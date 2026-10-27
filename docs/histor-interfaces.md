@@ -102,6 +102,18 @@ fan_mode 的切档通过 type0x99 / ioctl0x5799，仅改变原厂系统风扇策
 
 本版状态以 `scope: "system_fan"`、`cpu_policy: "vendor_auto"` 表示此边界。不向用户提供在官方固件上会被该线程反复覆盖的CPU独立手动或曲线，也不擅自停止温控daemon。cpu/sys是程序通道名，具体对应机箱内哪个物理风扇仍需实际核验。hwmon独立通道控制属于另一条有条件的后端，不与原厂策略混称。
 
+### CPU 每 10 秒调速在哪里，能否单独关闭
+
+原厂 `/histor/bin/init.sh` 第 156–164 行将 `/histor/bin/temp_control` 放到后台。它是编译后的 ELF，并非一个可以直接编辑的 Python 或 shell 温控脚本。以下名称来自静态识别，地址对应本文 SHA256 的固件样本：
+
+1. `temp_control` 的 main 在 `0xfb7c` 调用 `0xfaa5` 创建 CPU 温控线程。
+2. CPU 循环 `check_cpu_fan_thread` 在 `0xfa35`：读取温度 `0xf9af`，调用 CPU 调速 `0x18f4f`，等待 10000 毫秒，再次循环。
+3. 调速通过 `/dev/hikio` 的 `ioctl(0x5798, 整数PWM)`，不是系统风扇的 `fan_mode` 配置。
+
+已核对的 `fan_mode`、USR1、USR2 没有单独停用 CPU 线程的功能。停止整个进程虽然能停止这次 CPU 写入，但它同时运行 `disk_autosleep` 硬盘休眠线程（main `0xfc49` 创建线程 `0xf2d7`），因此会影响硬盘休眠，不作为本版设置开关。该结论不是说不存在任何可开发方案，而是没有找到可以直接使用的原厂 CPU-only 开关。
+
+较小作用域的待验证候选是在 RAM 中提供动态符号适配层，只在短时接管租约有效期间处理指定风扇请求，其他 ioctl 原样透传。当前样本动态导入 `ioctl@GLIBC_2.2.5`，CPU/系统写点 `0x14581/0x145e9` 均经 PLT `0xe580`。但需要重启一次原厂进程加载适配层，并解决 emhistor 也能直接设置系统风扇的竞争。单纯租约过期恢复透传不能保证立即恢复系统档位，仍需独立监督和原厂策略恢复验证。本版未实现或启用这一接管候选。
+
 rootfs hikio.ko 的 hikio_ioctl 0x620–0x9f5 根据 type 0x57、低 byte 分发；0x93/0x94/0x98/0x99 落不支持路径。这条结论仅属于 rootfs 那份，不能代表 initrd 或本机实际 loaded 模块。
 
 initrd hikio_ioctl 从 0x5a0 开始：0x719 比较 0x98，进入 0x766；0x8ff 比较 0x99，进入 0x961。handler 调用 0x470 hik_chip_id，识别 0x1502/0x8613，并在内核中执行 SuperIO 操作。0x96/0x97 温度请求也有分支，但 0x93/0x94 旧 RPM 请求没有。因此旧 product_test -o 失败与本机支持调速可以同时成立。以上仅静态阅读，没有执行任何调速 ioctl、iopl 或端口读写。

@@ -23,7 +23,12 @@ def build_bundle(root=ROOT, output=None):
         raise ValueError('缺少 ui 目录，或该目录是符号链接')
     sources = {'frontend/index.html': frontend / 'index.html',
                **{'runtime/' + name: root / 'runtime' / name
-                  for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'device_info.py', 'histor.py')}}
+                  for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'device_info.py', 'histor.py', 'web_config.py')}}
+    web = frontend / 'web'
+    if web.is_symlink():
+        raise ValueError('网页配置目录不允许符号链接')
+    for name in ('index.html', 'config.css', 'config.js'):
+        sources['frontend/web/' + name] = web / name
     assets = frontend / 'assets'
     if assets.is_symlink():
         raise ValueError('UI assets 不允许符号链接')
