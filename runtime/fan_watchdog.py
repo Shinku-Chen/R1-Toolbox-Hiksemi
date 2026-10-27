@@ -8,6 +8,7 @@ part of tests, or execute a firmware binary on a development machine.
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import signal
@@ -40,7 +41,10 @@ class SystemBackend:
     def _firmware_signature(self):
         if not self._inside(self.program) or self.program_link.resolve() != self.program:
             raise ValueError("原厂程序路径不在设备根目录内")
-        info = self.program.stat()
+        try:
+            info = self.program.stat()
+        except OSError:
+            raise ValueError("原厂温控程序不可读") from None
         if not stat.S_ISREG(info.st_mode) or info.st_size > 4 * 1024 * 1024:
             raise ValueError("原厂温控程序格式不受支持")
         signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
@@ -59,7 +63,10 @@ class SystemBackend:
             raise ValueError("已加载的风扇驱动身份已经改变或未验证")
         self._firmware_signature()
         device = self.root / "dev/hikio"
-        info = device.lstat()
+        try:
+            info = device.lstat()
+        except OSError:
+            raise ValueError("风扇字符设备身份无法确认") from None
         current = (info.st_dev, info.st_ino, info.st_rdev)
         if not stat.S_ISCHR(info.st_mode) or self._device is not None and current != self._device:
             raise ValueError("风扇字符设备身份无法确认")
@@ -87,18 +94,30 @@ class SystemBackend:
             raise ValueError("独立恢复需要宿主 systemd-run")
         self.verify_live()
         guard = self.guard_path.resolve()
-        info = guard.stat()
+        try:
+            info = guard.stat()
+        except OSError:
+            raise ValueError("缺少已编译的 Linux amd64 风扇保护模块") from None
         header = read_bytes(guard, 2 * 1024 * 1024)
         if (self.guard_path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022
                 or header is None or len(header) < 64 or header[:6] != b"\x7fELF\x02\x01"
                 or header[16:20] != b"\x03\x00\x3e\x00"):
             raise ValueError("缺少已编译的 Linux amd64 风扇保护模块")
-        vendors = self._vendors()
+        try:
+            vendors = self._vendors()
+        except OSError:
+            raise ValueError("原厂温控进程身份无法读取") from None
         if len(vendors) != 1:
             raise ValueError("必须存在唯一身份已验证的原厂温控进程")
         endpoint = self.root / "var/tmp/emhistor"
-        if self.mode() is None or not stat.S_ISSOCK(endpoint.stat().st_mode):
-            raise ValueError("原厂系统风扇策略或同步接口不可用")
+        if self.mode() is None:
+            raise ValueError("原厂系统风扇策略配置无效或不可读")
+        try:
+            socket_available = stat.S_ISSOCK(endpoint.stat().st_mode)
+        except OSError:
+            socket_available = False
+        if not socket_available:
+            raise ValueError("原厂系统风扇同步接口不可用")
         return {"guard_available": True}
 
     def owner_identity(self):
@@ -150,8 +169,14 @@ class SystemBackend:
         return HistorAdapter(root=self.root, runtime_dir=folder, allow_writes=True)
 
     def mode(self):
-        raw = read_json(self.root / "tmp/nand_config/config.txt", 1024 * 1024)
-        fan = raw.get("fan") if raw else None
+        # This vendor-owned JSON can end in NUL bytes. Only this known file
+        # accepts that encoding; leases and recovery/status JSON remain strict.
+        raw = read_bytes(self.root / "tmp/nand_config/config.txt", 1024 * 1024)
+        try:
+            value = json.loads(raw.rstrip(b"\0")) if raw is not None else None
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return None
+        fan = value.get("fan") if isinstance(value, dict) else None
         code = fan.get("fan_mode") if isinstance(fan, dict) else None
         return {2: "low", 3: "medium", 4: "high", 5: "auto"}.get(code) if type(code) is int else None
 
