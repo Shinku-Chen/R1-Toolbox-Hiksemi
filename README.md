@@ -44,6 +44,7 @@ python3 -m venv .venv
 python -m pip install -r requirements-dev.txt
 python tools/boot-once/build-compose.py
 python scripts/build-ui.py
+node tests/check_histor_bridge.cjs
 python tools/boot-once/test_runner.py
 python -m unittest discover -s tests -v
 docker build --platform linux/amd64 -t r1-toolbox:local .
