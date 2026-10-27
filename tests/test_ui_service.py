@@ -270,6 +270,7 @@ class ServiceTests(unittest.TestCase):
         launcher.write_text(
             '#!/bin/sh\nprintf "%s\\n%s\\n" "$APPDIR" "$PWD" > "$APPDIR/launched"\n'
             'printf "%s" "$LD_LIBRARY_PATH" > "$APPDIR/child-library-path"\n'
+            'printf "%s" "$R1_TOOLBOX_CONTROL_TOKEN" > "$APPDIR/control-token"\n'
             'while [ ! -f "$APPDIR/release" ]; do sleep 0.02; done\nexit 7\n'
         )
         launcher.chmod(0o755)
@@ -278,8 +279,8 @@ class ServiceTests(unittest.TestCase):
         bound, observed = threading.Event(), threading.Event()
         servers, errors = [], []
 
-        def make_server(sampler, port):
-            server = original_make_server(sampler, port=0)
+        def make_server(sampler, port, **options):
+            server = original_make_server(sampler, port=0, **options)
             servers.append(server)
             bound.set()
             return server
@@ -309,11 +310,13 @@ class ServiceTests(unittest.TestCase):
 
         observer = threading.Thread(target=observe, daemon=True)
         observer.start()
+        controller = types.SimpleNamespace(start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {}, action=mock.Mock())
+        insights = types.SimpleNamespace(start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {}, action=mock.Mock())
         with mock.patch.object(service, "StatusMonitor", return_value=monitor), \
                 mock.patch.object(service, "make_http_server", side_effect=make_server), \
                 mock.patch.dict(os.environ, {"R1_TOOLBOX_APP_LD_LIBRARY_PATH": "/electron/lib"}), \
                 contextlib.redirect_stdout(io.StringIO()):
-            result = service.run_service(app, port=0)
+            result = service.run_service(app, port=0, controller=controller, insights=insights)
         observer.join(timeout=3)
         self.assertFalse(observer.is_alive())
         self.assertEqual(errors, [])
@@ -321,10 +324,49 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result, 7, "the service must preserve AppRun's exit status")
         self.assertEqual((app / "launched").read_text().splitlines(), [str(app.resolve())] * 2)
         self.assertEqual((app / "child-library-path").read_text(), "/electron/lib")
+        self.assertRegex((app / "control-token").read_text(), r"^[0-9a-f]{64}$")
+        controller.start.assert_called_once()
+        controller.stop.assert_called_once()
+        insights.start.assert_called_once()
+        insights.stop.assert_called_once()
+        controller.action.assert_not_called()
+        insights.action.assert_not_called()
         self.assertEqual(servers[0].socket.fileno(), -1)
         with self.assertRaises(OSError):
             with socket.create_connection(("127.0.0.1", servers[0].server_port), timeout=0.2):
                 pass
+
+    def test_hardware_cleanup_precedes_child_wait_and_survives_child_cleanup_failure(self):
+        app = self.temporary / "failing-cleanup-app"
+        app.mkdir()
+        launcher = app / "AppRun"
+        launcher.write_text("#!/bin/sh\nexit 7\n")
+        launcher.chmod(0o755)
+        events, servers = [], []
+        controller = types.SimpleNamespace(start=mock.Mock(), stop=lambda: events.append("hardware"), snapshot=lambda: {})
+        insights = types.SimpleNamespace(start=mock.Mock(), stop=lambda: events.append("insights"), snapshot=lambda: {})
+        child = mock.Mock()
+        child.poll.return_value = 7
+        original = service.make_http_server
+
+        def make_server(*args, **kwargs):
+            server = original(*args, **kwargs)
+            servers.append(server)
+            return server
+
+        def fail_child_cleanup(unused):
+            events.append("child")
+            raise service.subprocess.TimeoutExpired("fixture child", 1)
+
+        with mock.patch.object(service, "make_http_server", side_effect=make_server), \
+                mock.patch.object(service.subprocess, "Popen", return_value=child), \
+                mock.patch.object(service, "stop_child", side_effect=fail_child_cleanup), \
+                mock.patch.object(service, "StatusMonitor", return_value=service.StatusMonitor(self.sampler, interval=0.02)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = service.run_service(app, port=0, controller=controller, insights=insights)
+        self.assertEqual(result, 7)
+        self.assertEqual(events, ["hardware", "child", "insights"])
+        self.assertEqual(servers[0].socket.fileno(), -1)
 
 
 if __name__ == "__main__":
