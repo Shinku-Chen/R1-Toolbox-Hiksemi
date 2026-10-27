@@ -22,9 +22,12 @@ class ControlAPITests(unittest.TestCase):
         self.web = mock.Mock()
         self.web.snapshot.return_value = {"enabled": True, "port": 18732, "addresses": []}
         self.web.pairing_info.return_value = {"code": "1234567890", "expires_in": 180, "port": 18732}
+        self.policy = mock.Mock()
+        self.policy.snapshot.return_value = {"active": False, "busy": False, "recovery_confirmed": True}
+        self.policy.action.return_value = {"ok": True, "settings_saved": True, "pending": True}
         monitor = types.SimpleNamespace(snapshot=lambda: {"schema_version": 1, "available": True})
         self.server = service.make_http_server(monitor, 0, self.controller, self.insights, self.token,
-                                              web_config=self.web)
+                                              web_config=self.web, fan_policy=self.policy)
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
         self.thread.start()
@@ -53,7 +56,7 @@ class ControlAPITests(unittest.TestCase):
         })
 
     def test_read_routes_do_not_disclose_the_control_token(self):
-        for path in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config"):
+        for path in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config", "/api/fan-policy"):
             code, headers, data = self.request(path=path)
             self.assertEqual(code, 200)
             self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
@@ -75,6 +78,17 @@ class ControlAPITests(unittest.TestCase):
         self.web.pairing_info.assert_called_once_with(rotate=True)
         self.controller.action.assert_not_called()
         self.assertNotIn("1234567890", json.dumps(self.request(path="/api/web-config")[2]))
+
+    def test_custom_policy_dispatch_and_legacy_control_interlock(self):
+        payload = {"config": {"fixture": True}, "apply": False}
+        self.assertEqual(self.action({"action": "fan.policy.update", **payload})[0], 200)
+        self.policy.action.assert_called_once_with("fan.policy.update", payload)
+        for state in ({"active": True}, {"busy": True}, {"recovery_confirmed": False}):
+            self.policy.snapshot.return_value = state
+            for name, values in (("fan.official", {"mode": "low", "confirmed": True}),
+                                  ("fan.set", {"channel": "anything"}), ("fan.restore", {})):
+                self.assertEqual(self.action({"action": name, **values})[0], 409)
+        self.controller.action.assert_not_called()
 
     def test_missing_or_wrong_token_cannot_control_the_host(self):
         for token in ("", "wrong-token", "0" * 64):

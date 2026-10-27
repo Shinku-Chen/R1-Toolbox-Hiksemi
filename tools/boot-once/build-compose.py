@@ -25,7 +25,7 @@ project = {
             "network_mode": "host",
             "environment": {
                 "TASK_CONTAINER": "r1-toolbox",
-                "TASK_REVISION": "6",
+                "TASK_REVISION": "7",
                 "UI_MODE": "image",
                 "UI_DIR": "",
                 "R1_WEB_BIND": "0.0.0.0",

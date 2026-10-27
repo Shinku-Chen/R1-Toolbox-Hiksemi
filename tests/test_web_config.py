@@ -158,6 +158,33 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(self.action(extra=headers)[0], 403)
         self.assertEqual(self.controller.calls, [])
 
+    def test_independent_fan_route_requires_pairing_origin_and_csrf(self):
+        class Policy:
+            calls = []
+            def snapshot(self):
+                return {'active': False, 'busy': False, 'capability': {'available': False}, 'sources': []}
+            def action(self, name, payload):
+                self.calls.append((name, payload))
+                return {'ok': True, 'settings_saved': True, 'applied': False, 'pending': False}
+        policy = Policy()
+        self.web.fan_policy = policy
+        payload = {'config': {'fixture': 'validation belongs to policy'}, 'apply': False}
+        self.assertEqual(self.action('fan.policy.update', payload)[0], 401)
+        self.login()
+        self.assertIn('fan_policy', self.request('GET', '/api/session')[2])
+        for headers in ({'Origin': 'http://evil.invalid'}, {'X-R1-CSRF': ''}, {'Host': 'evil.invalid'}):
+            self.assertEqual(self.action('fan.policy.update', payload, headers)[0], 403)
+        self.assertEqual(policy.calls, [])
+        status, _, value = self.action('fan.policy.update', payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(value['saved'])
+        self.assertFalse(value['applied'])
+        self.assertEqual(policy.calls, [('fan.policy.update', payload)])
+        status, _, value = self.action('fan.policy.release', {'confirmed': True})
+        self.assertEqual(status, 200)
+        self.assertEqual(policy.calls[-1], ('fan.policy.release', {'confirmed': True}))
+        self.assertEqual(self.controller.calls, [])
+
     def test_forbidden_commands_payloads_and_unverified_devices_never_reach_controller(self):
         self.login()
         for action in ('fan.set', 'fan.official', 'power.request', 'container.action', 'vm.action', 'rgb.probe', 'web.pairing'):

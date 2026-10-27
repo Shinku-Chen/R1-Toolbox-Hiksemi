@@ -28,7 +28,7 @@ else
 fi
 
 mkdir -p dist
-python scripts/build-ui.py
+# Docker's Bookworm builder compiles and packages the native fan adapter.
 docker build --platform linux/amd64 --build-arg "TOOLBOX_VERSION=$version" \
   --label "org.opencontainers.image.revision=$commit" -t "$image" .
 docker image inspect "$image" > dist/build-image-inspect.json
