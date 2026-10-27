@@ -73,7 +73,7 @@ class ControlAPITests(unittest.TestCase):
         self.controller.action.assert_not_called()
 
     def test_power_and_workload_actions_require_boolean_confirmation(self):
-        for action in ("power.request", "container.action", "vm.action"):
+        for action in ("power.request", "container.action", "vm.action", "fan.official"):
             for confirmed in (None, False, "true", 1):
                 with self.subTest(action=action, confirmed=confirmed):
                     self.assertEqual(self.action({"action": action, "confirmed": confirmed})[0], 400)
