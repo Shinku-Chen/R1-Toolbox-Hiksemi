@@ -31,7 +31,7 @@ DEFAULTS = {"history_enabled": True, "retention_days": 30, "traffic_exclude_virt
                 "capacity_warn": 85, "capacity_critical": 95}}
 META = {
     "cpu_usage_percent": ("CPU 使用率", "%"), "memory_usage_percent": ("内存使用率", "%"),
-    "rx_bytes_per_sec": ("物理网口接收速率", "B/s"), "tx_bytes_per_sec": ("物理网口发送速率", "B/s"),
+    "rx_bytes_per_sec": ("已计网口接收速率", "B/s"), "tx_bytes_per_sec": ("已计网口发送速率", "B/s"),
     "cpu_temperature_c": ("CPU 最高温度", "°C"), "disk_temperature_c": ("硬盘最高温度", "°C"),
     "cpu_package_w": ("CPU 封装功耗 · RAPL", "W"),
     "disk_read_bytes_per_sec": ("物理磁盘读取速率", "B/s"),
@@ -39,7 +39,7 @@ META = {
     "fan_cpu_target_percent": ("CPU 风扇请求输出", "%"),
     "fan_system_target_percent": ("系统风扇请求输出", "%"),
 }
-VIRTUAL = re.compile(r"^(?:lo$|docker|veth|br-|virbr|tun|tap|vnet|lxc|kube|wg|vxlan)")
+VIRTUAL = re.compile(r"^(?:lo$|docker|veth|br-|br[0-9]+$|virbr|bond[0-9]+$|team[0-9]+$|tun|tap|vnet|lxc|kube|wg|vxlan)")
 IFACE = re.compile(r"[A-Za-z0-9_.:@-]{1,64}")
 DISK = re.compile(r"(?:sd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|vd[a-z]+|xvd[a-z]+)")
 MAX_SAMPLES, MAX_METRICS, MAX_EVENTS, MAX_SMART = 86400, 64, 2000, 1000
@@ -180,6 +180,11 @@ class MonitoringService:
                     os.fsync(stream.fileno())
                     temporary = Path(stream.name)
                 temporary.replace(target)
+                descriptor = os.open(self.state_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
                 with self.lock:
                     self.settings, self.settings_error = updated, None
                     if not updated["history_enabled"]:
@@ -250,6 +255,28 @@ class MonitoringService:
     def _periods(self, stamp):
         date = dt.datetime.fromtimestamp(stamp, self.timezone).astimezone(self.timezone)
         return date.strftime("%Y-%m-%d"), date.strftime("%Y-%m")
+
+    def _virtual_interface(self, name):
+        """Avoid adding bridge/bond/VLAN counters to their lower interfaces."""
+        if VIRTUAL.match(name):
+            return True
+        path = self.sys / "class/net" / name
+        try:
+            resolved = path.resolve()
+            relative = resolved.relative_to(self.sys.resolve())
+            if "devices/virtual/net/" in relative.as_posix() + "/":
+                return True
+            # These are kernel topology entries, never connection profiles.
+            if (resolved / "bridge").is_dir() or (resolved / "bonding").is_dir():
+                return True
+        except (OSError, ValueError, RuntimeError):
+            return False
+        try:
+            index = int(self._read(path / "ifindex", 32, self.sys))
+            link = int(self._read(path / "iflink", 32, self.sys))
+            return index > 0 and link > 0 and index != link
+        except (TypeError, ValueError):
+            return False
 
     def _traffic_sample(self, interfaces, stamp):
         boot = (self._read(self.proc / "sys/kernel/random/boot_id", 128, self.proc) or "").strip()
@@ -459,7 +486,8 @@ class MonitoringService:
             interfaces = interfaces[:128] if isinstance(interfaces, list) and main_fresh else []
             self._traffic_sample(interfaces, stamp)
             selected = [row for row in interfaces if isinstance(row, dict)
-                        and not (self.settings["traffic_exclude_virtual"] and VIRTUAL.match(str(row.get("name", ""))))]
+                        and isinstance(row.get("name"), str) and IFACE.fullmatch(row["name"])
+                        and not (self.settings["traffic_exclude_virtual"] and self._virtual_interface(row["name"]))]
             for field in ("rx_bytes_per_sec", "tx_bytes_per_sec"):
                 rates = [number(row.get(field), 0) for row in selected]
                 values[field] = sum(rates) if rates and all(value is not None for value in rates) else None
@@ -522,10 +550,11 @@ class MonitoringService:
             metrics = [{"id": key, "label": meta.get(key, (key, ""))[0], "unit": meta.get(key, (key, ""))[1],
                         "value": value, "sampled_at": stamp} for key, value in values.items()][:MAX_METRICS]
             valid = sum(row["value"] is not None for row in metrics)
+            traffic = self._traffic_snapshot(stamp)
             with self.lock:
                 self.current = {"metrics": metrics, "power": power, "disk_io": io_rows, "sampled_at": stamp}
                 self.smart = smart_rows
-                self.traffic_cache = self._traffic_snapshot(stamp)
+                self.traffic_cache = traffic
                 self.alerts_cache = {"active": list(self.active.values()), "events": list(self.events)[-100:],
                                      "smart_observations": list(self.observations)[-100:]}
                 self.summary = {"status": "critical" if any(row["level"] == "critical" for row in self.active.values()) else "warning" if self.active else "ok" if valid else "unknown",
@@ -575,6 +604,10 @@ class MonitoringService:
             except SQLiteError:
                 pass
             self.db_reason = "历史写入未确认，实时监控继续运行；未把缺测补成零"
+            with self.lock:
+                for history in self.history_cache.values():
+                    history["recording"] = False
+                    history["reason"] = self.db_reason
 
     def _empty_history(self, range, reason):
         return {"available": False, "range": range, "aggregation": "last", "series": [], "reason": reason,
@@ -590,7 +623,7 @@ class MonitoringService:
             for timestamp, raw in rows:
                 try:
                     values = json.loads(raw) if isinstance(raw, str) and len(raw) <= 60000 else None
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, RecursionError):
                     continue
                 if not isinstance(values, dict):
                     continue
@@ -634,23 +667,23 @@ class MonitoringService:
             return copy.deepcopy(self.history_cache[range])
 
     def _traffic_snapshot(self, stamp):
-            day, month = self._periods(stamp)
-            names = sorted({key[2] for key in self.traffic_totals if key[1] in (day, month)})
-            if self.settings["traffic_exclude_virtual"]:
-                names = [name for name in names if not VIRTUAL.match(name)]
-            items = []
-            for name in names[:128]:
-                daily = self.traffic_totals.get(("day", day, name))
-                monthly = self.traffic_totals.get(("month", month, name))
-                items.append({"name": name, "today": {"rx_bytes": daily[0], "tx_bytes": daily[1]} if daily else None,
-                              "month": {"rx_bytes": monthly[0], "tx_bytes": monthly[1]} if monthly else None})
-            totals = {}
-            for period in ("today", "month"):
-                rows = [item[period] for item in items if item[period] is not None]
-                totals[period] = {"rx_bytes": sum(row["rx_bytes"] for row in rows), "tx_bytes": sum(row["tx_bytes"] for row in rows)} if rows else None
-            return {"available": bool(items), "periods": {"day": day, "month": month}, "interfaces": items, "totals": totals,
-                "coverage": "observed_counter_deltas", "partial": self.traffic_partial,
-                "reason": "仅统计已观测的真实计数增量；重启、计数重置或跨日缺口不估算补齐"}
+        day, month = self._periods(stamp)
+        names = sorted({key[2] for key in self.traffic_totals if key[1] in (day, month)})
+        if self.settings["traffic_exclude_virtual"]:
+            names = [name for name in names if not self._virtual_interface(name)]
+        items = []
+        for name in names[:128]:
+            daily = self.traffic_totals.get(("day", day, name))
+            monthly = self.traffic_totals.get(("month", month, name))
+            items.append({"name": name, "today": {"rx_bytes": daily[0], "tx_bytes": daily[1]} if daily else None,
+                          "month": {"rx_bytes": monthly[0], "tx_bytes": monthly[1]} if monthly else None})
+        totals = {}
+        for period in ("today", "month"):
+            rows = [item[period] for item in items if item[period] is not None]
+            totals[period] = {"rx_bytes": sum(row["rx_bytes"] for row in rows), "tx_bytes": sum(row["tx_bytes"] for row in rows)} if rows else None
+        return {"available": bool(items), "periods": {"day": day, "month": month}, "interfaces": items, "totals": totals,
+            "coverage": "observed_counter_deltas", "partial": self.traffic_partial,
+            "reason": "仅统计已观测的真实计数增量；重启、计数重置或跨日缺口不估算补齐"}
 
     def traffic(self):
         with self.lock:
@@ -674,7 +707,11 @@ class MonitoringService:
         writer.writerow(["timestamp_utc", "metric", "value", "unit"])
         for row in history["series"]:
             for stamp, value in row["points"]:
-                writer.writerow([dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat(), row["id"], "" if value is None else value, row["unit"]])
+                # Labels are not exported. Guard textual cells even if a local
+                # history file was replaced with malformed metadata.
+                fields = [row["id"], row["unit"]]
+                fields = ["'" + field if field.startswith(("=", "+", "-", "@", "\t", "\r")) else field for field in fields]
+                writer.writerow([dt.datetime.fromtimestamp(stamp, dt.timezone.utc).isoformat(), fields[0], "" if value is None else value, fields[1]])
         return stream.getvalue()
 
     def start(self):

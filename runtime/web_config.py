@@ -172,7 +172,15 @@ class WebConfigServer:
                 raise ValueError('网页配置服务未启用')
             result = self.snapshot()
             if rotate is True:
-                code = f'{secrets.randbelow(10 ** 5):05d}'
+                for attempt in range(4):
+                    number = secrets.randbelow(10 ** 5)
+                    code = f'{number:05d}'
+                    if self.pair_hash is None or not secrets.compare_digest(hashlib.sha256(code.encode()).digest(), self.pair_hash):
+                        break
+                else:
+                    # Bounded even if the random source repeats; the immediately
+                    # preceding live code must never survive a rotation.
+                    code = f'{(number + 1) % 100000:05d}'
                 self.pair_hash = hashlib.sha256(code.encode()).digest()
                 self.pair_until = self.clock() + PAIR_TTL
                 result = self.snapshot()
@@ -245,12 +253,15 @@ class WebConfigServer:
         fan = {key: fan[key] for key in ('active', 'busy', 'capability', 'channels', 'sources',
                                         'last_error', 'recovery_confirmed') if key in fan}
         light = self._read(self.light_policy)
-        light = {key: value for key, value in light.items() if key not in ('config', 'settings_error')}
+        light = {key: light[key] for key in ('active', 'busy', 'capability', 'runtime', 'sources', 'target', 'last_requested_target',
+                    'reference_c', 'source_id', 'source_label', 'last_error', 'fallback', 'reason', 'schedule_active') if key in light}
+        analytics = self._read(self.monitoring)
+        analytics = {key: analytics[key] for key in ('available', 'current', 'summary', 'smart', 'history') if key in analytics}
         status, insights = self._read(self.monitor), self._read(self.insights)
         return {'schema_version': 1, 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                 'available': status.get('available', bool(insights)), 'status': status,
                 'insights': insights, 'controls': controls, 'fan_policy': fan,
-                'light_policy': light, 'analytics': self._read(self.monitoring)}
+                'light_policy': light, 'analytics': analytics}
 
     def _public(self, route, query):
         parameters = urllib.parse.parse_qs(query, keep_blank_values=True, max_num_fields=4)
@@ -524,13 +535,17 @@ class WebConfigServer:
                             if outer.server is None:
                                 raise ValueError('服务正在停止')
                             result = outer._action(body)
-                            self.send(200 if result['ok'] else 400, result)
+                            status = 200 if result['ok'] else 400
                         except ValueError:
-                            self.send(400, {'error': '操作或参数不受网页支持，设备能力须先在小屏验证'})
+                            status, result = 400, {'error': '操作或参数不受网页支持，设备能力须先在小屏验证'}
                         except Exception:
-                            self.send(503, {'error': '设置服务暂不可用，未确认应用结果'})
+                            status, result = 503, {'error': '设置服务暂不可用，未确认应用结果'}
                         finally:
                             outer.operation_lock.release()
+                        # A client can submit again as soon as it reads this
+                        # response. Release before publishing that completion,
+                        # rather than spuriously rejecting the next request.
+                        self.send(status, result)
                     else:
                         self.send(404, {'error': '接口不存在'})
 
