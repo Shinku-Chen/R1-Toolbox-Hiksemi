@@ -193,7 +193,7 @@ time.sleep(0.01)
         # Only these two host paths are redirected in this temporary copy.
         # All real payload operations are replaced by a harmless event append.
         script = (ROOT / "host-job.sh.in").read_text().replace(
-            "state_dir=/screen/docker-boot-once",
+            "state_dir=/run/r1-toolbox",
             "state_dir=" + shlex.quote(str(self.state_dir)),
         ).replace(
             "cat /proc/sys/kernel/random/boot_id",
