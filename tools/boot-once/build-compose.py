@@ -26,7 +26,7 @@ project = {
             "environment": {
                 "TASK_CONTAINER": "r1-toolbox",
                 "TASK_REVISION": "1",
-                "NEW_HTML": "",
+                "UI_DIR": "",
             },
             "volumes": [
                 "/:/host",
@@ -40,7 +40,8 @@ project = {
 }
 compose = (
     "# R1 Toolbox 镜像部署；首次默认仅诊断，完成后容器自行停止。\n"
-    "# 修改任务或 NEW_HTML 后，递增 TASK_REVISION 以便同次开机重新执行。\n"
+    "# UI_DIR 填 NAS 上的完整前端目录；只读挂载到小屏服务，不覆盖原文件。\n"
+    "# 修改任务或 UI_DIR 后，递增 TASK_REVISION 以便同次开机重新执行。\n"
     "# 可通过 R1_TOOLBOX_IMAGE 指定版本；发布包固定为对应构建的 sha 镜像标签。\n"
     + yaml.safe_dump(project, allow_unicode=True, sort_keys=False, width=100)
 )
