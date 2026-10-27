@@ -230,7 +230,7 @@
   }
   async function request(path, payload) {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), payload ? payload.action === "container.action" ? 25000 : 18000 : REQUEST_TIMEOUT);
+    const timeout = window.setTimeout(() => controller.abort(), payload ? payload.action === "container.action" ? 60000 : 18000 : REQUEST_TIMEOUT);
     try {
       const options = { method: payload ? "POST" : "GET", cache: "no-store", credentials: "omit", signal: controller.signal };
       if (payload) {
@@ -917,24 +917,28 @@
     button.addEventListener("click",()=>openView("app-detail",{kind,id:item.id},name));return button;
   }
   function renderApps(data) {
-    if(!data){pendingAppSnapshot=null;activeAppPointer=null;window.clearTimeout(appRefreshTimer);}
-    if(data && activeAppPointer !== null){pendingAppSnapshot=data;return;}
     const containers = data && data.containers, vms = data && data.vms;
+    const containersAvailable = Boolean(containers && containers.available === true);
+    if(!containersAvailable){pendingAppSnapshot=null;activeAppPointer=null;window.clearTimeout(appRefreshTimer);}
+    if(data && activeAppPointer !== null){pendingAppSnapshot=data;return;}
     const signature = JSON.stringify([containers, vms, toolboxOnline]);
     if (signature === appsSignature) { syncControls(); return; }
     appsSignature = signature;
-    $("container-entry").hidden = !(containers && containers.available);
+    $("container-entry").hidden = !containersAvailable;
     $("vm-entry").hidden = !(vms && vms.available);
     $("apps-empty").hidden = Boolean(containers && containers.available || vms && vms.available);
-    $("docker-summary").hidden=!(containers && containers.available);$("apps-container-preview").hidden=!(containers && containers.available);
-    const observed=list(containers && containers.items);text("docker-running",observed.filter(item=>item.state==="running").length);text("docker-total",observed.length);text("docker-summary-note",observed.length?"运行中 / 已发现总数":"已读取服务，尚未发现容器");clear($("apps-container-preview"));
-    if(containers && containers.available)observed.slice(0,6).forEach(item=>$("apps-container-preview").append(applicationCard(item,"container")));
+    $("container-read-reason").hidden=containersAvailable;
+    text("container-read-reason", containersAvailable ? "" : containers && containers.reason ? "Docker 容器暂不可读取：" + containers.reason : "Docker 容器状态未确认，正在重新读取。");
+    $("docker-summary").hidden=!containersAvailable;$("apps-container-preview").hidden=!containersAvailable;
+    const observed=containersAvailable?list(containers.items):[];text("docker-running",containersAvailable?observed.filter(item=>item.state==="running").length:"--");text("docker-total",containersAvailable?observed.length:"--");text("docker-summary-note",containersAvailable?(observed.length?"运行中 / 已发现总数":"已读取服务，尚未发现容器"):"容器状态未确认");clear($("apps-container-preview"));
+    if(containersAvailable)observed.slice(0,6).forEach(item=>$("apps-container-preview").append(applicationCard(item,"container")));
     [{ name: "container", value: containers, target: "container-list", count: "container-count", entry: "container-entry" }, { name: "vm", value: vms, target: "vm-list", count: "vm-count", entry: "vm-entry" }].forEach((group) => {
-      const values = list(group.value && group.value.items);
-      text(group.count, values.length + " 个");
-      $(group.entry).querySelector("small").textContent = values.length + " 个 · " + values.filter((item) => item.state === "running").length + " 个运行中";
+      const available = Boolean(group.value && group.value.available === true);
+      const values = available ? list(group.value.items) : [];
+      text(group.count, available ? values.length + " 个" : "--");
+      $(group.entry).querySelector("small").textContent = available ? values.length + " 个 · " + values.filter((item) => item.state === "running").length + " 个运行中" : "状态未确认";
       clear($(group.target));
-      if (!group.value || !group.value.available) { $(group.target).append(element("p", "capability-note", "服务当前不可用")); return; }
+      if (!available) { $(group.target).append(element("p", "capability-note", group.value && group.value.reason || "服务状态未确认，正在重新读取")); return; }
       if (!values.length) { $(group.target).append(element("p", "capability-note", "尚未发现应用")); return; }
       values.forEach((item) => {
         const labels = { running: "运行中", exited: "已停止", created: "未启动", paused: "已暂停", restarting: "重启中", dead: "异常", shutoff: "已关机", "shut off": "已关机", suspended: "已挂起" };
@@ -948,8 +952,9 @@
   }
   function renderAppDetail(kind, id) {
     const group = insights && insights[kind === "container" ? "containers" : "vms"];
-    const item = list(group && group.items).find((entry) => entry.id === id);
     clear($("app-detail"));
+    if (!group || group.available !== true) { $("app-detail").append(element("p", "capability-note", group && group.reason || "应用状态未确认，正在重新读取")); return; }
+    const item = list(group.items).find((entry) => entry.id === id);
     if (!item) { $("app-detail").append(element("p", "capability-note", "此应用当前不可用")); return; }
     const card = element("article", "card detail-content");
     card.append(detailRow("名称", item.name || item.id), detailRow("状态", item.status || item.state || "未知"));

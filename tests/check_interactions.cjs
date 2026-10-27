@@ -53,6 +53,9 @@ async function fixtureOnly(context){
   try {
     const context = await browser.newContext({ viewport: { width: 376, height: 960 }, deviceScaleFactor: 1, locale: 'zh-CN', hasTouch: true });
     await context.addInitScript(() => {
+      const setTimeout = window.setTimeout;
+      window._fixtureContainerTimeouts = [];
+      window.setTimeout = function(callback, delay, ...args) { if (delay === 60000) window._fixtureContainerTimeouts.push(delay); return setTimeout.call(this, callback, delay, ...args); };
       window.require = name => name === 'process' ? { env: { R1_TOOLBOX_CONTROL_TOKEN: 'fixture-only-not-real' } } : { ipcRenderer: { once: (_name, callback) => { window._fixtureAck = callback; }, send: name => { if (name === 'showWin' && window._fixtureAck) window._fixtureAck(); } } };
     });
     await fixtureOnly(context);
@@ -218,6 +221,49 @@ async function fixtureOnly(context){
     insights.containers.items[0].available_actions=[];await page.waitForFunction(()=>document.querySelectorAll('#app-detail button').length===0);insights.containers.items[0].available_actions=['stop','restart'];await page.waitForFunction(()=>document.querySelectorAll('#app-detail button').length===2);
     await root('apps');const delayedCard=page.locator('#apps-container-preview .application-card').first();await delayedCard.dispatchEvent('pointerdown',{pointerId:29,isPrimary:true});const pendingPoll=page.waitForResponse(response=>response.url().endsWith('/api/insights'));insights.containers.items[0].cpu_percent=127;await pendingPoll;offline=true;await page.waitForFunction(()=>document.getElementById('brightness-save').disabled&&document.getElementById('apps-container-preview').hidden);await page.locator('body').dispatchEvent('pointerup',{pointerId:29,isPrimary:true});await page.waitForTimeout(120);assert.equal(await page.locator('#apps-container-preview').isHidden(),true);assert.equal(await page.locator('#apps-container-preview .application-card').count(),0);offline=false;await page.waitForFunction(()=>!document.getElementById('apps-container-preview').hidden);
     checks.push('Docker cards show status/resources/observed ports and counts; polling preserves pressed card and never replays it after offline; protected one-shot completion is normal; explicit available_actions empty means no operations; cancelled start emits no POST and start/stop/restart require confirmation');
+
+    assert.equal(await page.evaluate(() => window._fixtureContainerTimeouts.length), posts.filter(item => item.action === 'container.action').length, 'each container operation receives one 60-second request budget without automatic retries');
+    const readableContainers = insights.containers, previousVMs = insights.vms, beforeUnavailablePosts = posts.filter(item => item.action === 'container.action').length;
+    await page.locator('#apps-container-preview .application-card').first().click();
+    insights.containers = { ...readableContainers, available: false, reason: '模拟：读取 Docker 容器列表超时，请等待重新采集' };
+    await page.waitForFunction(() => document.getElementById('app-detail').textContent.includes('读取 Docker 容器列表超时'));
+    assert.equal(await page.locator('#app-detail button').count(), 0, 'unreadable containers cannot retain management buttons from stale items');
+    await root('apps');
+    await page.locator('#container-read-reason').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#container-read-reason').textContent(), /读取 Docker 容器列表超时/);
+    assert.equal(await page.locator('#container-entry').isHidden(), true);
+    assert.equal(await page.locator('#docker-summary').isHidden(), true);
+    assert.equal(await page.locator('#docker-running').textContent(), '--');
+    assert.equal(await page.locator('#docker-total').textContent(), '--');
+    assert.equal(await page.locator('#container-count').textContent(), '--');
+    assert.equal(await page.locator('#apps-container-preview .application-card').count(), 0);
+    assert.equal(await page.locator('#container-list .application-card').count(), 0);
+    await measure('docker-unreadable-reason'); await shot('preview-376-docker-unreadable-fixture');
+    insights.vms = { available: true, reason: '', items: [] };
+    await page.waitForFunction(() => !document.getElementById('vm-entry').hidden && document.getElementById('apps-empty').hidden);
+    assert.equal(await page.locator('#container-read-reason').isVisible(), true, 'a readable VM service must not hide the Docker failure');
+    await page.setViewportSize({ width: 320, height: 960 }); await measure('docker-unreadable-reason-320'); await shot('preview-320-docker-unreadable-fixture'); await page.setViewportSize({ width: 376, height: 960 });
+    insights.containers = { available: true, reason: '', items: [] }; insights.vms = previousVMs;
+    await page.waitForFunction(() => !document.getElementById('docker-summary').hidden && document.getElementById('docker-total').textContent === '0');
+    assert.equal(await page.locator('#docker-running').textContent(), '0');
+    assert.equal(await page.locator('#container-read-reason').isHidden(), true);
+    assert.match(await page.locator('#docker-summary-note').textContent(), /已读取服务，尚未发现容器/);
+    insights.containers = readableContainers;
+    await page.waitForFunction(() => document.querySelectorAll('#apps-container-preview .application-card').length === 2);
+    const heldUnavailableCard = page.locator('#apps-container-preview .application-card').first();
+    await heldUnavailableCard.dispatchEvent('pointerdown', { pointerId: 39, isPrimary: true });
+    const deferredResponse = page.waitForResponse(response => response.url().endsWith('/api/insights'));
+    insights.containers.items[0].cpu_percent = 128;
+    await (await deferredResponse).finished(); await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    insights.containers = { ...readableContainers, available: false, reason: '模拟：Docker 状态暂不可读取' };
+    await page.waitForFunction(() => !document.getElementById('container-read-reason').hidden && document.getElementById('container-read-reason').textContent.includes('Docker 状态暂不可读取'));
+    await page.locator('body').dispatchEvent('pointerup', { pointerId: 39, isPrimary: true });
+    const rereadResponse = await page.waitForResponse(response => response.url().endsWith('/api/insights')); await rereadResponse.finished();
+    assert.equal(await page.locator('#apps-container-preview .application-card').count(), 0, 'an unavailable snapshot must discard deferred readable cards');
+    assert.equal(posts.filter(item => item.action === 'container.action').length, beforeUnavailablePosts, 'failed or recovering reads must not submit container actions');
+    insights.containers = readableContainers;
+    await page.waitForFunction(() => !document.getElementById('container-entry').hidden && document.getElementById('container-read-reason').hidden && document.querySelectorAll('#apps-container-preview .application-card').length === 2);
+    checks.push('Docker unavailable reason stays visible even when VMs are readable; stale cards/actions and deferred pointer snapshots are cleared; unknown counts differ from a confirmed zero; recovery rereads without POST; each container action waits up to 60 seconds without retry');
 
     await root('settings'); await page.locator('#page-settings [data-open-view="web-config"]').click(); await page.waitForFunction(() => !document.getElementById('web-pairing-generate').disabled);
     assert.match(await page.locator('#web-config-addresses').textContent(), /http:\/\/192\.168\.1\.10:18732/); assert.match(await page.locator('#web-config-security').textContent(), /HTTP 未加密/); assert.equal(await page.locator('#web-config-addresses .detail-row').count(), 1); assert.ok(!(await page.locator('#web-config-addresses').textContent()).includes('http://['));
