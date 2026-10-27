@@ -1,76 +1,89 @@
 # R1 Toolbox 部署说明
 
-NAS 使用 `composer.yml` 指向 `ghcr.io/shinku-chen/r1-toolbox` 镜像。运行脚本已装进镜像，部署时无需粘贴脚本或在 NAS 构建镜像。
+## 直接使用镜像内置 UI
 
-## 第一次部署
+1. 从 Actions 下载成功构建的部署文件，或使用提供的 `composer.yml`。
+2. 在 NAS Docker 市场更新原项目配置或创建项目，然后启动。
+3. 默认 `UI_MODE: image`、`UI_DIR: ''`：无需上传任何 HTML 或前端目录。
+4. 观察日志：镜像 UI 包校验、RAM 目录展开、只读挂载预检、小屏启动验证通过后，容器应显示“已停止”。
 
-1. 从本仓库 Actions 下载成功构建的部署产物。
-2. 在线使用：在 NAS Docker 市场新建项目，导入该包的 `composer.yml` 后启动。
-3. 离线使用：先导入同包的 `r1-toolbox-linux-amd64.tar`，再导入 Compose，保持镜像标签一致。
-4. 保持默认 `UI_DIR: ''`。容器只检查环境，不停止小屏；任务完成后容器应处于“已停止”。
-5. 从 NAS 管理页面正常重启。Docker 启动后会再次执行一次并停止。
+离线部署先在镜像页面导入同包的 `r1-toolbox-linux-amd64.tar`。Compose 与离线包的镜像标签必须一致。
 
-容器名和 `TASK_CONTAINER` 都是 `r1-toolbox`，需要保持一致。保留 `restart: always`。产物 Compose 固定为本次构建的 sha 镜像，根目录配置默认是 `preview` 通道。
-
-## 准备并挂载自定义界面
-
-在 NAS 数据盘建立自己的前端目录，例如 `/drives/实际磁盘/R1-Toolbox/ui`：
-
-```text
-ui/
-  index.html
-  assets/       # 页面用到的 JS、CSS、图片等
-```
-
-目录需包含页面引用的全部资源。单个自包含 HTML 可以直接作为 `index.html`；依赖官方资源的页面需要同时提供相应资源，目录挂载会遮住该小屏服务视图里的整个原版 `dist`。
-
-修改 Compose 环境变量，填写真实的 NAS 宿主路径：
+当前仍需已有可运行的 `/screen/squashfs-root/AppRun`，不自动解包官方 AppImage。新版环境变量示例：
 
 ```yaml
 environment:
   TASK_CONTAINER: r1-toolbox
-  TASK_REVISION: '2'
-  UI_DIR: /drives/实际磁盘/R1-Toolbox/ui
+  TASK_REVISION: '3'
+  UI_MODE: image
+  UI_DIR: ''
 ```
 
-`UI_DIR` 不是容器视角的 `/host/...` 路径。支持普通中文目录；为避免 systemd 解析歧义，路径暂不支持空白、冒号、反斜杠、引号、`%`、`$` 和控制字符。源目录不能与原 `dist` 相同，也不能包含或位于原 `dist` 内。修改目录、内容或任务后递增 `TASK_REVISION`，再重新部署。
+内置界面为概览、存储、网络三个页面，可点击导航或左右滑动。真实数据通过随小屏运行的 Python 服务持续采集，Toolbox 容器结束不影响刷新。未知温度、首次差分和读取失败会显示 `--` 或采集中，不填模拟数据。
 
-无需为 `UI_DIR` 再增加 Docker volume。已有 `/:/host` 提供宿主访问入口；工具让**宿主小屏服务**通过 `BindReadOnlyPaths` 将该目录只读挂载到 `/screen/squashfs-root/resources/app/dist`。普通 Docker volume 仅影响容器，无法单独改变宿主小屏进程看到的文件。
+## UI 模式
 
-启动前先用同样的挂载属性运行临时检查服务，确认目标目录确实指向源目录并只读，再停止已确认的 `hiksemi-sub`。新小屏主进程必须连续存活 3 秒、位于独立服务 cgroup，且从它自己的文件视图验证只读挂载，之后才记录成功并停止 Toolbox 容器。
+| UI_MODE | 用途 | UI_DIR |
+|---|---|---|
+| image | 使用镜像内置 UI，默认部署方式 | 必须为空 |
+| diagnostic | 只检查环境，不停止或更换小屏 | 保持为空 |
+| directory | 只读挂载用户在 NAS 数据盘上的完整前端目录 | NAS 宿主绝对路径 |
 
-原版 AppImage、解包版 `dist` 和 `/screen/screen-app-startup.sh` 不被覆盖。私有挂载由宿主 systemd 服务保持，容器停止后继续有效；宿主全局查看原版目录仍能看到原文件。
+旧 Compose 未设置 `UI_MODE` 时，`UI_DIR` 非空按 directory 处理，否则只诊断。旧 `NEW_HTML` 复制参数已停用，请移除。
 
-旧版 `NEW_HTML` 复制参数已停用，更新 Compose 时请移除此项。
+改变任务配置时递增 `TASK_REVISION`。更换镜像后，镜像 ID 的变化会自动触发同次开机重新执行，不会因旧成功记录而跳过。
 
-## 开机一次与自停
+## 镜像如何提供 UI
 
-`restart: always` 的容器在任务结束后明确调用 `docker stop` 停止自己；下次 Docker 守护进程启动时再次运行。宿主 `boot_id` 与 `TASK_REVISION` 的成功记录在 `/run/r1-toolbox/last-success`，只在当前 NAS 开机期间保留。单独重启 Docker 时，同次 NAS 开机成功过的同一任务会跳过。
+构建时将 `ui/` 和原创 Python 采集服务打包进镜像。容器启动后通过宿主 `docker cp` 读取内置包，先确认 `/run` 及其运行目录确实位于 tmpfs，再验证 SHA256、文件清单、路径、类型与大小限制。在随机暂存目录中校验完成后，原子发布到 `/run/r1-toolbox/ui-<内容摘要>`；复用缓存也重新校验。
 
-任务失败不记录成功，也会明确停止容器，避免循环停屏。Docker 接口或自停请求不可用时，容器打印错误并等待，不反复执行任务；在市场界面停止并修正依赖后重试。
+宿主小屏临时服务将缓存的 `frontend` 目录通过 `BindReadOnlyPaths` 只读挂载到 `/screen/squashfs-root/resources/app/dist`。挂载仅影响该服务的文件视图，宿主原目录保持原样。采集进程和 `AppRun` 属于同一临时服务，容器停止或重新创建后均不依赖原容器的文件系统或 PID。
 
-## 恢复官方界面
+仅复制、展开到 `/run` 运行目录，不覆盖原版 AppImage、解包版前端或 `/screen/screen-app-startup.sh`。不绑定 Docker 内部镜像层路径，也不要求新版 Compose 的 image volume 语法。
 
-先删除 Toolbox 项目，或将 `restart` 改为 `"no"` 后重新部署，再正常重启 NAS。临时小屏服务和挂载随重启消失，官方开机流程启动原版界面。
+停原程序前会先用同样的只读绑定属性启动检查服务，确认挂载身份与只读状态。新小屏主进程还需在独立 cgroup 连续存活 3 秒，并通过自己的 `/proc/PID/root` 文件视图验证挂载。失败时尽力停止新服务，无自定义挂载地恢复原解包程序。
 
-容器运行完成后本来就会停止，因此仅停止容器、或将 `UI_DIR` 清空再运行诊断，均不会立即撤销已经运行的小屏服务。挂载不回退旧版曾经执行过的文件复制；如果使用过旧版替换功能，需先恢复当时的原文件备份。
+## 实时指标
 
-## 依赖、日志与限制
+Python 标准库采集 `/proc`、sysfs 与真实数据盘挂载点，每 2 秒更新：
 
-- 宿主需要 `docker`、支持 `--cgroup` 的 `nsenter`、`mountpoint` 和 `python3`。实际挂载还需要支持 `BindReadOnlyPaths` 的 systemd（233 起）、`systemd-run`、`systemctl` 和现有小屏图形环境，以实际预检通过为准。
-- 需已存在可运行的 `/screen/squashfs-root/AppRun`。工具不会自动解包，也不会停止 Xorg 或 NAS 后端。
-- 预检失败不停止原程序。停止后的失败会尽力停止新服务，并无自定义挂载地重新运行原解包程序，结果记录在容器日志。
-- 小屏服务名打印在日志，宿主日志命令为 `journalctl -u histor-custom-<PID>.service`。
-- 只读是小屏服务的挂载视图，数据盘上的目录仍可由用户更新。原子更名整个源目录后需重新执行挂载，已挂载的旧目录不会自动切换。
-- 工具仅在 `/run` 写临时执行记录与服务运行信息；Electron 自身及系统仍可能写正常缓存和日志，不能保证整机零写入。
-- 固件升级、官方小屏升级或厂商守护程序抢回界面的行为仍需实机验证。
+- CPU 使用率、可用的 CPU 温度、内存占用、运行时长。
+- 默认路由网卡的 IPv4、上下行速率，避免累计 Docker 网桥。
+- `/drives/` 下数据盘容量，按文件系统去重。
 
-## 镜像与产物校验
+状态接口只监听 `127.0.0.1:18731/api/status`，不提供风扇、RGB、关机或其他写入控制。未知值为 null；不唤醒硬盘读取 SMART，不调用天气服务。当前未提供磁盘温度与多网卡聚合。
 
-发布包包括 `composer.yml`、`r1-toolbox-linux-amd64.tar`、`deployment-manifest.json`、`SHA256SUMS`。镜像文件是 `docker save` 格式，可通过 Docker 市场导入。
+采集进程随小屏退出；停止宿主小屏服务会同时结束采集与页面进程。若本地端口已被无关程序占用，新服务会启动失败并尝试恢复原界面，不覆盖或结束占用端口的程序。
 
-部署文件固定为与 tar 内 RepoTag 一致的镜像，manifest 记录源码提交、镜像 ID 和 `linux/amd64` 平台。源码仓库保持私有，镜像包可独立设为公开；公开后在线部署不需要 GitHub 登录。
+## 开机一次与恢复
 
-自动检查覆盖模拟生命周期、挂载操作与交付契约。真实 NAS 的首次开机、小屏画面和厂商管理界面仍需验证。
+保留 `restart: always`。任务完成或失败后明确调用 Docker 停止当前容器，下次 Docker 启动时再次运行；同次 NAS 开机、相同任务版本、镜像和 UI 配置成功后跳过。成功记录在 `/run/r1-toolbox/last-success`，失败不记录。
 
-参考：[systemd 私有绑定挂载](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#BindPaths=)、[Docker 重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/)、[GitHub Container registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。
+恢复官方界面：先删除项目，或将 `restart` 改为 `"no"` 后重新部署，再正常重启 NAS。临时服务、内存 UI 和挂载随重启消失，官方启动流程继续使用原文件。
+
+容器本来就会停止，仅停止容器或改为诊断不会立即撤销已运行的小屏服务。旧版若曾覆盖过 HTML，需要另外恢复当时的备份；内存挂载不会回退历史文件修改。
+
+## 自定义目录模式
+
+将自有界面放在数据盘，例如 `/drives/实际磁盘/R1-Toolbox/ui`，包含 `index.html` 及其引用的 JS、CSS、图片。然后设置：
+
+```yaml
+TASK_REVISION: '4'
+UI_MODE: directory
+UI_DIR: /drives/实际磁盘/R1-Toolbox/ui
+```
+
+这是宿主路径，不是 `/host/...`。无需额外添加 Docker volume，已有宿主访问入口会让小屏服务建立私有挂载。目录会遮住服务视图中的整个原版 `dist`，必须提供完整资源。directory 模式直接启动原 AppRun，不额外提供内置 UI 的状态 API。
+
+目录路径支持普通中文，不支持空白、冒号、反斜杠、引号、`%`、`$`、控制字符。源目录不能与目标相同或互为祖先；原子更名整个源目录后需要重跑挂载。
+
+## 依赖、日志与边界
+
+- 宿主需要 `docker`、支持 `--cgroup` 的 `nsenter`、`mountpoint`、`python3`。实际挂载还需要 systemd 233 起的 `BindReadOnlyPaths`、`systemd-run`、`systemctl` 和现有小屏图形环境。以实际预检通过为准。
+- 容器名与 `TASK_CONTAINER` 保持 `r1-toolbox`。镜像继承 `docker.io/library/debian:bookworm-slim`，保留原宿主访问机制，不联网安装宿主工具。
+- 镜像模式要求 `/run` 为 tmpfs；不满足时在停原小屏前拒绝部署 UI。缺少依赖或包损坏也不会停止原程序。
+- 临时服务名打印在容器日志，宿主可用 `journalctl -u histor-custom-<PID>.service` 查看。失败暂存保留至重启，便于排查。
+- 执行状态和 UI 位于运行时目录；Electron、系统、Docker 仍可能写正常配置、缓存和日志，不能保证整机零写入。
+- 真实 NAS 的画面、触摸、开机时序及厂商守护程序行为需要实机验证。
+
+参考：[systemd 私有挂载](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#BindPaths=)、[Docker cp](https://docs.docker.com/reference/cli/docker/container/cp/)、[Docker 重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/)。
