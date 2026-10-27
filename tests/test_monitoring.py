@@ -108,6 +108,12 @@ class MonitoringTests(unittest.TestCase):
             result = self.service.action("monitor.settings.update", {"settings": {"retention_days": 30}})
         self.assertFalse(result["settings_saved"])
 
+    def test_directory_sync_failure_is_not_acknowledged_as_saved(self):
+        with mock.patch.object(module.os, "fsync", side_effect=[None, OSError("directory sync fixture")]):
+            result = self.service.action("monitor.settings.update", {"settings": {"retention_days": 7}})
+        self.assertFalse(result["settings_saved"])
+        self.assertEqual(self.service.snapshot()["settings"]["retention_days"], 30)
+
     def test_bad_settings_and_symlink_are_not_loaded(self):
         self.write(self.state / "monitoring.json", "{broken")
         other = self.create(); self.addCleanup(other.stop)
@@ -234,6 +240,27 @@ class MonitoringTests(unittest.TestCase):
         self.sample(2)
         self.assertIsNone(self.service.traffic()["totals"]["today"])
 
+    def test_bond_bridge_vlan_virtual_topology_not_double_counted_with_lower_ports(self):
+        # Each aggregate/VLAN repeats the lower port's byte counters. Use
+        # names without special prefixes too: sysfs topology is authoritative.
+        names = ["eth0", "eth1", "bond0", "br0", "vlan-office", "custom-bridge"]
+        self.insights.value["interfaces"] = [self.interface(name) for name in names]
+        self.write(self.sys / "class/net/vlan-office/ifindex", 10)
+        self.write(self.sys / "class/net/vlan-office/iflink", 2)
+        target = self.sys / "devices/virtual/net/custom-bridge"
+        target.mkdir(parents=True)
+        (self.sys / "class/net/custom-bridge").symlink_to(target, target_is_directory=True)
+        self.sample()
+        for item in self.insights.value["interfaces"]:
+            item.update(rx_bytes=1100, tx_bytes=2200)
+        values = self.sample(2)
+        self.assertEqual(values["rx_bytes_per_sec"], 20)
+        self.assertEqual(self.service.traffic()["totals"]["today"], {"rx_bytes": 200, "tx_bytes": 400})
+        self.assertEqual([row["name"] for row in self.service.traffic()["interfaces"]], ["eth0", "eth1"])
+        self.service.action("monitor.settings.update", {"settings": {"traffic_exclude_virtual": False}})
+        self.sample(2)
+        self.assertEqual(self.service.traffic()["totals"]["today"]["rx_bytes"], 600)
+
     def test_traffic_midnight_gap_is_not_allocated_to_new_day(self):
         self.wall = dt.datetime(2026, 10, 15, 23, 59, 59, tzinfo=dt.timezone.utc).timestamp()
         self.sample()
@@ -343,6 +370,35 @@ class MonitoringTests(unittest.TestCase):
         self.sample(30)
         self.assertEqual(self.service.db.execute("SELECT count(*) FROM samples").fetchone()[0], count)
 
+    def test_sql_row_limit_bounded_database_and_failed_write_can_recover(self):
+        with mock.patch.object(module, "MAX_SAMPLES", 3):
+            self.sample()
+            for _ in range(5):
+                self.sample(30)
+        self.assertEqual(self.service.db.execute("SELECT count(*) FROM samples").fetchone()[0], 3)
+        self.assertEqual(self.service.db.execute("PRAGMA max_page_count").fetchone()[0], 32768)
+        real = self.service.db
+        class FailingConnection:
+            def __enter__(self):
+                real.__enter__(); return self
+            def __exit__(self, *args):
+                return real.__exit__(*args)
+            def execute(self, query, *args):
+                if query.startswith("INSERT OR REPLACE INTO samples"):
+                    raise sqlite3.OperationalError("fixture volume failure")
+                return real.execute(query, *args)
+            def rollback(self):
+                real.rollback()
+        self.service.db = FailingConnection()
+        self.sample(30)
+        self.assertEqual(next(row["value"] for row in self.service.snapshot()["current"]["metrics"] if row["id"] == "cpu_usage_percent"), 23)
+        self.assertFalse(self.service.history()["recording"])
+        self.assertIsNotNone(self.service.history()["reason"])
+        self.service.db = real
+        self.sample(30)
+        self.assertTrue(self.service.history()["recording"])
+        self.assertIsNone(self.service.history()["reason"])
+
     def test_write_failure_does_not_block_cached_snapshot_lock(self):
         self.sample()
         entered, finish = threading.Event(), threading.Event()
@@ -372,6 +428,12 @@ class MonitoringTests(unittest.TestCase):
         self.assertIn("timestamp_utc,metric,value,unit", csv)
         self.assertIn("cpu_usage_percent,23,%", csv)
         self.assertNotIn("hunter2", csv)
+
+    def test_csv_units_cannot_be_interpreted_as_spreadsheet_formulas(self):
+        self.sample()
+        self.service.history_cache["24h"]["series"][0]["unit"] = "=HYPERLINK(test)"
+        text = self.service.export_csv("24h")
+        self.assertIn("'=HYPERLINK(test)", text)
 
     def test_fixture_path_reader_rejects_fifo_oversize_and_outside_symlink(self):
         external = self.root / "secret"

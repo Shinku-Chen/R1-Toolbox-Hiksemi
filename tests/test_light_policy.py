@@ -180,6 +180,68 @@ class LightTests(unittest.TestCase):
         self.assertEqual(state['runtime']['source_id'], next(row['id'] for row in self.sources.snapshot() if row['temperature_c'] == 50))
         self.assertTrue(all(row['fresh'] for row in state['sources']))
 
+    def test_snapshot_expires_temperature_decision_without_tick_or_hardware_reads(self):
+        state = self.apply(self.config('temperature'))
+        self.assertTrue(state['applied'])
+        last_requested, stored_decision = state['target'], copy.deepcopy(self.light.decision)
+        before = len(self.calls)
+        self.now += 4
+        with mock.patch.object(self.sources, 'snapshot', side_effect=AssertionError('snapshot must be cached')):
+            state = self.light.snapshot()
+        self.assertEqual(len(self.calls), before)
+        self.assertFalse(state['sources'][0]['fresh'])
+        self.assertFalse(state['applied'] or state['runtime']['applied'])
+        for value in (state, state['runtime']):
+            self.assertIsNone(value['reference_c'])
+            self.assertIsNone(value['source_id'])
+            self.assertIsNone(value['source_label'])
+            self.assertIn('等待下一轮低亮保护确认', value['reason'])
+            self.assertEqual(value['last_requested_target'], last_requested)
+            self.assertEqual(value['target'], last_requested)
+        self.assertEqual(self.light.decision, stored_decision)
+
+    def test_snapshot_missing_or_invalid_required_temperature_cannot_claim_applied(self):
+        self.apply(self.config('temperature'))
+        healthy = copy.deepcopy(self.light.catalog[0])
+        for changes in (None, {'status': 'unavailable'}, {'temperature_c': None},
+                        {'temperature_c': float('nan')}, {'temperature_c': 151}):
+            with self.subTest(changes=changes):
+                self.light.catalog = [] if changes is None else [{**healthy, **changes}]
+                state = self.light.snapshot()
+                self.assertFalse(state['applied'])
+                self.assertIsNone(state['reference_c'])
+                self.assertIsNone(state['runtime']['source_age_seconds'])
+
+    def test_snapshot_fresh_standby_is_excluded_without_invalidating_confirmed_decision(self):
+        config = self.config('temperature')
+        cpu = self.sources.snapshot()[0]
+        standby = {'id': 'disk:standby', 'label': 'Sleeping disk', 'status': 'standby',
+                   'temperature_c': None, 'sampled_monotonic': self.now, 'max_age_seconds': 90}
+        config['sources'].append(standby['id'])
+        with mock.patch.object(self.sources, 'snapshot', return_value=[cpu, standby]):
+            self.apply(config)
+        self.now += 2
+        state = self.light.snapshot()
+        self.assertTrue(state['applied'])
+        self.assertEqual(state['reference_c'], 40)
+        self.assertFalse(state['fallback'])
+        config['sources'] = [standby['id']]
+        with mock.patch.object(self.sources, 'snapshot', return_value=[standby]):
+            self.apply(config)
+        state = self.light.snapshot()
+        self.assertTrue(state['applied'] and state['fallback'])
+        self.assertIsNone(state['reference_c'])
+        self.assertEqual(state['target']['color'], '#FFAA00')
+        self.now += 89
+        self.assertFalse(self.light.snapshot()['applied'])
+
+    def test_stale_temperature_catalog_does_not_invalidate_manual_lighting(self):
+        self.apply()
+        self.now += 4
+        state = self.light.snapshot()
+        self.assertFalse(state['sources'][0]['fresh'])
+        self.assertTrue(state['applied'])
+
     def test_missing_stale_and_all_standby_have_low_brightness_warning(self):
         config = self.config('temperature')
         cpu = config['sources'][0]
