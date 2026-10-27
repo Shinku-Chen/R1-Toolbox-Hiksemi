@@ -15,7 +15,7 @@ until mountpoint -q /screen; do
   sleep 2
 done
 
-state_dir=/screen/docker-boot-once
+state_dir=/run/r1-toolbox
 mkdir -p "$state_dir"
 boot_id=$(cat /proc/sys/kernel/random/boot_id)
 run_key="$boot_id:${TASK_REVISION:-1}"
