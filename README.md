@@ -1,26 +1,40 @@
 # R1 Toolbox
 
-用于保存海康 R1 NAS 的配置、脚本和可下载工具包。当前提供在官方固件上通过 Docker 执行宿主任务的工具。
+海康 R1 NAS 的 Docker 工具箱。NAS 通过 `composer.yml` 部署本仓库构建的镜像，运行脚本随镜像交付。
 
-| 工具 | 用途 | 说明 |
-| --- | --- | --- |
-| [开机执行一次](tools/boot-once/) | 每次 NAS 开机执行一次任务，完成后容器自行停止 | [部署与配置](tools/boot-once/README.md) |
+最终部署产物是 **`composer.yml` 与 Docker 镜像**。同时提供 `r1-toolbox-linux-amd64.tar`，可在 NAS 上离线导入同一个镜像。源码仓库保持私有，发布的 GHCR 镜像可以公开拉取。
 
 ## 下载与部署
 
-1. 打开本仓库的 [Actions](../../actions)，选择对应分支最近一次成功的 `检查与打包`。
-2. 在运行页面的 Artifacts 中下载工具包，解开后取得 ZIP 与 `SHA256SUMS`。
-3. 解开工具 ZIP，将里面的 `r1-boot-once/compose.yaml` 导入 NAS Docker 市场的新项目。
+镜像仓库：`ghcr.io/shinku-chen/r1-toolbox`，目标平台为 `linux/amd64`，与当前海康 R1 一致。开发分支更新 `preview`，主分支更新 `latest`，每个构建还发布不可变的 `sha-<完整提交>` 标签。
 
-也可以直接打开 [Compose 配置](tools/boot-once/compose.yaml)，复制完整内容到 NAS 项目编辑器。
+1. 打开 [Actions](https://github.com/Shinku-Chen/R1-Toolbox/actions)，下载最新成功运行的部署产物。
+2. 在线部署：将产物中的 `composer.yml` 导入 NAS Docker 市场的新项目，再启动项目。
+3. 离线部署：先在 NAS 导入同包的 `r1-toolbox-linux-amd64.tar`，再导入该 `composer.yml`。两者使用相同的镜像标签，无需在 NAS 构建镜像。
 
-默认 `NEW_HTML` 为空，只检查环境并验证执行后自停。真正替换小屏页面时，按工具说明设置新 HTML 的宿主路径并递增 `TASK_REVISION`。
+发布包里的 Compose 固定为对应提交的镜像；仓库根目录的 [composer.yml](composer.yml) 默认使用 `preview`，也可用 `R1_TOOLBOX_IMAGE` 指定版本。配置不强制联网拉取，便于离线导入。
 
-运行机制为 `restart: always` 配合作业结束后的明确 `docker stop`；同一次 NAS 启动和同一任务版本成功后会跳过重复操作。可选的小屏程序通过宿主临时服务继续运行，容器完成后停止。
+产物还包括 `deployment-manifest.json` 和 `SHA256SUMS`，用于核对提交、镜像 ID、平台和文件校验值。每次打包会验证 Docker archive 的标签和平台与部署文件一致。
 
-## 本地检查与打包
+## 首版功能
 
-需要 Python 3.9 或以上。Compose 检查需要 Docker Compose，但模拟测试和 ZIP 打包不需要连接 Docker 守护进程。
+- 环境检查：默认 `NEW_HTML` 为空，只输出宿主依赖、解包目录和小屏进程状态。
+- 小屏页面替换：指定新 HTML 的宿主路径后，备份原页面、停止已确认的小屏进程、原子替换页面，再由宿主临时 systemd 服务启动小屏。
+- 开机执行一次：同一次 NAS 开机、同一个 `TASK_REVISION` 成功后跳过重复操作，正常完成后容器自行停止。
+
+详细参数、备份与恢复方式见[部署说明](tools/boot-once/README.md)。HTML 的 JS、CSS、图片仍须与页面一同准备；首版不会自动解包官方 AppImage。
+
+## 运行与更新
+
+镜像继承 `docker.io/library/debian:bookworm-slim`，复用原逃生容器的 `/host` 和宿主命名空间机制。NAS 无需安装镜像构建工具，也无需复制运行脚本。
+
+原有行为保持：`restart: always` 配合明确停止自己；宿主 `boot_id` 与任务版本去重；未配置页面时只诊断；页面替换前备份；小屏交给宿主服务管理器运行。镜像停止后，小屏程序不依赖该容器继续存活。
+
+源码或任务更新后重新发布镜像。部署时选择同一构建的 Compose 与镜像，修改 `TASK_REVISION` 可以在同一次开机重新执行新任务。
+
+镜像首次发布时 GHCR 默认私有，需要在包设置中将**镜像包**设为公开。此设置独立于源码仓库可见性，源码仓库保持私有。公开状态以匿名拉取验证为准。
+
+## 开发与构建
 
 ```sh
 python3 -m venv .venv
@@ -28,11 +42,13 @@ python3 -m venv .venv
 python -m pip install -r requirements-dev.txt
 python tools/boot-once/build-compose.py
 python tools/boot-once/test_runner.py
-python scripts/package.py --version dev
+python -m unittest discover -s tests -v
+docker build --platform linux/amd64 -t r1-toolbox:local .
+docker run --rm --network none r1-toolbox:local --help
 ```
 
-打包前需先提交工具源码，确保包内文件对应记录的 Git commit。输出位于 `dist/`，包含 ZIP 和 `SHA256SUMS`；ZIP 内的 `manifest.json` 记录版本、提交与各文件校验值。ZIP 使用固定文件顺序、时间和权限，相同版本与提交可以重复生成一致的文件。生成物由 Actions 保存，仓库维护源码与可直接导入的 Compose 配置。
+自动流程检查生成文件、Compose、脚本和模拟测试，随后构建镜像、执行无宿主挂载的冒烟测试。非 PR 构建将镜像发布到 GHCR，并通过 `docker save` 导出离线镜像及部署文件。PR 仅构建与检查，不发布镜像。
 
-每次推送相关源码后，自动流程会检查生成文件是否同步、校验 Compose、运行模拟测试，再打包上传。开发依赖锁在 `requirements-dev.txt`，自动流程按该文件缓存依赖。默认分支纳入 workflow 后，也可以从 Actions 手动触发。
+镜像 CLI 支持默认 `run`、`--help`、`--version`。帮助与版本命令不访问 NAS 宿主。构建上下文采用白名单，只将工具运行必需的脚本放入镜像。
 
-自动化检查使用伪宿主工具。真实 NAS 的首次开机、自停、实际画面和厂商容器管理行为仍需部署验证，详见[工具说明](tools/boot-once/README.md)。
+真实 NAS 的首次开机、小屏实际画面和厂商 Docker 市场行为仍需部署验证。
