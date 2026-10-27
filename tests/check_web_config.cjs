@@ -78,8 +78,9 @@ class Adapter:
     def __init__(self, available):
         self.available, self.channels, self.targets = available, set(), {}
         self.fail_release = False
+        self.reason = "模拟设备：原厂风扇配置无法解析"
     def capabilities(self):
-        return {'available': self.available, 'reason': '' if self.available else '模拟设备：独立驱动未验证',
+        return {'available': self.available, 'reason': '' if self.available else self.reason,
                 'channels': ['cpu', 'system'] if self.available else [], 'rpm_available': False}
     def start(self, channels):
         assert self.available
@@ -149,7 +150,7 @@ lights=[LightPolicyController(lamp,Sources()) for lamp in lamps]
 for light in lights:light.start()
 monitoring=MonitoringService(fixture/'data',insights,monitor,Sources(),proc_root=fixture/'proc',sys_root=fixture/'sys').start()
 primary = WebConfigServer(controller(fixture), insights=insights, fan_policy=policy(fixture, True), light_policy=lights[0],monitoring=monitoring,monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
-unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False),light_policy=lights[1], host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
+unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False),light_policy=lights[1],monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
 
 try:
     print(json.dumps({'ready': True, 'primary': {'origin': 'http://127.0.0.1:' + str(primary.port), 'code': primary.pairing_info(rotate=True)['code']},
@@ -174,6 +175,16 @@ try:
             primary.fan_policy.adapter.fail_release = True
         elif operation == 'allow_release':
             primary.fan_policy.adapter.fail_release = False
+        elif operation == 'unsupported_fan_ready':
+            unsupported.fan_policy.adapter.available = True
+            unsupported.fan_policy.tick()
+        elif operation == 'unsupported_fan_busy':
+            with unsupported.fan_policy.lock:
+                unsupported.fan_policy.busy = True
+        elif operation == 'unsupported_fan_idle':
+            with unsupported.fan_policy.lock:
+                unsupported.fan_policy.busy = False
+            unsupported.fan_policy.tick()
         elif operation == 'app_refresh':
             item = insights.data['containers']['items'][0]
             item['cpu_percent'] = round(item.get('cpu_percent', 0) + 1, 1)
@@ -452,6 +463,28 @@ finally:
     await setting('fans'); await page.locator('#fan-cpu-mode').selectOption('temperature'); await page.locator('#fan-cpu-sources input[value="cpu"]').check(); await page.locator('#fan-cpu-normal_at').fill('58'); await page.locator('#fan-policy-save').click(); await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
     const unsupportedFan=JSON.parse(fs.readFileSync(path.join(fixtureDir,'unsupported/data/fan-policy.json'),'utf8')); assert.equal(unsupportedFan.config.channels.cpu.normal_at,58); assert.equal(unsupportedFan.resume_on_boot,false); assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true);
     checks.push('unverified hardware still permits independent configuration persistence but keeps apply disabled and never claims hardware success');
+    assert.equal(await page.locator('#fan-policy-apply').getAttribute('aria-describedby'),'fan-policy-apply-reason');
+    await page.waitForFunction(()=>document.getElementById('fan-policy-apply-reason').textContent.includes('模拟设备：原厂风扇配置无法解析'));
+    assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true);await page.locator('#fan-cpu-normal_at').fill('59');await page.locator('#fan-system-mode').selectOption('manual');await page.locator('#fan-system-manual_percent').fill('83');
+    await screenshot('preview-fan-preflight-reason-fixture');
+    const beforePreflightPosts=actionBodies.length;
+    await command('unsupported_fan_ready');await page.waitForFunction(()=>!document.getElementById('fan-policy-apply').disabled&&document.getElementById('fan-policy-apply-reason').textContent.startsWith('可应用'));
+    assert.equal(await page.locator('#fan-cpu-normal_at').inputValue(),'59');assert.equal(await page.locator('#fan-system-manual_percent').inputValue(),'83');
+    await command('unsupported_fan_busy');await page.waitForFunction(()=>document.getElementById('fan-policy-apply').disabled&&document.getElementById('fan-policy-apply-reason').textContent.includes('正在切换控制方式'));
+    await command('unsupported_fan_idle');await page.waitForFunction(()=>!document.getElementById('fan-policy-apply').disabled);
+    await page.route(fixture.unsupported.origin+'/api/v1/status',route=>route.abort('connectionrefused'));
+    await page.waitForFunction(()=>document.getElementById('fan-policy-apply-reason').textContent.includes('监控连接已中断'));
+    assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true);assert.equal(await page.locator('#fan-policy-save').isEnabled(),true);
+    await page.unroute(fixture.unsupported.origin+'/api/v1/status');await page.waitForFunction(()=>!document.getElementById('fan-policy-apply').disabled&&document.getElementById('fan-policy-apply-reason').textContent.startsWith('可应用'));
+    await page.route(fixture.unsupported.origin+'/api/session',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'fixture session state unavailable'})}));
+    await page.waitForFunction(()=>document.getElementById('fan-policy-apply-reason').textContent.includes('实时风扇状态暂不可读取'));
+    const nextPublic=page.waitForResponse(response=>response.url()===fixture.unsupported.origin+'/api/v1/status');await nextPublic;
+    assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true,'cached public snapshot must not bypass failed fan state reading');assert.match(await page.locator('#fan-cpu-live').textContent(),/设置状态未确认/);assert.ok(!(await page.locator('#fan-cpu-live').textContent()).includes('请求输出 0%'));assert.ok(!(await page.locator('#fan-system-live').textContent()).includes('参考 max：'));
+    await page.unroute(fixture.unsupported.origin+'/api/session');await page.waitForFunction(()=>!document.getElementById('fan-policy-apply').disabled&&document.getElementById('fan-policy-apply-reason').textContent.startsWith('可应用'));
+    assert.equal(await page.locator('#fan-cpu-normal_at').inputValue(),'59');assert.equal(await page.locator('#fan-system-manual_percent').inputValue(),'83');assert.equal(await page.locator('#fan-cpu-sources input[value="cpu"]').isChecked(),true);
+    assert.equal(actionBodies.length,beforePreflightPosts);assert.equal(JSON.parse(fs.readFileSync(path.join(fixtureDir,'unsupported/data/fan-policy.json'),'utf8')).config.channels.cpu.normal_at,58);
+    checks.push('fan apply reason names exact failed capability, busy switch, offline and failed session read; real capability/session recovery re-enables without applying or overwriting unsaved CPU/system drafts');
+
 
     assert.equal(blocked.length, 0, 'unexpected external requests'); assert.deepEqual(pageErrors, []);
     console.log(JSON.stringify({ passed: true, checks, sizes, pageErrors, externalRequests: blocked.length, fixtureDirectory: fixtureDir, fixtureFilesRetained: true }, null, 2));

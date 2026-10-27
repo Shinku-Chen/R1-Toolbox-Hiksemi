@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -279,6 +280,24 @@ class NativeFanTests(unittest.TestCase):
             adapter.start({"cpu"})
         self.assertEqual(self.backend.events, [])
 
+    def test_capability_reasons_allow_only_static_preflight_messages(self):
+        adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram",
+                                          backend=self.backend, allow_writes=True)
+        for message in native.PREFLIGHT_REASONS:
+            with self.subTest(message=message), patch.object(self.backend, "probe", side_effect=ValueError(message)):
+                state = adapter.capabilities()
+                self.assertFalse(state["available"])
+                self.assertEqual(state["reason"], message)
+        private = "/private/config-path token=fixture-secret environment=private"
+        for error in (ValueError(private), RuntimeError(private), OSError(private),
+                      FileNotFoundError(2, private, "/private/secret")):
+            with self.subTest(error=type(error).__name__), patch.object(self.backend, "probe", side_effect=error):
+                state = adapter.capabilities()
+                self.assertFalse(state["available"])
+                self.assertNotIn("/private", json.dumps(state))
+                self.assertNotIn("fixture-secret", json.dumps(state))
+                self.assertIn("身份尚未验证", state["reason"])
+
     def test_proc_identity_parses_parentheses_and_rejects_zombie_or_reused_pid(self):
         proc = self.folder / "proc/123"
         proc.mkdir(parents=True)
@@ -434,6 +453,75 @@ class NativeFanTests(unittest.TestCase):
             program.write_bytes(b"replaced-firmware-not-executable")
             with self.assertRaises(ValueError):
                 backend.verify_live()
+
+    def test_vendor_mode_accepts_only_trailing_nuls_on_known_bounded_config(self):
+        config = self.folder / "tmp/nand_config/config.txt"
+        config.parent.mkdir(parents=True)
+        backend = watchdog.SystemBackend(root=self.folder)
+        for code, expected in ((2, "low"), (3, "medium"), (4, "high"), (5, "auto")):
+            for suffix in (b"", b"\0", b"\0\0\0"):
+                with self.subTest(mode=code, nuls=len(suffix)):
+                    raw = json.dumps({"fan": {"fan_mode": code}}).encode() + suffix
+                    config.write_bytes(raw)
+                    self.assertEqual(backend.mode(), expected)
+                    self.assertEqual(config.read_bytes(), raw)
+                    if suffix:
+                        self.assertIsNone(native.read_json(config))
+        for raw in (b"", b"\0", b"not-json\0", b'{"fan":\0{"fan_mode":5}}\0',
+                    b'{"fan":{"fan_mode":5}}\0 {}', b'{"fan":{"fan_mode":5}}\0\n',
+                    b"[]\0", b"{}\0", b'{"fan":5}\0', b'{"fan":{"fan_mode":true}}\0',
+                    b'{"fan":{"fan_mode":"5"}}\0', b'{"fan":{"fan_mode":5.0}}\0',
+                    b'{"fan":{"fan_mode":null}}\0', b'{"fan":{"fan_mode":1}}\0',
+                    b'{"fan":{"fan_mode":6}}\0'):
+            with self.subTest(raw=raw):
+                config.write_bytes(raw)
+                self.assertIsNone(backend.mode())
+        config.write_bytes(b'{"fan":{"fan_mode":5}}' + b"\0" * (1024 * 1024))
+        self.assertIsNone(backend.mode())
+        config.rename(self.folder / "oversize-vendor-config")
+        target = self.folder / "valid-vendor-config"
+        target.write_bytes(b'{"fan":{"fan_mode":5}}\0')
+        config.symlink_to(target)
+        self.assertIsNone(backend.mode())
+
+    def test_single_nul_vendor_config_passes_probe_with_real_socket_and_safe_diagnostics(self):
+        config = self.folder / "tmp/nand_config/config.txt"
+        config.parent.mkdir(parents=True)
+        original = b'{"fan":{"fan_mode":5}}\0'
+        config.write_bytes(original)
+        endpoint = self.folder / "var/tmp/emhistor"
+        endpoint.parent.mkdir(parents=True)
+        guard = self.folder / "fan_guard.so"
+        elf = bytearray(64)
+        elf[:6], elf[16:20] = b"\x7fELF\x02\x01", b"\x03\x00\x3e\x00"
+        guard.write_bytes(elf)
+        guard.chmod(0o644)
+        backend = watchdog.SystemBackend(root=self.folder, guard_path=guard)
+        adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram",
+                                          backend=backend, allow_writes=True)
+        with patch.object(watchdog.sys, "platform", "linux"), patch.object(watchdog.os, "geteuid", return_value=0), \
+                patch.object(watchdog.shutil, "which", return_value="/fixture/systemd-run"), \
+                patch.object(backend, "verify_live"), patch.object(backend, "_vendors", return_value=[self.backend.vendor]), \
+                patch("subprocess.Popen", side_effect=AssertionError("预检不能启动程序")), \
+                patch("fcntl.ioctl", side_effect=AssertionError("预检不能写硬件")):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+                server.bind(str(endpoint))
+                self.assertTrue(adapter.capabilities()["available"])
+                self.assertEqual(config.read_bytes(), original)
+                config.write_bytes(b'{"fan":{"fan_mode":"5"}}\0')
+                self.assertEqual(adapter.capabilities()["reason"], "原厂系统风扇策略配置无效或不可读")
+                config.write_bytes(original)
+            endpoint.rename(self.folder / "closed-socket-fixture")
+            self.assertEqual(adapter.capabilities()["reason"], "原厂系统风扇同步接口不可用")
+            endpoint.write_bytes(b"ordinary file, not a socket")
+            self.assertEqual(adapter.capabilities()["reason"], "原厂系统风扇同步接口不可用")
+        self.assertEqual(config.read_bytes(), original)
+
+    def test_recovery_and_status_json_remain_strict_about_trailing_nuls(self):
+        for name in ("descriptor.json", "status.json", "release.json"):
+            path = self.folder / name
+            path.write_bytes(b'{"version":1}\0')
+            self.assertIsNone(native.read_json(path))
 
     def test_backend_sync_uses_only_get_existing_mode_and_exact_manual_factory_value(self):
         backend = watchdog.SystemBackend(root=self.folder)
