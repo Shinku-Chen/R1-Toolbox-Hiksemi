@@ -35,10 +35,10 @@ class BundleTests(unittest.TestCase):
         (self.root / 'runtime/device_info.py').write_text('def collect_device_info(*args): return {}\n')
         (self.root / 'runtime/histor.py').write_text('class HistorAdapter: pass\n')
         (self.root / 'runtime/web_config.py').write_text('class WebConfigServer: pass\n')
-        for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py'):
+        for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py', 'light_policy.py', 'monitoring.py'):
             (self.root / 'runtime' / name).write_text('# fixture only\n')
         (self.root / 'ui/web').mkdir()
-        for name in ('index.html', 'config.css', 'config.js'):
+        for name in ('index.html', 'config.css', 'config.js', 'monitor.js'):
             (self.root / 'ui/web' / name).write_text('web fixture')
         self.runtime = load_actions()
         self.runtime.runtime_root = self.root / 'ram'

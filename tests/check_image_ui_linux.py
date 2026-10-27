@@ -32,6 +32,12 @@ FAN_FIXTURE_CONFIG = {'schema_version': 1, 'channels': {
                'quiet_below': 28, 'normal_at': 43, 'full_at': 58,
                'quiet_percent': 60, 'normal_percent': 80, 'manual_percent': 75},
 }}
+LIGHT_FIXTURE_CONFIG = {'schema_version': 1, 'enabled': False, 'mode': 'temperature',
+    'sources': ['ci:cpu-package', 'ci:disk-a'],
+    'stops': [{'temperature': 30, 'color': '#20BFA9'}, {'temperature': 55, 'color': '#EDB353'},
+              {'temperature': 75, 'color': '#E36464'}],
+    'brightness': 65, 'manual': {'mode': 1, 'color': '#208070', 'brightness': 40},
+    'schedule': {'enabled': True, 'start': '22:30', 'end': '06:30', 'brightness': 15}}
 
 
 def command(*arguments, check=True, timeout=20):
@@ -101,11 +107,20 @@ def service_pid(unit):
 
 def check_web_config():
     with HTTP.open(f'http://127.0.0.1:{WEB_PORT}/', timeout=2) as response:
-        assert response.status == 200 and b'<!doctype html>' in response.read().lower(), '网页配置登录页面不可用'
+        assert response.status == 200 and b'<!doctype html>' in response.read().lower(), '网页监控页面不可用'
+    with HTTP.open(f'http://127.0.0.1:{WEB_PORT}/monitor.js', timeout=2) as response:
+        assert response.status == 200 and len(response.read()) > 100, '公开监控脚本未交付'
+    request = urllib.request.Request(f'http://127.0.0.1:{WEB_PORT}/api/v1/status',
+                                    headers={'Origin': 'https://third-party.example'})
+    with HTTP.open(request, timeout=2) as response:
+        value = json.load(response)
+        assert response.status == 200 and value.get('schema_version') == 1, '未配对结构化监控接口不可用'
+        assert response.headers.get('Access-Control-Allow-Origin') == '*', '公开只读接口未允许第三方读取'
+        assert 'csrf' not in value and 'settings' not in value.get('controls', {}), '公开状态包含设置授权材料'
     try:
         HTTP.open(f'http://127.0.0.1:{WEB_PORT}/api/session', timeout=2)
     except urllib.error.HTTPError as error:
-        assert error.code == 401, '未登录网页没有明确拒绝状态访问'
+        assert error.code == 401, '未登录网页没有明确拒绝设置访问'
     else:
         raise AssertionError('未配对网页可以读取设备设置')
 
@@ -181,6 +196,30 @@ def check_fixture_fan_policy(data_directory):
     active = saved.get('active_config', {}).get('channels', {})
     assert (set(active) == {'cpu', 'system'}
             and all(item.get('mode') == 'vendor' for item in active.values())), '仅保存覆盖了原厂活动策略'
+
+
+def save_fixture_auxiliary_settings(token, data_directory):
+    for action, payload in (
+        ('light.policy.update', {'config': LIGHT_FIXTURE_CONFIG, 'apply': False}),
+        ('monitor.settings.update', {'settings': {'retention_days': 7}}),
+    ):
+        body = json.dumps({'action': action, **payload}).encode()
+        request = urllib.request.Request(f'http://127.0.0.1:{PORT}/api/action', data=body,
+            headers={'Content-Type': 'application/json', 'X-R1-Token': token, 'Origin': 'null'})
+        with HTTP.open(request, timeout=3) as response:
+            value = json.load(response)
+            assert response.status == 200 and value.get('settings_saved') is True, '灯光或统计设置未明确保存'
+    check_fixture_auxiliary_settings(data_directory)
+
+
+def check_fixture_auxiliary_settings(data_directory):
+    with HTTP.open(f'http://127.0.0.1:{PORT}/api/light-policy', timeout=2) as response:
+        value = json.load(response)
+        assert value.get('config') == LIGHT_FIXTURE_CONFIG and value.get('active') is False, '灯光草稿未保留或意外执行'
+    with HTTP.open(f'http://127.0.0.1:{PORT}/api/monitoring', timeout=2) as response:
+        assert json.load(response).get('settings', {}).get('retention_days') == 7, '统计配置没有从卷恢复'
+    for name in ('light-policy.json', 'monitoring.json'):
+        assert (data_directory / name).is_file(), '数据卷缺少灯光或统计配置：' + name
 
 
 def check_fixture_settings():
@@ -281,6 +320,7 @@ def main():
         token = save_fixture_settings(token_file)
         check_fixture_settings()
         save_fixture_fan_policy(token, data_directory)
+        save_fixture_auxiliary_settings(token, data_directory)
 
         # The UI and API belong to the host service, not this source container.
         command('docker', 'stop', '--timeout', '2', container)
@@ -293,6 +333,7 @@ def main():
         check_web_config()
         check_fixture_settings()
         check_fixture_fan_policy(data_directory)
+        check_fixture_auxiliary_settings(data_directory)
         check_view(runtime, pid, frontend, expected_hash, original, original_identity)
         runtime['verify_cache'](cache, tarhash)
 
@@ -312,6 +353,7 @@ def main():
         wait_for_status()
         check_fixture_settings()
         check_fixture_fan_policy(data_directory)
+        check_fixture_auxiliary_settings(data_directory)
         check_web_config()
         check_view(runtime, service_pid(unit), frontend, expected_hash, original, original_identity)
         command('systemctl', 'stop', unit)
