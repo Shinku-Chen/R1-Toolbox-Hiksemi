@@ -2,7 +2,7 @@ name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/toolbox-image']
+    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -41,6 +41,8 @@ jobs:
         run: python tools/boot-once/test_runner.py
       - name: Check image delivery contracts
         run: python -m unittest discover -s tests -v
+      - name: Verify real read-only service mount on the disposable runner
+        run: sudo python3 tests/check_mount_linux.py
 
   publish-image:
     needs: checks
