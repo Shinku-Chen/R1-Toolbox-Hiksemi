@@ -26,7 +26,8 @@ async function fixtureOnly(context){
 (async () => {
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
   const checks = [], sizes = [], pageErrors = [], posts = [];
-  let offline = false, failNextAction = false, delayAction = false;
+  let offline = false, failNextAction = false, delayAction = false, pairingExpires = 180;
+  const webConfig = { enabled: true, host: '0.0.0.0', port: 18732, scheme: 'http', addresses: ['http://192.168.1.10:18732'], pairing: { active: false, expires_in: 0 } };
   const settings = { theme: 'dark', font_scale: 100, page_interval: 0, sleep_timeout: 0, brightness: 80, night_enabled: false, night_start: '22:00', night_end: '07:00', night_brightness: 20, enabled_pages: ['overview', 'storage', 'network', 'controls', 'apps', 'system', 'settings'] };
   const state = {
     capabilities: { screen: { available: true, reason: '' }, fans: { available: false, reason: '缺少可控制的风扇通道' }, rgb: { available: false, reason: '接口尚未验证' }, power: { available: true, reason: '' } },
@@ -37,7 +38,7 @@ async function fixtureOnly(context){
   const insights = {
     schema_version: 1, timestamp: new Date().toISOString(),
     system: { model: 'HIKSEMI R1', cpu_model: 'Intel N100', cpu_logical_cores: 4, load_average: [.34, .52, .6], process_count: 142, memory: { used_bytes: 3e9, available_bytes: 13e9, total_bytes: 16e9, usage_percent: 18.75, swap_used_bytes: 0, swap_total_bytes: 0 }, cpu_cores: [0, 1, 2, 3].map(id => ({ id, usage_percent: 16 + id })) },
-    device: { identity: { hostname: 'R1-NAS', os: 'Linux fixture', firmware: 'fixture-firmware', kernel: '6.1-fixture', dmi: { model: 'R1' } }, cpu: { architecture: 'x86_64', physical_cores: 4, sockets: 1 }, thermal: [{ id: 'coretemp:0', driver: 'coretemp', label: 'Package', celsius: 46, critical_celsius: 100 }], fans: [], network: [{ name: 'eth0', mtu: 1500, speed_mbps: 2500, duplex: 'full', ipv6: ['fe80::10'] }], storage: { devices: [{ name: 'sda', model: 'Test disk', serial: 'FIXTURE-ONLY', vendor: 'Fixture', state: 'running' }], raid: [] }, capabilities: {} },
+    device: { identity: { hostname: 'R1-NAS', os: 'Linux fixture', firmware: 'fixture-firmware', kernel: '6.1-fixture', dmi: { model: 'R1' } }, cpu: { architecture: 'x86_64', physical_cores: 4, sockets: 1 }, thermal: [{ id: 'coretemp:0', driver: 'coretemp', label: 'Package', celsius: 46, critical_celsius: 100 }], fans: [], network: [{ name: 'eth0', mtu: 1500, speed_mbps: 2500, duplex: 'full', ipv6: ['fe80::10'], ipv6_addresses: [{ address: '2001:db8:1234:5678:90ab:cdef:1234:5678', prefix_length: 64, scope: 'global' }, { address: 'fe80::10', prefix_length: 64, scope: 'link' }], address_status: { ipv6: 'ok' }, default_gateways: { ipv4: [{ gateway: '192.168.1.1', metric: 100, source: '/proc/net/route' }], ipv6: [{ gateway: 'fe80::1', metric: 200, source: '/proc/net/ipv6_route' }] }, route_status: { ipv4: 'ok', ipv6: 'ok' } }], network_config: { default_routes: { ipv4: [{ interface: 'eth0', gateway: '192.168.1.1', metric: 100, source: '/proc/net/route' }], ipv6: [{ interface: 'eth0', gateway: 'fe80::1', metric: 200, source: '/proc/net/ipv6_route' }, { interface: 'eth0', gateway: null, metric: 300, source: '/proc/net/ipv6_route' }] }, route_status: { ipv4: 'ok', ipv6: 'ok' }, dns: { servers: ['127.0.0.53', '2001:4860:4860::8888'], upstream_servers: ['192.168.1.1', '2001:4860:4860::8888'], stub_servers: ['127.0.0.53'], search: ['home.arpa', 'fixture.local'], domains: ['home.arpa'], status: 'partial', reason: '部分解析器状态文件不可读取', sources: [{ source: 'resolv.conf', path: '/etc/resolv.conf', status: 'ok', servers: ['127.0.0.53'], search: ['home.arpa'], domains: ['home.arpa'] }, { source: 'systemd-resolved', path: '/run/systemd/resolve/resolv.conf', status: 'ok', servers: ['2001:4860:4860::8888'], search: ['fixture.local'] }] } }, storage: { devices: [{ name: 'sda', model: 'Test disk', serial: 'FIXTURE-ONLY', vendor: 'Fixture', state: 'running' }], raid: [] }, capabilities: {} },
     interfaces: [{ name: 'eth0', ipv4: ['192.168.1.10'], mac: '00:11:22:33:44:55', operstate: 'up', rx_bytes: 3e9, tx_bytes: 1e9, rx_bytes_per_sec: 4096, tx_bytes_per_sec: 1024 }],
     disks: { available: true, reason: '', items: [{ id: 'sda', device: '/dev/sda', model: 'Test disk', size_bytes: 4e12, temp_c: 38, health: { passed: true }, standby: false }] },
     containers: { available: true, reason: '', items: [{ id: 'abcdef123456', name: 'test-db', image: 'postgres:17', state: 'running', status: 'Up 2 hours', cpu_percent: 125, memory_bytes: 125829120, protected: false }, { id: '123456abcdef', name: 'r1-toolbox', image: 'ghcr.io/shinku-chen/r1-toolbox:preview', state: 'exited', protected: true }] },
@@ -76,15 +77,16 @@ async function fixtureOnly(context){
         if (body.action === 'container.action') { assert.equal(body.confirmed, true); insights.containers.items[0].state = body.operation === 'stop' ? 'exited' : 'running'; }
         if (body.action === 'rgb.probe') { assert.equal(body.bus, 4); state.rgb.bus = body.bus; state.rgb.brightness = 75; state.capabilities.rgb.available = true; }
         if (body.action === 'rgb.set') { assert.equal(state.capabilities.rgb.available, true); Object.assign(state.rgb, { bus: body.bus, mode: body.mode, color: body.color, brightness: body.brightness === undefined ? state.rgb.brightness : body.brightness }); }
-        data = { ok: true, state, insights };
-      } else data = endpoint.endsWith('/status') ? status : endpoint.endsWith('/toolbox') ? state : insights;
+        if (body.action === 'web.pairing') { assert.equal(body.rotate, true); webConfig.pairing = { active: true, expires_in: pairingExpires }; data = { ok: true, web: { code: '1234509876', expires_in: pairingExpires, port: webConfig.port, addresses: webConfig.addresses, http: true } }; }
+        else data = { ok: true, state, insights };
+      } else data = endpoint.endsWith('/status') ? status : endpoint.endsWith('/toolbox') ? state : endpoint.endsWith('/web-config') ? webConfig : insights;
       return route.fulfill({ status: 200, headers, body: JSON.stringify(data) });
     });
     const root = async name => page.locator(`[data-page="${name}"]`).click();
     const enter = async name => page.locator(`#page-${name === 'screen' || name === 'power' || name === 'fans' || name === 'rgb-probe' ? 'controls' : name} [data-open-view="${name}"]`).click();
     const back = async () => page.locator('#detail-back').click();
     const title = async () => page.locator('#detail-title').textContent();
-    const shot = async name => { if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, name + '.png') }); };
+    const shot = async name => { if (screenshotDir) { await page.locator('#toast').waitFor({ state: 'hidden', timeout: 7500 }); await page.screenshot({ path: path.join(screenshotDir, name + '.png') }); } };
     const measure = async (name, detail = false) => {
       const metrics = await page.evaluate(detail => { const area = detail ? document.getElementById('detail-body') : document.querySelector('.page:not([hidden])'); return { width: innerWidth, body: document.body.scrollWidth, scroll: area.scrollWidth, client: area.clientWidth, height: area.scrollHeight, visible: area.clientHeight }; }, detail);
       sizes.push({ name, ...metrics }); assert.ok(metrics.body <= metrics.width && metrics.scroll <= metrics.client + 1, 'horizontal overflow ' + JSON.stringify({ name, ...metrics }));
@@ -97,6 +99,18 @@ async function fixtureOnly(context){
       for (const name of settings.enabled_pages) { await root(name); await measure(name); if (['overview', 'controls', 'apps', 'settings'].includes(name)) await shot(`preview-${width}-${name}`); }
     }
     checks.push('seven root pages at 320/376 without horizontal overflow; short first-level menus');
+    await root('overview');
+    const readability = await page.evaluate(() => {
+      const font = selector => parseFloat(getComputedStyle(document.querySelector(selector)).fontSize);
+      const cards = Array.from(document.querySelectorAll('.resource-card')).map(node => node.getBoundingClientRect());
+      const nav = Array.from(document.querySelectorAll('[data-page]')).map(node => ({ font: parseFloat(getComputedStyle(node).fontSize), width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height, bottom: node.getBoundingClientRect().bottom }));
+      return { body: font('body'), primary: font('.menu-row strong'), secondary: font('.menu-row small'), detail: font('.detail-row > span'), nav, singleColumn: cards.every(card => Math.abs(card.left - cards[0].left) < 1) };
+    });
+    assert.ok(readability.body >= 20 && readability.primary >= 20 && readability.secondary >= 18 && readability.detail >= 20, JSON.stringify(readability));
+    assert.equal(readability.singleColumn, true);
+    assert.ok(readability.nav.every(item => item.font >= 20 && item.width >= 52 && item.height >= 52 && item.bottom <= 960), JSON.stringify(readability.nav));
+    checks.push('default 20px body/detail, 22px entry titles, 18px descriptions; single-column metrics; all seven 52px-plus navigation targets visible');
+
     await root('overview');
     const cpuCard = page.locator('#page-overview [data-open-view="cpu"]');
     await cpuCard.dispatchEvent('pointerdown', { pointerId: 7, isPrimary: true, clientX: 290, clientY: 300 });
@@ -165,16 +179,35 @@ async function fixtureOnly(context){
     await page.locator('#detail-body').dispatchEvent('pointerdown', { pointerId: 4, isPrimary: true, clientX: 30, clientY: 400 }); await page.locator('#detail-body').dispatchEvent('pointerup', { pointerId: 4, isPrimary: true, clientX: 280, clientY: 405 }); assert.equal(await title(), '物理磁盘'); await back(); assert.equal(await page.locator('#page-storage').isVisible(), true);
     await page.locator('#viewport').dispatchEvent('pointerdown', { pointerId: 5, isPrimary: true, clientX: 290, clientY: 400 }); await page.locator('#viewport').dispatchEvent('pointerup', { pointerId: 5, isPrimary: true, clientX: 50, clientY: 405 }); assert.equal(await page.locator('#page-network').isVisible(), true);
     await page.locator('#viewport').dispatchEvent('pointerdown', { pointerId: 6, isPrimary: true, clientX: 180, clientY: 500 }); await page.locator('#viewport').dispatchEvent('pointerup', { pointerId: 6, isPrimary: true, clientX: 185, clientY: 250 }); assert.equal(await page.locator('#page-network').isVisible(), true);
-    await page.locator('#interfaces-entry').click(); await page.locator('#interface-list button').click(); assert.match(await page.locator('#interface-detail').textContent(), /2500 Mbps/); await page.keyboard.press('Escape'); assert.equal(await title(), '网络接口'); await back();
+    assert.match(await page.locator('#network-ipv4-summary').textContent(), /192\.168\.1\.10/); assert.match(await page.locator('#network-ipv6-summary').textContent(), /2001:db8:/);
+    await page.locator('#interfaces-entry').click(); await page.locator('#interface-list button').click();
+    const interfaceText = await page.locator('#interface-detail').textContent();
+    assert.match(interfaceText, /2500 Mbps/); assert.match(interfaceText, /2001:db8:1234:5678:90ab:cdef:1234:5678\/64/); assert.match(interfaceText, /scope：global/); assert.match(interfaceText, /scope：link/); assert.match(interfaceText, /IPv4 默认网关.*192\.168\.1\.1/s); assert.match(interfaceText, /IPv6 默认网关.*fe80::1/s); assert.match(interfaceText, /来源\n\/proc\/net\/route/);
+    await page.locator('#interface-detail .detail-row').filter({ hasText: 'IPv6 · 地址 1' }).scrollIntoViewIfNeeded(); await measure('ipv6-interface-detail', true); await shot('preview-376-network-interface');
+    await page.keyboard.press('Escape'); assert.equal(await title(), '网络接口'); await back();
+    await page.locator('[data-open-view="network-routes"]').click(); assert.match(await page.locator('#network-routes-detail').textContent(), /eth0/); assert.match(await page.locator('#network-routes-detail').textContent(), /fe80::1/); assert.match(await page.locator('#network-routes-detail').textContent(), /直连路由（无下一跳网关）/); await measure('network-routes-detail', true); await back();
+    await page.locator('[data-open-view="network-dns"]').click(); const dnsText = await page.locator('#network-dns-detail').textContent(); assert.match(dnsText, /2001:4860:4860::8888/); assert.match(dnsText, /home\.arpa/); assert.match(dnsText, /fixture\.local/); assert.match(dnsText, /systemd-resolved/); assert.match(dnsText, /默认域名.*home\.arpa/s); assert.ok(!dnsText.includes('路由域')); assert.match(dnsText, /部分解析器状态文件不可读取/); assert.ok(!dnsText.includes('未配置'));
+    await measure('network-dns-detail', true); await shot('preview-376-network-dns'); await back();
+    checks.push('IPv4/IPv6 overview and per-interface prefix/scope; dual-stack default gateways; DNS/upstream/stub/search/source and partial-read reason');
     checks.push('filesystem/disk/interface third-level details; right-swipe/back; root horizontal swipe; vertical gesture unchanged');
 
     await root('apps'); await page.locator('#container-entry').click(); assert.match(await page.locator('#container-list').textContent(), /125.0%/); await page.getByRole('button', { name: /r1-toolbox/ }).click(); assert.equal(await page.locator('#app-detail button').first().isDisabled(), true); await back(); await page.getByRole('button', { name: /test-db/ }).click(); await page.locator('#app-detail').getByRole('button', { name: '停止', exact: true }).click(); await page.locator('#confirm-accept').click(); await page.waitForFunction(() => Array.from(document.querySelectorAll('#app-detail button')).some(button => button.textContent === '启动' && !button.disabled));
     checks.push('application list-to-detail, protected Toolbox, real multicore CPU, confirmed lifecycle action');
 
+    await root('settings'); await page.locator('[data-open-view="web-config"]').click(); await page.waitForFunction(() => !document.getElementById('web-pairing-generate').disabled);
+    assert.match(await page.locator('#web-config-addresses').textContent(), /http:\/\/192\.168\.1\.10:18732/); assert.match(await page.locator('#web-config-security').textContent(), /HTTP 未加密/); assert.equal(await page.locator('#web-config-addresses .detail-row').count(), 1); assert.ok(!(await page.locator('#web-config-addresses').textContent()).includes('http://['));
+    await page.locator('#web-pairing-generate').click(); await page.waitForFunction(() => document.getElementById('web-pairing-code').textContent === '1234509876'); await measure('web-pairing', true); await shot('preview-376-web-pairing');
+    assert.ok(!(await page.locator('#web-config-addresses').textContent()).includes('fixture-only-not-real'));
+    await back(); assert.equal(await page.locator('#web-pairing-code').textContent(), '');
+    pairingExpires = 1; await page.locator('[data-open-view="web-config"]').click(); await page.waitForFunction(() => !document.getElementById('web-pairing-generate').disabled); await page.locator('#web-pairing-generate').click(); await page.waitForFunction(() => !document.getElementById('web-pairing').hidden); await page.waitForFunction(() => document.getElementById('web-pairing').hidden); assert.equal(await page.locator('#web-pairing-code').textContent(), ''); await back();
+    checks.push('web configuration address and unencrypted-HTTP notice; protected explicit pairing POST; 10-digit code cleared on leave/expiry');
+
     await root('settings'); await page.locator('[data-section="appearance"]').click(); await page.locator('#setting-theme').selectOption('jade'); await page.locator('#setting-theme').dispatchEvent('input'); await page.locator('#setting-font').fill('120'); await page.locator('#setting-font').dispatchEvent('input'); await page.locator('#settings-save').click(); await page.waitForFunction(() => document.documentElement.dataset.theme === 'jade'); assert.equal(settings.font_scale, 120);
     await page.locator('#setting-font').fill('140'); await page.locator('#setting-font').dispatchEvent('input'); await page.locator('#settings-save').click(); await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--ui-scale') === '1.4');
     await page.setViewportSize({ width: 320, height: 960 });
     for (const name of settings.enabled_pages) { await root(name); await measure(name + '-font140'); }
+    await root('network'); await page.locator('#interfaces-entry').click(); await page.locator('#interface-list button').click(); await page.locator('#interface-detail .detail-row').filter({ hasText: 'IPv6 · 地址 1' }).scrollIntoViewIfNeeded(); await measure('ipv6-font140', true); await shot('preview-320-ipv6-font140'); await back(); await back();
+    await page.locator('[data-open-view="network-dns"]').click(); await measure('dns-font140', true); await shot('preview-320-dns-font140'); await back();
     await root('controls'); await enter('screen'); await measure('screen-font140', true); await back(); await enter('fans'); await page.getByRole('button', { name: /原厂系统风扇策略/ }).click(); await measure('official-fan-font140', true); await shot('preview-320-official-fan-font140');
     await root('settings'); await page.locator('[data-section="pages"]').click(); await measure('settings-pages-font140', true);
     for (const checkbox of await page.locator('[data-page-setting]').all()) await checkbox.uncheck(); await page.locator('#settings-save').click(); assert.match(await page.locator('#toast').textContent(), /至少启用一个页面/);

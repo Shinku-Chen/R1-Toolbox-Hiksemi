@@ -40,6 +40,15 @@ class DeviceInfoTests(unittest.TestCase):
     def collect(self):
         return device_info.collect_device_info(self.proc, self.sys, self.etc, self.run)
 
+    def write_routes4(self, *rows):
+        self.write(self.proc / "net/route", "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n" + "\n".join(rows))
+
+    @staticmethod
+    def route6(gateway="fe800000000000000000000000000001", metric="00000400", interface="eth0",
+               flags="00000003", destination="0" * 32, prefix="00", source="0" * 32, source_prefix="00"):
+        return " ".join((destination, prefix, source, source_prefix, gateway, metric,
+                         "00000000", "00000000", flags, interface))
+
     def test_missing_files_remain_unknown_and_do_not_use_host_defaults(self):
         with patch("subprocess.run", side_effect=AssertionError("不能运行命令")), \
                 patch("socket.socket", side_effect=AssertionError("不能建立连接")):
@@ -248,6 +257,241 @@ class DeviceInfoTests(unittest.TestCase):
         self.assertEqual(data[0]["mtu"], 9000)
         self.assertEqual(data[0]["ipv6"], ["2001:db8::1/64", "fe80::1/64"])
         self.assertIsNone(data[1]["speed_mbps"])
+
+    def test_ipv6_addresses_preserve_multiple_prefixes_scopes_and_zero_flags(self):
+        self.write(self.sys / "class/net/eth0/operstate", "up")
+        self.write(self.sys / "class/net/lo/operstate", "unknown")
+        self.write(self.proc / "net/if_inet6", "20010db8000000000000000000000001 02 40 00 00 eth0\n"
+                   "fe800000000000000000000000000001 02 40 20 80 eth0\n"
+                   "00000000000000000000000000000001 01 80 10 80 lo\n")
+        data = self.collect()["network"]
+        self.assertEqual(data[0]["ipv6_addresses"], [
+            {"address": "2001:db8::1", "prefix_length": 64, "scope": "global", "scope_id": 0, "flags": 0},
+            {"address": "fe80::1", "prefix_length": 64, "scope": "link", "scope_id": 32, "flags": 128}])
+        self.assertEqual(data[1]["ipv6_addresses"][0]["scope"], "host")
+        self.assertEqual(data[1]["ipv6_addresses"][0]["prefix_length"], 128)
+        self.assertEqual(data[0]["address_status"]["ipv6"], "ok")
+
+    def test_ipv6_missing_empty_and_malformed_tables_are_distinct(self):
+        self.write(self.sys / "class/net/eth0/operstate", "up")
+        self.assertEqual(self.collect()["network"][0]["address_status"]["ipv6"], "unavailable")
+        self.write(self.proc / "net/if_inet6", "")
+        self.assertEqual(self.collect()["network"][0]["address_status"]["ipv6"], "ok")
+        self.write(self.proc / "net/if_inet6", "invalid address row\n")
+        self.assertEqual(self.collect()["network"][0]["address_status"]["ipv6"], "malformed")
+        self.write(self.proc / "net/if_inet6", "20010db8000000000000000000000001 02 81 00 80 eth0\n"
+                   "fe800000000000000000000000000001 02 40 20 00 eth0\n")
+        data = self.collect()["network"][0]
+        self.assertEqual(data["address_status"]["ipv6"], "partial")
+        self.assertEqual(data["ipv6"], ["fe80::1/64"])
+
+    def test_ipv6_address_output_is_bounded_and_reports_partial(self):
+        self.write(self.sys / "class/net/eth0/operstate", "up")
+        rows = [f"{index:032x} 02 40 00 00 eth0" for index in range(1, 20)]
+        self.write(self.proc / "net/if_inet6", "\n".join(rows))
+        data = self.collect()["network"][0]
+        self.assertEqual(len(data["ipv6_addresses"]), 16)
+        self.assertEqual(data["address_status"]["ipv6"], "partial")
+
+    def test_ipv4_defaults_decode_little_endian_keep_metrics_and_all_interfaces(self):
+        self.write(self.sys / "class/net/eth0/operstate", "up")
+        self.write(self.sys / "class/net/eth1/operstate", "up")
+        self.write_routes4("eth0 00000000 010200C0 0003 0 0 100 00000000 0 0 0",
+                           "eth1 00000000 0100000A 0003 0 0 0 00000000 0 0 0",
+                           "eth0 00000000 020200C0 0003 0 0 200 00000000 0 0 0")
+        data = self.collect()
+        routes = data["network_config"]["default_routes"]["ipv4"]
+        self.assertEqual([(row["gateway"], row["metric"]) for row in routes],
+                         [("10.0.0.1", 0), ("192.0.2.1", 100), ("192.0.2.2", 200)])
+        self.assertEqual(data["network"][0]["default_gateways"]["ipv4"], [routes[1], routes[2]])
+        self.assertEqual(data["network"][1]["default_gateways"]["ipv4"], [routes[0]])
+        self.assertEqual(data["network_config"]["route_status"]["ipv4"], "ok")
+
+    def test_ipv4_routes_do_not_treat_reject_down_or_specific_routes_as_gateways(self):
+        self.write_routes4("eth0 00000000 00000000 0001 0 0 0 00000000",
+                           "eth0 000200C0 00000000 0001 0 0 10 00FFFFFF",
+                           "eth0 00000000 010200C0 0002 0 0 20 00000000",
+                           "eth0 00000000 020200C0 0201 0 0 30 00000000")
+        rows = self.collect()["network_config"]["default_routes"]["ipv4"]
+        self.assertEqual(rows, [{"interface": "eth0", "gateway": None, "metric": 0, "source": "/proc/net/route"}])
+
+    def test_ipv6_defaults_decode_gateway_metric_and_source_specific_prefix(self):
+        self.write(self.sys / "class/net/eth0/operstate", "up")
+        self.write(self.proc / "net/ipv6_route", "\n".join((self.route6(),
+                   self.route6(metric="00000000", source="20010db8000100000000000000000000", source_prefix="40"),
+                   self.route6(gateway="0" * 32, metric="00000800"))))
+        data = self.collect()
+        routes = data["network_config"]["default_routes"]["ipv6"]
+        self.assertEqual(routes[0]["source_prefix"], "2001:db8:1::/64")
+        self.assertEqual([(row["gateway"], row["metric"]) for row in routes],
+                         [("fe80::1", 0), ("fe80::1", 1024), (None, 2048)])
+        self.assertEqual(data["network"][0]["default_gateways"]["ipv6"], routes)
+        self.assertEqual(data["network_config"]["route_status"]["ipv6"], "ok")
+
+    def test_ipv6_reject_down_and_nondefault_routes_do_not_invent_gateways(self):
+        self.write(self.proc / "net/ipv6_route", "\n".join((self.route6(flags="00000201"),
+                   self.route6(flags="00000002"), self.route6(destination="20010db8" + "0" * 24, prefix="40"))))
+        data = self.collect()["network_config"]
+        self.assertEqual(data["default_routes"]["ipv6"], [])
+        self.assertEqual(data["route_status"]["ipv6"], "ok")
+
+    def test_route_missing_empty_malformed_and_partial_are_explicit(self):
+        data = self.collect()["network_config"]
+        self.assertEqual(data["route_status"], {"ipv4": "unavailable", "ipv6": "unavailable"})
+        self.write_routes4()
+        self.write(self.proc / "net/ipv6_route", "")
+        self.assertEqual(self.collect()["network_config"]["route_status"], {"ipv4": "ok", "ipv6": "ok"})
+        self.write_routes4("broken row")
+        self.write(self.proc / "net/ipv6_route", self.route6() + "\nmalformed\n")
+        self.assertEqual(self.collect()["network_config"]["route_status"], {"ipv4": "malformed", "ipv6": "partial"})
+        self.write(self.proc / "net/route", "not a kernel route header")
+        self.assertEqual(self.collect()["network_config"]["route_status"]["ipv4"], "malformed")
+
+    def test_route_parser_rejects_bad_ranges_and_limits_output(self):
+        self.write_routes4("eth0 00000000 010200C0 0003 0 0 4294967296 00000000",
+                           "../secret 00000000 010200C0 0003 0 0 1 00000000",
+                           "eth0 00000000 BADGATEWAY 0003 0 0 1 00000000")
+        self.assertEqual(self.collect()["network_config"]["route_status"]["ipv4"], "malformed")
+        self.write(self.proc / "net/ipv6_route", self.route6(prefix="81"))
+        self.assertEqual(self.collect()["network_config"]["route_status"]["ipv6"], "malformed")
+        self.write_routes4(*(f"eth0 00000000 010200C0 0003 0 0 {metric} 00000000" for metric in range(300)))
+        data = self.collect()["network_config"]
+        self.assertEqual(len(data["default_routes"]["ipv4"]), 256)
+        self.assertEqual(data["route_status"]["ipv4"], "partial")
+
+    def test_dns_preserves_dual_stack_values_search_domains_and_discards_other_fields(self):
+        self.write(self.etc / "resolv.conf", "# password=private-secret\nnameserver 192.0.2.53\n"
+                   "nameserver 2001:0db8::53 ; comment\nnameserver fe80::53%eth0\n"
+                   "nameserver 192.0.2.53\nsearch NAS.Example local.\ndomain example.org\n"
+                   "options timeout:2\npassword private-secret\n")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["servers"], ["192.0.2.53", "2001:db8::53", "fe80::53%eth0"])
+        self.assertEqual(data["upstream_servers"], data["servers"])
+        self.assertEqual(data["stub_servers"], [])
+        self.assertEqual(data["search"], ["nas.example", "local."])
+        self.assertEqual(data["domains"], ["example.org"])
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["sources"][0]["path"], "/etc/resolv.conf")
+        self.assertNotIn("private-secret", json.dumps(data))
+
+    def test_systemd_stub_symlink_reports_actual_upstream_without_other_resolvers(self):
+        stub = self.run / "systemd/resolve/stub-resolv.conf"
+        self.write(stub, "nameserver 127.0.0.53\nsearch fixture.local\n")
+        self.write(self.run / "systemd/resolve/resolv.conf", "nameserver 192.0.2.53\nnameserver 2001:db8::53\n")
+        self.write(self.run / "NetworkManager/no-stub-resolv.conf", "nameserver 198.51.100.99\n")
+        (self.etc / "resolv.conf").symlink_to(stub)
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["servers"], ["127.0.0.53"])
+        self.assertEqual(data["stub_servers"], ["127.0.0.53"])
+        self.assertEqual(data["upstream_servers"], ["192.0.2.53", "2001:db8::53"])
+        self.assertEqual(data["search"], ["fixture.local"])
+        self.assertEqual(data["status"], "ok")
+
+    def test_direct_dns_does_not_merge_stale_runtime_upstreams(self):
+        self.write(self.etc / "resolv.conf", "nameserver 192.0.2.53")
+        self.write(self.run / "systemd/resolve/resolv.conf", "nameserver 203.0.113.8")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["upstream_servers"], ["192.0.2.53"])
+        self.assertEqual(data["sources"][1]["servers"], ["203.0.113.8"])
+
+    def test_dns_only_associated_upstream_damage_changes_aggregate_status(self):
+        upstream = self.run / "systemd/resolve/resolv.conf"
+        self.write(upstream, "nameserver 192.0.2.53\nnameserver invalid")
+        self.write(self.run / "NetworkManager/no-stub-resolv.conf", "nameserver invalid")
+        self.write(self.etc / "resolv.conf", "nameserver 127.0.0.53")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["sources"][1]["status"], "partial")
+        self.assertEqual(data["upstream_servers"], ["192.0.2.53"])
+        self.assertEqual(data["status"], "partial")
+        self.assertIn("关联上游", data["reason"])
+        # Unrelated stale resolver files remain visible in sources, but cannot
+        # make a directly configured healthy resolver appear broken.
+        self.write(self.etc / "resolv.conf", "nameserver 198.51.100.53")
+        self.assertEqual(self.collect()["network_config"]["dns"]["status"], "ok")
+
+    def test_network_manager_known_stub_link_reports_upstream_and_ignores_profiles(self):
+        path = self.run / "NetworkManager/resolv.conf"
+        self.write(path, "nameserver 127.0.0.1\n")
+        self.write(self.run / "NetworkManager/no-stub-resolv.conf", "nameserver 198.51.100.53\nnameserver 2001:db8::54\n")
+        self.write(self.run / "NetworkManager/system-connections/secret.nmconnection", "password=do-not-read")
+        (self.etc / "resolv.conf").symlink_to(path)
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["stub_servers"], ["127.0.0.1"])
+        self.assertEqual(data["upstream_servers"], ["198.51.100.53", "2001:db8::54"])
+        self.assertNotIn("do-not-read", json.dumps(data))
+
+    def test_dns_missing_or_unknown_upstream_is_not_reported_as_unconfigured(self):
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["status"], "unavailable")
+        self.assertEqual(data["servers"], [])
+        self.assertIn("不能据此判断", data["reason"])
+        self.write(self.etc / "resolv.conf", "nameserver ::1")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["status"], "partial")
+        self.assertEqual(data["stub_servers"], ["::1"])
+        self.assertEqual(data["upstream_servers"], [])
+        self.assertIn("上游", data["reason"])
+
+    def test_dns_runtime_fallback_is_labelled_unconfirmed(self):
+        self.write(self.run / "systemd/resolve/resolv.conf", "nameserver 2001:db8::53")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["servers"], ["2001:db8::53"])
+        self.assertEqual(data["status"], "partial")
+        self.assertIn("未确认系统实际选择", data["reason"])
+
+    def test_dns_invalid_fields_are_rejected_without_losing_valid_values(self):
+        self.write(self.etc / "resolv.conf", "nameserver 999.0.0.1\nnameserver 192.0.2.53:53\n"
+                   "nameserver 2001:db8::53%../secret\nnameserver 192.0.2.53\n"
+                   "search good.example bad/label\ndomain one.example two.example\nsearch valid.example\n")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["servers"], ["192.0.2.53"])
+        self.assertEqual(data["search"], ["valid.example"])
+        self.assertEqual(data["domains"], [])
+        self.assertEqual(data["status"], "partial")
+        self.write(self.etc / "resolv.conf", "nameserver invalid\ndomain invalid/label")
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["status"], "malformed")
+        self.assertEqual(data["servers"], [])
+
+    def test_dns_bounded_values_and_oversized_file_keep_uncertainty(self):
+        self.write(self.etc / "resolv.conf", "\n".join(f"nameserver 192.0.2.{index}" for index in range(1, 30)))
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(len(data["servers"]), 16)
+        self.assertEqual(data["status"], "partial")
+        self.write(self.etc / "resolv.conf", "#\n" * 1025 + "nameserver 192.0.2.53")
+        self.assertEqual(self.collect()["network_config"]["dns"]["status"], "partial")
+        self.write(self.etc / "resolv.conf", "x" * 65537)
+        data = self.collect()["network_config"]["dns"]
+        self.assertEqual(data["status"], "unavailable")
+        self.assertEqual(data["servers"], [])
+
+    def test_dns_symlinks_cannot_read_credentials_inside_or_outside_injected_roots(self):
+        secret = self.etc / "credentials"
+        self.write(secret, "nameserver 192.0.2.199\npassword private-secret")
+        (self.etc / "resolv.conf").symlink_to(secret)
+        original = device_info._Reader.text
+        read_paths = []
+
+        def record_read(reader, path, *args):
+            read_paths.append(Path(path))
+            return original(reader, path, *args)
+
+        with patch.object(device_info._Reader, "text", record_read):
+            data = self.collect()["network_config"]["dns"]
+        self.assertNotIn(secret, read_paths)
+        self.assertEqual(data["sources"][0]["status"], "unavailable")
+        self.assertIn("不在已知", data["sources"][0]["reason"])
+        self.assertNotIn("192.0.2.199", json.dumps(data))
+        # Even an absolute link to the real host's standard resolver path is
+        # rejected: fixture collection cannot fall back to host /etc or /run.
+        runtime = self.run / "systemd/resolve"
+        runtime.mkdir(parents=True)
+        (runtime / "resolv.conf").symlink_to("/etc/resolv.conf")
+        read_paths.clear()
+        with patch.object(device_info._Reader, "text", record_read):
+            data = self.collect()["network_config"]["dns"]
+        self.assertNotIn(Path("/etc/resolv.conf"), read_paths)
+        self.assertEqual(data["sources"][1]["status"], "unavailable")
 
     def test_pci_resolves_names_from_local_database_and_falls_back_to_numeric_ids(self):
         self.write(self.etc / "pci.ids", "8086  Fixture Intel\n\t1234  Fixture GPU\n\t\t0000 0001 Subsystem\n")

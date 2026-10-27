@@ -149,7 +149,7 @@ class ToolboxController:
 
     def _save_settings(self, settings):
         require(not self.state_dir.is_symlink(), "设置目录不能是符号链接")
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         target = self.state_dir / "settings.json"
         require(not target.is_symlink(), "设置文件不能是符号链接")
         data = (json.dumps(settings, ensure_ascii=False, sort_keys=True) + "\n").encode()
@@ -160,6 +160,13 @@ class ToolboxController:
             os.fsync(handle.fileno())
             temporary = Path(handle.name)
         temporary.replace(target)
+        # Persist the replacement directory entry as well as the file contents.
+        directory = os.open(self.state_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                            | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def _backlight(self):
         folder = self.sys_root / "class/backlight/intel_backlight"
@@ -408,6 +415,7 @@ class ToolboxController:
             }
 
     def action(self, name, payload):
+        settings_saved = False if name in ("settings.update", "screen.brightness") else None
         try:
             with self.lock:
                 require(not self.stopped.is_set(), "控制服务正在停止，操作未执行")
@@ -416,6 +424,7 @@ class ToolboxController:
                     keys(payload, ("settings",))
                     updated = validated_settings(payload.get("settings"), self.settings)
                     self._save_settings(updated)
+                    settings_saved = True
                     changes = payload["settings"]
                     self.settings, self.settings_error = updated, None
                     self.last_activity = self.clock()
@@ -431,6 +440,7 @@ class ToolboxController:
                     self.settings["brightness"] = value
                     self.last_activity = self.clock()
                     self._save_settings(self.settings)
+                    settings_saved = True
                 elif name == "screen.sleep":
                     keys(payload, ())
                     self._sleep()
@@ -473,9 +483,11 @@ class ToolboxController:
                     self.pending = None
                 else:
                     raise ValueError("不支持的操作")
-            return {"ok": True, "state": self.snapshot()}
+            return {"ok": True, "state": self.snapshot(),
+                    **({"settings_saved": settings_saved} if settings_saved is not None else {})}
         except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
-            return {"ok": False, "error": str(error)}
+            return {"ok": False, "error": str(error),
+                    **({"settings_saved": settings_saved} if settings_saved is not None else {})}
 
     def tick(self):
         command = None
