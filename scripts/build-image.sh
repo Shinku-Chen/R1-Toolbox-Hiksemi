@@ -28,6 +28,7 @@ else
 fi
 
 mkdir -p dist
+python scripts/build-ui.py
 docker build --platform linux/amd64 --build-arg "TOOLBOX_VERSION=$version" \
   --label "org.opencontainers.image.revision=$commit" -t "$image" .
 docker image inspect "$image" > dist/build-image-inspect.json
@@ -63,6 +64,8 @@ if [ "$actual_version" != "R1 Toolbox $version" ]; then
   echo '镜像 --version 输出与源码版本不一致。' >&2
   exit 1
 fi
+
+sudo python3 tests/check_image_ui_linux.py --image "$image"
 
 if [ "${PUBLISH_IMAGE:-0}" = 1 ]; then
   if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then

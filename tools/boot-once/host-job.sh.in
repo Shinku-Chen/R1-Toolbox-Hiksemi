@@ -18,11 +18,33 @@ done
 state_dir=/run/r1-toolbox
 mkdir -p "$state_dir"
 boot_id=$(cat /proc/sys/kernel/random/boot_id)
-run_key="$boot_id:${TASK_REVISION:-1}"
+ui_mode=${UI_MODE:-}
+if [ -z "$ui_mode" ]; then
+  if [ -n "${UI_DIR:-}" ]; then ui_mode=directory; else ui_mode=diagnostic; fi
+fi
+UI_MODE=$ui_mode
+export UI_MODE
+image_id=$(docker --host unix:///var/run/docker.sock inspect --format '{{.Image}}' "$TASK_CONTAINER") || {
+  echo '[ERROR] 无法读取当前镜像 ID，未执行任务。'
+  exit 1
+}
+image_hash=${image_id#sha256:}
+if [ "$image_id" = "$image_hash" ] || [ "${#image_hash}" -ne 64 ]; then
+  echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1
+fi
+case "$image_hash" in
+  *[!0123456789abcdef]*) echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1 ;;
+esac
+run_key="$boot_id:${TASK_REVISION:-1}:$image_id:$ui_mode:${UI_DIR:-}"
 last_key=$(cat "$state_dir/last-success" 2>/dev/null || true)
 if [ "$last_key" = "$run_key" ]; then
   echo '[SKIP] 本次 NAS 启动已经成功执行过当前任务版本。'
   exit 0
+fi
+if [ -f "$state_dir/last-success" ]; then
+  # A failed update may restore the official app. Re-selecting the previous
+  # image must run again instead of trusting that image's earlier success.
+  mv "$state_dir/last-success" "$state_dir/last-success.previous"
 fi
 
 echo '[START] 开始执行宿主任务。'

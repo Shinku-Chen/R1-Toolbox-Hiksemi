@@ -280,6 +280,21 @@ class MountTests(unittest.TestCase):
                     self.assertEqual(actions.verify_binding(pid, self.source),
                                      same_directory and read_only)
 
+    def test_host_python_does_not_load_the_electron_library_path(self):
+        actions = load_actions()
+        actions.app, actions.target = self.app, self.target
+        actions.run = mock.Mock(return_value=types.SimpleNamespace(returncode=1))
+        backend = self.temporary / 'runtime/ui_service.py'
+        with self.assertRaises(RuntimeError):
+            actions.start('bundled-ui', {'DISPLAY': ':0', 'LD_LIBRARY_PATH': '/electron/lib'},
+                          self.source, backend=backend)
+        command = actions.run.call_args.args
+        self.assertIn('--setenv=R1_TOOLBOX_APP_LD_LIBRARY_PATH=/electron/lib', command)
+        self.assertIn('--setenv=LD_LIBRARY_PATH=', command)
+        self.assertNotIn('--setenv=LD_LIBRARY_PATH=/electron/lib', command)
+        self.assertIn('-B', command)
+        self.assertIn(str(backend), command)
+
 
 if __name__ == "__main__":
     unittest.main()
