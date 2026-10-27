@@ -31,6 +31,9 @@ sys.path.insert(0, str(repo / 'runtime'))
 from toolbox import ToolboxController
 from web_config import WebConfigServer
 from fan_policy import FanPolicyController
+from light_policy import LightPolicyController
+from monitoring import MonitoringService
+import copy
 
 assert fixture.name.startswith('r1-web-browser-') and fixture.is_dir()
 registers = {1: 0x55, 0x90: 1, 0x91: 204}
@@ -95,8 +98,58 @@ def policy(folder, available):
     policies.append(value)
     value.start()
     return value
-primary = WebConfigServer(controller(fixture), fan_policy=policy(fixture, True), host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
-unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False), host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
+
+class Monitor:
+    def snapshot(self):
+        return {'schema_version':1,'available':True,'hostname':'R1-Fixture','uptime_seconds':201600,
+                'cpu':{'usage_percent':24.5,'temp_c':62},'memory':{'usage_percent':37.5,'used_bytes':3e9,'total_bytes':8e9},
+                'network':{'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000},
+                'disks':[{'mount':'/drives/data','used_bytes':1e12,'total_bytes':4e12,'usage_percent':25}]}
+class Insights:
+    def __init__(self):
+        self.data={'system':{'model':'HIKSEMI R1','cpu_model':'Intel N100','cpu_logical_cores':4,'uptime_seconds':201600,
+                     'cpu_usage_percent':24.5,'load_average':[.2,.3,.5],'memory':{'used_bytes':3e9,'total_bytes':8e9,'usage_percent':37.5},
+                     'cpu_cores':[{'id':n,'usage_percent':10+n*5} for n in range(4)]},
+                  'device':{'identity':{'hostname':'R1-Fixture','os':'Fixture Linux','kernel':'6.1-fixture','firmware':'fixture'},
+                    'cpu':{'physical_cores':4,'architecture':'x86_64'},'thermal':[{'driver':'coretemp','label':'Package','celsius':62}],
+                    'network':[{'name':'eth0','speed_mbps':2500,'ipv6_addresses':[{'address':'2001:db8:1234:5678:90ab:cdef:1234:5678','prefix_length':64,'scope':'global'}]}],
+                    'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
+                  'interfaces':[{'name':'eth0','ipv4':['192.168.1.10'],'mac':'00:11:22:33:44:55','operstate':'up','rx_bytes':400000000,'tx_bytes':100000000,'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000}],
+                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'health':{'passed':True}}]},
+                  'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
+                  'vms':{'available':False,'reason':'fixture: no VM','items':[]},'ports':[{'protocol':'tcp','address':'127.0.0.1','port':18731}],
+                  'processes':[{'pid':101,'name':'fixture-monitor','cpu_percent':1.2,'memory_bytes':40000000}],
+                  'gpu':{'available':False,'reason':'fixture: no GPU','devices':[]},
+                  'history':[{'cpu_usage_percent':v,'memory_usage_percent':37.5} for v in [18,22,28,21,24.5]]}
+    def snapshot(self):return copy.deepcopy(self.data)
+    def action(self,name,payload):
+        assert name=='container.action' and payload.get('confirmed') is True
+        item=next(n for n in self.data['containers']['items'] if n['id']==payload['id'])
+        assert not item['protected']
+        item['state']='exited' if payload['operation']=='stop' else 'running'
+        return {'ok':True}
+class Lamp:
+    def __init__(self, folder):self.state_dir=folder/'data';self.available=False;self.value={'mode':1,'color':'#4A9170','brightness':60};self.owner=None
+    def lighting_probe(self):
+        if not self.available:raise ValueError('fixture unavailable')
+        return copy.deepcopy(self.value)
+    def lighting_claim(self,owner):self.lighting_probe();self.owner=owner;return copy.deepcopy(self.value)
+    def lighting_apply(self,owner,target,expected=None):
+        assert self.owner is owner and (expected is None or expected==self.value)
+        self.value=copy.deepcopy(target);return copy.deepcopy(self.value)
+    def lighting_release(self,owner,original=None,expected=None):
+        assert self.owner is None or self.owner is owner
+        if original is not None and (expected is None or expected==self.value):self.value=copy.deepcopy(original)
+        self.owner=None;return True
+    def snapshot(self):return {'capabilities':{'rgb':{'available':self.available}}}
+monitor,insights=Monitor(),Insights()
+lamps=[Lamp(fixture),Lamp(fixture/'unsupported')]
+lights=[LightPolicyController(lamp,Sources()) for lamp in lamps]
+for light in lights:light.start()
+monitoring=MonitoringService(fixture/'data',insights,monitor,Sources(),proc_root=fixture/'proc',sys_root=fixture/'sys').start()
+primary = WebConfigServer(controller(fixture), insights=insights, fan_policy=policy(fixture, True), light_policy=lights[0],monitoring=monitoring,monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
+unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False),light_policy=lights[1], host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
+
 try:
     print(json.dumps({'ready': True, 'primary': {'origin': 'http://127.0.0.1:' + str(primary.port), 'code': primary.pairing_info(rotate=True)['code']},
                       'unsupported': {'origin': 'http://127.0.0.1:' + str(unsupported.port), 'code': unsupported.pairing_info(rotate=True)['code']}}), flush=True)
@@ -104,7 +157,10 @@ try:
         request = json.loads(line)
         operation = request['operation']
         if operation == 'verify_rgb':
-            primary.controller._probe_rgb(4)
+            primary.controller._rgb_candidates=lambda: [{"bus":4,"name":"Fixture DesignWare","physical":"fixture-only","device":[0,0,0]}]
+            primary.controller._probe_rgb()
+            lamps[0].available=True
+            lights[0]._probe()
         elif operation == 'reconstruct':
             primary.controller = controller(fixture)
             primary.fan_policy.stop()
@@ -125,6 +181,8 @@ try:
 finally:
     primary.stop()
     unsupported.stop()
+    monitoring.stop()
+    for light in lights:light.stop()
     for value in policies:
         value.adapter.fail_release = False
         value.stop()
@@ -183,7 +241,7 @@ finally:
     };
     const login = async pair => {
       const initialSession = page.waitForResponse(response => response.url() === pair.origin + '/api/session');
-      await page.goto(pair.origin); await initialSession;
+      await page.goto(pair.origin + '/#settings'); await page.reload(); await initialSession;
       await page.locator('#code').fill(pair.code);
       await page.locator('#pair-form button').click();
       await page.waitForFunction(() => !document.getElementById('editor').hidden);
@@ -197,7 +255,42 @@ finally:
     };
     const reload = async () => { await page.reload(); await page.waitForFunction(() => !document.getElementById('editor').hidden); };
 
-    await page.goto(fixture.primary.origin);
+    await page.goto(fixture.primary.origin + '/#overview');
+    await page.waitForFunction(() => document.getElementById('host-name').textContent === 'R1-Fixture');
+    const publicStatus = await page.request.get(fixture.primary.origin + '/api/v1/status');
+    assert.equal(publicStatus.status(),200); assert.equal(publicStatus.headers()['access-control-allow-origin'],'*');
+    assert.equal((await page.request.get(fixture.primary.origin + '/api/session')).status(),401);
+    assert.equal(await page.locator('#editor').isVisible(),false);
+    assert.match(await page.locator('#overview-fans').textContent(),/RPM 未知/);
+    const publicPosts=actionBodies.length;
+    for(const width of [1440,1120,760,376,320]) {
+      await page.setViewportSize({width,height:1000});
+      for(const view of ['overview','trends','storage','network','apps','device']) {
+        await page.locator('[data-web-page="'+view+'"]').click();
+        if(view==='trends') await page.waitForFunction(()=>!document.getElementById('history-note').textContent.includes('正在读取'));
+        await measure('public-'+width+'-'+view);
+        if(['overview','network'].includes(view)&&[1440,376,320].includes(width)) await screenshot('preview-web-'+width+'-'+view+'-fixture');
+      }
+    }
+    assert.equal(actionBodies.length,publicPosts,'public navigation must never emit device writes');
+    assert.equal(await page.locator('#web-power-card').isVisible(),false);
+    await page.locator('[data-web-page="network"]').click();
+    assert.match(await page.locator('#network-interfaces').textContent(),/2001:db8:1234:5678:90ab:cdef:1234:5678\/64/);
+    assert.match(await page.locator('#network-routes').textContent(),/直连路由（无下一跳网关）/);
+    assert.match(await page.locator('#network-dns').textContent(),/默认域名/);
+    await page.locator('[data-web-page="apps"]').click();assert.equal(await page.locator('#web-containers [data-device-action]').count(),0);
+    checks.push('public real HTTP dashboard requires no pairing; CORS read-only; six monitoring sections at five widths; IPv6/source wrapping and on-link routes; no unauthorized controls or POST');
+    const historyRoute='**/api/v1/history?range=*';
+    await page.route(historyRoute,route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({available:true,range:'1h',series:[{id:'temperature.cpu-fixture',label:'CPU fixture sensor',unit:'°C',points:[[100,40],[130,50],[160,null],[190,60]]},{id:'fan_cpu_target_percent',label:'CPU 风扇请求输出',unit:'%',points:[[100,55],[130,75],[160,null],[190,100]]},{id:'fan_rpm.fixture',label:'实测传感器 fixture',unit:'rpm',points:[[100,1200],[130,1400],[160,null],[190,1600]]}]})}));
+    await page.locator('[data-web-page="trends"]').click();await page.waitForFunction(()=>document.querySelectorAll('#history-charts .card').length===3);
+    for(const line of await page.locator('#history-charts .chart-line').all())assert.equal(((await line.getAttribute('d')).match(/M/g)||[]).length,2,'missing history sample must break the SVG line');
+    assert.match(await page.locator('#history-charts').textContent(),/CPU 风扇请求输出/);await page.unroute(historyRoute);
+    await page.locator('#load-report').click();await page.waitForFunction(()=>document.getElementById('report-content').textContent.includes('有效 / 缺测指标'));assert.match(await page.locator('#report-content').textContent(),/不是 SMART 自检/);
+    const [download]=await Promise.all([page.waitForEvent('download'),page.locator('#export-csv').click()]);assert.match(download.suggestedFilename(),/\.csv$/);
+    checks.push('history renders separate sensor/real-RPM/request-output series with null gaps, never zero-filled; report labels read-only limits and CSV downloads only after explicit click');
+
+    await page.setViewportSize({width:1120,height:1000});
+    await page.goto(fixture.primary.origin + '/#settings');
     await page.waitForFunction(() => !document.getElementById('login').hidden);
     assert.equal((await page.request.get(fixture.primary.origin + '/api/session')).status(), 401);
     await measure('desktop-login'); await screenshot('preview-web-login-fixture');
@@ -272,6 +365,28 @@ finally:
     assert.deepEqual(storage, []);
     checks.push('new real controller reconstructs settings from the same data directory; RGB verification is not persisted; UI uses CSRF without any Electron token or browser storage');
 
+    await page.locator('[data-web-page="apps"]').click();await page.waitForFunction(()=>document.querySelectorAll('#web-containers [data-device-action]').length>0);
+    const beforeAppCancel=actionBodies.length;await page.locator('#web-containers .application-row').first().getByRole('button',{name:'停止',exact:true}).click();await page.locator('#web-confirm button[value="cancel"]').click();assert.equal(actionBodies.length,beforeAppCancel);
+    await page.locator('#web-containers .application-row').first().getByRole('button',{name:'停止',exact:true}).click();await page.locator('#web-confirm-accept').click();await page.waitForFunction(()=>document.querySelector('#web-containers .application-row').textContent.includes('exited'));
+    assert.ok(actionBodies.some(body=>body.action==='container.action'&&body.payload.confirmed===true));
+    assert.equal(await page.locator('#web-containers .application-row').nth(1).getByRole('button',{name:'启动',exact:true}).isDisabled(),true);
+    checks.push('paired container changes use explicit confirm, cancellation emits no POST, protected toolbox stays disabled, actual fixture state updates');
+    await page.route('**/api/v1/status',route=>route.abort('connectionrefused'));await page.waitForFunction(()=>document.getElementById('live-status').textContent==='连接中断');
+    for(const button of await page.locator('[data-device-action]').all())assert.equal(await button.isDisabled(),true);
+    assert.match(await page.locator('#monitor-error').textContent(),/此前读数仅供参考/);await page.unroute('**/api/v1/status');await page.waitForFunction(()=>document.getElementById('live-status').textContent==='实时连接');
+    checks.push('lost public sampling disables paired device actions immediately and labels cached readings unconfirmed; reconnect restores capability-based controls');
+
+    await page.locator('[data-web-page="settings"]').click();
+    await page.waitForFunction(()=>!document.getElementById('analytics-settings-section').hidden);
+    await page.locator('#history-retention').fill('14');await page.locator('#monitor-cpu-warn').fill('82');await page.locator('#monitor-cpu-critical').fill('96');await page.locator('#analytics-form button[type="submit"]').click();await page.waitForFunction(()=>document.getElementById('analytics-result').textContent.includes('已保存'));
+    const analyticsSaved=JSON.parse(fs.readFileSync(path.join(fixtureDir,'data/monitoring.json'),'utf8')).settings;assert.equal(analyticsSaved.retention_days,14);assert.equal(analyticsSaved.thresholds.cpu_warn,82);await reload();assert.equal(await page.locator('#history-retention').inputValue(),'14');
+    await page.locator('#light-mode').selectOption('temperature');await page.locator('#light-enabled').check();await page.locator('#light-sources input[value="cpu"]').check();await page.locator('#light-sources input[value="board"]').check();await page.locator('#light-brightness').fill('44');await page.locator('#light-policy-save').click();await page.waitForFunction(()=>document.getElementById('light-policy-result').textContent.includes('尚未应用'));
+    const lightSaved=()=>JSON.parse(fs.readFileSync(path.join(fixtureDir,'data/light-policy.json'),'utf8'));assert.deepEqual(lightSaved().config.sources,['cpu','board']);assert.equal(lightSaved().resume_on_boot,false);
+    await command('verify_rgb');await reload();page.once('dialog',dialog=>dialog.accept());await page.locator('#light-policy-apply').click();await page.waitForFunction(()=>document.getElementById('light-policy-state').textContent==='运行中');assert.match(await page.locator('#light-policy-live').textContent(),/66 °C/);assert.match(await page.locator('#light-policy-live').textContent(),/主板温度/);assert.equal(lightSaved().resume_on_boot,true);assert.equal(await page.locator('#rgb-card').isVisible(),false,'active light policy must hide immediate RGB overrides');
+    await page.locator('#light-night-enabled').check();await page.locator('#light-night-brightness').fill('12');await page.locator('#light-policy-save').click();await page.waitForFunction(()=>document.getElementById('light-policy-result').textContent.includes('尚未应用'));assert.equal(lightSaved().config.schedule.brightness,12);
+    await reload();assert.equal(await page.locator('#light-brightness').inputValue(),'44');assert.equal(await page.locator('#light-night-brightness').inputValue(),'12');
+    for(const width of [1440,320]){await page.setViewportSize({width,height:1000});await measure('policy-settings-'+width);await screenshot('preview-web-'+width+'-all-settings-fixture');}
+    checks.push('real monitoring settings persist and reload independently of safety thresholds; real LightPolicyController saves drafts, applies asynchronously using only an in-memory lamp, max-temperature source and nighttime values survive reload');
     await page.locator('#logout').click(); await page.waitForFunction(() => !document.getElementById('login').hidden);
     assert.equal((await page.request.get(fixture.primary.origin + '/api/session')).status(), 401); assert.ok(!(await context.cookies(fixture.primary.origin)).some(item => item.name === 'r1_web_session'));
     checks.push('real logout revokes the session and clears its cookie');

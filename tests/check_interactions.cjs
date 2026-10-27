@@ -27,7 +27,7 @@ async function fixtureOnly(context){
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
   const checks = [], sizes = [], pageErrors = [], posts = [];
   let offline = false, failNextAction = false, delayAction = false, pairingExpires = 180;
-  let independentPolicy = null;
+  let independentPolicy = null, lightPolicy = null;
   const webConfig = { enabled: true, host: '0.0.0.0', port: 18732, scheme: 'http', addresses: ['http://192.168.1.10:18732'], pairing: { active: false, expires_in: 0 } };
   const settings = { theme: 'dark', font_scale: 100, page_interval: 0, sleep_timeout: 0, brightness: 80, night_enabled: false, night_start: '22:00', night_end: '07:00', night_brightness: 20, enabled_pages: ['overview', 'storage', 'network', 'controls', 'apps', 'system', 'settings'] };
   const state = {
@@ -78,9 +78,9 @@ async function fixtureOnly(context){
         if (body.action === 'container.action') { assert.equal(body.confirmed, true); insights.containers.items[0].state = body.operation === 'stop' ? 'exited' : 'running'; }
         if (body.action === 'rgb.probe') { assert.equal(body.bus, 4); state.rgb.bus = body.bus; state.rgb.brightness = 75; state.capabilities.rgb.available = true; }
         if (body.action === 'rgb.set') { assert.equal(state.capabilities.rgb.available, true); Object.assign(state.rgb, { bus: body.bus, mode: body.mode, color: body.color, brightness: body.brightness === undefined ? state.rgb.brightness : body.brightness }); }
-        if (body.action === 'web.pairing') { assert.equal(body.rotate, true); webConfig.pairing = { active: true, expires_in: pairingExpires }; data = { ok: true, web: { code: '1234509876', expires_in: pairingExpires, port: webConfig.port, addresses: webConfig.addresses, http: true } }; }
+        if (body.action === 'web.pairing') { assert.equal(body.rotate, true); webConfig.pairing = { active: true, expires_in: pairingExpires }; data = { ok: true, web: { code: '12345', expires_in: pairingExpires, port: webConfig.port, addresses: webConfig.addresses, http: true } }; }
         else data = { ok: true, state, insights };
-      } else data = endpoint.endsWith('/status') ? status : endpoint.endsWith('/toolbox') ? state : endpoint.endsWith('/web-config') ? webConfig : endpoint.endsWith('/fan-policy') ? independentPolicy : insights;
+      } else data = endpoint.endsWith('/status') ? status : endpoint.endsWith('/toolbox') ? state : endpoint.endsWith('/web-config') ? webConfig : endpoint.endsWith('/fan-policy') ? independentPolicy : endpoint.endsWith('/light-policy') ? lightPolicy : insights;
       return route.fulfill({ status: 200, headers, body: JSON.stringify(data) });
     });
     const root = async name => page.locator(`[data-page="${name}"]`).click();
@@ -171,10 +171,12 @@ async function fixtureOnly(context){
     await page.locator('#power-off').dispatchEvent('click'); assert.equal(await page.locator('#confirm-backdrop').isHidden(), true); assert.equal(posts.filter(item => item.action === 'power.request').length, previousPower); await page.waitForTimeout(700); await back();
     checks.push('first wake touch swallowed, never leaks into power confirmation');
 
-    await enter('rgb-probe'); assert.equal(await page.locator('#rgb-color').isVisible(), false); await page.locator('#rgb-bus').selectOption('4'); await page.locator('#rgb-probe').click(); await page.locator('#confirm-accept').click(); await page.waitForFunction(() => document.getElementById('detail-title').textContent === '灯光');
+    assert.equal(await page.locator('#page-controls [data-control-entry="rgb"]').isVisible(), false); state.rgb.bus = 4; state.rgb.brightness = 75; state.capabilities.rgb.available = true; await page.waitForFunction(() => !document.querySelector('#page-controls [data-control-entry="rgb"]').hidden); await page.locator('#page-controls [data-control-entry="rgb"]').click(); await page.waitForFunction(() => document.getElementById('detail-title').textContent === '灯光');
     assert.equal(posts.filter(item => item.action === 'rgb.set').length, 0, 'probe must not write colors'); assert.equal(await page.locator('#rgb-mode option[value="2"]').textContent(), '彩虹'); assert.equal(await page.locator('#rgb-mode option[value="3"]').textContent(), '呼吸');
     await page.locator('#rgb-mode').selectOption('3'); await page.locator('#rgb-brightness').fill('35'); await page.locator('#rgb-brightness').dispatchEvent('input'); await page.locator('#rgb-save').click(); await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光设置已提交'); assert.equal(state.rgb.mode, 3); assert.equal(state.rgb.brightness, 35);
-    checks.push('RGB probe precedes revealing controls; protocol labels/payload match');
+    lightPolicy = {config:{enabled:true},active:true,busy:false,runtime:{reference_c:62,source_label:'CPU Package',reason:'温度联动运行中',target:{brightness:44}}};await page.waitForFunction(()=>!document.getElementById('small-light-policy').hidden);assert.equal(await page.locator('#rgb-save').isDisabled(),true);assert.match(await page.locator('#small-light-policy-state').textContent(),/62 °C/);lightPolicy=null;await page.waitForFunction(()=>document.getElementById('small-light-policy').hidden);
+    checks.push('local light-policy live state exposes reference/source/target and disables immediate RGB overrides while owned');
+    checks.push('RGB controls appear only after automatic verification; protocol labels/payload match');
 
     await root('storage'); await page.locator('#disk-list button').first().click(); assert.match(await page.locator('#volume-detail').textContent(), /\/drives\/data/); await back(); await page.locator('#physical-disks-entry').click(); await page.locator('#physical-disks button').first().click(); assert.match(await page.locator('#disk-detail').textContent(), /FIXTURE-ONLY/); await measure('disk-detail', true); await shot('preview-376-disk-detail');
     await page.locator('#detail-body').dispatchEvent('pointerdown', { pointerId: 4, isPrimary: true, clientX: 30, clientY: 400 }); await page.locator('#detail-body').dispatchEvent('pointerup', { pointerId: 4, isPrimary: true, clientX: 280, clientY: 405 }); assert.equal(await title(), '物理磁盘'); await back(); assert.equal(await page.locator('#page-storage').isVisible(), true);
@@ -197,11 +199,11 @@ async function fixtureOnly(context){
 
     await root('settings'); await page.locator('#page-settings [data-open-view="web-config"]').click(); await page.waitForFunction(() => !document.getElementById('web-pairing-generate').disabled);
     assert.match(await page.locator('#web-config-addresses').textContent(), /http:\/\/192\.168\.1\.10:18732/); assert.match(await page.locator('#web-config-security').textContent(), /HTTP 未加密/); assert.equal(await page.locator('#web-config-addresses .detail-row').count(), 1); assert.ok(!(await page.locator('#web-config-addresses').textContent()).includes('http://['));
-    await page.locator('#web-pairing-generate').click(); await page.waitForFunction(() => document.getElementById('web-pairing-code').textContent === '1234509876'); await measure('web-pairing', true); await shot('preview-376-web-pairing');
+    await page.locator('#web-pairing-generate').click(); await page.waitForFunction(() => document.getElementById('web-pairing-code').textContent === '12345'); await measure('web-pairing', true); await shot('preview-376-web-pairing');
     assert.ok(!(await page.locator('#web-config-addresses').textContent()).includes('fixture-only-not-real'));
     await back(); assert.equal(await page.locator('#web-pairing-code').textContent(), '');
     pairingExpires = 1; await page.locator('#page-settings [data-open-view="web-config"]').click(); await page.waitForFunction(() => !document.getElementById('web-pairing-generate').disabled); await page.locator('#web-pairing-generate').click(); await page.waitForFunction(() => !document.getElementById('web-pairing').hidden); await page.waitForFunction(() => document.getElementById('web-pairing').hidden); assert.equal(await page.locator('#web-pairing-code').textContent(), ''); await back();
-    checks.push('web configuration address and unencrypted-HTTP notice; protected explicit pairing POST; 10-digit code cleared on leave/expiry');
+    checks.push('web configuration address and unencrypted-HTTP notice; protected explicit pairing POST; 5-digit code cleared on leave/expiry');
 
     await root('settings'); await page.locator('[data-section="appearance"]').click(); await page.locator('#setting-theme').selectOption('jade'); await page.locator('#setting-theme').dispatchEvent('input'); await page.locator('#setting-font').fill('120'); await page.locator('#setting-font').dispatchEvent('input'); await page.locator('#settings-save').click(); await page.waitForFunction(() => document.documentElement.dataset.theme === 'jade'); assert.equal(settings.font_scale, 120);
     await page.locator('#setting-font').fill('140'); await page.locator('#setting-font').dispatchEvent('input'); await page.locator('#settings-save').click(); await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--ui-scale') === '1.4');

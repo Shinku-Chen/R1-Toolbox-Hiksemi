@@ -21,7 +21,7 @@ class ControlAPITests(unittest.TestCase):
         self.insights.action.return_value = {"ok": True}
         self.web = mock.Mock()
         self.web.snapshot.return_value = {"enabled": True, "port": 18732, "addresses": []}
-        self.web.pairing_info.return_value = {"code": "1234567890", "expires_in": 180, "port": 18732}
+        self.web.pairing_info.return_value = {"code": "12345", "expires_in": 180, "port": 18732}
         self.policy = mock.Mock()
         self.policy.snapshot.return_value = {"active": False, "busy": False, "recovery_confirmed": True}
         self.policy.action.return_value = {"ok": True, "settings_saved": True, "pending": True}
@@ -74,10 +74,10 @@ class ControlAPITests(unittest.TestCase):
         self.web.pairing_info.assert_not_called()
         code, _, data = self.action({"action": "web.pairing", "rotate": True})
         self.assertEqual(code, 200)
-        self.assertEqual(data["web"]["code"], "1234567890")
+        self.assertEqual(data["web"]["code"], "12345")
         self.web.pairing_info.assert_called_once_with(rotate=True)
         self.controller.action.assert_not_called()
-        self.assertNotIn("1234567890", json.dumps(self.request(path="/api/web-config")[2]))
+        self.assertNotIn("12345", json.dumps(self.request(path="/api/web-config")[2]))
 
     def test_custom_policy_dispatch_and_legacy_control_interlock(self):
         payload = {"config": {"fixture": True}, "apply": False}

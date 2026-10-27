@@ -103,6 +103,9 @@ class ToolboxController:
         self.fan_error = None
         self.rgb_bus = self.rgb_mode = self.rgb_color = None
         self.rgb_brightness = None
+        self.rgb_raw = self.rgb_adapter = self._rgb_owner = None
+        self.rgb_error = "正在自动识别 DesignWare 灯控接口；默认只读"
+        self.rgb_operation_lock = threading.RLock()
         self.pending = None
         self.executing = False
         self.power_error = None
@@ -327,49 +330,158 @@ class ToolboxController:
             self.fan_error = "同号 RPM 读数为 0，已回退满速；请确认通道对应或检查风扇"
             raise RuntimeError(self.fan_error)
 
-    def _probe_rgb(self, bus):
-        """Read only the explicitly selected bus; never scan or force I²C access."""
-        integer(bus, 0, 255, "I2C bus")
-        require(self.i2cget and self.i2cset and (self.dev_root / ("i2c-" + str(bus))).exists(),
-                "I2C 工具或指定总线不存在；未写入 RGB")
-        # A failed revalidation must revoke old write capability, including when
-        # the user selected another controller/bus since the previous request.
-        self.rgb_bus = self.rgb_mode = self.rgb_color = self.rgb_brightness = None
-        def read(register):
-            probe = self.runner([self.i2cget, "-y", str(bus), "0x26", register, "b"])
-            try:
-                value = int(probe.stdout.strip(), 16)
-            except (ValueError, AttributeError):
-                value = -1
-            require(probe.returncode == 0 and 0 <= value <= 255, "0x26 非强制读取验证失败；未写入 RGB")
-            return value
-        require(read("0x01") == 0x55, "灯控芯片识别值不匹配；未写入 RGB")
-        current = read("0x90")
-        require(current in (0, 1, 2, 3), "灯控模式寄存器无法确认；未写入 RGB")
-        brightness = read("0x91")
-        self.rgb_bus, self.rgb_mode = bus, current
-        self.rgb_brightness = (brightness * 100 + 254) // 255
-        return current
+    def _rgb_candidates(self):
+        candidates = {}
+        root = self.sys_root.resolve()
+        for base in ("class/i2c-dev", "bus/i2c/devices"):
+            for folder in sorted((self.sys_root / base).glob("i2c-*"))[:256]:
+                if not re.fullmatch(r"i2c-[0-9]{1,3}", folder.name):
+                    continue
+                try:
+                    resolved = folder.resolve()
+                    require(root in resolved.parents, "I2C sysfs 路径超出设备目录")
+                    with (folder / "name").open() as source:
+                        name = source.read(257)
+                    require(len(name) <= 256, "I2C adapter name 过长")
+                    name = name.strip()
+                    if not re.search(r"\bDesignWare\b", name, re.I):
+                        continue
+                    bus = int(folder.name[4:])
+                    node = self.dev_root / folder.name
+                    info = node.lstat()
+                    if not stat.S_ISCHR(info.st_mode):
+                        continue
+                    physical = "/".join(part for part in resolved.relative_to(root).parts
+                                        if not re.fullmatch(r"i2c-[0-9]+", part))
+                    candidates[bus] = {"bus": bus, "name": name, "physical": physical,
+                                       "device": [info.st_dev, info.st_ino, info.st_rdev]}
+                except (OSError, ValueError, UnicodeError, RuntimeError):
+                    continue
+        require(len(candidates) <= 8, "DesignWare 接口数量异常，未读取灯控")
+        return list(candidates.values())
 
-    def _set_rgb(self, payload):
-        keys(payload, ("bus", "mode", "color", "brightness"))
-        bus = payload.get("bus", self.rgb_bus)
-        integer(bus, 0, 255, "I2C bus")
+    def _rgb_read(self, bus, register):
+        result = self.runner([self.i2cget, "-y", str(bus), "0x26", f"0x{register:02x}", "b"])
+        text = getattr(result, "stdout", "").strip()
+        require(result.returncode == 0 and re.fullmatch(r"0x[0-9a-fA-F]{1,2}", text),
+                "灯控固定地址读取失败；未强制访问")
+        return int(text, 16)
+
+    def _probe_rgb(self):
+        """Mirror the firmware's DesignWare selection, with no -f or address scan."""
+        with self.lock:
+            self.rgb_bus = self.rgb_mode = self.rgb_color = self.rgb_brightness = None
+            self.rgb_raw = self.rgb_adapter = None
+        try:
+            require(self.i2cget and self.i2cset, "宿主缺少 I2C 工具")
+            matches = []
+            for candidate in self._rgb_candidates():
+                try:
+                    if self._rgb_read(candidate["bus"], 0x01) == 0x55:
+                        matches.append(candidate)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    continue
+            require(len(matches) == 1, "未找到唯一身份为 0x55 的 DesignWare 灯控，保持只读")
+            candidate = matches[0]
+            raw = [self._rgb_read(candidate["bus"], register) for register in range(0x90, 0x95)]
+            require(raw[0] in (0, 1, 2, 3), "灯效寄存器不受支持")
+            with self.lock:
+                self.rgb_bus, self.rgb_adapter, self.rgb_raw = candidate["bus"], candidate, raw
+                self.rgb_mode, self.rgb_brightness = raw[0], round(raw[1] * 100 / 255)
+                self.rgb_color = "#" + "".join(f"{value:02X}" for value in raw[2:])
+                self.rgb_error = None
+                return {"adapter": copy.deepcopy(candidate), "registers": list(raw),
+                        "mode": self.rgb_mode, "brightness": self.rgb_brightness, "color": self.rgb_color}
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            with self.lock:
+                self.rgb_error = str(error)
+            raise
+
+    def _write_rgb_raw(self, current, raw):
+        try:
+            for offset in (2, 3, 4, 1, 0):
+                if current["registers"][offset] != raw[offset]:
+                    result = self.runner([self.i2cset, "-y", str(current["adapter"]["bus"]),
+                                          "0x26", hex(0x90 + offset), hex(raw[offset]), "b"])
+                    require(result.returncode == 0, "灯控写入失败，结果未确认")
+            actual = self._probe_rgb()
+            require(actual["adapter"] == current["adapter"] and actual["registers"] == raw,
+                    "灯控写入后读回不一致，结果未确认")
+            return actual
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            with self.lock:
+                self.rgb_bus = self.rgb_mode = self.rgb_color = self.rgb_brightness = None
+                self.rgb_raw = self.rgb_adapter = None
+                self.rgb_error = str(error)
+            raise
+
+    def _set_rgb(self, payload, expected=None):
+        keys(payload, ("mode", "color", "brightness"))
         mode = integer(payload.get("mode"), 0, 3, "RGB 模式")
         color = payload.get("color")
         require(isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color), "颜色必须是 #RRGGBB")
         brightness = integer(payload["brightness"], 0, 100, "RGB 亮度") if "brightness" in payload else None
-        self._probe_rgb(bus)
+        current = self._probe_rgb()
+        require(expected is None or current == expected, "灯光已被原厂或其他应用修改，未覆盖")
         channels = [int(color[index:index + 2], 16) for index in (1, 3, 5)]
-        writes = list(zip((0x92, 0x93, 0x94), channels))
-        if brightness is not None:
-            writes.append((0x91, round(255 * brightness / 100)))
-        for register, value in writes + [(0x90, mode)]:
-            result = self.runner([self.i2cset, "-y", str(bus), "0x26", hex(register), hex(value), "b"])
-            require(result.returncode == 0, "RGB 写入失败；请检查总线状态")
-        self.rgb_bus, self.rgb_mode, self.rgb_color = bus, mode, color.upper()
-        if brightness is not None:
-            self.rgb_brightness = brightness
+        raw = [mode, round(255 * brightness / 100) if brightness is not None else current["registers"][1], *channels]
+        return self._write_rgb_raw(current, raw)
+
+    def lighting_probe(self):
+        with self.rgb_operation_lock:
+            with self.lock:
+                require(not self.stopped.is_set(), "控制服务正在停止")
+            return self._probe_rgb()
+
+    def lighting_claim(self, owner):
+        with self.rgb_operation_lock:
+            with self.lock:
+                require(self._rgb_owner is None or self._rgb_owner is owner, "灯光正在由其他策略管理")
+            value = self.lighting_probe()
+            with self.lock:
+                self._rgb_owner = owner
+            return value
+
+    def lighting_apply(self, owner, target, expected=None):
+        with self.rgb_operation_lock:
+            with self.lock:
+                require(self._rgb_owner is owner and owner is not None, "灯光策略未取得控制权")
+                require(not self.stopped.is_set(), "控制服务正在停止")
+            return self._set_rgb(target, expected)
+
+    def lighting_release(self, owner, original=None, expected=None):
+        with self.rgb_operation_lock:
+            with self.lock:
+                require(self._rgb_owner is None or self._rgb_owner is owner, "不能释放其他灯光策略")
+            try:
+                if original is not None and expected is not None:
+                    current = self._probe_rgb()
+                    if current != expected or current["adapter"] != original["adapter"]:
+                        return False
+                    self._write_rgb_raw(current, original["registers"])
+                return True
+            finally:
+                with self.lock:
+                    self._rgb_owner = None
+
+    def _rgb_action(self, name, payload):
+        if not self.rgb_operation_lock.acquire(blocking=False):
+            return {"ok": False, "error": "灯光正在读取或应用，请稍后重试"}
+        try:
+            with self.lock:
+                require(not self.stopped.is_set(), "控制服务正在停止，操作未执行")
+                if name == "rgb.set":
+                    require(self._rgb_owner is None, "灯光联动正在运行，请先停用联动再即时调灯")
+            if name == "rgb.set":
+                self._set_rgb(payload)
+            else:
+                keys(payload, ())
+                self._probe_rgb()
+            return {"ok": True, "state": self.snapshot()}
+        except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+            return {"ok": False, "error": str(error)}
+        finally:
+            self.rgb_operation_lock.release()
 
     def _is_night(self):
         now = datetime.datetime.now().strftime("%H:%M")
@@ -400,7 +512,7 @@ class ToolboxController:
                     "fans": {"available": bool(fans) or bool(official.get("control_available")),
                              "reason": "" if fans or official.get("control_available") else
                              "未发现可用的原厂策略接口或 IT87 PWM；详见设备接口诊断"},
-                    "rgb": {"available": self.rgb_bus is not None, "reason": "" if self.rgb_bus is not None else "需明确指定 I2C bus 并验证 0x26；默认不写入"},
+                    "rgb": {"available": self.rgb_bus is not None, "reason": self.rgb_error or ""},
                     "power": {"available": self.systemctl is not None, "reason": "" if self.systemctl else "宿主缺少 systemctl"},
                 },
                 "settings": copy.deepcopy(self.settings), "settings_error": self.settings_error,
@@ -409,12 +521,15 @@ class ToolboxController:
                 "fans": {"channels": fans, "official": official,
                          "temperature_c": self._temperature(), "last_error": self.fan_error},
                 "rgb": {"bus": self.rgb_bus, "mode": self.rgb_mode, "color": self.rgb_color,
-                        "brightness": self.rgb_brightness, "availableBuses": buses},
+                        "brightness": self.rgb_brightness, "availableBuses": buses,
+                        "automatic": True, "policy_active": self._rgb_owner is not None},
                 "power": {"pending": {"operation": self.pending["operation"], "seconds_remaining": remaining} if self.pending else None,
                           "executing": self.executing, "last_error": self.power_error},
             }
 
     def action(self, name, payload):
+        if name in ("rgb.set", "rgb.probe"):
+            return self._rgb_action(name, payload)
         settings_saved = False if name in ("settings.update", "screen.brightness") else None
         try:
             with self.lock:
@@ -462,11 +577,6 @@ class ToolboxController:
                 elif name == "fan.restore":
                     keys(payload, ("channel",))
                     self._restore_fan(payload.get("channel"))
-                elif name == "rgb.set":
-                    self._set_rgb(payload)
-                elif name == "rgb.probe":
-                    keys(payload, ("bus",))
-                    self._probe_rgb(payload.get("bus"))
                 elif name == "power.request":
                     keys(payload, ("operation", "confirmed"))
                     require(payload.get("confirmed") is True, "电源操作需要明确确认")
