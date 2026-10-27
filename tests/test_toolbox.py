@@ -76,10 +76,19 @@ class ToolboxTests(unittest.TestCase):
     def test_settings_save_only_in_state_dir_and_reload(self):
         result = self.controller.action("settings.update", {"settings": {"theme": "jade", "font_scale": 120}})
         self.assertTrue(result["ok"], result)
+        self.assertTrue(result["settings_saved"])
         self.assertTrue((self.state / "settings.json").is_file())
         other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, dev_root=self.dev)
         self.assertEqual(other.snapshot()["settings"]["font_scale"], 120)
         self.assertEqual(other.snapshot()["settings"]["theme"], "jade")
+
+    def test_same_value_save_failure_is_not_reported_as_persisted(self):
+        changes = {"theme": self.controller.settings["theme"]}
+        with mock.patch.object(self.controller, "_save_settings", side_effect=OSError("fixture read-only volume")):
+            result = self.controller.action("settings.update", {"settings": changes})
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["settings_saved"])
+        self.assertFalse((self.state / "settings.json").exists())
 
     def test_oversize_and_symlink_settings_are_not_followed(self):
         self.state.mkdir()
@@ -214,6 +223,7 @@ class ToolboxTests(unittest.TestCase):
             result = self.controller.action("settings.update", {"settings": {"brightness": 70}})
         self.assertFalse(result["ok"])
         self.assertIn("设置已保存，但背光调整失败", result["error"])
+        self.assertTrue(result["settings_saved"])
         self.assertTrue((self.state / "settings.json").is_file())
 
     def test_settings_oversize_is_rejected(self):

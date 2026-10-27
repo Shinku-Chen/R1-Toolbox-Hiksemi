@@ -190,7 +190,7 @@ time.sleep(0.01)
         output, _ = process.communicate(timeout=2)
         self.assertEqual(process.returncode, -signal.SIGTERM, output)
 
-    def run_host_job(self, revision="1", returncode=0, image=None, mode=None, ui_dir=None):
+    def run_host_job(self, revision="1", returncode=0, image=None, mode=None, ui_dir=None, web_port=None):
         # Only these two host paths are redirected in this temporary copy.
         # All real payload operations are replaced by a harmless event append.
         script = (ROOT / "host-job.sh.in").read_text().replace(
@@ -207,6 +207,8 @@ time.sleep(0.01)
             env["UI_MODE"] = mode
         if ui_dir is not None:
             env["UI_DIR"] = ui_dir
+        if web_port is not None:
+            env["R1_WEB_PORT"] = web_port
         return subprocess.run(
             ["/bin/sh", "-s"], input=script, env=env,
             capture_output=True, text=True, timeout=4,
@@ -219,7 +221,7 @@ time.sleep(0.01)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self.actions_read(), ["executed"])
         self.assertEqual((self.state_dir / "last-success").read_text(),
-                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic:\n")
+                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732\n")
 
     def test_revision_change_and_new_boot_run_again(self):
         results = [self.run_host_job(), self.run_host_job(revision="2")]
@@ -229,7 +231,14 @@ time.sleep(0.01)
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.actions_read(), ["executed"] * 3)
         self.assertEqual((self.state_dir / "last-success").read_text(),
-                         "boot-b:2:sha256:" + "1" * 64 + ":diagnostic:\n")
+                         "boot-b:2:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732\n")
+
+    def test_changed_web_configuration_runs_again_in_the_same_boot(self):
+        for port in ("18732", "18733", "0"):
+            result = self.run_host_job(web_port=port)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.actions_read(), ["executed"] * 3)
+        self.assertTrue((self.state_dir / "last-success").read_text().endswith(":0.0.0.0:0\n"))
 
     def test_failure_does_not_mark_success_and_can_be_retried(self):
         failed = self.run_host_job(returncode=23)
@@ -239,7 +248,7 @@ time.sleep(0.01)
         self.assertEqual(retry.returncode, 0, retry.stderr)
         self.assertEqual(self.actions_read(), ["executed", "executed"])
         self.assertEqual((self.state_dir / "last-success").read_text(),
-                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic:\n")
+                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732\n")
 
     def test_new_image_in_the_same_boot_runs_without_revision_change(self):
         first = self.run_host_job()

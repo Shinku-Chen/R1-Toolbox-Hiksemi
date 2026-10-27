@@ -34,6 +34,10 @@ class BundleTests(unittest.TestCase):
         (self.root / 'runtime/insights.py').write_text('class InsightsCollector: pass\n')
         (self.root / 'runtime/device_info.py').write_text('def collect_device_info(*args): return {}\n')
         (self.root / 'runtime/histor.py').write_text('class HistorAdapter: pass\n')
+        (self.root / 'runtime/web_config.py').write_text('class WebConfigServer: pass\n')
+        (self.root / 'ui/web').mkdir()
+        for name in ('index.html', 'config.css', 'config.js'):
+            (self.root / 'ui/web' / name).write_text('web fixture')
         self.runtime = load_actions()
         self.runtime.runtime_root = self.root / 'ram'
         self.runtime.runtime_root.mkdir()
@@ -65,6 +69,8 @@ class BundleTests(unittest.TestCase):
         manifest, files = self.read()
         self.assertEqual(set(manifest['files']), set(files) - {'manifest.json'})
         self.assertEqual(files['frontend/index.html'], b'<p>Own UI</p>')
+        self.assertEqual(files['frontend/web/index.html'], b'web fixture')
+        self.assertIn('runtime/web_config.py', files)
         self.assertEqual((self.root / 'build/ui-bundle.sha256').read_text(), self.digest + '\n')
 
     def test_archive_digest_and_payload_hash_corruption_are_rejected(self):
