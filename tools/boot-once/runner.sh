@@ -95,7 +95,7 @@ echo '[START] 开始执行宿主任务。'
 set -eu
 command -v python3 >/dev/null || { echo '宿主缺少 python3，未修改小屏'; exit 1; }
 exec python3 - <<'PY'
-import hashlib, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, unicodedata
+import collections, hashlib, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, unicodedata
 
 app = pathlib.Path('/screen/squashfs-root')
 target = app / 'resources/app/dist'
@@ -342,19 +342,126 @@ def verify_binding(pid, bind_source):
         return False
 
 
-def processes():
+Process = collections.namedtuple('Process', 'pid exe start is_main ppid process_type')
+
+
+def process_type(raw_cmdline, exe):
+    """Chromium can flatten argv into one Linux process title; do not split real args."""
+    args = [arg for arg in raw_cmdline.split(b'\0') if arg]
+    if not args:
+        return '?'
+    if len(args) == 1:
+        executable = os.fsencode(exe)
+        if args[0] == executable:
+            tokens = []
+        elif args[0].startswith(executable + b' '):
+            # Only inspect switch words: setproctitle has discarded quoting.
+            tokens = args[0][len(executable) + 1:].split()
+        else:
+            return '?'
+    else:
+        tokens = args[1:]
+    kinds = []
+    for token in tokens:
+        if token == b'--':
+            break
+        if token in (b'--type', b'-type'):
+            return '?'
+        if token.startswith((b'--type=', b'-type=')):
+            value = token.split(b'=', 1)[1]
+            if not re.fullmatch(rb'[A-Za-z0-9_-]+', value):
+                return '?'
+            kinds.append(value.decode('ascii'))
+    return kinds[0] if len(kinds) == 1 else '?' if kinds else None
+
+
+def read_process_stat(path):
+    fields = path.read_text().rsplit(')', 1)[1].split()
+    require(len(fields) >= 20 and fields[19].isdigit(), '无法读取小屏进程身份')
+    return fields[0], int(fields[1]), fields[19]
+
+
+def read_identity(pid, proc_root=None):
+    root = pathlib.Path('/proc') if proc_root is None else pathlib.Path(proc_root)
+    _, ppid, start = read_process_stat(root / str(pid) / 'stat')
+    return ppid, start
+
+
+def processes(proc_root=None):
+    root = pathlib.Path('/proc') if proc_root is None else pathlib.Path(proc_root)
     found = []
-    for p in pathlib.Path('/proc').glob('[0-9]*'):
+    for p in root.glob('[0-9]*'):
+        exe, before = None, None
         try:
             exe = os.readlink(p / 'exe')
             if pathlib.Path(exe).name != 'hiksemi-sub':
                 continue
-            args = (p / 'cmdline').read_bytes().split(b'\0')
-            start = (p / 'stat').read_text().rsplit(')', 1)[1].split()[19]
-            found.append((int(p.name), exe, start, not any(x.startswith(b'--type=') for x in args)))
+            before = read_process_stat(p / 'stat')
+            if before[0] == 'Z':
+                continue
+            raw = (p / 'cmdline').read_bytes()
+            after = read_process_stat(p / 'stat')
+            if after[0] == 'Z':
+                continue
+            kind = process_type(raw, exe) if before[1:] == after[1:] else '?'
+            found.append(Process(int(p.name), exe, after[2], kind is None, after[1], kind))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
         except (OSError, ValueError, IndexError):
-            pass
+            # Do not hide a live matching process whose identity is unreadable.
+            if exe is not None and pathlib.Path(exe).name == 'hiksemi-sub':
+                found.append(Process(int(p.name), exe, before[2] if before else '?', False,
+                                     before[1] if before else -1, '?'))
     return found
+
+
+def identify_family(snapshot):
+    """Require one browser and a complete, unambiguous same-executable PPID tree."""
+    require(snapshot and all(p.process_type != '?' for p in snapshot), '小屏进程类型或身份不明确，请稍后重试')
+    mains = [p for p in snapshot if p.is_main]
+    require(len(mains) == 1, '必须找到唯一正在运行的小屏主进程，才能继承图形环境')
+    main = mains[0]
+    require(all(p.exe == main.exe for p in snapshot), '小屏进程来自不同程序，未停止原程序')
+    by_pid = {p.pid: p for p in snapshot}
+    require(len(by_pid) == len(snapshot) and main.ppid not in by_pid, '小屏进程父子关系不明确')
+    for process in snapshot:
+        if process.pid == main.pid:
+            continue
+        seen = {process.pid}
+        parent = process.ppid
+        while parent != main.pid:
+            require(parent in by_pid and parent not in seen, '小屏子进程不属于唯一主进程，未停止原程序')
+            seen.add(parent)
+            parent = by_pid[parent].ppid
+    return main
+
+
+def read_environment(process, proc_root=None):
+    root = pathlib.Path('/proc') if proc_root is None else pathlib.Path(proc_root)
+    identity = process.ppid, process.start
+    require(read_identity(process.pid, root) == identity, '小屏主进程身份已变化，请重试')
+    raw = (root / str(process.pid) / 'environ').read_bytes()
+    require(read_identity(process.pid, root) == identity, '读取环境时小屏主进程身份已变化，请重试')
+    return raw
+
+
+def process_summary(snapshot, proc_root=None):
+    root = pathlib.Path('/proc') if proc_root is None else pathlib.Path(proc_root)
+    entries = []
+    for process in sorted(snapshot, key=lambda item: item.pid):
+        argc, display = '?', '?'
+        try:
+            argc = len([part for part in (root / str(process.pid) / 'cmdline').read_bytes().split(b'\0') if part])
+        except OSError:
+            pass
+        try:
+            display = any(part.startswith(b'DISPLAY=')
+                          for part in (root / str(process.pid) / 'environ').read_bytes().split(b'\0'))
+        except OSError:
+            pass
+        entries.append('PID={} PPID={} 类型={} exe={} argc={} DISPLAY存在={}'.format(
+            process.pid, process.ppid, process.process_type or 'browser', process.exe, argc, display))
+    return '; '.join(entries) or '无'
 
 
 def start(name, environment, bind_source=None, backend=None):
@@ -374,26 +481,30 @@ def start(name, environment, bind_source=None, backend=None):
         command = [python, '-B', str(backend), '--app', str(app)]
     if run(*options, *command).returncode:
         raise RuntimeError('宿主 systemd-run 启动失败（请查 journalctl -u ' + name + '）')
-    deadline, stable = time.monotonic() + 10, None
+    deadline, stable, stable_identity = time.monotonic() + 10, None, None
+    seen = []
     while time.monotonic() < deadline:
         group = run('systemctl', 'show', name, '--property=ControlGroup', '--value').stdout.strip()
-        owned, seen = [], processes()
-        for pid, exe, _, main in seen:
-            try:
-                groups = pathlib.Path('/proc', str(pid), 'cgroup').read_text().splitlines()
-                if main and exe == str(app / 'hiksemi-sub') and group and any(
-                    row.split(':', 2)[-1] == group for row in groups):
-                    if bind_source is None or verify_binding(pid, bind_source):
-                        owned.append(pid)
-            except OSError:
-                pass
+        seen, owned, identity = processes(), False, None
+        try:
+            main = identify_family(seen)
+            groups = pathlib.Path('/proc', str(main.pid), 'cgroup').read_text().splitlines()
+            owned = (all(p.exe == str(app / 'hiksemi-sub') for p in seen) and bool(group) and any(
+                row.split(':', 2)[-1] == group for row in groups)
+                and (bind_source is None or verify_binding(main.pid, bind_source)))
+            identity = main.pid, main.start
+        except (ValueError, OSError):
+            pass
         active = run('systemctl', 'is-active', name).stdout.strip() == 'active'
-        healthy = active and len(owned) == 1 and sum(p[3] for p in seen) == 1
-        stable = (stable if stable is not None else time.monotonic()) if healthy else None
+        if active and owned:
+            if stable is None or identity != stable_identity:
+                stable, stable_identity = time.monotonic(), identity
+        else:
+            stable, stable_identity = None, None
         if stable is not None and time.monotonic() - stable >= 3:
             return
         time.sleep(0.5)
-    raise RuntimeError('新程序未通过 3 秒存活、独立 cgroup 及只读挂载检查')
+    raise RuntimeError('新程序未通过 3 秒存活、独立 cgroup 及只读挂载检查；' + process_summary(seen))
 
 
 def main():
@@ -425,7 +536,12 @@ def main():
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             current = processes()
-            if incoming.is_dir() and (incoming / 'index.html').is_file() and target.is_dir() and any(p[3] for p in current):
+            try:
+                identify_family(current)
+                family_ready = True
+            except ValueError:
+                family_ready = False
+            if incoming.is_dir() and (incoming / 'index.html').is_file() and target.is_dir() and family_ready:
                 break
             time.sleep(1)
 
@@ -438,18 +554,17 @@ def main():
                 and (app / 'hiksemi-sub').is_file() and os.access(app / 'AppRun', os.X_OK),
                 '请先解包 AppImage，确认原 dist/index.html 存在且 AppRun 可执行')
         require(all(shutil.which(k) for k in ('systemd-run', 'systemctl')), '宿主需要 systemd-run 和 systemctl')
-        mains = [p for p in current if p[3]]
-        require(len(mains) == 1, '必须找到唯一正在运行的小屏主进程，才能继承图形环境')
-        require(all(p[1] == str(app / 'hiksemi-sub') or (
-            p[1].startswith('/tmp/.mount_Histor') and pathlib.Path(p[1]).parent.parent == pathlib.Path('/tmp'))
+        main_process = identify_family(current)
+        require(all(p.exe == str(app / 'hiksemi-sub') or (
+            p.exe.startswith('/tmp/.mount_Histor') and pathlib.Path(p.exe).parent.parent == pathlib.Path('/tmp'))
             for p in current), '发现来源不明的同名进程，已停止操作')
-        raw = pathlib.Path('/proc', str(mains[0][0]), 'environ').read_bytes()
+        raw = read_environment(main_process)
         allowed = {'DISPLAY', 'XAUTHORITY', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LANGUAGE',
                    'LC_ALL', 'LC_CTYPE', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'LD_LIBRARY_PATH'}
         environment = dict(base_env, APPDIR=str(app))
         environment.update((k, v) for item in raw.split(b'\0') if b'=' in item
                            for k, v in [item.decode(errors='surrogateescape').split('=', 1)] if k in allowed)
-        old_root = str(pathlib.Path(mains[0][1]).parent)
+        old_root = str(pathlib.Path(main_process.exe).parent)
         if 'LD_LIBRARY_PATH' in environment:
             environment['LD_LIBRARY_PATH'] = ':'.join(str(app) + p[len(old_root):] if p == old_root or p.startswith(old_root + '/') else p
                                                      for p in environment['LD_LIBRARY_PATH'].split(':'))
@@ -457,14 +572,21 @@ def main():
         require(not environment.get('XAUTHORITY') or pathlib.Path(environment['XAUTHORITY']).is_file(),
                 'XAUTHORITY 文件不存在')
         preflight_binding(unit, incoming)
+        current = processes()
+        latest_main = identify_family(current)
+        require((latest_main.pid, latest_main.start) == (main_process.pid, main_process.start),
+                '只读挂载预检期间小屏主进程已变化，未停止原程序')
+        require(all(p.exe == main_process.exe for p in current), '小屏进程来源已变化，未停止原程序')
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError, tarfile.TarError) as error:
         print('预检失败，未停止原程序：', error)
+        print('小屏进程诊断:', process_summary(current))
         return 1
 
     try:
         for sig, wait in ((signal.SIGTERM, 4), (signal.SIGKILL, 2)):
-            live = {(p[0], p[2]) for p in processes()}
-            for pid, _, start_time, _ in current:
+            live = {(p.pid, p.start) for p in processes()}
+            for process in current:
+                pid, start_time = process.pid, process.start
                 if (pid, start_time) in live:
                     try:
                         os.kill(pid, sig)
@@ -490,7 +612,7 @@ def main():
                 print('未能确认新服务已停止；请检查 journalctl -u ' + unit)
         except RuntimeError:
             print('未能确认新服务已停止；请检查 journalctl -u ' + unit)
-        if not any(p[3] for p in processes()):
+        if not processes():
             try:
                 start(unit + '-recovery', environment)
                 print('已使用官方原 dist 重新启动解包程序。')
