@@ -164,9 +164,11 @@ def main():
         service_attempted = True
         command(*runtime['service_options'](unit, frontend), sys.executable, '-B',
                 str(cache / 'runtime/ui_service.py'), '--app', str(app))
+        # Type=simple publishes MainPID before the child finishes setting up its
+        # mount namespace. The API proves that our backend has actually exec'd.
+        wait_for_status()
         pid = service_pid(unit)
         check_view(runtime, pid, frontend, expected_hash, original, original_identity)
-        wait_for_status()
 
         # The UI and API belong to the host service, not this source container.
         command('docker', 'stop', '--timeout', '2', container)
