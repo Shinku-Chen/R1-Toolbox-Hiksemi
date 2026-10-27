@@ -2,7 +2,7 @@ name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui']
+    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
