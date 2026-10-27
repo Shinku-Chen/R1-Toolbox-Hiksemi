@@ -14,9 +14,11 @@ import threading
 import time
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "runtime"))
 SPEC = importlib.util.spec_from_file_location("insights_under_test", ROOT / "runtime/insights.py")
 insights = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(insights)
@@ -152,6 +154,20 @@ class InsightsTests(unittest.TestCase):
         self.assertIsNone(value["system"]["cpu_usage_percent"])
         self.assertIsNone(value["system"]["memory"]["usage_percent"])
         self.assertIsNone(value["interfaces"][0]["rx_bytes_per_sec"])
+
+    def test_device_inventory_is_independent_and_does_not_block_basic_metrics(self):
+        self.cpu()
+        self.network()
+        with mock.patch.object(insights, "collect_device_info", side_effect=OSError("fixture inventory failed")) as collect:
+            self.collector._collect_fast()
+            collect.assert_not_called()
+            name, callback = next((name, callback) for name, callback in self.collector._integrations() if name == "device")
+            self.collector._publish_integration(name, callback)
+        value = self.collector.snapshot()
+        self.assertEqual(value["interfaces"][0]["name"], "eth0")
+        self.assertFalse(value["device"]["available"])
+        self.assertIn("重试", value["device"]["reason"])
+        self.assertIsNotNone(value["device"]["sampled_at"])
 
     def test_interfaces_expose_all_addresses_counters_and_bounded_history(self):
         self.network()
