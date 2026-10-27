@@ -24,7 +24,8 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
     sources = {'frontend/index.html': frontend / 'index.html',
                **{'runtime/' + name: root / 'runtime' / name
                   for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'device_info.py', 'histor.py', 'web_config.py',
-                               'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py')}}
+                               'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
+                               'light_policy.py', 'monitoring.py')}}
     if native_guard is not None:
         guard = Path(native_guard)
         if guard.is_symlink() or not guard.is_file() or guard.stat().st_size > MAX_FILE_BYTES:
@@ -36,7 +37,7 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
     web = frontend / 'web'
     if web.is_symlink():
         raise ValueError('网页配置目录不允许符号链接')
-    for name in ('index.html', 'config.css', 'config.js'):
+    for name in ('index.html', 'config.css', 'config.js', 'monitor.js'):
         sources['frontend/web/' + name] = web / name
     assets = frontend / 'assets'
     if assets.is_symlink():

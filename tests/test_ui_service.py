@@ -60,6 +60,11 @@ class ServiceTests(unittest.TestCase):
             start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {"active": False, "busy": False}))
         fan_factory.start()
         self.addCleanup(fan_factory.stop)
+        for name in ('create_light_policy', 'create_monitoring'):
+            factory = mock.patch.object(service, name, return_value=types.SimpleNamespace(
+                start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {}))
+            factory.start()
+            self.addCleanup(factory.stop)
         web_factory = mock.patch.object(service, "create_web_config", return_value=None)
         self.web_factory = web_factory.start()
         self.addCleanup(web_factory.stop)
