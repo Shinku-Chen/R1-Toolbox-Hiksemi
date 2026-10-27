@@ -14,12 +14,16 @@
 ```yaml
 environment:
   TASK_CONTAINER: r1-toolbox
-  TASK_REVISION: '3'
+  TASK_REVISION: '4'
   UI_MODE: image
   UI_DIR: ''
 ```
 
-内置界面为概览、存储、网络三个页面，可点击导航或左右滑动。真实数据通过随小屏运行的 Python 服务持续采集，Toolbox 容器结束不影响刷新。未知温度、首次差分和读取失败会显示 `--` 或采集中，不填模拟数据。
+内置界面为概览、存储、网络、控制、应用、系统、设置七个页面，可点击导航、左右滑动和页面内滚动。真实数据通过随小屏运行的 Python 服务持续采集，Toolbox 容器结束不影响刷新。未知温度、首次差分和读取失败会显示 `--` 或采集中，不填模拟数据。完整范围见 [功能与支持条件](../../docs/features.md)。
+
+当前官方固件 `6.1.66-001` 只发现 `gpio-it87`，没有 IT87 hwmon/PWM 风扇通道；这台 NAS 的风扇调速会显示不可用。`gpio-it87` 不是风扇驱动，程序不自动加载其他驱动或使用 `/dev/port`。
+
+Compose 中的 `r1-toolbox-data:/data` 是独立命名卷，保存主题、字号、页面、轮播、息屏和夜间亮度等设置。宿主服务通过 Docker `.Mounts.Source` 解析这个卷的位置；不依赖容器继续运行。不要把 `/data` 改为官方小屏目录。旧 Compose 未提供可用数据卷时会提示设置仅在本次开机保留，不影响 UI 的 RAM 部署。
 
 ## UI 模式
 
@@ -35,9 +39,9 @@ environment:
 
 ## 镜像如何提供 UI
 
-构建时将 `ui/` 和原创 Python 采集服务打包进镜像。容器启动后通过宿主 `docker cp` 读取内置包，先确认 `/run` 及其运行目录确实位于 tmpfs，再验证 SHA256、文件清单、路径、类型与大小限制。在随机暂存目录中校验完成后，原子发布到 `/run/r1-toolbox/ui-<内容摘要>`；复用缓存也重新校验。
+构建时将 `ui/` 和原创 Python 监控/控制服务打包进镜像。容器启动后通过宿主 `docker cp` 读取内置包，先确认 `/run` 及其运行目录确实位于 tmpfs，再验证 SHA256、文件清单、路径、类型与大小限制。在随机暂存目录中校验完成后，原子发布到 `/run/r1-toolbox/ui-<内容摘要>`；复用缓存也重新校验。
 
-宿主小屏临时服务将缓存的 `frontend` 目录通过 `BindReadOnlyPaths` 只读挂载到 `/screen/squashfs-root/resources/app/dist`。挂载仅影响该服务的文件视图，宿主原目录保持原样。采集进程和 `AppRun` 属于同一临时服务，容器停止或重新创建后均不依赖原容器的文件系统或 PID。
+宿主小屏临时服务将缓存的 `frontend` 目录通过 `BindReadOnlyPaths` 只读挂载到 `/screen/squashfs-root/resources/app/dist`。挂载仅影响该服务的文件视图，宿主原目录保持原样。Python 服务和 `AppRun` 属于同一临时服务，容器停止或重新创建后均不依赖原容器的文件系统或 PID。设置单独写入数据卷，不写入只读前端。
 
 仅复制、展开到 `/run` 运行目录，不覆盖原版 AppImage、解包版前端或 `/screen/screen-app-startup.sh`。不绑定 Docker 内部镜像层路径，也不要求新版 Compose 的 image volume 语法。
 
@@ -47,23 +51,40 @@ environment:
 
 HistorSub 1.1.15 默认创建隐藏窗口。内置 UI 通过官方 `showWin` 显示握手启动窗口定位，收到官方在显示后发出的 `sendAppPath` 回执，再发送 `deviceStatus` 结束定位轮询。普通浏览器预览不发送 Electron 消息；握手脚本独立于状态采集和页面交互加载。容器的进程、挂载检查通过后，仍需确认实机画面与触摸。
 
-## 实时指标
+## 实时指标与控制
 
-Python 标准库采集 `/proc`、sysfs 与真实数据盘挂载点，每 2 秒更新：
+Python 标准库采集 `/proc`、sysfs 与真实数据盘挂载点，基础指标约每 2 秒更新；可选命令在后台分开执行：
 
 - CPU 使用率、可用的 CPU 温度、内存占用、运行时长。
 - 默认路由网卡的 IPv4、上下行速率，避免累计 Docker 网桥。
 - `/drives/` 下数据盘容量，按文件系统去重。
+- CPU 分核、负载、Swap、进程、监听端口、多网卡信息与可用的 GPU sysfs 信息。
+- 物理磁盘型号、容量、温度与 SMART；使用 `smartctl -n standby -j -a`，结果缓存 30 秒，休眠或不支持时如实显示不可用。
+- Docker 容器状态和资源统计；有 `virsh` 且 libvirt 可访问时读取虚拟机状态。
 
-状态接口只监听 `127.0.0.1:18731/api/status`，不提供风扇、RGB、关机或其他写入控制。未知值为 null；不唤醒硬盘读取 SMART，不调用天气服务。当前未提供磁盘温度与多网卡聚合。
+CPU/内存趋势只保留内存中最近 120 次采样，服务退出后清空。数据为空、缺工具或权限不足时返回原因；GPU 利用率和显存字段只在宿主实际提供时显示，不保证当前 Intel GPU 有利用率读数。
 
-采集进程随小屏退出；停止宿主小屏服务会同时结束采集与页面进程。若本地端口已被无关程序占用，新服务会启动失败并尝试恢复原界面，不覆盖或结束占用端口的程序。
+API 只监听 `127.0.0.1:18731`。`GET /api/status`、`GET /api/toolbox`、`GET /api/insights` 为读取接口；`POST /api/action` 需要 JSON、允许的 Host/Origin 与 `X-R1-Token`。令牌每次服务启动随机生成，只传给本次启动的 Electron 环境，不写入前端或返回给读取接口。因此普通浏览器预览只有读取能力，控制应在 NAS 小屏操作；当前没有对局域网开放的远程 Web 管理入口。
+
+控制页根据实际能力开放操作：
+
+- 亮度、立即息屏/唤醒、无操作息屏和夜间低亮度；息屏后的第一次触摸仅唤醒，避免误触底下的按钮。实机可能出现原始 `brightness=0` 但画面正常，因此不单凭该值判定息屏。
+- 风扇仅在发现 IT87 hwmon/PWM 通道后可接管：手动 50–100%，低/中/高档 60/80/100%，自动模式温度缺测时满速。同号 RPM 为 0 时回退满速并显示原因；通道与实际 CPU/机箱风扇的对应仍需确认。当前用户固件没有这些通道。
+- RGB 需明确选择现有 I²C 总线，先非强制读取 `0x26` 模式寄存器验证，再应用颜色与灯效；默认不扫描地址或写灯控。
+- Docker 仅启动/停止/重启，保护 Toolbox 自身；VM 仅 start/shutdown/reboot/suspend/resume，不提供删除或强制断电。
+- NAS 重启/关机需确认，5 秒内可取消，之后交由固定的 `systemctl` 操作执行。没有 RTC、WOL 或关机后自动开机功能。
+
+设置会持久保存。退出宿主服务时取消尚未执行的电源请求，并尽力恢复接管前的风扇 PWM/enable、屏幕原始亮度/blank；RGB 不自动恢复原灯效，后续可在控制页或官方界面重新设置。恢复机制依赖进程正常收到退出信号，突然断电或强制杀死进程不能保证执行。
+
+Python 服务随小屏退出；停止宿主小屏服务会同时结束服务与页面进程。若本地端口已被无关程序占用，新服务会启动失败并尝试恢复原界面，不覆盖或结束占用端口的程序。
 
 ## 开机一次与恢复
 
 保留 `restart: always`。任务完成或失败后明确调用 Docker 停止当前容器，下次 Docker 启动时再次运行；同次 NAS 开机、相同任务版本、镜像和 UI 配置成功后跳过。成功记录在 `/run/r1-toolbox/last-success`，失败不记录。
 
 恢复官方界面：先删除项目，或将 `restart` 改为 `"no"` 后重新部署，再正常重启 NAS。临时服务、内存 UI 和挂载随重启消失，官方启动流程继续使用原文件。
+
+删除项目时通常可保留独立数据卷；删除项目对应的 `r1-toolbox-data` 卷会丢失 Toolbox 设置，实际卷名可能带项目前缀。卷内只保存 Toolbox 配置，恢复官方 UI 不需要删除该卷。
 
 容器本来就会停止，仅停止容器或改为诊断不会立即撤销已运行的小屏服务。旧版若曾覆盖过 HTML，需要另外恢复当时的备份；内存挂载不会回退历史文件修改。
 
@@ -87,7 +108,8 @@ UI_DIR: /drives/实际磁盘/R1-Toolbox/ui
 - 容器名与 `TASK_CONTAINER` 保持 `r1-toolbox`。镜像继承 `docker.io/library/debian:bookworm-slim`，保留原宿主访问机制，不联网安装宿主工具。
 - 镜像模式要求 `/run` 为 tmpfs；不满足时在停原小屏前拒绝部署 UI。缺少依赖或包损坏也不会停止原程序。
 - 临时服务名打印在容器日志，宿主可用 `journalctl -u histor-custom-<PID>.service` 查看。失败暂存保留至重启，便于排查。
-- 执行状态和 UI 位于运行时目录；Electron、系统、Docker 仍可能写正常配置、缓存和日志，不能保证整机零写入。
+- 执行状态、UI 和采样历史位于运行时目录；Toolbox 设置写入独立数据卷，Electron、系统、Docker 仍可能写正常配置、缓存和日志，不能保证整机零写入。
+- 未提供天气服务、SMTP/Server酱、iDRAC、月报、fnOS 相册/影视/音乐统计、RGB 温度联动或每日固定时刻的亮熄屏/RGB 计划。
 - 真实 NAS 的画面、触摸、开机时序及厂商守护程序行为需要实机验证。
 
 参考：[systemd 私有挂载](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#BindPaths=)、[Docker cp](https://docs.docker.com/reference/cli/docker/container/cp/)、[Docker 重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/)。

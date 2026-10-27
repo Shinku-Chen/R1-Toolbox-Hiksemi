@@ -7,6 +7,7 @@ Run: python3 -m unittest discover -s tests -p 'test_mount.py'
 import ast
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -360,6 +361,22 @@ class MountTests(unittest.TestCase):
                 actions, _ = self.timed_launch(snapshot)
                 with self.assertRaises((ValueError, RuntimeError)):
                     actions.start("expected", {"DISPLAY": ":0"}, self.source)
+
+    def test_settings_use_only_the_explicit_docker_data_volume(self):
+        actions = load_actions()
+        actions.app = self.app
+        volume = self.temporary / "docker-volume"
+        volume.mkdir()
+        mounted = {"Destination": "/data", "Type": "volume", "RW": True, "Source": str(volume)}
+        actions.run = mock.Mock(return_value=types.SimpleNamespace(returncode=0, stdout=json.dumps([mounted])))
+        self.assertEqual(actions.settings_directory("r1-toolbox"), volume.resolve())
+        self.assertEqual(list(volume.iterdir()), [], "volume discovery must not write settings")
+        for invalid in ({**mounted, "Type": "bind"}, {**mounted, "RW": False},
+                        {**mounted, "Source": str(self.app)}, {**mounted, "Source": "/"}):
+            with self.subTest(invalid=invalid):
+                actions.run.return_value.stdout = json.dumps([invalid])
+                self.assertEqual(actions.settings_directory("r1-toolbox"), actions.runtime_root / "settings")
+        self.assertEqual(self.snapshot(), self.original)
 
     def test_binding_verification_requires_identity_and_read_only(self):
         actions = load_actions()

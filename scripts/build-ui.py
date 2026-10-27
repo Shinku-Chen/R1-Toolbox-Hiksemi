@@ -22,7 +22,8 @@ def build_bundle(root=ROOT, output=None):
     if frontend.is_symlink() or not frontend.is_dir():
         raise ValueError('缺少 ui 目录，或该目录是符号链接')
     sources = {'frontend/index.html': frontend / 'index.html',
-               'runtime/ui_service.py': root / 'runtime/ui_service.py'}
+               **{'runtime/' + name: root / 'runtime' / name
+                  for name in ('ui_service.py', 'toolbox.py', 'insights.py')}}
     assets = frontend / 'assets'
     if assets.is_symlink():
         raise ValueError('UI assets 不允许符号链接')
