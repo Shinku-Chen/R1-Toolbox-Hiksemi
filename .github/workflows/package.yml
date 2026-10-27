@@ -2,7 +2,7 @@ name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection']
+    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection', 'fix/histor-window-handshake']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -35,6 +35,8 @@ jobs:
         run: |
           python scripts/build-ui.py
           for script in ui/assets/*.js; do node --check "$script"; done
+      - name: Check the official hidden-window handshake
+        run: node tests/check_histor_bridge.cjs
       - name: Check Python syntax
         run: python -m compileall -q scripts tools/boot-once runtime tests
       - name: Validate Compose configuration
