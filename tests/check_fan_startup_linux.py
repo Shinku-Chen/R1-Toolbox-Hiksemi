@@ -34,7 +34,7 @@ static volatile sig_atomic_t exit_on_signal;
 static void received(int number) {
     if (exit_on_signal) _exit(23);
     unsigned char value = (unsigned char)number;
-    if (acknowledge >= 0) (void)write(acknowledge, &value, 1);
+    if (acknowledge >= 0 && write(acknowledge, &value, 1) != 1) _exit(24);
 }
 
 static void delay(long nanoseconds) {
