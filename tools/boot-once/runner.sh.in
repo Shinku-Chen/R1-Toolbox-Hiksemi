@@ -1,0 +1,57 @@
+#!/bin/sh
+# Docker PID 1. Stop through the Engine API; a normal exit would restart us.
+set -u
+task_rc=1
+trap 'exit "$task_rc"' TERM INT
+
+host_docker() {
+  chroot /host /bin/sh -c '
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/histor/bin:/histor/sbin
+    export PATH
+    exec docker --host unix:///var/run/docker.sock "$@"
+  ' docker "$@"
+}
+
+host_shell() {
+  chroot /host /bin/sh -c '
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/histor/bin:/histor/sbin
+    export PATH
+    exec nsenter --target 1 --mount --uts --pid --cgroup --root=/proc/1/root --wd=/ -- /bin/sh -s
+  '
+}
+
+# Allow Docker to finish starting and monitoring this container.
+sleep 12
+ready=0
+attempt=0
+while [ "$attempt" -lt 10 ]; do
+  if [ "$(host_docker inspect --format '{{.State.Running}}' "$TASK_CONTAINER" 2>/dev/null)" = true ]; then
+    ready=1
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+if [ "$ready" -ne 1 ]; then
+  echo '[ERROR] 无法调用宿主 Docker 或找不到本容器；未执行任务。'
+  echo '[ERROR] 保持等待以避免反复执行，请查看宿主 docker 命令和容器名称。'
+  exec sleep infinity
+fi
+
+if host_shell <<'R1_HOST_JOB'
+__HOST_JOB__
+R1_HOST_JOB
+then
+  task_rc=0
+  echo '[OK] 本次任务完成，正在停止容器。'
+else
+  task_rc=$?
+  echo "[ERROR] 本次任务失败（状态 ${task_rc}），停止容器，不自动循环执行。"
+fi
+
+# Background + interruptible wait lets PID 1 handle the stop signal immediately.
+host_docker stop --time 5 "$TASK_CONTAINER" &
+stop_pid=$!
+wait "$stop_pid" || true
+echo '[ERROR] 自停请求未能终止容器；保持等待，不重复执行任务。'
+exec sleep infinity

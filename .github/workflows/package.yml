@@ -1,0 +1,56 @@
+name: 检查与打包
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version
+        required: false
+        default: dev
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  boot-once:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install development dependency
+        run: python -m pip install -r requirements-dev.txt
+      - name: Check generated files
+        run: |
+          python tools/boot-once/build-compose.py
+          git diff --exit-code -- tools/boot-once/compose.yaml tools/boot-once/runner.sh
+      - name: Check shell syntax
+        run: |
+          for script in tools/boot-once/*.sh tools/boot-once/*.sh.in; do
+            sh -n "$script"
+          done
+      - name: Validate Compose configuration
+        run: docker compose -f tools/boot-once/compose.yaml config --quiet
+      - name: Run six simulated lifecycle tests
+        run: python tools/boot-once/test_runner.py
+      - name: Package and verify ZIP
+        env:
+          PACKAGE_VERSION: ${{ inputs.version || 'dev' }}
+        run: python scripts/package.py --version "$PACKAGE_VERSION"
+      - name: Verify download checksum
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: r1-boot-once-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
