@@ -91,11 +91,12 @@ class _Server(http.server.ThreadingHTTPServer):
 
 
 class WebConfigServer:
-    def __init__(self, controller, insights=None, *, host='0.0.0.0', port=18732,
+    def __init__(self, controller, insights=None, *, fan_policy=None, host='0.0.0.0', port=18732,
                  asset_dir=None, clock=None):
         if host not in ('127.0.0.1', '0.0.0.0') or type(port) is not int or not (port == 0 or 1024 <= port <= 65535):
             raise ValueError('网页监听只允许 127.0.0.1/0.0.0.0 和 1024–65535 端口')
         self.controller, self.insights = controller, insights
+        self.fan_policy = fan_policy
         self.host, self.port = host, port
         self.asset_dir = Path(asset_dir) if asset_dir is not None else Path(__file__).resolve().parent.parent / 'frontend/web'
         self.clock = clock or time.monotonic
@@ -223,6 +224,12 @@ class WebConfigServer:
         if not isinstance(body, dict) or set(body) != {'action', 'payload'} or not isinstance(body['payload'], dict):
             raise ValueError('操作格式错误')
         action, payload = body['action'], body['payload']
+        if action in ('fan.policy.update', 'fan.policy.release'):
+            if self.fan_policy is None:
+                raise ValueError('独立温控服务未启用')
+            result = self.fan_policy.action(action, copy.deepcopy(payload))
+            return {**result, 'saved': result.get('settings_saved') is True,
+                    'state': self._state(), 'fan_policy': self.fan_policy.snapshot()}
         state = self._state()
         if action == 'settings.update':
             changes = payload.get('settings')
@@ -366,7 +373,8 @@ class WebConfigServer:
                         return
                     if route == '/api/session':
                         try:
-                            self.send(200, {'csrf': session['csrf'], 'state': outer._state(), 'http': True})
+                            self.send(200, {'csrf': session['csrf'], 'state': outer._state(), 'http': True,
+                                **({'fan_policy': outer.fan_policy.snapshot()} if outer.fan_policy is not None else {})})
                         except Exception:
                             self.send(503, {'error': '设置服务暂不可用'})
                     else:

@@ -35,6 +35,8 @@ class BundleTests(unittest.TestCase):
         (self.root / 'runtime/device_info.py').write_text('def collect_device_info(*args): return {}\n')
         (self.root / 'runtime/histor.py').write_text('class HistorAdapter: pass\n')
         (self.root / 'runtime/web_config.py').write_text('class WebConfigServer: pass\n')
+        for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py'):
+            (self.root / 'runtime' / name).write_text('# fixture only\n')
         (self.root / 'ui/web').mkdir()
         for name in ('index.html', 'config.css', 'config.js'):
             (self.root / 'ui/web' / name).write_text('web fixture')
@@ -84,6 +86,37 @@ class BundleTests(unittest.TestCase):
         self.change_tar(corrupt)
         with self.assertRaises(ValueError):
             self.read()
+
+    def test_native_adapter_is_bundled_and_bound_to_payload_integrity(self):
+        guard = self.root / 'fixture.so'
+        # Header-only fixture is never loaded; executable ABI tests run on Linux.
+        header = bytearray(64)
+        header[:7] = b'\x7fELF\x02\x01\x01'
+        header[16:20] = b'\x03\x00\x3e\x00'
+        guard.write_bytes(header)
+        builder.build_bundle(self.root, native_guard=guard)
+        manifest, files = self.read()
+        self.assertEqual(files['runtime/fan_guard.so'], bytes(header))
+        self.assertEqual(manifest['files']['runtime/fan_guard.so'], hashlib.sha256(header).hexdigest())
+        def corrupt(members):
+            for index, (member, data) in enumerate(members):
+                if member.name == 'runtime/fan_guard.so':
+                    members[index] = (member, b'X' * len(data))
+        self.change_tar(corrupt)
+        with self.assertRaises(ValueError):
+            self.read()
+
+    def test_native_adapter_rejects_wrong_architecture_or_symlink(self):
+        guard = self.root / 'fixture.so'
+        for value in (b'MZ' + bytes(62), b'\x7fELF\x01\x01\x01' + bytes(57),
+                      b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00' + bytes(44)):
+            guard.write_bytes(value)
+            with self.subTest(value=value[:20]), self.assertRaises(ValueError):
+                builder.build_bundle(self.root, native_guard=guard)
+        link = self.root / 'linked.so'
+        link.symlink_to(guard)
+        with self.assertRaises(ValueError):
+            builder.build_bundle(self.root, native_guard=link)
 
     def test_untrusted_archive_paths_duplicates_and_links_are_rejected(self):
         original = self.archive.read_bytes()
