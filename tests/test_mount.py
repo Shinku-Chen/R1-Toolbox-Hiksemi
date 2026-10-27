@@ -370,12 +370,21 @@ class MountTests(unittest.TestCase):
         mounted = {"Destination": "/data", "Type": "volume", "RW": True, "Source": str(volume)}
         actions.run = mock.Mock(return_value=types.SimpleNamespace(returncode=0, stdout=json.dumps([mounted])))
         self.assertEqual(actions.settings_directory("r1-toolbox"), volume.resolve())
+        self.assertEqual(actions.settings_directory("r1-toolbox", required=True), volume.resolve())
         self.assertEqual(list(volume.iterdir()), [], "volume discovery must not write settings")
+        with mock.patch.object(actions.os, "statvfs", return_value=types.SimpleNamespace(f_flag=os.ST_RDONLY)):
+            with self.assertRaisesRegex(ValueError, "持久化设置卷"):
+                actions.settings_directory("r1-toolbox", required=True)
         for invalid in ({**mounted, "Type": "bind"}, {**mounted, "RW": False},
                         {**mounted, "Source": str(self.app)}, {**mounted, "Source": "/"}):
             with self.subTest(invalid=invalid):
                 actions.run.return_value.stdout = json.dumps([invalid])
                 self.assertEqual(actions.settings_directory("r1-toolbox"), actions.runtime_root / "settings")
+                with self.assertRaisesRegex(ValueError, "持久化设置卷"):
+                    actions.settings_directory("r1-toolbox", required=True)
+        actions.run.return_value.stdout = "[]"
+        with self.assertRaisesRegex(ValueError, "持久化设置卷"):
+            actions.settings_directory("r1-toolbox", required=True)
         self.assertEqual(self.snapshot(), self.original)
 
     def test_binding_verification_requires_identity_and_read_only(self):

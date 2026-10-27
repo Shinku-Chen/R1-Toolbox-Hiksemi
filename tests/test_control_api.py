@@ -19,8 +19,12 @@ class ControlAPITests(unittest.TestCase):
         self.insights = mock.Mock()
         self.insights.snapshot.return_value = {"containers": [], "system": {}}
         self.insights.action.return_value = {"ok": True}
+        self.web = mock.Mock()
+        self.web.snapshot.return_value = {"enabled": True, "port": 18732, "addresses": []}
+        self.web.pairing_info.return_value = {"code": "1234567890", "expires_in": 180, "port": 18732}
         monitor = types.SimpleNamespace(snapshot=lambda: {"schema_version": 1, "available": True})
-        self.server = service.make_http_server(monitor, 0, self.controller, self.insights, self.token)
+        self.server = service.make_http_server(monitor, 0, self.controller, self.insights, self.token,
+                                              web_config=self.web)
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
         self.thread.start()
@@ -49,13 +53,28 @@ class ControlAPITests(unittest.TestCase):
         })
 
     def test_read_routes_do_not_disclose_the_control_token(self):
-        for path in ("/api/status", "/api/toolbox", "/api/insights"):
+        for path in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config"):
             code, headers, data = self.request(path=path)
             self.assertEqual(code, 200)
             self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
             self.assertNotIn(self.token, json.dumps(data))
         self.controller.action.assert_not_called()
         self.insights.action.assert_not_called()
+        self.web.pairing_info.assert_not_called()
+
+    def test_pairing_code_is_only_created_by_authenticated_local_action(self):
+        self.assertEqual(self.action({"action": "web.pairing", "rotate": True},
+                                     {"X-R1-Token": "wrong"})[0], 403)
+        self.web.pairing_info.assert_not_called()
+        for value in ({"rotate": "true"}, {"rotate": 1}, {"command": "anything"}):
+            self.assertEqual(self.action({"action": "web.pairing", **value})[0], 400)
+        self.web.pairing_info.assert_not_called()
+        code, _, data = self.action({"action": "web.pairing", "rotate": True})
+        self.assertEqual(code, 200)
+        self.assertEqual(data["web"]["code"], "1234567890")
+        self.web.pairing_info.assert_called_once_with(rotate=True)
+        self.controller.action.assert_not_called()
+        self.assertNotIn("1234567890", json.dumps(self.request(path="/api/web-config")[2]))
 
     def test_missing_or_wrong_token_cannot_control_the_host(self):
         for token in ("", "wrong-token", "0" * 64):

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -20,6 +21,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT = 18731
+WEB_PORT = 18732
 STATUS_URL = f'http://127.0.0.1:{PORT}/api/status'
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -40,10 +42,11 @@ def cleanup_command(*arguments):
 
 
 def assert_port_free():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-        connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        connection.bind(('127.0.0.1', PORT))
-        connection.listen(1)
+    for port in (PORT, WEB_PORT):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            connection.bind(('127.0.0.1', port))
+            connection.listen(1)
 
 
 def wait_for_port_release():
@@ -54,7 +57,7 @@ def wait_for_port_release():
             return
         except OSError:
             if time.monotonic() >= deadline:
-                raise AssertionError('停止测试服务后，状态 API 端口仍未释放') from None
+                raise AssertionError('停止测试服务后，状态或网页端口仍未释放') from None
             time.sleep(0.1)
 
 
@@ -86,6 +89,43 @@ def service_pid(unit):
                 return pid
         time.sleep(0.1)
     raise AssertionError('测试服务没有产生存活的 MainPID')
+
+
+def check_web_config():
+    with HTTP.open(f'http://127.0.0.1:{WEB_PORT}/', timeout=2) as response:
+        assert response.status == 200 and b'<!doctype html>' in response.read().lower(), '网页配置登录页面不可用'
+    try:
+        HTTP.open(f'http://127.0.0.1:{WEB_PORT}/api/session', timeout=2)
+    except urllib.error.HTTPError as error:
+        assert error.code == 401, '未登录网页没有明确拒绝状态访问'
+    else:
+        raise AssertionError('未配对网页可以读取设备设置')
+
+
+def save_fixture_settings(token_file):
+    deadline, token = time.monotonic() + 5, ''
+    while time.monotonic() < deadline:
+        try:
+            token = token_file.read_text().strip()
+        except OSError:
+            token = ''
+        if re.fullmatch(r'[0-9a-f]{64}', token):
+            break
+        time.sleep(0.05)
+    assert re.fullmatch(r'[0-9a-f]{64}', token), '测试小屏没有收到控制令牌'
+    body = json.dumps({'action': 'settings.update', 'settings': {
+        'theme': 'jade', 'font_scale': 120}}).encode()
+    request = urllib.request.Request(f'http://127.0.0.1:{PORT}/api/action', data=body,
+                                    headers={'Content-Type': 'application/json', 'X-R1-Token': token,
+                                             'Origin': 'null'})
+    with HTTP.open(request, timeout=3) as response:
+        assert response.status == 200 and json.load(response).get('ok') is True, '测试设置没有保存成功'
+
+
+def check_fixture_settings():
+    with HTTP.open(f'http://127.0.0.1:{PORT}/api/toolbox', timeout=2) as response:
+        settings = json.load(response).get('settings', {})
+        assert settings.get('theme') == 'jade' and settings.get('font_scale') == 120, '重建服务没有读回持久化设置'
 
 
 def check_view(runtime, pid, frontend, expected_hash, original, original_identity):
@@ -137,12 +177,15 @@ def main():
     original_identity = (original.stat().st_dev, original.stat().st_ino)
     app = fixture / 'app'
     app_run = app / 'AppRun'
-    app_run.write_text('#!/bin/sh\nexec /usr/bin/sleep 60\n', encoding='utf-8')
+    token_file = fixture / 'fixture-control-token'
+    app_run.write_text('#!/bin/sh\numask 077\nprintf %s "$R1_TOOLBOX_CONTROL_TOKEN" > '
+                       + shlex.quote(str(token_file)) + '\nexec /usr/bin/sleep 60\n', encoding='utf-8')
     app_run.chmod(0o755)
     runtime['app'], runtime['target'] = app, target
 
     unique = str(os.getpid()) + '-' + str(time.monotonic_ns())
     container = 'r1-toolbox-image-ci-' + unique
+    volume = container + '-data'
     unit = 'r1-toolbox-image-ui-ci-' + unique
     container_attempted = service_attempted = False
     try:
@@ -150,7 +193,9 @@ def main():
         command('docker', 'run', '--detach', '--pull=never', '--name', container,
                 '--network', 'none', '--read-only', '--cap-drop', 'ALL',
                 '--security-opt', 'no-new-privileges', '--pids-limit', '32',
+                '--mount', 'type=volume,source=' + volume + ',target=/data',
                 '--entrypoint', '/bin/sh', args.image, '-c', 'sleep 120')
+        data_directory = runtime['settings_directory'](container, required=True)
         cache = runtime['prepare_image_bundle'](container)
         tarhash = cache.name.removeprefix('ui-')
         runtime['verify_cache'](cache, tarhash)
@@ -162,13 +207,17 @@ def main():
         assert original.read_bytes() == b'official', '挂载预检修改了宿主原始页面'
 
         service_attempted = True
-        command(*runtime['service_options'](unit, frontend), sys.executable, '-B',
+        command(*runtime['service_options'](unit, frontend), '--setenv=R1_WEB_BIND=127.0.0.1',
+                '--setenv=R1_WEB_PORT=' + str(WEB_PORT), '--setenv=R1_TOOLBOX_DATA_DIR=' + str(data_directory), sys.executable, '-B',
                 str(cache / 'runtime/ui_service.py'), '--app', str(app))
         # Type=simple publishes MainPID before the child finishes setting up its
         # mount namespace. The API proves that our backend has actually exec'd.
         wait_for_status()
+        check_web_config()
         pid = service_pid(unit)
         check_view(runtime, pid, frontend, expected_hash, original, original_identity)
+        save_fixture_settings(token_file)
+        check_fixture_settings()
 
         # The UI and API belong to the host service, not this source container.
         command('docker', 'stop', '--timeout', '2', container)
@@ -178,16 +227,35 @@ def main():
         assert command('systemctl', 'is-active', unit).stdout.strip() == 'active', '停止容器导致宿主 UI 服务停止'
         assert service_pid(unit) == pid, '停止容器后宿主 UI 服务被意外重启'
         wait_for_status()
+        check_web_config()
+        check_fixture_settings()
         check_view(runtime, pid, frontend, expected_hash, original, original_identity)
         runtime['verify_cache'](cache, tarhash)
 
         command('systemctl', 'stop', unit)
         service_attempted = False
         wait_for_port_release()
+        assert (data_directory / 'settings.json').is_file(), '容器删除后设置数据卷文件丢失'
+        assert command('docker', 'volume', 'inspect', volume).returncode == 0, '容器删除误删了设置数据卷'
+        # Recreate a host service with the retained volume, without the source
+        # container. This verifies the actual storage boundary, not a mock save.
+        unit += '-reload'
+        service_attempted = True
+        command(*runtime['service_options'](unit, frontend), '--setenv=R1_WEB_BIND=127.0.0.1',
+                '--setenv=R1_WEB_PORT=' + str(WEB_PORT), '--setenv=R1_TOOLBOX_DATA_DIR=' + str(data_directory),
+                sys.executable, '-B', str(cache / 'runtime/ui_service.py'), '--app', str(app))
+        wait_for_status()
+        check_fixture_settings()
+        check_web_config()
+        check_view(runtime, service_pid(unit), frontend, expected_hash, original, original_identity)
+        command('systemctl', 'stop', unit)
+        service_attempted = False
+        wait_for_port_release()
         assert original.read_bytes() == b'official', '停止服务后宿主原始页面发生变化'
         assert (original.stat().st_dev, original.stat().st_ino) == original_identity, '宿主原始页面标识发生变化'
         print('PASS: built image Docker copy, verified tmpfs UI cache, real read-only service mount, '
-              'live API surviving container stop/removal, released API port and unchanged host files')
+              'live API and authenticated web config surviving container stop/removal, '
+              'persistent Docker volume settings after service recreation, released ports and unchanged host files')
     finally:
         if service_attempted:
             logs = cleanup_command('journalctl', '--unit', unit, '--no-pager', '--lines', '40')
@@ -197,6 +265,7 @@ def main():
         cleanup_command('systemctl', 'stop', unit + '-check')
         if container_attempted:
             cleanup_command('docker', 'rm', '--force', container)
+        cleanup_command('docker', 'volume', 'rm', volume)
         print('CI 临时测试目录保留至 runner 回收：', fixture, runtime_root)
 
 
