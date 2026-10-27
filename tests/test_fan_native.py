@@ -1,4 +1,5 @@
 """Synthetic fan takeover tests. No firmware, processes, devices or ioctls run."""
+from contextlib import contextmanager
 import importlib.util
 import hashlib
 import json
@@ -88,6 +89,12 @@ class FakeBackend:
         vendors = [item for item in self.live.values() if item["exe"] == self.vendor["exe"]]
         if vendors != [identity]:
             raise RuntimeError("fixture competing vendor process")
+
+    def assert_ready(self, identity, *, require_guard=False):
+        self.assert_single(identity)
+        if not self.alive(identity):
+            raise RuntimeError("fixture daemon died")
+        return identity
 
     def restore_daemon(self, original, guarded, lease=None):
         self.events.append(("restore_daemon", dict(original)))
@@ -523,15 +530,272 @@ class NativeFanTests(unittest.TestCase):
             path.write_bytes(b'{"version":1}\0')
             self.assertIsNone(native.read_json(path))
 
+    @contextmanager
+    def real_proc_backend(self):
+        program = self.folder / "histor/bin/temp_control"
+        program.parent.mkdir(parents=True)
+        program.write_bytes(b"fixture program, never executed")
+        note = self.folder / "sys/module/hikio/notes/.note.gnu.build-id"
+        note.parent.mkdir(parents=True)
+        note.write_bytes(native.DRIVER_NOTE)
+        device = self.folder / "dev/hikio"
+        device.parent.mkdir()
+        device.write_bytes(b"fixture character device substitute")
+        config = self.folder / "tmp/nand_config/config.txt"
+        config.parent.mkdir(parents=True)
+        config.write_bytes(b'{"fan":{"fan_mode":5}}\0')
+        guard = self.folder / "fan_guard.so"
+        elf = bytearray(64)
+        elf[:6], elf[16:20] = b"\x7fELF\x02\x01", b"\x03\x00\x3e\x00"
+        guard.write_bytes(elf)
+        guard.chmod(0o644)
+        (self.folder / "proc").mkdir()
+        endpoint = self.folder / "var/tmp/emhistor"
+        endpoint.parent.mkdir(parents=True)
+        backend = watchdog.SystemBackend(root=self.folder, guard_path=guard)
+        with patch.object(watchdog.sys, "platform", "linux"), patch.object(watchdog.os, "geteuid", return_value=0), \
+                patch.object(watchdog.signal, "SIGUSR1", 10), patch.object(watchdog.signal, "SIGUSR2", 12), \
+                patch.object(watchdog.shutil, "which", return_value="/fixture/systemd-run"), \
+                patch.object(watchdog, "FIRMWARE_SHA256", hashlib.sha256(program.read_bytes()).hexdigest()), \
+                patch.object(watchdog.stat, "S_ISCHR", return_value=True), \
+                patch("subprocess.Popen", side_effect=AssertionError("不能执行假固件")), \
+                patch("os.kill", side_effect=AssertionError("不能发送信号")), \
+                patch("fcntl.ioctl", side_effect=AssertionError("不能访问硬件")), \
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(endpoint))
+            yield backend
+
+    def write_proc_identity(self, backend, pid, starttime, state="S", exe=None):
+        path = backend.proc / str(pid)
+        path.mkdir(exist_ok=True)
+        (path / "stat").write_text(f"{pid} (temp_control) {state} "
+                                   + " ".join(["0"] * 18 + [str(starttime)] + ["0"] * 4))
+        if not (path / "exe").is_symlink():
+            (path / "exe").symlink_to(exe or backend.program)
+        (path / "status").write_text("Name:\ttemp_control\nSigCgt:\t0000000000000a00\n")
+        return {"pid": pid, "starttime": starttime, "exe": str(exe or backend.program)}
+
+    def test_real_proc_vendor_to_guarded_replacement_keeps_repeated_capabilities_available(self):
+        with self.real_proc_backend() as backend:
+            adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram",
+                                              backend=backend, allow_writes=True)
+            original = self.write_proc_identity(backend, 20, 200)
+            self.assertEqual(backend._vendors(), [original])
+            self.assertTrue(adapter.capabilities()["available"])
+            # Replaced parent remains a zombie; the sole live replacement is
+            # our exact guarded daemon. No _vendors/probe/identity mocks here.
+            self.write_proc_identity(backend, 20, 200, state="Z")
+            guarded = self.write_proc_identity(backend, 30, 300)
+            lease = self.folder / "ram/lease.bin"
+            (backend.proc / "30/maps").write_text(f"0000-1000 r-xp 0000 00:01 123 {backend.guard_path.resolve()}\n")
+            (backend.proc / "30/environ").write_bytes(b"R1_FAN_LEASE=" + os.fsencode(lease) + b"\0")
+            self.assertEqual(backend._owner_kind(guarded, lease), "ours")
+            adapter.channels = {"cpu"}
+            for _ in range(3):
+                self.assertEqual(backend._vendors(), [guarded])
+                state = adapter.capabilities()
+                self.assertTrue(state["available"], state)
+                self.assertEqual(state["owner"], "custom")
+
+    def test_real_proc_cardinality_unknown_exe_zombies_and_nested_threads_keep_identity_gate(self):
+        with self.real_proc_backend() as backend:
+            adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram",
+                                              backend=backend, allow_writes=True)
+            unique_reason = "必须存在唯一身份已验证的原厂温控进程"
+            self.assertEqual(adapter.capabilities()["reason"], unique_reason)
+            self.write_proc_identity(backend, 99, 990, state="Z")
+            self.assertEqual(backend._vendors(), [])
+            self.assertEqual(adapter.capabilities()["reason"], unique_reason)
+            original = self.write_proc_identity(backend, 20, 200)
+            task = backend.proc / "20/task/21"
+            task.mkdir(parents=True)
+            (task / "stat").write_text("21 (temp_control) S " + " ".join(["0"] * 18 + ["210"] + ["0"] * 4))
+            (task / "exe").symlink_to(backend.program)
+            self.assertEqual(backend._vendors(), [original])
+            self.assertTrue(adapter.capabilities()["available"])
+            second = self.write_proc_identity(backend, 30, 300)
+            self.assertEqual({row["pid"] for row in backend._vendors()}, {20, 30})
+            self.assertEqual(adapter.capabilities()["reason"], unique_reason)
+            self.write_proc_identity(backend, 30, 300, state="Z")
+            self.assertTrue(adapter.capabilities()["available"])
+            (backend.proc / "30/exe").rename(self.folder / "retired-exe-symlink")
+            self.write_proc_identity(backend, second["pid"], 301, exe=self.folder / "unknown/temp_control")
+            self.assertIn("来源或版本无法确认", adapter.capabilities()["reason"])
+
     def test_backend_sync_uses_only_get_existing_mode_and_exact_manual_factory_value(self):
         backend = watchdog.SystemBackend(root=self.folder)
         rpc = type("RPC", (), {"_has_socket": lambda _: True, "_config_mode": lambda _: 2,
                                 "_get_mode": lambda _: 2})()
         with patch.object(backend, "verify_live"), patch.object(backend, "_histor", return_value=rpc), \
-                patch.object(backend, "mode", return_value="low"), patch.object(backend, "_write") as write:
+                patch.object(backend, "mode", return_value="low"), patch.object(backend, "_write") as write, \
+                patch.object(backend, "_vendors", return_value=[self.backend.vendor]), \
+                patch.object(backend, "_owner_kind", return_value="vendor"), \
+                patch.object(backend, "assert_ready"), patch.object(backend, "wait_ready"):
             backend.sync_mode(self.folder, expected="low")
             write.assert_called_once_with({"system": 120}, minimum=120)
         self.assertFalse(hasattr(rpc, "_rpc"))  # There is no SET primitive here.
+
+    def fake_startup_clock(self, backend, on_sleep=lambda seconds: None):
+        now = [0.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+            on_sleep(now[0])
+
+        backend.clock, backend.sleep = lambda: now[0], sleep
+        return now
+
+    def test_spawn_waits_for_both_handlers_and_exact_guard_then_stability(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            base = backend.proc / "30"
+            original = {"argv": [str(backend.program)], "env": {"DISK_AUTOSLEEP": "preserved"},
+                        "cwd": str(backend.program.parent)}
+            for guarded in (False, True):
+                with self.subTest(guarded=guarded):
+                    (base / "status").write_text("SigCgt:\t0000000000000000\n")
+                    (base / "maps").write_bytes(b"")
+
+                    def advance(seconds):
+                        if seconds >= 0.10:
+                            (base / "status").write_text("SigCgt:\t0000000000000200\n")
+                        if seconds >= 0.25:
+                            (base / "status").write_text("SigCgt:\t0000000000000a00\n")
+                        if seconds >= 0.35:
+                            (base / "maps").write_text(f"0000-1000 r-xp 0000 00:01 123 {backend.guard_path.resolve()}\n")
+
+                    now = self.fake_startup_clock(backend, advance)
+                    child = type("Child", (), {"pid": 30, "poll": lambda _: None})()
+                    with patch("subprocess.Popen", return_value=child) as popen:
+                        result = backend.spawn(original, lease=self.folder / "lease.bin" if guarded else None,
+                                               mask=1 if guarded else None)
+                    self.assertEqual(result, identity)
+                    self.assertGreaterEqual(now[0], (0.35 if guarded else 0.25) + 0.15 - 1e-9)
+                    self.assertLess(now[0], 1)
+                    self.assertEqual(popen.call_args.kwargs["env"]["DISK_AUTOSLEEP"], "preserved")
+
+    def test_spawn_unready_timeout_exit_and_pid_reuse_never_cleanup_another_identity(self):
+        with self.real_proc_backend() as backend:
+            base = backend.proc / "30"
+            original = {"argv": [str(backend.program)], "env": {}, "cwd": str(backend.program.parent)}
+            for failure in ("timeout", "exit", "pid_reuse"):
+                with self.subTest(failure=failure):
+                    identity = self.write_proc_identity(backend, 30, 300)
+                    (base / "status").write_text("SigCgt:\t0000000000000000\n")
+
+                    def advance(seconds):
+                        if seconds >= 0.1 and failure != "timeout":
+                            self.write_proc_identity(backend, 30, 301 if failure == "pid_reuse" else 300,
+                                                     state="Z" if failure == "exit" else "S")
+
+                    now = self.fake_startup_clock(backend, advance)
+                    child = type("Child", (), {"pid": 30, "poll": lambda _: None})()
+                    with patch("subprocess.Popen", return_value=child), patch.object(backend, "stop_process") as stop:
+                        with self.assertRaisesRegex(RuntimeError, "信号处理器就绪未确认"):
+                            backend.spawn(original)
+                    self.assertLessEqual(now[0], 5)
+                    if failure == "timeout":
+                        stop.assert_called_once_with(identity)
+                    else:
+                        stop.assert_not_called()
+
+    def test_sync_never_sends_get_until_both_handlers_are_ready(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            base = backend.proc / "30"
+            (base / "maps").write_bytes(b"")
+            (base / "environ").write_bytes(b"PATH=/fixture\0")
+            calls = []
+            rpc = type("RPC", (), {"_has_socket": lambda _: True, "_config_mode": lambda _: 5,
+                                    "_get_mode": lambda _: calls.append("GET") or 5})()
+            now = self.fake_startup_clock(backend)
+            for raw in (b"", b"SigCgt:\t0\n", b"SigCgt:\t200\n", b"SigCgt:\t800\n",
+                        b"SigCgt:\t-a00\n", b"SigCgt:\ta00\nSigCgt:\ta00\n", b"SigCgt:\tinvalid\n"):
+                (base / "status").write_bytes(raw)
+                with patch.object(backend, "_histor", return_value=rpc), \
+                        self.assertRaisesRegex(RuntimeError, "信号处理器就绪未确认"):
+                    backend.sync_mode(self.folder)
+            self.assertEqual(calls, [])
+            self.assertEqual(now[0], 0)  # No second five-second startup wait before GET.
+            self.assertTrue(backend.alive(identity))
+
+    def test_sync_get_exit_and_guard_disappearance_cannot_return_success(self):
+        with self.real_proc_backend() as backend:
+            base = backend.proc / "30"
+            (base).mkdir()
+            (base / "environ").write_bytes(b"R1_FAN_LEASE=" + os.fsencode(self.folder / "lease.bin") + b"\0")
+            calls = []
+            for failure in ("exit", "guard_lost", "late_exit"):
+                self.write_proc_identity(backend, 30, 300)
+                (base / "maps").write_text(f"0000-1000 r-xp 0000 00:01 123 {backend.guard_path.resolve()}\n")
+
+                def advance(seconds):
+                    if failure == "late_exit" and seconds >= 0.05:
+                        self.write_proc_identity(backend, 30, 300, state="Z")
+
+                self.fake_startup_clock(backend, advance)
+
+                def get_mode(_):
+                    calls.append("GET")
+                    if failure == "exit":
+                        self.write_proc_identity(backend, 30, 300, state="Z")
+                    elif failure == "guard_lost":
+                        (base / "maps").write_bytes(b"")
+                    return 5
+
+                rpc = type("RPC", (), {"_has_socket": lambda _: True, "_config_mode": lambda _: 5,
+                                        "_get_mode": get_mode})()
+                with patch.object(backend, "_histor", return_value=rpc), \
+                        patch.object(backend, "_write") as write, self.assertRaises(RuntimeError):
+                    backend.sync_mode(self.folder)
+                write.assert_not_called()
+            self.assertEqual(calls, ["GET", "GET", "GET"])
+
+    def test_restore_get_followed_by_daemon_death_keeps_recovery_descriptor(self):
+        owner = self.make({"cpu"})
+        owner.begin()
+
+        def sync_then_die(*args, **kwargs):
+            self.backend.live.pop(self.backend.vendor["pid"], None)
+            return "auto"
+
+        with patch.object(self.backend, "sync_mode", side_effect=sync_then_die):
+            self.assertFalse(owner.restore("lease_or_identity_failed"))
+        status = native.read_json(self.folder / "status.json")
+        self.assertEqual(status["phase"], "recovery_failed")
+        self.assertFalse(status["restore_ok"])
+        self.assertIn("vendor_daemon_unconfirmed", status["recovery_errors"])
+        self.assertIn("original", native.read_json(self.folder / "descriptor.json"))
+
+    def test_capture_failure_with_no_vendor_never_claims_recovery_or_redacts(self):
+        owner = self.make({"cpu"})
+        self.backend.live.pop(self.backend.vendor["pid"])
+        with patch.object(self.backend, "capture", side_effect=ValueError("fixture preflight failed")):
+            with self.assertRaises(ValueError):
+                owner.begin()
+        self.assertFalse(owner.restore("lease_or_identity_failed"))
+        self.assertEqual(self.backend.events, [])
+        status = native.read_json(self.folder / "status.json")
+        self.assertEqual(status["phase"], "recovery_failed")
+        self.assertFalse(status["restore_ok"])
+        self.assertNotIn("recovered", native.read_json(self.folder / "descriptor.json"))
+
+    def test_restored_vendor_is_waited_ready_before_reuse_and_never_spawned_twice(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            base = backend.proc / "30"
+            (base / "maps").write_bytes(b"")
+            (base / "environ").write_bytes(b"PATH=/fixture\0")
+            (base / "status").write_text("SigCgt:\t0\n")
+
+            def advance(seconds):
+                if seconds >= 0.25:
+                    (base / "status").write_text("SigCgt:\ta00\n")
+
+            now = self.fake_startup_clock(backend, advance)
+            with patch.object(backend, "spawn", side_effect=AssertionError("不可另起副本")):
+                self.assertEqual(backend.restore_daemon({"identity": identity}, None), identity)
+            self.assertGreaterEqual(now[0], 0.4 - 1e-9)
 
     def test_oversized_recovery_descriptor_is_refused_before_writing(self):
         with self.assertRaises(ValueError):
@@ -608,6 +872,7 @@ class NativeFanTests(unittest.TestCase):
         with patch.object(backend, "_firmware_signature"), \
                 patch.object(backend, "_vendors", return_value=[self.backend.vendor]), \
                 patch.object(backend, "_owner_kind", return_value="vendor"), \
+                patch.object(backend, "wait_ready", side_effect=lambda identity: identity), \
                 patch.object(backend, "stop_process") as stop, patch.object(backend, "spawn") as spawn:
             self.assertEqual(backend.restore_daemon(original, None, lease=self.folder / "lease.bin"), self.backend.vendor)
             stop.assert_not_called()

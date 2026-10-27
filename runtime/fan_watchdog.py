@@ -25,7 +25,7 @@ from fan_native import (CHANNEL_BITS, DRIVER_NOTE, FIRMWARE_SHA256, atomic_json,
 
 
 class SystemBackend:
-    def __init__(self, root="/", guard_path=None):
+    def __init__(self, root="/", guard_path=None, *, clock=None, sleep=None):
         self.root = Path(root).resolve()
         self.proc = self.root / "proc"
         self.program_link = self.root / "histor/bin/temp_control"
@@ -33,6 +33,7 @@ class SystemBackend:
         self.guard_path = Path(guard_path) if guard_path else Path(__file__).with_name("fan_guard.so")
         self._signature = self._device = None
         self.children = []
+        self.clock, self.sleep = clock or time.monotonic, sleep or time.sleep
 
     def _inside(self, path):
         path = Path(path).resolve()
@@ -194,7 +195,20 @@ class SystemBackend:
             raise RuntimeError("vendor_policy_changed")
         if not adapter._has_socket() or adapter._config_mode() is None:
             raise ValueError("原厂系统风扇策略接口不可用")
+        vendors = self._vendors()
+        if len(vendors) != 1:
+            raise RuntimeError("必须存在唯一身份已验证的原厂温控进程")
+        identity = vendors[0]
+        kind = self._owner_kind(identity, Path(folder) / "lease.bin")
+        if kind not in ("vendor", "ours"):
+            raise RuntimeError("原厂温控信号就绪状态无法确认")
+        guarded = kind == "ours"
+        # get_fan_status sends USR1/USR2; exe/maps alone do not prove that
+        # temp_control has installed its handlers. Never send GET while starting.
+        self.assert_ready(identity, require_guard=guarded)
         actual = adapter._get_mode()
+        self.assert_ready(identity, require_guard=guarded)
+        self.wait_ready(identity, require_guard=guarded, deadline=self.clock() + 0.3)
         self.verify_live()
         after = self.mode()
         if after != before or actual != MODES[before]:
@@ -254,28 +268,72 @@ class SystemBackend:
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True, close_fds=True)
         self.children.append(child)
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            identity = process_identity(child.pid, self.proc)
-            if child.poll() is not None:
-                break
-            if identity and identity["exe"] == str(self.program):
-                if lease is None:
-                    return identity
-                maps = read_bytes(self.proc / str(child.pid) / "maps", 1024 * 1024)
-                paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
-                if os.fsencode(self.guard_path.resolve()) in paths:
-                    return identity
-            time.sleep(0.05)
-        identity = process_identity(child.pid, self.proc)
-        if identity and identity["exe"] == str(self.program):
-            self.stop_process(identity)
-        raise RuntimeError("原厂温控重启或保护模块加载未确认")
+        deadline = self.clock() + 5
+        expected = None
+        try:
+            while self.clock() < deadline:
+                identity = process_identity(child.pid, self.proc)
+                if child.poll() is not None:
+                    break
+                if identity and identity["exe"] == str(self.program):
+                    expected = identity
+                    return self.wait_ready(identity, require_guard=lease is not None, deadline=deadline)
+                self.sleep(0.05)
+        except (OSError, ValueError, RuntimeError):
+            pass
+        if expected is not None and self.alive(expected):
+            self.stop_process(expected)
+        raise RuntimeError("原厂温控信号处理器就绪未确认")
 
     def assert_single(self, identity):
         vendors = self._vendors()
         if vendors != [identity]:
             raise RuntimeError("检测到原厂温控执行者竞争，已释放自定义控制")
+
+    def _ready(self, identity, require_guard):
+        if identity is None or identity.get("exe") != str(self.program) or not self.alive(identity):
+            raise RuntimeError("原厂温控启动身份无法确认")
+        self.assert_single(identity)
+        base = self.proc / str(identity["pid"])
+        raw = read_bytes(base / "status", 65536)
+        fields = [line.split(b":", 1)[1].strip() for line in (raw or b"").splitlines()
+                  if line.startswith(b"SigCgt:")]
+        required = (1 << (signal.SIGUSR1 - 1)) | (1 << (signal.SIGUSR2 - 1))
+        try:
+            caught = (int(fields[0], 16) if len(fields) == 1 and 1 <= len(fields[0]) <= 16
+                      and all(char in b"0123456789abcdefABCDEF" for char in fields[0]) else 0)
+        except ValueError:
+            caught = 0
+        ready = caught & required == required
+        if require_guard:
+            maps = read_bytes(base / "maps", 1024 * 1024)
+            paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
+            ready = ready and os.fsencode(self.guard_path.resolve()) in paths
+        if not self.alive(identity):
+            raise RuntimeError("原厂温控启动身份无法确认")
+        return ready
+
+    def assert_ready(self, identity, *, require_guard=False):
+        """Immediate identity/uniqueness/USR-handler gate before a signaling GET."""
+        if not self._ready(identity, require_guard):
+            raise RuntimeError("原厂温控信号处理器就绪未确认")
+        return identity
+
+    def wait_ready(self, identity, *, require_guard=False, deadline=None, stable_seconds=0.15):
+        """Bounded startup gate, also used by harmless real-/proc Linux fixtures."""
+        deadline = min(self.clock() + 5, deadline) if deadline is not None else self.clock() + 5
+        stable_since = None
+        while self.clock() < deadline:
+            ready = self._ready(identity, require_guard)
+            now = self.clock()
+            if ready:
+                stable_since = now if stable_since is None else stable_since
+                if now - stable_since >= stable_seconds:
+                    return identity
+            elif stable_since is not None:
+                raise RuntimeError("原厂温控信号处理器就绪未确认")
+            self.sleep(min(0.025, max(0, deadline - now)))
+        raise RuntimeError("原厂温控信号处理器就绪未确认")
 
     def _owner_kind(self, identity, lease):
         """Recognize an orphan from this exact lease, not any injected daemon."""
@@ -305,17 +363,17 @@ class SystemBackend:
         if len(vendors) == 1 and (guarded is None or vendors[0] != guarded):
             kind = self._owner_kind(vendors[0], lease)
             if kind == "vendor":
-                return vendors[0]
+                return self.wait_ready(vendors[0])
             if kind == "ours":
                 self.stop_process(vendors[0])
                 vendors = self._vendors()
                 if len(vendors) == 1 and self._owner_kind(vendors[0], lease) == "vendor":
-                    return vendors[0]
+                    return self.wait_ready(vendors[0])
             else:
                 raise RuntimeError("恢复时发现未知温控注入，未启动另一个副本")
         elif len(vendors) == 1 and guarded is not None and vendors[0] == guarded:
             if self._owner_kind(guarded, lease) == "vendor":
-                return guarded
+                return self.wait_ready(guarded)
         if vendors:
             raise RuntimeError("原厂温控存在多个执行者，不能再启动副本")
         return self.spawn(original)
@@ -405,6 +463,9 @@ class FanWatchdog:
         except (OSError, ValueError):
             self.phase = "restoring"  # Recovery is never gated on writable RAM.
         errors = []
+        restored_identity = self.original["identity"] if self.original is not None else None
+        if self.original is None:
+            errors.append("vendor_daemon_unconfirmed")
         competing_policy = reason == "vendor_policy_changed" and self.backend.mode() in ("low", "medium", "high", "auto")
         # Fail high first, before touching a daemon or waiting on an RPC.
         try:
@@ -417,10 +478,11 @@ class FanWatchdog:
         if self.original is not None and (self.descriptor.get("daemon_changed")
                                          or not self.backend.alive(self.original["identity"])):
             try:
-                self.backend.restore_daemon(self.original, self.guarded, lease=self.folder / "lease.bin")
+                restored_identity = self.backend.restore_daemon(self.original, self.guarded, lease=self.folder / "lease.bin")
             except (OSError, ValueError, RuntimeError):
+                restored_identity = None
                 errors.append("vendor_daemon_unconfirmed")
-        if self.original is not None and self.descriptor.get("daemon_changed"):
+        if restored_identity is not None and self.descriptor.get("daemon_changed"):
             try:
                 # Never persist another fan_mode value. An explicit official-app
                 # choice wins; otherwise synchronize the policy we inherited.
@@ -429,6 +491,13 @@ class FanWatchdog:
                     safe_auto="system" in self.channels and not competing_policy)
             except (OSError, ValueError, RuntimeError):
                 errors.append("vendor_policy_unconfirmed")
+        if restored_identity is not None:
+            try:
+                # Do not redact the only recovery descriptor merely because a
+                # spawn or signaling RPC returned before the daemon then died.
+                self.backend.assert_ready(restored_identity)
+            except (OSError, ValueError, RuntimeError):
+                errors.append("vendor_daemon_unconfirmed")
         final_phase = "recovery_failed" if errors else "released"
         try:
             self.status(final_phase,
