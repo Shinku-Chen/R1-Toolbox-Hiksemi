@@ -475,3 +475,5 @@ input[type="color"] { min-height: 56px; height: 56px; width: 82px; }
 .pairing-code { display: flex; flex-direction: column; align-items: center; margin-top: 12px; color: var(--accent); font-size: calc(44px * var(--ui-scale)); line-height: 1.35; letter-spacing: 5px; font-variant-numeric: tabular-nums; }
 .web-address { font-size: calc(20px * var(--ui-scale)); word-break: break-word; overflow-wrap: anywhere; white-space: normal; }
 @media (max-width: 350px) { .panel { padding-left: 14px; padding-right: 14px; } .resource-card { padding: 16px; } .resource-metric { font-size: calc(38px * var(--ui-scale)); } .detail-content, .detail-view .control-card { padding: 18px 16px; } .detail-heading { gap: 10px; } .menu-row { padding: 17px 15px; } }
+
+#independent-fans>h2{margin-bottom:12px}#independent-fan-list{margin-top:16px}.fan-policy-summary small{white-space:pre-line}.fan-reference{font-size:calc(32px * var(--ui-scale));line-height:1.4;color:var(--accent);font-variant-numeric:tabular-nums}.fan-policy-summary{margin-bottom:4px}
