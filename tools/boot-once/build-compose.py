@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the self-contained Compose file; the NAS only needs compose.yaml."""
+"""Compile the image runner and the two equivalent NAS Compose entry points."""
 from pathlib import Path
 import yaml
 
@@ -13,28 +13,18 @@ runner = (root / "runner.sh.in").read_text(encoding="utf-8").replace(
 )
 (root / "runner.sh").write_text(runner, encoding="utf-8")
 
-class Literal(str):
-    pass
-
-class Dumper(yaml.SafeDumper):
-    pass
-
-Dumper.add_representer(
-    Literal, lambda dumper, value: dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|")
-)
-
 project = {
     "services": {
-        "r1-boot-once": {
-            "image": "docker.io/library/debian:bookworm-slim",
-            "container_name": "r1-boot-once",
+        "r1-toolbox": {
+            "image": "${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}",
+            "container_name": "r1-toolbox",
             "restart": "always",
             "privileged": True,
             "pid": "host",
             "ipc": "host",
             "network_mode": "host",
             "environment": {
-                "TASK_CONTAINER": "r1-boot-once",
+                "TASK_CONTAINER": "r1-toolbox",
                 "TASK_REVISION": "1",
                 "NEW_HTML": "",
             },
@@ -45,15 +35,14 @@ project = {
                 "/sys:/host/sys",
                 "/run:/host/run",
             ],
-            "entrypoint": ["/bin/sh", "-c"],
-            # Compose interprets dollars even inside quoted shell heredocs.
-            "command": [Literal(runner.replace("$", "$$"))],
         }
     }
 }
-(root / "compose.yaml").write_text(
-    "# 默认 NEW_HTML 为空：只验证依赖和开机一次/自停机制，不改动小屏。\n"
+compose = (
+    "# R1 Toolbox 镜像部署；首次默认仅诊断，完成后容器自行停止。\n"
     "# 修改任务或 NEW_HTML 后，递增 TASK_REVISION 以便同次开机重新执行。\n"
-    + yaml.dump(project, Dumper=Dumper, allow_unicode=True, sort_keys=False, width=100),
-    encoding="utf-8",
+    "# 可通过 R1_TOOLBOX_IMAGE 指定版本；发布包固定为对应构建的 sha 镜像标签。\n"
+    + yaml.safe_dump(project, allow_unicode=True, sort_keys=False, width=100)
 )
+for path in (root / "compose.yaml", root.parents[1] / "composer.yml"):
+    path.write_text(compose, encoding="utf-8")
