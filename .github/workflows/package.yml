@@ -1,22 +1,17 @@
-name: 检查与打包
+name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/**']
+    branches: [main, 'feat/toolbox-image']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
-    inputs:
-      version:
-        description: Package version
-        required: false
-        default: dev
-        type: string
 
 permissions:
   contents: read
 
 jobs:
-  boot-once:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -30,28 +25,81 @@ jobs:
       - name: Check generated files
         run: |
           python tools/boot-once/build-compose.py
-          git diff --exit-code -- tools/boot-once/compose.yaml tools/boot-once/runner.sh
+          git diff --exit-code -- composer.yml tools/boot-once/compose.yaml tools/boot-once/runner.sh
       - name: Check shell syntax
         run: |
-          for script in tools/boot-once/*.sh tools/boot-once/*.sh.in; do
+          for script in tools/boot-once/*.sh tools/boot-once/*.sh.in docker/*.sh scripts/*.sh; do
             sh -n "$script"
           done
+      - name: Check Python syntax
+        run: python -m compileall -q scripts tools/boot-once tests
       - name: Validate Compose configuration
-        run: docker compose -f tools/boot-once/compose.yaml config --quiet
+        run: |
+          docker compose -f composer.yml config --quiet
+          docker compose -f tools/boot-once/compose.yaml config --quiet
       - name: Run six simulated lifecycle tests
         run: python tools/boot-once/test_runner.py
-      - name: Package and verify ZIP
+      - name: Check image delivery contracts
+        run: python -m unittest discover -s tests -v
+
+  publish-image:
+    needs: checks
+    if: github.event_name != 'pull_request' && github.repository == 'Shinku-Chen/R1-Toolbox'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install packaging dependency
+        run: python -m pip install -r requirements-dev.txt
+      - name: Build, smoke-test, publish, and save linux/amd64 image
         env:
-          PACKAGE_VERSION: ${{ inputs.version || 'dev' }}
-        run: python scripts/package.py --version "$PACKAGE_VERSION"
-      - name: Verify download checksum
-        working-directory: dist
-        run: sha256sum -c SHA256SUMS
+          PUBLISH_IMAGE: '1'
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: sh scripts/build-image.sh
       - uses: actions/upload-artifact@v7
         with:
-          name: r1-boot-once-${{ github.sha }}
+          name: r1-toolbox-linux-amd64-${{ github.sha }}
           path: |
-            dist/*.zip
+            dist/composer.yml
+            dist/r1-toolbox-linux-amd64.tar
+            dist/deployment-manifest.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  pull-request-image:
+    needs: checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install packaging dependency
+        run: python -m pip install -r requirements-dev.txt
+      - name: Build, smoke-test, and save image without registry access
+        env:
+          PUBLISH_IMAGE: '0'
+        run: sh scripts/build-image.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: r1-toolbox-pr-linux-amd64-${{ github.sha }}
+          path: |
+            dist/composer.yml
+            dist/r1-toolbox-linux-amd64.tar
+            dist/deployment-manifest.json
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
