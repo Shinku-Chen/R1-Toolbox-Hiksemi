@@ -9,6 +9,7 @@ import array
 from collections import deque
 import copy
 import datetime
+import hashlib
 import ipaddress
 import json
 import math
@@ -476,13 +477,45 @@ class InsightsCollector:
         valid = [value / 1000 for value in values if value is not None and 0 < value <= 200000]
         return max(valid) if valid else None
 
-    def _smart(self, name):
+    def _disk_identity(self, name, folder, smart_identity=None):
+        """Stable identity; never hash a transient /dev/sdX or hwmon number."""
+        def digest(kind, value):
+            return kind + ':' + hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]
+        for kind, paths in (
+            ('wwn', (folder / 'wwid', folder / 'device/wwid')),
+            ('serial', (folder / 'device/serial', folder / 'serial')),
+        ):
+            for path in paths:
+                value = (_text(path, 512) or '').strip()
+                if value:
+                    return digest(kind, value)
+        if name.startswith('nvme'):
+            controller = re.match(r'nvme\d+', name)[0]
+            serial = (_text(self.sys_root / 'class/nvme' / controller / 'serial', 512) or '').strip()
+            if serial:
+                return digest('serial', serial)
+        if smart_identity:
+            return smart_identity
+        try:
+            relative = folder.resolve().relative_to(self.sys_root.resolve())
+            parts = [part for part in relative.parts if part != 'block' and part != 'hwmon'
+                     and not re.fullmatch(r'(?:sd[a-z]+|nvme\d+(?:n\d+)?|mmcblk\d+|vd[a-z]+|xvd[a-z]+|hwmon\d+)', part)]
+            if parts and parts[0] == 'devices':
+                return digest('physical', '/'.join(parts))
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return None
+
+    def _smart(self, name, identity=None):
         now = self.clock()
         cached = self._smart_cache.get(name)
-        if cached and now - cached[0] < 30:
+        if cached and 0 <= now - cached[0] < 30 and len(cached) == 3 and cached[2] == identity:
             return copy.deepcopy(cached[1])
         result = {"smart_available": False, "standby": None, "temp_c": None,
-                  "health": {"passed": None, "reason": None}}
+                  "health": {"passed": None, "reason": None},
+                  "smart_temperature_c": None, "smart_sampled_monotonic": None,
+                  "smart_status": "unavailable", "smart_identity": None,
+                  "temperature_critical_c": None}
         command, error = self._run("smartctl", ["-n", "standby", "-j", "-a", "/dev/" + name])
         if error:
             result["health"]["reason"] = error
@@ -495,9 +528,11 @@ class InsightsCollector:
                 messages = data.get("smartctl", {}).get("messages", [])
                 notes = " ".join(str(entry.get("string", "")) for entry in messages if isinstance(entry, dict))
                 power = str(data.get("power_mode", {}).get("string", ""))
-                standby = bool(re.search(r"\b(?:standby|sleep)\b", notes + " " + power, re.I))
+                standby = bool(re.fullmatch(r'(?:standby|sleep)(?:\s+mode)?', power.strip(), re.I)
+                               or re.search(r'\b(?:device|disk)\s+is\s+in\s+(?:standby|sleep)\s+mode\b', notes, re.I))
                 result["standby"] = True if standby else None
                 if standby:
+                    result["smart_status"] = "standby"
                     result["health"]["reason"] = "磁盘处于休眠，已跳过 SMART 读取"
                 else:
                     smart = data.get("smart_status", {})
@@ -515,9 +550,29 @@ class InsightsCollector:
                         result["temp_c"] = _finite(temperature.get("current"), maximum=200)
                     if result["temp_c"] is None and isinstance(nvme, dict):
                         result["temp_c"] = _finite(nvme.get("temperature"), maximum=200)
+                    # The control catalog uses bounded physical readings and
+                    # this probe's time, independently of the legacy UI field.
+                    if code & 7 == 0:
+                        candidate = temperature.get('current') if isinstance(temperature, dict) else None
+                        measured = _finite(candidate, minimum=-40, maximum=150)
+                        if measured is None and isinstance(nvme, dict):
+                            measured = _finite(nvme.get('temperature'), minimum=-40, maximum=150)
+                        result['smart_temperature_c'] = measured
+                        if measured is not None:
+                            result['smart_status'] = 'ok'
+                    critical = temperature.get('op_limit_max') if isinstance(temperature, dict) else None
+                    result['temperature_critical_c'] = _finite(critical, minimum=40, maximum=150)
+                serial = data.get('serial_number')
+                wwn = data.get('wwn')
+                if isinstance(wwn, dict) and all(type(wwn.get(key)) is int for key in ('naa', 'oui', 'id')):
+                    raw = json.dumps({key: wwn[key] for key in ('naa', 'oui', 'id')}, sort_keys=True)
+                    result['smart_identity'] = 'wwn:' + hashlib.sha256(raw.encode()).hexdigest()[:24]
+                elif isinstance(serial, str) and 0 < len(serial.strip()) <= 512:
+                    result['smart_identity'] = 'serial:' + hashlib.sha256(serial.strip().encode()).hexdigest()[:24]
             except (ValueError, TypeError, AttributeError):
                 result["health"]["reason"] = "SMART 返回了无效数据"
-        self._smart_cache[name] = (now, copy.deepcopy(result))
+        result['smart_sampled_monotonic'] = self.clock()
+        self._smart_cache[name] = (result['smart_sampled_monotonic'], copy.deepcopy(result), identity)
         return result
 
     def _disks(self):
@@ -533,14 +588,20 @@ class InsightsCollector:
             rotational = _integer(folder / "queue/rotational")
             media = "NVMe SSD" if name.startswith("nvme") else "eMMC" if name.startswith("mmcblk") else "HDD" if rotational == 1 else "SSD" if rotational == 0 else None
             temperature = self._disk_temperature(name, folder)
-            smart = self._smart(name) if not name.startswith("mmcblk") else {
+            identity = self._disk_identity(name, folder)
+            smart = self._smart(name, identity) if not name.startswith("mmcblk") else {
                 "smart_available": False, "standby": None, "temp_c": None,
                 "health": {"passed": None, "reason": "eMMC 不提供通用 SMART 状态"}}
             entry = {"id": name, "device": "/dev/" + name,
                      "model": (_text(folder / "device/model", 512) or "").strip() or None,
                      "size_bytes": sectors * 512 if sectors is not None else None, "type": media,
                      "temp_c": temperature if temperature is not None else smart["temp_c"],
-                     "health": smart["health"], "smart_available": smart["smart_available"], "standby": smart["standby"]}
+                     "health": smart["health"], "smart_available": smart["smart_available"], "standby": smart["standby"],
+                     "stable_identity": self._disk_identity(name, folder, smart.get('smart_identity')),
+                     "smart_temperature_c": smart.get('smart_temperature_c'),
+                     "smart_sampled_monotonic": smart.get('smart_sampled_monotonic'),
+                     "smart_status": smart.get('smart_status', 'unavailable'),
+                     "temperature_critical_c": smart.get('temperature_critical_c')}
             rows.append(entry)
         self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
         return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows}

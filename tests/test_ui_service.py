@@ -56,6 +56,10 @@ class ServiceTests(unittest.TestCase):
         self.addCleanup(self.address.stop)
         self.addCleanup(self.hostname.stop)
         self.real_web_factory = service.create_web_config
+        fan_factory = mock.patch.object(service, "create_fan_policy", return_value=types.SimpleNamespace(
+            start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {"active": False, "busy": False}))
+        fan_factory.start()
+        self.addCleanup(fan_factory.stop)
         web_factory = mock.patch.object(service, "create_web_config", return_value=None)
         self.web_factory = web_factory.start()
         self.addCleanup(web_factory.stop)

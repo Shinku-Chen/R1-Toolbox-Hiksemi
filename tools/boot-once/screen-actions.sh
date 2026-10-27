@@ -89,7 +89,8 @@ def read_bundle(tar_path, expected_sha):
                 continue
             require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py',
                              'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
-                             'runtime/web_config.py', 'frontend/web/index.html',
+                             'runtime/web_config.py', 'runtime/fan_policy.py', 'runtime/fan_native.py',
+                             'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'runtime/fan_guard.so', 'frontend/web/index.html',
                              'frontend/web/config.css', 'frontend/web/config.js')
                     or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
             require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
@@ -121,7 +122,8 @@ def read_bundle(tar_path, expected_sha):
                 and hashlib.sha256(files[name]).hexdigest() == digest, 'manifest 文件校验失败：' + name)
     require(all(files.get(name) for name in ('frontend/index.html', 'runtime/ui_service.py',
                                            'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
-                                           'runtime/web_config.py', 'frontend/web/index.html',
+                                           'runtime/web_config.py', 'runtime/fan_policy.py', 'runtime/fan_native.py',
+                                           'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'frontend/web/index.html',
                                            'frontend/web/config.css', 'frontend/web/config.js')),
             '内置界面缺少页面、采集或控制模块')
     return manifest, files

@@ -15,7 +15,7 @@ MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 
-def build_bundle(root=ROOT, output=None):
+def build_bundle(root=ROOT, output=None, native_guard=None):
     root = Path(root)
     output = Path(output) if output else root / 'build'
     frontend = root / 'ui'
@@ -23,7 +23,16 @@ def build_bundle(root=ROOT, output=None):
         raise ValueError('缺少 ui 目录，或该目录是符号链接')
     sources = {'frontend/index.html': frontend / 'index.html',
                **{'runtime/' + name: root / 'runtime' / name
-                  for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'device_info.py', 'histor.py', 'web_config.py')}}
+                  for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'device_info.py', 'histor.py', 'web_config.py',
+                               'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py')}}
+    if native_guard is not None:
+        guard = Path(native_guard)
+        if guard.is_symlink() or not guard.is_file() or guard.stat().st_size > MAX_FILE_BYTES:
+            raise ValueError('风扇适配层不是有界普通文件')
+        header = guard.read_bytes()[:20]
+        if len(header) < 20 or header[:7] != b'\x7fELF\x02\x01\x01' or header[16:20] != b'\x03\x00\x3e\x00':
+            raise ValueError('风扇适配层必须是 Linux x86-64 ELF 共享库')
+        sources['runtime/fan_guard.so'] = guard
     web = frontend / 'web'
     if web.is_symlink():
         raise ValueError('网页配置目录不允许符号链接')
@@ -75,9 +84,10 @@ def build_bundle(root=ROOT, output=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=ROOT / 'build')
+    parser.add_argument('--native-guard', type=Path, help='已编译的 Linux amd64 风扇适配层；生产镜像由 Bookworm 阶段提供')
     args = parser.parse_args()
     try:
-        digest = build_bundle(output=args.output)
+        digest = build_bundle(output=args.output, native_guard=args.native_guard)
     except (OSError, ValueError, tarfile.TarError) as error:
         parser.exit(1, 'UI 打包失败：' + str(error) + '\n')
     print('Built UI bundle sha256:' + digest)
