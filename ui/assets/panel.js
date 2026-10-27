@@ -22,8 +22,13 @@
   });
 
   let currentPage = 0;
+  let currentDetail = null;
+  let navigationStack = [];
+  let lastStatus = null;
+  let fanDetailSignature = null;
   let requestRunning = false;
   let pointerStart = null;
+  let suppressGestureClick = false;
   let diskSignature = null;
   let toolbox = null;
   let insights = null;
@@ -32,6 +37,7 @@
   let settingsDirty = false;
   let brightnessDirty = false;
   let rgbDirty = false;
+  let rgbBrightnessDirty = false;
   let rgbBusesSignature = null;
   let fanSignature = null;
   let appsSignature = null;
@@ -98,6 +104,7 @@
 
   function meter(id, value) {
     const bar = document.getElementById(id);
+    if (!bar) return;
     const result = percent(value);
     bar.style.width = `${result === null ? 0 : result}%`;
     bar.parentElement.setAttribute("aria-label", `${bar.parentElement.getAttribute("aria-label").split("：")[0]}：${result === null ? "数据暂不可用" : `${Math.round(result)}%`}`);
@@ -131,36 +138,18 @@
     const signature = JSON.stringify([connected, disks]);
     if (signature === diskSignature) return;
     diskSignature = signature;
-    const list = document.getElementById("disk-list");
-    const previousScroll = list.scrollTop;
-    list.replaceChildren();
-    if (!disks.length) {
-      const empty = element("div", "empty-state");
-      empty.append(element("p", "", connected ? "暂未发现数据盘" : "数据暂不可用"));
-      empty.append(element("span", "", connected ? "这里显示宿主机的数据盘挂载" : "连接后显示真实挂载信息"));
-      list.append(empty);
-      return;
-    }
+    clear($("disk-list"));
+    if (!disks.length) { $("disk-list").append(element("p", "capability-note", connected ? "暂未发现挂载的数据盘" : "等待连接本机服务")); return; }
     disks.forEach((disk, index) => {
-      const card = element("article", "card disk-card");
-      const heading = element("div", "disk-card-heading");
       const parts = disk.mount.split("/").filter(Boolean);
-      heading.append(element("h3", "disk-name", parts[parts.length - 1] || `数据盘 ${index + 1}`));
-      heading.append(element("span", "disk-percent", `${percentage(disk.usage_percent)}%`));
-      const track = element("div", "meter meter-neutral");
-      const fill = element("span", "");
-      const usedPercent = percent(disk.usage_percent);
-      fill.style.width = `${usedPercent === null ? 0 : usedPercent}%`;
-      track.append(fill);
-      card.append(heading, track);
-      card.append(element("div", "disk-capacity", `${bytes(disk.used_bytes)} / ${bytes(disk.total_bytes)}`));
-      card.append(element("div", "disk-mount", disk.mount));
-      list.append(card);
+      const name = parts[parts.length - 1] || "存储空间 " + (index + 1);
+      $("disk-list").append(menuButton(name, bytes(disk.used_bytes) + " / " + bytes(disk.total_bytes) + " · " + percentage(disk.usage_percent) + "%", () => openView("volume-detail", { mount: disk.mount }, name)));
     });
-    list.scrollTop = previousScroll;
+    renderFocusedDetail();
   }
 
   function render(data) {
+    lastStatus = data;
     const connected = data !== null;
     const cpu = data && data.cpu && typeof data.cpu === "object" ? data.cpu : {};
     const memory = data && data.memory && typeof data.memory === "object" ? data.memory : {};
@@ -218,7 +207,7 @@
   }
   async function request(path, payload) {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), payload ? 10000 : REQUEST_TIMEOUT);
+    const timeout = window.setTimeout(() => controller.abort(), payload ? 18000 : REQUEST_TIMEOUT);
     try {
       const options = { method: payload ? "POST" : "GET", cache: "no-store", credentials: "omit", signal: controller.signal };
       if (payload) {
@@ -232,29 +221,192 @@
       return data;
     } finally { window.clearTimeout(timeout); }
   }
+  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", "rgb-probe": "验证灯光接口", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置" };
+  function activeScroller() { return currentDetail ? $("detail-body") : $("page-" + pages[currentPage]); }
+  function drawNavigation() {
+    pages.forEach((name, index) => { $("page-" + name).hidden = Boolean(currentDetail) || index !== currentPage; });
+    $("subpage").hidden = !currentDetail;
+    document.querySelector(".swipe-hint").textContent = currentDetail ? "右滑返回上一级" : "左右滑动切换";
+    document.querySelectorAll("[data-detail-view]").forEach((view) => { view.hidden = !currentDetail || view.dataset.detailView !== currentDetail.name; });
+    if (currentDetail) {
+      const parent = navigationStack.length ? navigationStack[navigationStack.length - 1] : null;
+      text("detail-title", currentDetail.title || detailTitles[currentDetail.name]);
+      text("detail-breadcrumb", parent && parent.detail ? parent.detail.title || detailTitles[parent.detail.name] : pageLabels[pages[currentPage]]);
+      $("detail-depth").textContent = navigationStack.length > 1 ? "详情" : "";
+      document.querySelectorAll("[data-settings-section]").forEach((section) => { section.hidden = currentDetail.name !== "settings-editor" || section.dataset.settingsSection !== currentDetail.params.section; });
+    }
+  }
+  function openView(name, params = {}, title, replace = false) {
+    if (!document.querySelector('[data-detail-view="' + name + '"]')) return;
+    if (!replace) navigationStack.push({ detail: currentDetail, scroll: activeScroller().scrollTop });
+    currentDetail = { name, params, title: title || detailTitles[name] };
+    drawNavigation(); renderFocusedDetail(); $("detail-body").scrollTop = 0;
+    lastCarousel = lastInteraction = Date.now();
+  }
+  function backView() {
+    if (!currentDetail) return;
+    const previous = navigationStack.pop();
+    currentDetail = previous ? previous.detail : null;
+    drawNavigation(); renderFocusedDetail();
+    activeScroller().scrollTop = previous ? previous.scroll : 0;
+    lastCarousel = lastInteraction = Date.now();
+  }
+  $("detail-back").addEventListener("click", backView);
+  document.addEventListener("click", (event) => {
+    const view = event.target.closest("[data-open-view]");
+    const page = event.target.closest("[data-open-page]");
+    if (view) openView(view.dataset.openView, view.dataset.section ? { section: view.dataset.section } : {});
+    else if (page) showPage(page.dataset.openPage);
+  });
+  function menuButton(title, description, onClick, className = "") {
+    const button = element("button", "menu-row " + className);
+    button.type = "button";
+    const labels = element("span", "");
+    labels.append(element("strong", "", title), element("small", "", description));
+    button.append(labels, element("span", "menu-chevron", "›"));
+    button.addEventListener("click", onClick);
+    return button;
+  }
+  function familyFanControl() {
+    const official = toolbox && toolbox.fans && toolbox.fans.official;
+    return Boolean(cap("fans").available === true && list(toolbox && toolbox.fans && toolbox.fans.channels).length) || Boolean(official && official.control_available === true);
+  }
+  function showControlModules() {
+    const official = toolbox && toolbox.fans && toolbox.fans.official;
+    const available = { screen: cap("screen").available === true, fans: familyFanControl(), power: cap("power").available === true,
+      rgb: cap("rgb").available === true || Boolean(toolbox && toolbox.rgb && list(toolbox.rgb.availableBuses).length) };
+    let count = 0;
+    document.querySelectorAll("[data-control-entry]").forEach((button) => {
+      const name = button.dataset.controlEntry;
+      button.hidden = !toolboxOnline || !available[name];
+      if (!button.hidden) count++;
+      if (name === "rgb") {
+        button.dataset.openView = cap("rgb").available ? "rgb" : "rgb-probe";
+        button.querySelector("strong").textContent = cap("rgb").available ? "灯光" : "验证灯光接口";
+        button.querySelector("small").textContent = cap("rgb").available ? "颜色与灯效" : "验证通过后开放调色";
+      }
+      if (name === "fans" && official && official.control_available) button.querySelector("small").textContent = "原厂系统风扇策略" + (list(toolbox.fans.channels).length ? "与可用通道" : "");
+    });
+    $("control-empty").hidden = count > 0;
+    if (currentDetail && ["screen", "power", "rgb", "rgb-probe", "fans", "fan-detail", "official-fan"].includes(currentDetail.name)) {
+      const type = currentDetail.name.startsWith("rgb") ? "rgb" : currentDetail.name.includes("fan") ? "fans" : currentDetail.name;
+      if (!toolboxOnline || !available[type]) { currentDetail = null; navigationStack = []; drawNavigation(); }
+    }
+  }
+  function fillDetails(id, rows, fallback = "暂无可用信息") {
+    clear($(id));
+    const present = rows.filter((row) => row[1] !== undefined && row[1] !== null && row[1] !== "");
+    if (!present.length) { $(id).append(element("p", "capability-note", fallback)); return; }
+    present.forEach(([label, value, health]) => $(id).append(detailRow(label, String(value), health)));
+  }
+  function readable(value) {
+    if (typeof value === "string" || typeof value === "number") return String(value);
+    if (Array.isArray(value)) return value.map(readable).filter(Boolean).join(" · ");
+    return value && typeof value === "object" ? Object.entries(value).map(([key, item]) => key + ": " + readable(item)).join(" · ") : null;
+  }
+  function finite(value) { return typeof value === "number" && Number.isFinite(value); }
+  function renderFocusedDetail() {
+    if (!currentDetail) return;
+    const name = currentDetail.name, params = currentDetail.params;
+    const device = insights && insights.device || {}, system = insights && insights.system || {};
+    if (name === "fan-detail") renderFanDetail(list(toolbox && toolbox.fans && toolbox.fans.channels).find((channel) => channel.id === params.id));
+    if (name === "official-fan") renderOfficialFan();
+    if (name === "app-detail") renderAppDetail(params.kind, params.id);
+    if (name === "volume-detail") {
+      const volume = list(lastStatus && lastStatus.disks).find((item) => item.mount === params.mount);
+      fillDetails("volume-detail", volume ? [["挂载路径", volume.mount], ["已用空间", bytes(volume.used_bytes)], ["总容量", bytes(volume.total_bytes)], ["使用率", percentage(volume.usage_percent) + "%"]] : [], "此存储空间当前不可用");
+    }
+    if (name === "disk-detail") {
+      const disk = list(insights && insights.disks && insights.disks.items).find((item) => (item.id || item.device) === params.id);
+      const raw = list(device.storage && device.storage.devices).find((item) => disk && (item.name === disk.id || "/dev/" + item.name === disk.device));
+      const health = disk && disk.health || {};
+      fillDetails("disk-detail", disk ? [["型号", disk.model], ["设备", disk.device || disk.id], ["容量", bytes(disk.size_bytes)], ["类型", disk.type], ["温度", finite(disk.temp_c) ? disk.temp_c + " °C" : "暂无读数"], ["状态", disk.standby ? "待机 · 未主动唤醒" : "可读取"], ["SMART", health.passed === true ? "检测正常" : health.passed === false ? "检测异常" : health.reason || "暂不可用", health.passed === false ? "unhealthy" : ""], ["序列号", raw && raw.serial], ["厂商", raw && raw.vendor], ["介质状态", raw && raw.state]] : [], "此磁盘当前不可用");
+    }
+    if (name === "interface-detail") {
+      const network = list(insights && insights.interfaces).find((item) => item.name === params.id);
+      const raw = list(device.network).find((item) => item.name === params.id) || {};
+      const rx = speed(network && network.rx_bytes_per_sec), tx = speed(network && network.tx_bytes_per_sec);
+      fillDetails("interface-detail", network ? [["接口", network.name], ["状态", network.operstate], ["IPv4", list(network.ipv4).join(" · ") || "未配置"], ["IPv6", list(raw.ipv6).join(" · ")], ["MAC", network.mac], ["接收", rx.value + " " + rx.unit], ["发送", tx.value + " " + tx.unit], ["累计接收", bytes(network.rx_bytes)], ["累计发送", bytes(network.tx_bytes)], ["连接速率", finite(raw.speed_mbps) && raw.speed_mbps > 0 ? raw.speed_mbps + " Mbps" : null], ["双工", raw.duplex], ["MTU", raw.mtu]] : [], "此网络接口当前不可用");
+    }
+    if (name === "memory") {
+      const memory = system.memory || lastStatus && lastStatus.memory || {};
+      fillDetails("memory-detail", [["内存使用率", percentage(memory.usage_percent) + "%"], ["已用", bytes(memory.used_bytes)], ["可用", bytes(memory.available_bytes)], ["总量", bytes(memory.total_bytes)], ["交换空间", number(memory.swap_total_bytes) === 0 ? "未启用" : bytes(memory.swap_used_bytes) + " / " + bytes(memory.swap_total_bytes)]]);
+    }
+    if (name === "identity") {
+      const identity = device.identity || {}, cpu = device.cpu || {};
+      const official = toolbox && toolbox.fans && toolbox.fans.official;
+      const modes = { low: "低速", medium: "中速", high: "高速", auto: "自动" };
+      fillDetails("device-identity-extra", [["持续运行", lastStatus ? uptime(lastStatus.uptime_seconds) : null], ["操作系统", readable(identity.os)], ["固件", readable(identity.firmware)], ["内核", readable(identity.kernel)], ["架构", cpu.architecture], ["物理核心", cpu.physical_cores], ["处理器插槽", cpu.sockets], ["DMI", readable(identity.dmi)], ["PCI 设备", readable(identity.pci)], ["配置系统风扇策略", official && modes[official.mode]], ["当前原厂档位", official && finite(official.grade) ? official.grade + "（档位，不是转速）" : null], ["原厂风扇接口", official && official.reason], ["风扇驱动 Build-ID", official && official.driver_build_id], ["硬件能力说明", official && official.hardware_reason]]);
+    }
+    if (name === "cpu") {
+      const cpu = device.cpu || {};
+      const frequency = list(cpu.frequencies_mhz).filter((item) => finite(item.current)).map((item) => "CPU " + item.id + " · " + Math.round(item.current) + " MHz").join(" / ");
+      fillDetails("cpu-hardware-detail", [["型号", cpu.model || system.cpu_model], ["核心", (cpu.physical_cores || "--") + " 物理 / " + (cpu.logical_cores || system.cpu_logical_cores || "--") + " 逻辑"], ["架构", cpu.architecture], ["报告频率", frequency]], "");
+    }
+    if (name === "thermal") fillDetails("thermal-detail", list(device.thermal).filter((item) => finite(item.celsius)).map((item) => [item.driver + " · " + (item.label || item.channel || item.id), item.celsius + " °C" + (finite(item.critical_celsius) ? " · 临界 " + item.critical_celsius + " °C" : "")]), "暂无可读取的温度传感器");
+    if (name === "fan-sensors") {
+      const rows = list(device.fans).filter((item) => finite(item.rpm)).map((item) => [item.driver + " · " + (item.label || item.channel || item.id), item.rpm + " RPM" + (item.role_verified && item.physical_role ? " · " + item.physical_role : " · 未确认物理位置")]);
+      const official = toolbox && toolbox.fans && toolbox.fans.official;
+      if (official && finite(official.cpu_rpm)) rows.push(["CPU 风扇 · 原厂接口", official.cpu_rpm + " RPM"]);
+      if (official && finite(official.system_rpm)) rows.push(["系统风扇 · 原厂接口", official.system_rpm + " RPM"]);
+      fillDetails("fan-sensor-detail", rows, "当前接口未提供转速读数");
+    }
+    if (name === "raid") fillDetails("raid-detail", list(device.storage && device.storage.raid).map((item) => [item.name || item.device || "阵列", readable(item)]), "宿主未报告软件阵列");
+    if (name === "capabilities") {
+      const labels = { screen: "屏幕控制", fans: "风扇控制", rgb: "灯光控制", power: "电源控制" };
+      const rows = Object.entries(toolbox && toolbox.capabilities || {}).map(([key, value]) => [labels[key] || key, value.available ? "可用" : value.reason || "当前不可用"]);
+      const official = toolbox && toolbox.fans && toolbox.fans.official;
+      if (official && official.policy_only) rows.push(["原厂系统风扇策略接口", official.reason || "策略可读取；硬件调速尚未验证，不开放控制"]);
+      Object.entries(device.capabilities || {}).forEach(([key, value]) => rows.push([key, typeof value === "object" ? value.reason || (value.available ? "可用" : "当前不可用") : readable(value)]));
+      fillDetails("capabilities-detail", rows, "服务未连接，无法读取设备能力");
+    }
+  }
+  function updateInformationModules() {
+    const device = insights && insights.device || {};
+    const gpu = insights && insights.gpu;
+    $("thermal-entry").hidden = !list(device.thermal).some((item) => finite(item.celsius));
+    const official = toolbox && toolbox.fans && toolbox.fans.official;
+    $("fan-sensor-entry").hidden = !list(device.fans).some((item) => finite(item.rpm)) && !(official && (finite(official.cpu_rpm) || finite(official.system_rpm)));
+    $("gpu-entry").hidden = !(gpu && gpu.available && list(gpu.devices).length);
+    $("process-entry").hidden = !list(insights && insights.processes).length;
+    $("ports-entry").hidden = !list(insights && insights.ports).length;
+    $("raid-entry").hidden = !list(device.storage && device.storage.raid).length;
+    $("physical-disks-entry").hidden = !(insights && insights.disks && insights.disks.available);
+    $("interfaces-entry").hidden = !list(insights && insights.interfaces).length;
+    const system = insights && insights.system || {};
+    text("system-summary", system.model ? system.model + (number(system.cpu_logical_cores) !== null ? " · " + system.cpu_logical_cores + " 核" : "") : "设备报告的真实信息与采样");
+    renderFocusedDetail();
+  }
+
   function setAllowed(id, allowed) { $(id).dataset.allowed = String(Boolean(allowed)); }
   function syncControls() {
     const writable = canWrite() && !actionBusy;
     const screenAvailable = cap("screen").available === true;
-    const rgbAvailable = cap("rgb").available === true || Boolean(toolbox && toolbox.rgb && list(toolbox.rgb.availableBuses).length);
+    const rgbAvailable = cap("rgb").available === true;
+    const rgbProbeAvailable = Boolean(toolbox && toolbox.rgb && list(toolbox.rgb.availableBuses).length);
     const powerAvailable = cap("power").available === true;
     const pending = Boolean(toolbox && toolbox.power && toolbox.power.pending);
     const executing = Boolean(toolbox && toolbox.power && toolbox.power.executing);
     setAllowed("brightness-save", screenAvailable);
     setAllowed("screen-sleep", screenAvailable && !pending);
     setAllowed("rgb-save", rgbAvailable);
+    setAllowed("rgb-probe", rgbProbeAvailable);
     setAllowed("power-reboot", powerAvailable && !pending && !executing);
     setAllowed("power-off", powerAvailable && !pending && !executing);
     document.querySelectorAll(".requires-write").forEach((node) => {
       node.disabled = !writable || node.dataset.allowed === "false";
     });
     $("brightness").disabled = !writable || !screenAvailable;
-    $("rgb-color").disabled = $("rgb-mode").disabled = $("rgb-bus").disabled = !writable || !rgbAvailable;
+    $("rgb-color").disabled = $("rgb-mode").disabled = $("rgb-brightness").disabled = !writable || !rgbAvailable;
+    $("rgb-bus").disabled = !writable || !rgbProbeAvailable;
     document.querySelectorAll("#settings-form input, #settings-form select").forEach((node) => { node.disabled = !writable; });
     document.querySelectorAll(".fan-input").forEach((node) => { node.disabled = !writable || !cap("fans").available; });
-    $("power-cancel").disabled = !writable || !pending || executing;
+    $("power-cancel").disabled = $("global-power-cancel").disabled = !writable || !pending || executing;
+    showControlModules();
     const notice = !controlToken ? "只读预览 · 控制仅限本机小屏授权会话" : !toolboxOnline ? "服务未连接 · 所有设备操作已禁用" : actionBusy ? "正在执行操作，请稍候" : "本机授权会话 · 所有高影响操作均需确认";
     text("control-access", notice);
+    $("control-access").hidden = canWrite();
+    $("action-status").hidden = !actionBusy;
     text("settings-access", !controlToken ? "只读预览 · 请在 NAS 小屏修改设置" : !toolboxOnline ? "服务未连接 · 暂时无法保存设置" : "设置会保存并立即生效");
   }
   async function action(name, payload = {}, successMessage = "操作已完成", options = {}) {
@@ -310,6 +462,7 @@
     // Settings remains reachable even if every business page is hidden.
     document.querySelectorAll("[data-page]").forEach((button) => { button.hidden = !enabledPages.includes(button.dataset.page) && button.dataset.page !== "settings"; });
     if (!enabledPages.includes(pages[currentPage]) && pages[currentPage] !== "settings") showPage(enabledPages[0]);
+    text("settings-summary", "当前主题：" + ({dark:"深空",light:"晨光",ink:"水墨",jade:"青玉"}[settings.theme] || "深空") + " · 字号 " + (scale || 100) + "%");
     if (settingsDirty) return;
     $("setting-theme").value = themes.includes(settings.theme) ? settings.theme : "dark";
     $("setting-font").value = scale !== null ? scale : 100;
@@ -358,75 +511,117 @@
   });
 
   function renderFans(data) {
-    const channels = list(data && data.channels);
-    const signature = JSON.stringify([cap("fans"), data && data.last_error, channels.map((item) => [item.id, item.driver, item.owned, item.mode])]);
-    if (signature === fanSignature) {
-      channels.forEach((channel) => {
-        const value = document.querySelector('[data-fan-duty="' + channel.id + '"]');
-        if (value) value.textContent = percentage(channel.duty_percent) + "%";
-      });
-      return;
+    const channels = list(data && data.channels), official = data && data.official;
+    const signature = JSON.stringify([cap("fans"), data && data.last_error, official, channels.map((item) => [item.id, item.driver, item.owned, item.mode, item.duty_percent])]);
+    if (signature !== fanSignature) {
+      fanSignature = signature; clear($("fan-list"));
+      if (data && data.last_error) $("fan-list").append(element("p", "capability-note fan-error", data.last_error));
+      if (official && official.control_available) {
+        const readings = [];
+        if (finite(official.cpu_rpm)) readings.push("CPU " + official.cpu_rpm + " RPM");
+        if (finite(official.system_rpm)) readings.push("系统 " + official.system_rpm + " RPM");
+        $("fan-list").append(menuButton("原厂系统风扇策略", readings.length ? readings.join(" · ") : "策略可设 · 转速读数不可用", () => openView("official-fan")));
+      }
+      channels.forEach((channel) => $("fan-list").append(menuButton(channel.label || channel.driver + " · " + channel.id, percentage(channel.duty_percent) + "% PWM · " + (channel.owned ? "Toolbox 接管" : "原控制模式"), () => openView("fan-detail", { id: channel.id }, channel.label || channel.id))));
+      if (!channels.length && !(official && official.control_available)) $("fan-list").append(element("p", "capability-note", "此设备当前没有可控制的风扇接口"));
     }
-    fanSignature = signature;
-    clear($("fan-controls"));
-    if (data && data.last_error) $("fan-controls").append(element("p", "capability-note fan-error", data.last_error));
-    if (!cap("fans").available || !channels.length) {
-      $("fan-controls").append(element("p", "capability-note", cap("fans").reason || "宿主未提供可控 PWM 通道；不会模拟风扇控制"));
-      return;
-    }
-    channels.forEach((channel) => {
-      const card = element("div", "fan-channel");
-      const heading = element("div", "fan-heading");
-      const duty = element("span", "fan-rpm", percentage(channel.duty_percent) + "%"); duty.dataset.fanDuty = channel.id;
-      heading.append(element("strong", "", channel.driver || channel.id), duty);
-      const rpm = channel.rpm_verified && number(channel.rpm) !== null ? " · " + channel.rpm + " RPM" : " · 转速传感器未确认";
-      const note = element("p", "capability-note", channel.id + (channel.owned ? " · 已由 Toolbox 接管" : " · 尚未接管") + rpm);
-      if (channel.rpm_reason) note.append(document.createTextNode(" · " + channel.rpm_reason));
-      const consent = element("label", "check-row");
-      const takeover = document.createElement("input");
-      takeover.type = "checkbox";
-      takeover.className = "fan-input";
-      takeover.checked = channel.owned === true;
-      consent.append(takeover, element("span", "", "允许 Toolbox 临时接管此风扇"));
-      const output = element("output", "", (percent(channel.duty_percent) === null ? 60 : Math.max(50, Math.round(channel.duty_percent))) + "%");
-      const label = element("label", "control-label", "自定义 PWM 占空比");
-      label.append(output);
-      const slider = document.createElement("input");
-      slider.type = "range"; slider.min = "50"; slider.max = "100"; slider.step = "5";
-      slider.value = percent(channel.duty_percent) === null ? "60" : String(Math.max(50, Math.round(channel.duty_percent)));
-      slider.className = "touch-range fan-input";
-      slider.addEventListener("input", () => { output.textContent = slider.value + "%"; });
-      const buttons = element("div", "item-actions");
-      [["低速", "low"], ["均衡", "medium"], ["高速", "high"], ["应用自定义", "manual"], ["自动温控", "auto"], ["恢复原控制", "restore"]].forEach(([title, mode]) => {
-        const button = element("button", "button button-secondary requires-write", title);
-        button.type = "button";
-        button.dataset.allowed = String(mode !== "restore" || channel.owned === true);
-        button.addEventListener("click", async () => {
-          if (!takeover.checked && mode !== "restore") { toast("请先勾选允许接管风扇", true); return; }
-          const message = mode === "restore" ? "将恢复 " + channel.id + " 接管前的控制模式和 PWM 设置。" : mode === "auto" ? "Toolbox 将按 CPU 温度调整此通道；温度不可读时使用满速。确认允许接管？" : "将调整 " + channel.id + "。确认允许 Toolbox 接管该通道？";
-          if (!(await confirmOperation(title, message, "确认调整"))) return;
-          if (mode === "restore") await action("fan.restore", { channel: channel.id }, "已请求恢复原风扇控制");
-          else await action("fan.set", { channel: channel.id, mode, value: Number(slider.value), takeover: true }, "风扇控制已提交");
-        });
-        buttons.append(button);
-      });
-      card.append(heading, note, consent, label, slider, buttons);
-      $("fan-controls").append(card);
-    });
+    if (currentDetail && currentDetail.name === "fan-detail") renderFanDetail(channels.find((channel) => channel.id === currentDetail.params.id));
+    if (currentDetail && currentDetail.name === "official-fan") renderOfficialFan();
   }
+  function renderOfficialFan() {
+    const official = toolbox && toolbox.fans && toolbox.fans.official;
+    const modes = { low: "低速", medium: "中速", high: "高速", auto: "自动" };
+    fillDetails("official-fan-readings", official ? [["CPU 风扇", finite(official.cpu_rpm) ? official.cpu_rpm + " RPM" : null], ["系统风扇", finite(official.system_rpm) ? official.system_rpm + " RPM" : null], ["当前系统风扇策略", modes[official.mode] || "未读取到策略"]] : [], "接口当前不可用");
+    text("official-fan-reason", official && !finite(official.cpu_rpm) && !finite(official.system_rpm) ? "系统风扇策略可设，转速读数不可用" : official && official.reason || "该策略会保存到海康配置");
+    clear($("official-fan-modes"));
+    if (!official || !official.control_available) return;
+    Object.entries(modes).forEach(([mode, label]) => {
+      const button = element("button", "button button-secondary requires-write" + (official.mode === mode ? " is-selected" : ""), label);
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        if (!(await confirmOperation("切换至" + label, "将修改原厂系统风扇策略，并保存到海康配置。\nCPU 风扇继续由原厂温控管理；物理风扇对应需实机确认。", "确认切换"))) return;
+        await action("fan.official", { mode, confirmed: true }, "原厂系统风扇策略已提交");
+      });
+      $("official-fan-modes").append(button);
+    });
+    syncControls();
+  }
+  function renderFanDetail(channel) {
+    const signature = JSON.stringify(channel ? [channel.id, channel.driver, channel.owned, channel.mode, channel.curve, toolbox && toolbox.fans && toolbox.fans.last_error] : null);
+    if (signature === fanDetailSignature) return;
+    fanDetailSignature = signature; clear($("fan-controls"));
+    if (!channel) { $("fan-controls").append(element("p", "capability-note", "此通道当前不可用")); return; }
+    const card = element("article", "card control-card fan-channel");
+    const heading = element("div", "fan-heading");
+    heading.append(element("strong", "", channel.label || channel.driver || channel.id), element("span", "fan-rpm", percentage(channel.duty_percent) + "% PWM"));
+    const note = element("p", "capability-note", channel.id + (channel.owned ? " · 已由 Toolbox 接管" : " · 尚未接管") + (channel.rpm_verified && finite(channel.rpm) ? " · " + channel.rpm + " RPM" : " · 未确认转速对应关系"));
+    if (channel.rpm_reason) note.append(document.createTextNode(" · " + channel.rpm_reason));
+    const consent = element("label", "check-row");
+    const takeover = document.createElement("input"); takeover.type = "checkbox"; takeover.className = "fan-input"; takeover.checked = channel.owned === true;
+    consent.append(takeover, element("span", "", "允许 Toolbox 临时接管此通道"));
+    const slider = document.createElement("input"); slider.type = "range"; slider.min = "50"; slider.max = "100"; slider.step = "5"; slider.value = String(percent(channel.duty_percent) === null ? 80 : Math.max(50, Math.round(channel.duty_percent))); slider.className = "touch-range fan-input";
+    const output = element("output", "", slider.value + "%");
+    const label = element("label", "control-label", "手动 PWM 占空比"); label.append(output);
+    slider.addEventListener("input", () => { output.textContent = slider.value + "%"; });
+    async function setMode(mode, title, curve) {
+      if (!takeover.checked && mode !== "restore") { toast("请先勾选允许接管风扇", true); return; }
+      const message = mode === "restore" ? "恢复此通道接管前的控制模式和 PWM 设置。" : mode === "auto" || mode === "curve" ? "Toolbox 将按温度调整该通道；传感器缺失或过热时使用满速。确认允许接管？" : "将调整 " + channel.id + "，确认允许 Toolbox 接管此通道？";
+      if (!(await confirmOperation(title, message, "确认调整"))) return;
+      if (mode === "restore") await action("fan.restore", { channel: channel.id }, "已请求恢复原风扇控制");
+      else {
+        const payload = { channel: channel.id, mode, value: Number(slider.value), takeover: true };
+        if (curve) payload.curve = curve;
+        await action("fan.set", payload, "风扇控制已提交");
+      }
+    }
+    const buttons = element("div", "mode-grid");
+    [["低速", "low"], ["中速", "medium"], ["高速", "high"], ["自动温控", "auto"], ["应用手动", "manual"], ["恢复原控制", "restore"]].forEach(([title, mode]) => {
+      const button = element("button", "button button-secondary requires-write", title); button.type = "button"; button.dataset.allowed = String(mode !== "restore" || channel.owned === true);
+      button.addEventListener("click", () => setMode(mode, title)); buttons.append(button);
+    });
+    const curveEditor = element("details", "curve-editor");
+    const summary = element("summary", "check-row", "自定义温控曲线"); curveEditor.append(summary);
+    curveEditor.append(element("p", "capability-note", "5–8 个递增温度点；PWM 最低 50%。超温或温度缺测时使用满速。"));
+    const curveHead = element("div", "curve-heading"); curveHead.append(element("span", "", "温度 °C"), element("span", "", "PWM %"), element("span", "")); curveEditor.append(curveHead);
+    const pointList = element("div", "curve-points");
+    function addPoint(point) {
+      const row = element("div", "curve-row");
+      const temperature = document.createElement("input"); temperature.type = "number"; temperature.min = "0"; temperature.max = "100"; temperature.step = "1"; temperature.value = String(point.temperature); temperature.className = "fan-input"; temperature.setAttribute("aria-label", "曲线温度");
+      const duty = document.createElement("input"); duty.type = "number"; duty.min = "50"; duty.max = "100"; duty.step = "1"; duty.value = String(point.duty); duty.className = "fan-input"; duty.setAttribute("aria-label", "曲线 PWM");
+      const remove = element("button", "button button-secondary curve-remove requires-write", "−"); remove.type = "button"; remove.setAttribute("aria-label", "移除此温度点");
+      remove.addEventListener("click", () => { if (pointList.children.length <= 5) toast("至少保留 5 个温度点", true); else row.remove(); });
+      row.append(temperature, duty, remove); pointList.append(row);
+    }
+    const points = list(channel.curve).length >= 5 ? channel.curve : [{ temperature: 30, duty: 60 }, { temperature: 40, duty: 60 }, { temperature: 50, duty: 75 }, { temperature: 60, duty: 90 }, { temperature: 75, duty: 100 }]; points.forEach(addPoint); curveEditor.append(pointList);
+    const curveButtons = element("div", "button-row");
+    const add = element("button", "button button-secondary requires-write", "添加温度点"); add.type = "button";
+    add.addEventListener("click", () => { if (pointList.children.length >= 8) toast("最多设置 8 个温度点", true); else { const inputs = pointList.lastElementChild.querySelectorAll("input"); addPoint({ temperature: Math.min(100, Number(inputs[0].value) + 5), duty: 100 }); syncControls(); } });
+    const apply = element("button", "button requires-write", "应用曲线"); apply.type = "button";
+    apply.addEventListener("click", () => {
+      const curve = Array.from(pointList.children).map((row) => { const inputs = row.querySelectorAll("input"); return { temperature: Number(inputs[0].value), duty: Number(inputs[1].value) }; });
+      if (curve.length < 5 || curve.length > 8 || curve.some((point, index) => !Number.isInteger(point.temperature) || point.temperature < 0 || point.temperature > 100 || !Number.isInteger(point.duty) || point.duty < 50 || point.duty > 100 || index && point.temperature <= curve[index - 1].temperature)) { toast("请填写 5–8 个递增温度点，PWM 为 50–100%", true); return; }
+      setMode("curve", "应用温控曲线", curve);
+    });
+    curveButtons.append(add, apply); curveEditor.append(curveButtons);
+    card.append(heading, note, consent, label, slider, buttons, curveEditor); $("fan-controls").append(card);
+    if (toolbox && toolbox.fans && toolbox.fans.last_error) $("fan-controls").append(element("p", "capability-note fan-error", toolbox.fans.last_error));
+    syncControls();
+  }
+
   function renderPower(power) {
     const pending = power && power.pending;
     powerOperation = pending && pending.operation;
     powerDeadline = pending && number(pending.seconds_remaining) !== null ? Date.now() + pending.seconds_remaining * 1000 : null;
-    $("power-pending").hidden = !pending && !(power && power.executing);
-    if (power && power.executing) text("power-countdown", "电源操作已交给宿主系统");
+    $("power-pending").hidden = $("global-power-notice").hidden = !pending && !(power && power.executing);
+    if (power && power.executing) { text("power-countdown", "电源操作已交给宿主系统"); text("global-power-label", "电源操作正在执行"); }
     else updatePowerCountdown();
     text("power-reason", power && power.last_error ? power.last_error : cap("power").available ? "确认后有 5 秒可取消倒计时" : cap("power").reason);
   }
   function updatePowerCountdown() {
     if (powerDeadline === null) return;
     const seconds = Math.max(0, Math.ceil((powerDeadline - Date.now()) / 1000));
-    text("power-countdown", (powerOperation === "poweroff" ? "关闭 NAS" : "重启 NAS") + (seconds ? ` · ${seconds} 秒后执行` : " · 等待宿主确认"));
+    const message = (powerOperation === "poweroff" ? "关闭 NAS" : "重启 NAS") + (seconds ? ` · ${seconds} 秒后执行` : " · 等待宿主确认");
+    text("power-countdown", message); text("global-power-label", message);
   }
   function setSleeping(value) {
     sleeping = value === true;
@@ -443,7 +638,7 @@
       text("screen-state", "离线"); text("screen-reason", "服务未连接，亮度与息屏操作已禁用");
       text("rgb-reason", "服务未连接，灯光状态不可用"); text("rgb-state", "离线");
       text("power-reason", "服务未连接，电源操作已禁用");
-      if (powerDeadline !== null) text("power-countdown", "连接中断 · 电源操作状态未知");
+      if (powerDeadline !== null) { text("power-countdown", "连接中断 · 电源操作状态未知"); text("global-power-label", "连接中断 · 电源状态未知"); }
       powerDeadline = null;
       if (resolveConfirmation) resolveConfirmation(false);
       syncControls(); return;
@@ -456,7 +651,8 @@
     setSleeping(screen.asleep);
     const rgb = toolbox.rgb || {};
     text("rgb-state", cap("rgb").available ? "可控制" : "不可用");
-    text("rgb-reason", cap("rgb").available ? "仅使用宿主已验证的 I²C 灯光接口" : cap("rgb").reason);
+    text("rgb-reason", cap("rgb").available ? "当前使用已验证的灯光接口" : cap("rgb").reason);
+    text("rgb-probe-reason", cap("rgb").reason || "已验证，可进入灯光设置");
     const buses = list(rgb.availableBuses).filter((bus) => Number.isInteger(bus));
     if (JSON.stringify(buses) !== rgbBusesSignature) {
       rgbBusesSignature = JSON.stringify(buses);
@@ -467,7 +663,11 @@
       $("rgb-bus").value = previousBus;
     }
     if (!rgbDirty && Number.isInteger(rgb.bus)) $("rgb-bus").value = String(rgb.bus);
-    text("rgb-save", cap("rgb").available ? "应用灯光" : "验证总线并应用灯光");
+    text("rgb-save", "应用灯光");
+    if (!rgbBrightnessDirty) {
+      if (percent(rgb.brightness) !== null) $("rgb-brightness").value = rgb.brightness;
+      text("rgb-brightness-value", percentage(rgb.brightness) + "%");
+    }
     if (!rgbDirty) { if (/^#[0-9a-f]{6}$/i.test(rgb.color || "")) $("rgb-color").value = rgb.color; if (number(rgb.mode) !== null) $("rgb-mode").value = String(rgb.mode); }
     applySettings(toolbox.settings);
     renderFans(toolbox.fans);
@@ -484,13 +684,19 @@
     }
   });
   ["rgb-color", "rgb-mode", "rgb-bus"].forEach((id) => $(id).addEventListener("input", () => { rgbDirty = true; }));
+  $("rgb-brightness").addEventListener("input", () => { rgbBrightnessDirty = true; text("rgb-brightness-value", $("rgb-brightness").value + "%"); });
+  $("rgb-probe").addEventListener("click", async () => {
+    const value = $("rgb-bus").value, bus = value === "" ? null : Number(value);
+    if (!Number.isInteger(bus) || !list(toolbox && toolbox.rgb && toolbox.rgb.availableBuses).includes(bus)) { toast("请明确选择宿主检测到的 I²C 总线", true); return; }
+    if (!(await confirmOperation("验证灯光接口", "只在 i2c-" + bus + " 的设备地址 0x26 验证接口。验证通过后才开放调色。", "开始验证"))) return;
+    if (await action("rgb.probe", { bus }, "灯光接口验证通过")) { if (cap("rgb").available) openView("rgb", {}, "灯光", true); }
+  });
   $("rgb-save").addEventListener("click", async () => {
     const rgb = toolbox && toolbox.rgb;
-    const selected = $("rgb-bus").value;
-    const bus = selected === "" ? null : Number(selected);
-    if (!rgb || !Number.isInteger(bus) || !list(rgb.availableBuses).includes(bus)) { toast("请明确选择宿主检测到的 I²C 总线", true); return; }
-    if ((!cap("rgb").available || rgb.bus !== bus) && !(await confirmOperation("验证灯光接口", "将在 i2c-" + bus + " 的设备地址 0x26 验证接口并应用灯光；验证失败时不会执行灯光写入。", "验证并应用"))) return;
-    if (await action("rgb.set", { bus, mode: Number($("rgb-mode").value), color: $("rgb-color").value }, "灯光设置已提交")) rgbDirty = false;
+    if (!cap("rgb").available || !rgb || !Number.isInteger(rgb.bus)) { toast("灯光接口尚未验证", true); return; }
+    const payload = { bus: rgb.bus, mode: Number($("rgb-mode").value), color: $("rgb-color").value };
+    if (rgbBrightnessDirty) payload.brightness = Number($("rgb-brightness").value);
+    if (await action("rgb.set", payload, "灯光设置已提交")) { rgbDirty = false; rgbBrightnessDirty = false; }
   });
   async function requestPower(operation) {
     const label = operation === "poweroff" ? "关闭 NAS" : "重启 NAS";
@@ -500,6 +706,7 @@
   $("power-reboot").addEventListener("click", () => requestPower("reboot"));
   $("power-off").addEventListener("click", () => requestPower("poweroff"));
   $("power-cancel").addEventListener("click", () => action("power.cancel", {}, "已取消电源操作"));
+  $("global-power-cancel").addEventListener("click", () => action("power.cancel", {}, "已取消电源操作"));
 
   function emptyList(id, message) {
     clear($(id)); $(id).append(element("p", "capability-note", message));
@@ -510,57 +717,57 @@
     return row;
   }
   function renderApps(data) {
-    const containers = data && data.containers;
-    const vms = data && data.vms;
+    const containers = data && data.containers, vms = data && data.vms;
     const signature = JSON.stringify([containers, vms, toolboxOnline]);
     if (signature === appsSignature) { syncControls(); return; }
     appsSignature = signature;
-    const groups = [
-      { name: "container", value: containers, target: "container-list", count: "container-count", label: "容器" },
-      { name: "vm", value: vms, target: "vm-list", count: "vm-count", label: "虚拟机" },
-    ];
-    groups.forEach((group) => {
+    $("container-entry").hidden = !(containers && containers.available);
+    $("vm-entry").hidden = !(vms && vms.available);
+    $("apps-empty").hidden = Boolean(containers && containers.available || vms && vms.available);
+    [{ name: "container", value: containers, target: "container-list", count: "container-count", entry: "container-entry" }, { name: "vm", value: vms, target: "vm-list", count: "vm-count", entry: "vm-entry" }].forEach((group) => {
       const values = list(group.value && group.value.items);
-      text(group.count, group.value && group.value.available ? values.length + " 个" : "不可用");
-      if (!group.value || !group.value.available) { emptyList(group.target, group.value && group.value.reason || "服务未连接，状态不可用"); return; }
-      if (!values.length) { emptyList(group.target, "未发现" + group.label); return; }
+      text(group.count, values.length + " 个");
+      $(group.entry).querySelector("small").textContent = values.length + " 个 · " + values.filter((item) => item.state === "running").length + " 个运行中";
       clear($(group.target));
-      if (group.value.reason) $(group.target).append(element("p", "capability-note", group.value.reason));
+      if (!group.value || !group.value.available) { $(group.target).append(element("p", "capability-note", "服务当前不可用")); return; }
+      if (!values.length) { $(group.target).append(element("p", "capability-note", "尚未发现应用")); return; }
       values.forEach((item) => {
-        const card = element("article", "card");
-        const heading = element("div", "item-heading");
-        const running = item.state === "running";
-        const stateLabels = { running: "运行中", exited: "已停止", created: "未启动", paused: "已暂停", restarting: "重启中", dead: "异常", shutoff: "已关机", "shut off": "已关机", suspended: "已挂起" };
-        heading.append(element("h2", "item-title", item.name || String(item.id).slice(0, 12)), element("span", "item-status" + (running ? " is-running" : ""), stateLabels[item.state] || item.state || "未知"));
-        card.append(heading);
-        if (group.name === "container") {
-          card.append(element("p", "item-image", item.image || "镜像信息不可用"));
-          card.append(element("p", "item-metrics", `CPU ${number(item.cpu_percent) === null ? "--" : item.cpu_percent.toFixed(1)}% · 内存 ${bytes(item.memory_bytes)}`));
-          if (item.status) card.append(element("p", "item-image", item.status));
-        }
-        if (item.protected) card.append(element("p", "capability-note", "Toolbox 容器受到保护，请从 NAS 管理页管理"));
-        const operations = group.name === "container"
-          ? running ? [["停止", "stop"], ["重启", "restart"]] : item.state === "exited" || item.state === "created" ? [["启动", "start"]] : []
-          : running ? [["关机", "shutdown"], ["重启", "reboot"], ["挂起", "suspend"]] : item.state === "paused" || item.state === "suspended" ? [["恢复", "resume"]] : item.state === "shut off" || item.state === "shutoff" ? [["启动", "start"]] : [];
-        const buttons = element("div", "item-actions");
-        operations.forEach(([label, operation]) => {
-          const button = element("button", "button button-secondary requires-write", label);
-          button.type = "button";
-          button.dataset.allowed = String(!item.protected && Boolean(insights));
-          button.addEventListener("click", async () => {
-            if (!(await confirmOperation(label + group.label, "确定要" + label + "「" + (item.name || item.id) + "」吗？正在进行的任务可能受到影响。", "确认" + label, operation !== "start" && operation !== "resume"))) return;
-            if (await action(group.name + ".action", { id: item.id, operation, confirmed: true }, group.label + "操作已提交")) {
-              await pollInsights(true);
-            }
-          });
-          buttons.append(button);
-        });
-        if (operations.length) card.append(buttons);
-        $(group.target).append(card);
+        const labels = { running: "运行中", exited: "已停止", created: "未启动", paused: "已暂停", restarting: "重启中", dead: "异常", shutoff: "已关机", "shut off": "已关机", suspended: "已挂起" };
+        const name = item.name || String(item.id).slice(0, 12);
+        const description = [labels[item.state] || item.state || "未知状态", group.name === "container" ? "CPU " + (number(item.cpu_percent) === null ? "--" : item.cpu_percent.toFixed(1)) + "% · " + bytes(item.memory_bytes) : "", item.protected ? "Toolbox 保护" : ""].filter(Boolean).join(" · ");
+        $(group.target).append(menuButton(name, description, () => openView("app-detail", { kind: group.name, id: item.id }, name), "app-summary"));
       });
     });
+    if (currentDetail && currentDetail.name === "app-detail") renderAppDetail(currentDetail.params.kind, currentDetail.params.id);
     syncControls();
   }
+  function renderAppDetail(kind, id) {
+    const group = insights && insights[kind === "container" ? "containers" : "vms"];
+    const item = list(group && group.items).find((entry) => entry.id === id);
+    clear($("app-detail"));
+    if (!item) { $("app-detail").append(element("p", "capability-note", "此应用当前不可用")); return; }
+    const card = element("article", "card detail-content");
+    card.append(detailRow("名称", item.name || item.id), detailRow("状态", item.status || item.state || "未知"));
+    if (kind === "container") {
+      card.append(detailRow("镜像", item.image || "未提供"), detailRow("CPU", (number(item.cpu_percent) === null ? "--" : item.cpu_percent.toFixed(1)) + "%"), detailRow("内存", bytes(item.memory_bytes)));
+      if (item.ports) card.append(detailRow("端口映射", readable(item.ports)));
+    }
+    card.append(detailRow("标识", item.id));
+    if (item.protected) card.append(element("p", "capability-note", "Toolbox 容器受保护，请在 NAS 管理页管理"));
+    const running = item.state === "running";
+    const operations = kind === "container" ? running ? [["停止", "stop"], ["重启", "restart"]] : ["exited", "created"].includes(item.state) ? [["启动", "start"]] : [] : running ? [["关机", "shutdown"], ["重启", "reboot"], ["挂起", "suspend"]] : ["paused", "suspended"].includes(item.state) ? [["恢复", "resume"]] : ["shut off", "shutoff"].includes(item.state) ? [["启动", "start"]] : [];
+    const buttons = element("div", "item-actions");
+    operations.forEach(([label, operation]) => {
+      const button = element("button", "button button-secondary requires-write", label); button.type = "button"; button.dataset.allowed = String(!item.protected && Boolean(group && group.available));
+      button.addEventListener("click", async () => {
+        if (!(await confirmOperation(label + (kind === "container" ? "容器" : "虚拟机"), "确定" + label + "「" + (item.name || item.id) + "」？正在运行的任务可能受到影响。", "确认" + label, !["start", "resume"].includes(operation)))) return;
+        if (await action(kind + ".action", { id: item.id, operation, confirmed: true }, "应用操作已提交")) await pollInsights(true);
+      }); buttons.append(button);
+    });
+    if (operations.length) card.append(buttons);
+    $("app-detail").append(card); syncControls();
+  }
+
   function renderInsights(data) {
     insights = data && typeof data === "object" ? data : null;
     renderApps(insights);
@@ -602,7 +809,7 @@
         const state = disk.standby ? "待机 · 不主动唤醒" : health.passed === true ? "SMART 正常" : health.passed === false ? "SMART 检测异常" : health.reason || "SMART 状态不可用";
         const temperature = number(disk.temp_c);
         const description = [disk.device || disk.id, bytes(disk.size_bytes), temperature === null ? "温度 --" : temperature.toFixed(0) + " °C", state].join(" · ");
-        $("physical-disks").append(detailRow(disk.model || disk.id || "磁盘", description, health.passed === false ? "unhealthy" : health.passed === true ? "healthy" : ""));
+        $("physical-disks").append(menuButton(disk.model || disk.id || "磁盘", description, () => openView("disk-detail", { id: disk.id || disk.device }, disk.model || disk.id || "磁盘")));
       });
     }
     const interfaces = list(insights && insights.interfaces);
@@ -610,7 +817,7 @@
     if (!interfaces.length) emptyList("interface-list", "网络接口信息暂不可用");
     interfaces.forEach((network) => {
       const rx = speed(network.rx_bytes_per_sec), tx = speed(network.tx_bytes_per_sec);
-      $("interface-list").append(detailRow(network.name + " · " + (network.operstate || "未知"), [list(network.ipv4).join(", ") || "无 IPv4", network.mac || "MAC --", "↓ " + rx.value + " " + rx.unit + " / ↑ " + tx.value + " " + tx.unit].join(" · ")));
+      $("interface-list").append(menuButton(network.name + " · " + (network.operstate || "未知"), list(network.ipv4).join(" · ") || "未配置 IPv4", () => openView("interface-detail", { id: network.name }, network.name)));
     });
     const gpu = insights && insights.gpu;
     if (!gpu || !gpu.available) emptyList("gpu-list", gpu && gpu.reason || "GPU 信息暂不可用");
@@ -628,6 +835,7 @@
     const ports = list(insights && insights.ports);
     if (!ports.length) emptyList("port-list", insights ? "未发现监听端口" : "监听端口信息暂不可用");
     ports.slice(0, 60).forEach((port) => $("port-list").append(detailRow(String(port.protocol || "TCP").toUpperCase() + " :" + port.port, port.address || "地址不可用")));
+    updateInformationModules();
   }
   let insightsRunning = false;
   async function pollInsights(force = false) {
@@ -662,7 +870,10 @@
       name = allowed[(current + value + allowed.length) % allowed.length];
     }
     if (!pages.includes(name) || (!enabledPages.includes(name) && name !== "settings")) return;
+    currentDetail = null; navigationStack = [];
     currentPage = pages.indexOf(name);
+    $("subpage").hidden = true;
+    document.querySelector(".swipe-hint").textContent = "左右滑动切换";
     pages.forEach((pageName) => {
       const active = pageName === name;
       const page = $("page-" + pageName);
@@ -679,14 +890,20 @@
   document.querySelectorAll("[data-page]").forEach((button) => button.addEventListener("click", () => showPage(button.dataset.page)));
   const viewport = $("viewport");
   viewport.addEventListener("pointerdown", (event) => {
-    if (!event.isPrimary || event.target.closest("input, select, button, summary, .button, .disk-list")) return;
+    if (!event.isPrimary) return;
+    pointerStart = null;
+    if (event.target.closest("input, select, button, summary, .button, .disk-list")) return;
     pointerStart = { x: event.clientX, y: event.clientY, id: event.pointerId };
   });
   viewport.addEventListener("pointerup", (event) => {
     if (!pointerStart || event.pointerId !== pointerStart.id) return;
     const dx = event.clientX - pointerStart.x, dy = event.clientY - pointerStart.y;
     pointerStart = null;
-    if (Math.abs(dx) >= 65 && Math.abs(dx) > Math.abs(dy) * 1.6) showPage(dx < 0 ? 1 : -1);
+    if (Math.abs(dx) >= 70 && Math.abs(dx) > Math.abs(dy) * 1.8) {
+      suppressGestureClick = true;
+      if (currentDetail) { if (dx > 0) backView(); }
+      else showPage(dx < 0 ? 1 : -1);
+    }
   });
   viewport.addEventListener("pointercancel", () => { pointerStart = null; });
   async function wakeScreen() {
@@ -697,6 +914,12 @@
   }
   ["pointerdown", "pointerup", "click"].forEach((name) => {
     document.addEventListener(name, (event) => {
+      if (name === "pointerdown") suppressGestureClick = false;
+      if (name === "click" && suppressGestureClick) {
+        suppressGestureClick = false;
+        event.preventDefault(); event.stopImmediatePropagation();
+        return;
+      }
       if (sleeping || Date.now() < swallowUntil) {
         event.preventDefault(); event.stopImmediatePropagation();
         if (name === "pointerdown" && sleeping) { swallowUntil = Date.now() + 650; wakeScreen(); }
@@ -713,6 +936,7 @@
     }, true);
   });
   document.addEventListener("keydown", (event) => {
+    suppressGestureClick = false;
     lastInteraction = lastCarousel = Date.now();
     if (resolveConfirmation) {
       if (event.key === "Escape") { event.preventDefault(); resolveConfirmation(false); }
@@ -720,6 +944,9 @@
       return;
     }
     if (event.target.closest("input, select, textarea")) return;
+    if (event.key === "Escape" && currentDetail) { event.preventDefault(); backView(); return; }
+    if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"][data-open-view], [role="button"][data-open-page]')) { event.preventDefault(); event.target.click(); return; }
+    if (currentDetail) { if (event.key === "ArrowLeft") backView(); return; }
     if (event.key === "ArrowRight") showPage(1);
     if (event.key === "ArrowLeft") showPage(-1);
   });
@@ -731,7 +958,7 @@
   window.setInterval(() => {
     updateClock(); updatePowerCountdown();
     const interval = number(settings.page_interval);
-    if (interval && !sleeping && !resolveConfirmation && !actionBusy && !settingsDirty && Date.now() - lastInteraction >= interval * 1000 && Date.now() - lastCarousel >= interval * 1000) showPage(1);
+    if (interval && !currentDetail && !sleeping && !resolveConfirmation && !actionBusy && !settingsDirty && Date.now() - lastInteraction >= interval * 1000 && Date.now() - lastCarousel >= interval * 1000) showPage(1);
   }, 1000);
   window.setInterval(poll, POLL_INTERVAL);
 })();
