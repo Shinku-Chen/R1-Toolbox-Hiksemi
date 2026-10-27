@@ -55,6 +55,10 @@ class ServiceTests(unittest.TestCase):
         self.hostname.start()
         self.addCleanup(self.address.stop)
         self.addCleanup(self.hostname.stop)
+        self.real_web_factory = service.create_web_config
+        web_factory = mock.patch.object(service, "create_web_config", return_value=None)
+        self.web_factory = web_factory.start()
+        self.addCleanup(web_factory.stop)
 
     def recycle_fixture(self):
         trash = Path.home() / ".Trash"
@@ -367,6 +371,41 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result, 7)
         self.assertEqual(events, ["hardware", "child", "insights"])
         self.assertEqual(servers[0].socket.fileno(), -1)
+
+    def test_optional_web_port_failure_does_not_abort_screen_and_is_cleaned_up(self):
+        app = self.temporary / "web-failure-app"
+        app.mkdir()
+        launcher = app / "AppRun"
+        launcher.write_text("#!/bin/sh\nexit 7\n")
+        launcher.chmod(0o755)
+        web = mock.Mock()
+        web.start.side_effect = OSError("fixture occupied port")
+        self.web_factory.return_value = web
+        controller = types.SimpleNamespace(start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {})
+        insights = types.SimpleNamespace(start=mock.Mock(), stop=mock.Mock(), snapshot=lambda: {})
+        child = mock.Mock()
+        child.poll.return_value = 7
+        with mock.patch.object(service.subprocess, "Popen", return_value=child), \
+                mock.patch.object(service, "stop_child"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = service.run_service(app, port=0, controller=controller, insights=insights)
+        self.assertEqual(result, 7)
+        web.start.assert_called_once()
+        web.stop.assert_called_once()
+        controller.stop.assert_called_once()
+        insights.stop.assert_called_once()
+
+    def test_web_listener_configuration_is_bounded_and_can_be_disabled(self):
+        with mock.patch.dict(os.environ, {"R1_WEB_PORT": "0", "R1_WEB_BIND": "0.0.0.0"}):
+            self.assertIsNone(self.real_web_factory(None, None))
+        for host, port in (("example.invalid", "18732"), ("::", "18732"),
+                           ("0.0.0.0", "65536"), ("0.0.0.0", "80"),
+                           ("0.0.0.0", "-1"), ("0.0.0.0", "1.5"),
+                           ("0.0.0.0", "１８７３２")):
+            with self.subTest(host=host, port=port), mock.patch.dict(
+                    os.environ, {"R1_WEB_PORT": port, "R1_WEB_BIND": host}):
+                with self.assertRaises(ValueError):
+                    self.real_web_factory(None, None)
 
 
 if __name__ == "__main__":

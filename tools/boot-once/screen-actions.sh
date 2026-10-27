@@ -84,11 +84,13 @@ def read_bundle(tar_path, expected_sha):
             require(member.isfile() or member.isdir(), 'ui.tar 不允许链接或特殊文件：' + name)
             require(not member.issparse(), 'ui.tar 不允许稀疏文件：' + name)
             if member.isdir():
-                require(name in ('frontend', 'frontend/assets', 'runtime') or name.startswith('frontend/assets/'),
+                require(name in ('frontend', 'frontend/assets', 'frontend/web', 'runtime') or name.startswith('frontend/assets/'),
                         'ui.tar 包含不支持的目录：' + name)
                 continue
             require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py',
-                             'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py')
+                             'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
+                             'runtime/web_config.py', 'frontend/web/index.html',
+                             'frontend/web/config.css', 'frontend/web/config.js')
                     or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
             require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
             limit = MAX_MANIFEST if name == 'manifest.json' else MAX_FILE
@@ -118,7 +120,9 @@ def read_bundle(tar_path, expected_sha):
         require(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)
                 and hashlib.sha256(files[name]).hexdigest() == digest, 'manifest 文件校验失败：' + name)
     require(all(files.get(name) for name in ('frontend/index.html', 'runtime/ui_service.py',
-                                           'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py')),
+                                           'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
+                                           'runtime/web_config.py', 'frontend/web/index.html',
+                                           'frontend/web/config.css', 'frontend/web/config.js')),
             '内置界面缺少页面、采集或控制模块')
     return manifest, files
 
@@ -191,7 +195,7 @@ def prepare_image_bundle(container):
     return write_cache(stage, files, bundle / 'ui.tar', tarhash)
 
 
-def settings_directory(container):
+def settings_directory(container, required=False):
     """Resolve the public Docker data-volume mount, never an image layer path."""
     fallback = runtime_root / 'settings'
     try:
@@ -202,6 +206,7 @@ def settings_directory(container):
         require(isinstance(mounts, list), '数据卷信息不是数组')
         matches = [mount for mount in mounts if isinstance(mount, dict) and mount.get('Destination') == '/data']
         if not matches:
+            require(not required, '未配置 /data 数据卷')
             print('未配置设置数据卷，设置仅在本次开机保留。')
             return fallback
         require(len(matches) == 1 and matches[0].get('Type') == 'volume'
@@ -209,6 +214,9 @@ def settings_directory(container):
         source = pathlib.Path(matches[0].get('Source', ''))
         require(source.is_absolute() and source.is_dir(), 'Docker 数据卷源目录无效')
         source = source.resolve(strict=True)
+        require(not os.statvfs(source).f_flag & os.ST_RDONLY, 'Docker 数据卷所在文件系统只读')
+        require(source != runtime_root and runtime_root not in source.parents,
+                '设置卷不能位于 Toolbox 的易失运行目录')
         official = app.resolve(strict=True)
         require(source != pathlib.Path('/') and source != official and source not in official.parents
                 and official not in source.parents and not any(c in str(source) for c in '\n\r\x00'),
@@ -216,6 +224,8 @@ def settings_directory(container):
         print('设置将保存在 Docker 独立数据卷中。')
         return source
     except (ValueError, OSError, RuntimeError, TypeError):
+        if required:
+            raise ValueError('未找到可写的持久化设置卷；请使用包含 r1-toolbox-data:/data 的新版 Compose，未停止原小屏') from None
         print('未找到可用的设置数据卷，设置仅在本次开机保留。')
         return fallback
 
@@ -504,8 +514,16 @@ def main():
         environment.update((k, v) for item in raw.split(b'\0') if b'=' in item
                            for k, v in [item.decode(errors='surrogateescape').split('=', 1)] if k in allowed)
         if backend is not None:
-            environment['R1_TOOLBOX_DATA_DIR'] = str(settings_directory(os.environ.get('TASK_CONTAINER', 'r1-toolbox')))
+            environment['R1_TOOLBOX_DATA_DIR'] = str(settings_directory(os.environ.get('TASK_CONTAINER', 'r1-toolbox'), required=True))
             environment['R1_TOOLBOX_VERSION'] = os.environ.get('TOOLBOX_VERSION', 'dev')
+            web_bind = os.environ.get('R1_WEB_BIND', '0.0.0.0')
+            web_port = os.environ.get('R1_WEB_PORT', '18732')
+            require(web_bind in ('0.0.0.0', '127.0.0.1'), 'R1_WEB_BIND 只能是 0.0.0.0 或 127.0.0.1')
+            require(web_port.isascii() and web_port.isdigit() and len(web_port) <= 5
+                    and (int(web_port) == 0 or 1024 <= int(web_port) <= 65535),
+                    'R1_WEB_PORT 需要为 1024–65535，或 0 禁用网页')
+            environment['R1_WEB_BIND'] = web_bind
+            environment['R1_WEB_PORT'] = web_port
         old_root = str(pathlib.Path(main_process.exe).parent)
         if 'LD_LIBRARY_PATH' in environment:
             environment['LD_LIBRARY_PATH'] = ':'.join(str(app) + p[len(old_root):] if p == old_root or p.startswith(old_root + '/') else p

@@ -35,7 +35,7 @@ fi
 case "$image_hash" in
   *[!0123456789abcdef]*) echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1 ;;
 esac
-run_key="$boot_id:${TASK_REVISION:-1}:$image_id:$ui_mode:${UI_DIR:-}"
+run_key="$boot_id:${TASK_REVISION:-1}:$image_id:$ui_mode:${UI_DIR:-}:${R1_WEB_BIND:-0.0.0.0}:${R1_WEB_PORT:-18732}"
 last_key=$(cat "$state_dir/last-success" 2>/dev/null || true)
 if [ "$last_key" = "$run_key" ]; then
   echo '[SKIP] 本次 NAS 启动已经成功执行过当前任务版本。'
