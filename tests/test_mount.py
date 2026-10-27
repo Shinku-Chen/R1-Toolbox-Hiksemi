@@ -55,6 +55,9 @@ class MountTests(unittest.TestCase):
         self.pid = 31001
         (self.proc / str(self.pid)).mkdir(parents=True)
         (self.proc / str(self.pid) / "environ").write_bytes(b"DISPLAY=:0\0LANG=C\0")
+        (self.proc / str(self.pid) / "stat").write_text(
+            str(self.pid) + " (hiksemi-sub) " + " ".join(["S", "1", *(["0"] * 17), "1000"]) + "\n"
+        )
         self.module.app = self.app
         self.module.target = self.target
         self.module.unit = "histor-custom-test"
@@ -103,7 +106,7 @@ class MountTests(unittest.TestCase):
         }
 
     def processes(self):
-        return [(self.pid, str(self.app / "hiksemi-sub"), "start-1", True)] if self.live else []
+        return [self.module.Process(self.pid, str(self.app / "hiksemi-sub"), "1000", True, 1, None)] if self.live else []
 
     def kill(self, pid, sig):
         self.assertEqual(pid, self.pid)
@@ -174,6 +177,53 @@ class MountTests(unittest.TestCase):
         self.assertEqual(len(starts), 1)
         self.assertEqual(starts[0][2], self.source.resolve())
 
+    def test_six_process_electron_family_passes_preflight_and_is_stopped_together(self):
+        records = [self.module.Process(self.pid, str(self.app / "hiksemi-sub"), "1000", True, 1, None)]
+        for offset, parent, kind in ((1, self.pid, "zygote"), (2, self.pid, "zygote"),
+                                     (3, self.pid + 1, "gpu-process"),
+                                     (4, self.pid, "utility"), (5, self.pid, "renderer")):
+            records.append(self.module.Process(self.pid + offset, str(self.app / "hiksemi-sub"),
+                                               "1000", False, parent, kind))
+        killed = set()
+        self.module.processes = lambda: [record for record in records if record.pid not in killed]
+
+        def stop_family(pid, sig):
+            self.events.append(("kill", pid, sig))
+            killed.add(pid)
+        self.module.os.kill.side_effect = stop_family
+        result, output = self.main({"UI_DIR": str(self.source)})
+        self.assertEqual(result, 0, output)
+        self.assertEqual(killed, {record.pid for record in records})
+        self.module.preflight_binding.assert_called_once()
+        self.module.start.assert_called_once()
+
+    def test_unsafe_electron_snapshot_fails_preflight_without_stopping(self):
+        root = self.module.Process(self.pid, str(self.app / "hiksemi-sub"), "1000", True, 1, None)
+        for is_main, parent, kind in ((True, self.pid, None), (False, 99999, "renderer"),
+                                      (False, self.pid, "?")):
+            with self.subTest(is_main=is_main, parent=parent, kind=kind):
+                other = self.module.Process(self.pid + 1, root.exe, "1000", is_main, parent, kind)
+                self.module.processes = lambda: [root, other]
+                result, output = self.main({"UI_DIR": str(self.source)})
+                self.assertEqual(result, 1, output)
+                self.assert_not_stopped()
+                self.module.preflight_binding.assert_not_called()
+
+    def test_transient_process_title_ambiguity_can_settle_before_preflight(self):
+        root = self.module.Process(self.pid, str(self.app / "hiksemi-sub"), "1000", True, 1, None)
+        unresolved = self.module.Process(self.pid + 1, root.exe, "1000", False, root.pid, "?")
+        waits = []
+
+        def settle(seconds):
+            waits.append(seconds)
+        self.module.time.sleep = settle
+        self.module.processes = lambda: ([root] if waits else [root, unresolved]) if self.live else []
+        result, output = self.main({"UI_DIR": str(self.source)})
+        self.assertEqual(result, 0, output)
+        self.assertTrue(waits, "the incomplete Electron family should be allowed to settle")
+        self.module.preflight_binding.assert_called_once()
+        self.module.start.assert_called_once()
+
     def test_failed_mounted_launch_stops_it_then_recovers_without_bind(self):
         def failing_start(name, environment, bind_source=None):
             self.start(name, environment, bind_source)
@@ -216,7 +266,7 @@ class MountTests(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout=value, stderr="")
 
         actions.run = command
-        actions.processes = lambda: [(self.pid, str(self.app / "hiksemi-sub"), "start-1", True)]
+        actions.processes = self.processes
         actions.verify_binding = mock.Mock(return_value=True)
         actions.preflight_binding("binding-check", self.source)
         actions.start("bound-screen", {"DISPLAY": ":0"}, self.source)
@@ -242,7 +292,7 @@ class MountTests(unittest.TestCase):
         actions.app, actions.target = self.app, self.target
         actions.pathlib = types.SimpleNamespace(Path=self.mapped_path)
         actions.time = self.module.time
-        actions.processes = lambda: [(self.pid, str(self.app / "hiksemi-sub"), "start-1", True)]
+        actions.processes = self.processes
 
         def command(*args, env=None):
             if args[0] == "systemd-run":
@@ -262,6 +312,53 @@ class MountTests(unittest.TestCase):
                 (self.proc / str(self.pid) / "cgroup").write_text("0::" + group + "\n")
                 actions.verify_binding = mock.Mock(return_value=verified_mount)
                 with self.assertRaises(RuntimeError):
+                    actions.start("expected", {"DISPLAY": ":0"}, self.source)
+
+    def timed_launch(self, snapshot):
+        actions = load_actions()
+        actions.app, actions.target = self.app, self.target
+        actions.pathlib = types.SimpleNamespace(Path=self.mapped_path)
+        clock = types.SimpleNamespace(now=0)
+
+        def advance(seconds):
+            clock.now += seconds
+        actions.time = types.SimpleNamespace(monotonic=lambda: clock.now, sleep=advance)
+        actions.processes = lambda: snapshot(actions, clock)
+        actions.verify_binding = mock.Mock(return_value=True)
+        (self.proc / str(self.pid) / "cgroup").write_text("0::/system.slice/expected.service\n")
+
+        def command(*args, env=None):
+            if args[0] == "systemd-run":
+                value = ""
+            elif args[:2] == ("systemctl", "show"):
+                value = "/system.slice/expected.service\n"
+            elif args[:2] == ("systemctl", "is-active"):
+                value = "active\n"
+            else:
+                self.fail("unexpected host command: " + repr(args))
+            return types.SimpleNamespace(returncode=0, stdout=value, stderr="")
+        actions.run = command
+        return actions, clock
+
+    def test_launch_restarts_three_second_timer_when_pid_identity_changes(self):
+        def snapshot(actions, clock):
+            start = "1000" if clock.now < 1.5 else "2000"
+            return [actions.Process(self.pid, str(self.app / "hiksemi-sub"), start, True, 1, None)]
+        actions, clock = self.timed_launch(snapshot)
+        actions.start("expected", {"DISPLAY": ":0"}, self.source)
+        self.assertGreaterEqual(clock.now, 4.5,
+                                "a reused PID must survive three seconds after its new starttime")
+        self.assertLess(clock.now, 10)
+
+    def test_launch_rejects_nested_second_main_or_unowned_typed_process(self):
+        for is_main, parent, kind in ((True, self.pid, None), (False, 99999, "renderer")):
+            with self.subTest(is_main=is_main, parent=parent, kind=kind):
+                def snapshot(actions, clock):
+                    binary = str(self.app / "hiksemi-sub")
+                    return [actions.Process(self.pid, binary, "1000", True, 1, None),
+                            actions.Process(self.pid + 1, binary, "1000", is_main, parent, kind)]
+                actions, _ = self.timed_launch(snapshot)
+                with self.assertRaises((ValueError, RuntimeError)):
                     actions.start("expected", {"DISPLAY": ":0"}, self.source)
 
     def test_binding_verification_requires_identity_and_read_only(self):
