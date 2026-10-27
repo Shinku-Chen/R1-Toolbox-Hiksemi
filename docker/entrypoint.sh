@@ -13,7 +13,8 @@ Usage: r1-toolbox [run|--help|--version]
   --version   Show the image version without accessing the NAS host.
 
 Deploy with composer.yml for the required host mounts and namespaces.
-NEW_HTML is empty by default: the task only reports diagnostics.
+UI_DIR is empty by default: the task only reports diagnostics.
+Set UI_DIR to a NAS directory with index.html and its assets for a read-only mount.
 HELP
     ;;
   --version|-V|version)
