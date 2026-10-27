@@ -33,6 +33,6 @@ python scripts/package.py --version dev
 
 打包前需先提交工具源码，确保包内文件对应记录的 Git commit。输出位于 `dist/`，包含 ZIP 和 `SHA256SUMS`；ZIP 内的 `manifest.json` 记录版本、提交与各文件校验值。ZIP 使用固定文件顺序、时间和权限，相同版本与提交可以重复生成一致的文件。生成物由 Actions 保存，仓库维护源码与可直接导入的 Compose 配置。
 
-每次推送相关源码后，自动流程会检查生成文件是否同步、校验 Compose、运行模拟测试，再打包上传。默认分支纳入 workflow 后，也可以从 Actions 手动触发。
+每次推送相关源码后，自动流程会检查生成文件是否同步、校验 Compose、运行模拟测试，再打包上传。开发依赖锁在 `requirements-dev.txt`，自动流程按该文件缓存依赖。默认分支纳入 workflow 后，也可以从 Actions 手动触发。
 
 自动化检查使用伪宿主工具。真实 NAS 的首次开机、自停、实际画面和厂商容器管理行为仍需部署验证，详见[工具说明](tools/boot-once/README.md)。
