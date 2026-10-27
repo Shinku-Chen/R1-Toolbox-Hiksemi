@@ -10,6 +10,8 @@ LABEL org.opencontainers.image.title="R1 Toolbox" \
 
 WORKDIR /opt/r1-toolbox
 COPY tools/boot-once/runner.sh ./runner.sh
+COPY build/ui-bundle.tar /opt/r1-toolbox/ui-bundle/ui.tar
+COPY build/ui-bundle.sha256 /opt/r1-toolbox/ui-bundle/ui.sha256
 COPY docker/entrypoint.sh /usr/local/bin/r1-toolbox
 RUN chmod 755 /usr/local/bin/r1-toolbox /opt/r1-toolbox/runner.sh
 
