@@ -106,11 +106,79 @@ class DeliveryTests(TemporaryFixture):
             config_path: config,
             layer_path: layer_bytes,
         }
+        self.write_members(members, path)
+
+    def write_members(self, members, path=None):
         with tarfile.open(path or self.archive, mode="w") as bundle:
             for name, data in members.items():
                 member = tarfile.TarInfo(name)
                 member.size = len(data)
                 bundle.addfile(member, io.BytesIO(data))
+
+    def write_modern_archive(self, *, root_kind="manifest", damage=None,
+                             reference=None):
+        """Model containerd's save archive, whose image ID is an OCI root digest.
+
+        manifest.json remains the Docker compatibility view. Its config must be
+        the same config reached through the OCI graph, not just a valid blob.
+        """
+        self.write_archive(reference=reference)
+        with tarfile.open(self.archive) as bundle:
+            original = {member.name: bundle.extractfile(member).read()
+                        for member in bundle.getmembers()}
+        compatible = json.loads(original["manifest.json"])[0]
+        config = original[compatible["Config"]]
+        layer = original[compatible["Layers"][0]]
+        members = {"oci-layout": b'{"imageLayoutVersion":"1.0.0"}'}
+
+        def blob(data, media_type):
+            digest = "sha256:" + sha256(data)
+            members["blobs/sha256/" + digest.split(":", 1)[1]] = data
+            return {"mediaType": media_type, "digest": digest, "size": len(data)}
+
+        def document(value):
+            return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+        config_type = "application/vnd.oci.image.config.v1+json"
+        manifest_type = "application/vnd.oci.image.manifest.v1+json"
+        index_type = "application/vnd.oci.image.index.v1+json"
+        config_descriptor = blob(config, config_type)
+        layer_descriptor = blob(layer, "application/vnd.oci.image.layer.v1.tar")
+        compatible["Config"] = "blobs/sha256/" + config_descriptor["digest"][7:]
+        compatible["Layers"] = ["blobs/sha256/" + layer_descriptor["digest"][7:]]
+        members["manifest.json"] = document([compatible])
+
+        if damage == "different-config":
+            # Every hash is valid, but this graph no longer describes the image
+            # in Docker's compatibility view.
+            unrelated = json.loads(config)
+            unrelated["created"] = "2026-01-01T00:00:00Z"
+            config_descriptor = blob(document(unrelated), config_type)
+        root = blob(document({
+            "schemaVersion": 2, "mediaType": manifest_type,
+            "config": config_descriptor, "layers": [layer_descriptor],
+        }), manifest_type)
+        manifest_digest = root["digest"]
+        index_depth = {"manifest": 0, "index": 1, "nested-index": 2}[root_kind]
+        for _ in range(index_depth):
+            child = dict(root, platform={"architecture": "amd64", "os": "linux"})
+            root = blob(document({
+                "schemaVersion": 2, "mediaType": index_type,
+                "manifests": [child],
+            }), index_type)
+        self.image_id = root["digest"]
+        root_with_name = dict(root, annotations={
+            "org.opencontainers.image.ref.name": reference or self.reference,
+            "io.containerd.image.name": reference or self.reference,
+        })
+        members["index.json"] = document({
+            "schemaVersion": 2, "mediaType": index_type,
+            "manifests": [root_with_name],
+        })
+        if damage in ("root-hash", "child-hash"):
+            digest = self.image_id if damage == "root-hash" else manifest_digest
+            members["blobs/sha256/" + digest[7:]] += b"\n"
+        self.write_members(members)
 
     def package(self, *, image_id=None, archive=None):
         return subprocess.run(
@@ -126,10 +194,7 @@ class DeliveryTests(TemporaryFixture):
         self.assertFalse((self.output / "deployment-manifest.json").exists(),
                          "rejected input must not produce a deployment manifest")
 
-    def test_delivers_compose_and_archive_for_the_same_image(self):
-        self.write_archive()
-        archive_digest = sha256(self.archive.read_bytes())
-        result = self.package()
+    def assert_delivery(self, result, archive_digest):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         compose = yaml.safe_load((self.output / "composer.yml").read_text())
@@ -161,6 +226,42 @@ class DeliveryTests(TemporaryFixture):
             name: checksums[name] for name in expected_names
             if name != "deployment-manifest.json"
         })
+
+    def test_delivers_compose_and_archive_for_the_same_image(self):
+        self.write_archive()
+        archive_digest = sha256(self.archive.read_bytes())
+        self.assert_delivery(self.package(), archive_digest)
+
+    def test_accepts_modern_single_manifest_image_id(self):
+        self.write_modern_archive(root_kind="manifest")
+        archive_digest = sha256(self.archive.read_bytes())
+        self.assert_delivery(self.package(), archive_digest)
+
+    def test_accepts_modern_index_image_id(self):
+        for root_kind in ("index", "nested-index"):
+            with self.subTest(root_kind=root_kind):
+                self.write_modern_archive(root_kind=root_kind)
+                archive_digest = sha256(self.archive.read_bytes())
+                self.assert_delivery(self.package(), archive_digest)
+
+    def test_rejects_modern_root_or_child_blob_hash_mismatch(self):
+        for damage in ("root-hash", "child-hash"):
+            with self.subTest(damage=damage):
+                self.write_modern_archive(root_kind="index", damage=damage)
+                self.assert_rejected(self.package())
+
+    def test_rejects_modern_root_referring_to_a_different_config(self):
+        self.write_modern_archive(root_kind="index", damage="different-config")
+        self.assert_rejected(self.package())
+
+    def test_rejects_a_forged_modern_root_id(self):
+        self.write_modern_archive(root_kind="index")
+        self.assert_rejected(self.package(image_id="sha256:" + "0" * 64))
+
+    def test_rejects_modern_archive_with_a_different_tag(self):
+        self.write_modern_archive(root_kind="index",
+                                  reference="ghcr.io/shinku-chen/r1-toolbox:unrelated")
+        self.assert_rejected(self.package())
 
     def test_rejects_archive_with_a_different_image_tag(self):
         self.write_archive(reference="ghcr.io/shinku-chen/r1-toolbox:unrelated")
