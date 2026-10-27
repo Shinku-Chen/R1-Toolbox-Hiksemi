@@ -87,7 +87,8 @@ def read_bundle(tar_path, expected_sha):
                 require(name in ('frontend', 'frontend/assets', 'runtime') or name.startswith('frontend/assets/'),
                         'ui.tar 包含不支持的目录：' + name)
                 continue
-            require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py')
+            require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py',
+                             'runtime/toolbox.py', 'runtime/insights.py')
                     or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
             require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
             limit = MAX_MANIFEST if name == 'manifest.json' else MAX_FILE
@@ -116,8 +117,9 @@ def read_bundle(tar_path, expected_sha):
     for name, digest in hashes.items():
         require(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)
                 and hashlib.sha256(files[name]).hexdigest() == digest, 'manifest 文件校验失败：' + name)
-    require(files.get('frontend/index.html') and files.get('runtime/ui_service.py'),
-            '内置界面必须包含非空 frontend/index.html 和 runtime/ui_service.py')
+    require(all(files.get(name) for name in ('frontend/index.html', 'runtime/ui_service.py',
+                                           'runtime/toolbox.py', 'runtime/insights.py')),
+            '内置界面缺少页面、采集或控制模块')
     return manifest, files
 
 
@@ -189,6 +191,35 @@ def prepare_image_bundle(container):
     return write_cache(stage, files, bundle / 'ui.tar', tarhash)
 
 
+def settings_directory(container):
+    """Resolve the public Docker data-volume mount, never an image layer path."""
+    fallback = runtime_root / 'settings'
+    try:
+        result = run('docker', '--host', 'unix:///var/run/docker.sock', 'inspect',
+                     '--format', '{{json .Mounts}}', container)
+        require(result.returncode == 0, '无法读取数据卷')
+        mounts = json.loads(result.stdout)
+        require(isinstance(mounts, list), '数据卷信息不是数组')
+        matches = [mount for mount in mounts if isinstance(mount, dict) and mount.get('Destination') == '/data']
+        if not matches:
+            print('未配置设置数据卷，设置仅在本次开机保留。')
+            return fallback
+        require(len(matches) == 1 and matches[0].get('Type') == 'volume'
+                and matches[0].get('RW') is True, '/data 必须是可写 Docker 数据卷')
+        source = pathlib.Path(matches[0].get('Source', ''))
+        require(source.is_absolute() and source.is_dir(), 'Docker 数据卷源目录无效')
+        source = source.resolve(strict=True)
+        official = app.resolve(strict=True)
+        require(source != pathlib.Path('/') and source != official and source not in official.parents
+                and official not in source.parents and not any(c in str(source) for c in '\n\r\x00'),
+                'Docker 设置数据卷必须与官方程序目录独立')
+        print('设置将保存在 Docker 独立数据卷中。')
+        return source
+    except (ValueError, OSError, RuntimeError, TypeError):
+        print('未找到可用的设置数据卷，设置仅在本次开机保留。')
+        return fallback
+
+
 def resolve_source(value):
     """Use canonical paths, and reject systemd property syntax/escaping hazards."""
     def safe_path(path):
@@ -213,7 +244,7 @@ def binding_property(bind_source):
 def service_options(name, bind_source=None):
     options = ['systemd-run', '--quiet', '--unit=' + name,
                '--property=WorkingDirectory=' + str(app), '--property=Restart=no',
-               '--property=TimeoutStopSec=5']
+               '--property=TimeoutStopSec=25']
     if bind_source is not None:
         options.append(binding_property(bind_source))
     return options
@@ -389,7 +420,7 @@ def start(name, environment, bind_source=None, backend=None):
         command = [python, '-B', str(backend), '--app', str(app)]
     if run(*options, *command).returncode:
         raise RuntimeError('宿主 systemd-run 启动失败（请查 journalctl -u ' + name + '）')
-    deadline, stable, stable_identity = time.monotonic() + 10, None, None
+    deadline, stable, stable_identity = time.monotonic() + 35, None, None
     seen = []
     while time.monotonic() < deadline:
         group = run('systemctl', 'show', name, '--property=ControlGroup', '--value').stdout.strip()
@@ -472,6 +503,9 @@ def main():
         environment = dict(base_env, APPDIR=str(app))
         environment.update((k, v) for item in raw.split(b'\0') if b'=' in item
                            for k, v in [item.decode(errors='surrogateescape').split('=', 1)] if k in allowed)
+        if backend is not None:
+            environment['R1_TOOLBOX_DATA_DIR'] = str(settings_directory(os.environ.get('TASK_CONTAINER', 'r1-toolbox')))
+            environment['R1_TOOLBOX_VERSION'] = os.environ.get('TOOLBOX_VERSION', 'dev')
         old_root = str(pathlib.Path(main_process.exe).parent)
         if 'LD_LIBRARY_PATH' in environment:
             environment['LD_LIBRARY_PATH'] = ':'.join(str(app) + p[len(old_root):] if p == old_root or p.startswith(old_root + '/') else p
