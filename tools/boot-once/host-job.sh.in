@@ -1,0 +1,37 @@
+#!/bin/sh
+# Runs in the NAS host namespaces, with the host filesystem as its root.
+set -eu
+command -v mountpoint >/dev/null || {
+  echo '[ERROR] 宿主缺少 mountpoint，未执行任务。'
+  exit 1
+}
+attempt=0
+until mountpoint -q /screen; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 60 ]; then
+    echo '[ERROR] 等待 /screen 持久分区挂载超时，未执行任务。'
+    exit 1
+  fi
+  sleep 2
+done
+
+state_dir=/screen/docker-boot-once
+mkdir -p "$state_dir"
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+run_key="$boot_id:${TASK_REVISION:-1}"
+last_key=$(cat "$state_dir/last-success" 2>/dev/null || true)
+if [ "$last_key" = "$run_key" ]; then
+  echo '[SKIP] 本次 NAS 启动已经成功执行过当前任务版本。'
+  exit 0
+fi
+
+echo '[START] 开始执行宿主任务。'
+(
+__SCREEN_ACTIONS__
+)
+
+# Record success only after all actions finish. Failed runs remain retryable.
+printf '%s\n' "$run_key" > "$state_dir/last-success.new"
+mv "$state_dir/last-success.new" "$state_dir/last-success"
+sync
+echo '[OK] 已记录本次启动的成功状态。'
