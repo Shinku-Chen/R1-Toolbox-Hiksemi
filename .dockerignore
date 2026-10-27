@@ -1,0 +1,11 @@
+# Only the runtime files may enter the build context.
+**
+!Dockerfile
+!docker/
+docker/*
+!docker/entrypoint.sh
+!tools/
+tools/*
+!tools/boot-once/
+tools/boot-once/*
+!tools/boot-once/runner.sh
