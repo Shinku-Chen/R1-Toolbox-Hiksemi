@@ -376,7 +376,7 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 if not isinstance(payload, dict):
                     raise ValueError("需要对象")
                 action = payload.pop("action", None)
-                if action in ("power.request", "container.action", "vm.action") and payload.get("confirmed") is not True:
+                if action in ("power.request", "container.action", "vm.action", "fan.official") and payload.get("confirmed") is not True:
                     raise ValueError("此操作需要在界面明确确认")
                 if not isinstance(action, str):
                     raise ValueError("缺少操作名称")
@@ -384,7 +384,7 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 self.send_json(400, {"ok": False, "error": "请求格式无效或缺少明确确认"}, origin)
                 return
             allowed_controls = {"settings.update", "screen.brightness", "screen.sleep", "screen.wake",
-                                "screen.activity", "fan.set", "fan.restore", "rgb.set", "power.request", "power.cancel"}
+                                "screen.activity", "fan.set", "fan.restore", "fan.official", "rgb.set", "rgb.probe", "power.request", "power.cancel"}
             if action in allowed_controls:
                 destination = controller
             elif action in ("container.action", "vm.action") and insights is not None:
@@ -514,7 +514,9 @@ def run_service(app, port=PORT, controller=None, insights=None):
         sys.path.insert(0, runtime_dir)
     if controller is None:
         from toolbox import ToolboxController
-        controller = ToolboxController(state_dir=os.environ.get("R1_TOOLBOX_DATA_DIR", "/run/r1-toolbox/settings"))
+        from histor import HistorAdapter
+        controller = ToolboxController(state_dir=os.environ.get("R1_TOOLBOX_DATA_DIR", "/run/r1-toolbox/settings"),
+                                       histor=HistorAdapter(allow_writes=True))
     if insights is None:
         from insights import InsightsCollector
         insights = InsightsCollector()

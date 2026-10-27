@@ -24,6 +24,8 @@ import threading
 import time
 import uuid
 
+from device_info import collect_device_info
+
 try:
     import fcntl
 except ImportError:
@@ -179,7 +181,7 @@ class InsightsCollector:
     def __init__(self, proc_root="/proc", sys_root="/sys", runner=None,
                  command_finder=None, clock=None, sample_interval=2.0,
                  slow_interval=30.0, history_limit=120, ipv4_provider=None,
-                 page_size=None, clock_ticks=None):
+                 page_size=None, clock_ticks=None, etc_root=None, run_root=None):
         self.proc_root, self.sys_root = Path(proc_root), Path(sys_root)
         self.runner = runner or _command
         self.command_finder = command_finder or shutil.which
@@ -189,10 +191,15 @@ class InsightsCollector:
         self.slow_interval = max(1.0, float(slow_interval))
         self.page_size = page_size or os.sysconf("SC_PAGE_SIZE")
         self.clock_ticks = clock_ticks or os.sysconf("SC_CLK_TCK")
+        # Fixture proc trees must never fall through to this computer's /etc.
+        self.etc_root = Path(etc_root) if etc_root is not None else (
+            Path("/etc") if self.proc_root == Path("/proc") else self.proc_root.parent / "etc")
+        self.run_root = Path(run_root) if run_root is not None else (
+            Path("/run") if self.proc_root == Path("/proc") else self.proc_root.parent / "run")
         self._lock = threading.RLock()
         self._action_lock = threading.Lock()
         self._stop = threading.Event()
-        self._refresh = {name: threading.Event() for name in ("disks", "containers", "vms")}
+        self._refresh = {name: threading.Event() for name in ("disks", "containers", "vms", "device")}
         self._threads = []
         self._history = deque(maxlen=max(1, min(int(history_limit), 120)))
         self._previous_cpu = {}
@@ -203,7 +210,7 @@ class InsightsCollector:
             "schema_version": 1, "timestamp": None, "system": {}, "interfaces": [],
             "disks": _capability(), "containers": _capability(), "vms": _capability(),
             "ports": [], "processes": [], "gpu": {"available": False, "reason": "正在探测", "devices": []},
-            "history": [],
+            "history": [], "device": {},
         }
 
     def start(self):
@@ -241,7 +248,8 @@ class InsightsCollector:
             self._stop.wait(self.sample_interval)
 
     def _integrations(self):
-        return (("disks", self._disks), ("containers", self._containers), ("vms", self._vms))
+        return (("disks", self._disks), ("containers", self._containers), ("vms", self._vms),
+                ("device", lambda: collect_device_info(self.proc_root, self.sys_root, self.etc_root, self.run_root)))
 
     def _slow_loop(self, name, collect):
         while not self._stop.is_set():
