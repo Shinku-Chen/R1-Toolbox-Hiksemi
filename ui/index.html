@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
+    <title>R1 Toolbox · 本机面板</title>
+    <link rel="stylesheet" href="./assets/panel.css">
+    <script src="./assets/panel.js" defer></script>
+  </head>
+  <body>
+    <main class="panel">
+      <header class="masthead">
+        <div class="brand-row">
+          <span class="brand"><span class="brand-mark" aria-hidden="true"></span>R1 TOOLBOX</span>
+          <span class="connection" id="connection" data-state="connecting" role="status"><i aria-hidden="true"></i><span id="connection-label">连接中</span></span>
+        </div>
+        <div class="clock-row"><time id="clock">--:--</time><span class="clock-seconds" id="seconds">--</span></div>
+        <div class="date-row"><time id="date">本机时间</time><span class="device-name" data-field="hostname">本机面板</span></div>
+      </header>
+
+      <div class="viewport" id="viewport">
+        <section class="page is-active" id="page-overview" aria-labelledby="title-overview">
+          <div class="page-heading"><h1 id="title-overview">系统概览</h1><span class="page-number">01 <span>/ 03</span></span></div>
+          <div class="resource-grid">
+            <article class="card resource-card">
+              <div class="card-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3"/><rect x="10" y="10" width="4" height="4" rx="1"/></svg><h2>CPU</h2></div>
+              <div class="metric resource-metric"><span data-field="cpu">--</span><span class="metric-unit">%</span></div>
+              <div class="meter" role="img" aria-label="CPU 使用率"><span id="cpu-meter"></span></div>
+              <div class="card-foot"><span data-field="cpu-status">等待采样</span><span><b data-field="temperature">--</b> °C</span></div>
+            </article>
+            <article class="card resource-card">
+              <div class="card-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M6 17v3m4-3v3m4-3v3m4-3v3M7 9v4m5-4v4m5-4v4"/></svg><h2>内存</h2></div>
+              <div class="metric resource-metric"><span data-field="memory">--</span><span class="metric-unit">%</span></div>
+              <div class="meter meter-secondary" role="img" aria-label="内存使用率"><span id="memory-meter"></span></div>
+              <div class="card-foot"><span data-field="memory-usage">等待读取</span></div>
+            </article>
+          </div>
+
+          <article class="card network-summary">
+            <div class="card-topline"><h2>网络流量</h2><span class="subtle" data-field="interface">--</span></div>
+            <div class="speed-grid">
+              <div><div class="flow-label"><span class="flow-arrow" aria-hidden="true">↓</span>下载</div><div class="metric speed-metric"><span data-field="rx">--</span><span class="speed-unit" data-field="rx-unit">/s</span></div></div>
+              <div><div class="flow-label"><span class="flow-arrow" aria-hidden="true">↑</span>上传</div><div class="metric speed-metric"><span data-field="tx">--</span><span class="speed-unit" data-field="tx-unit">/s</span></div></div>
+            </div>
+          </article>
+
+          <article class="card storage-summary">
+            <div class="card-topline"><h2>数据盘</h2><span class="subtle" data-field="disk-count">--</span></div>
+            <div class="storage-total"><span class="metric" data-field="disk-used">--</span><span class="storage-of" data-field="disk-total">等待读取容量</span></div>
+            <div class="meter meter-neutral" role="img" aria-label="数据盘总使用率"><span id="storage-meter"></span></div>
+          </article>
+
+          <article class="uptime-card"><span class="uptime-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><div><h2>持续运行</h2><span class="uptime-value" data-field="uptime">--</span></div><span class="uptime-caption">UPTIME</span></article>
+        </section>
+
+        <section class="page" id="page-storage" aria-labelledby="title-storage" hidden>
+          <div class="page-heading"><h1 id="title-storage">存储空间</h1><span class="page-number">02 <span>/ 03</span></span></div>
+          <article class="card capacity-card"><span class="eyebrow">已用空间</span><div class="capacity-value metric" data-field="disk-used">--</div><div class="capacity-description"><span data-field="disk-total">等待读取容量</span><span data-field="disk-count">--</span></div><div class="meter meter-neutral" role="img" aria-label="数据盘总使用率"><span id="storage-detail-meter"></span></div></article>
+          <div class="section-label"><h2>已挂载的数据盘</h2><span class="subtle">只读监测</span></div>
+          <div class="disk-list" id="disk-list"><div class="empty-state"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="9" y="8" width="30" height="32" rx="7"/><path d="M9 29h30M16 34h1m5 0h1M17 18h14"/></svg><p>等待读取数据盘</p><span>连接后显示真实挂载信息</span></div></div>
+        </section>
+
+        <section class="page" id="page-network" aria-labelledby="title-network" hidden>
+          <div class="page-heading"><h1 id="title-network">网络状态</h1><span class="page-number">03 <span>/ 03</span></span></div>
+          <article class="card network-detail"><div class="flow-label"><span class="flow-arrow" aria-hidden="true">↓</span>实时下载</div><div class="metric transfer-metric"><span data-field="rx">--</span><span class="transfer-unit" data-field="rx-unit">/s</span></div><div class="transfer-baseline" aria-hidden="true"></div></article>
+          <article class="card network-detail"><div class="flow-label"><span class="flow-arrow" aria-hidden="true">↑</span>实时上传</div><div class="metric transfer-metric"><span data-field="tx">--</span><span class="transfer-unit" data-field="tx-unit">/s</span></div><div class="transfer-baseline transfer-secondary" aria-hidden="true"></div></article>
+          <article class="card connection-card"><div class="info-row"><span>网络接口</span><strong data-field="interface">--</strong></div><div class="info-row info-ip"><span>IPv4 地址</span><strong data-field="ipv4">--</strong></div></article>
+          <p class="network-note" data-field="network-status">连接后读取本机网络数据</p>
+        </section>
+      </div>
+
+      <footer class="footer">
+        <div class="freshness"><span id="freshness-label">正在连接本机只读服务</span><span class="swipe-hint">左右滑动切换</span></div>
+        <nav class="navigation" aria-label="面板页面">
+          <button class="nav-button is-active" type="button" data-page="overview" aria-controls="page-overview" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>概览</span></button>
+          <button class="nav-button" type="button" data-page="storage" aria-controls="page-storage"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="4"/><path d="M4 15h16M8 18h1m3 0h1M9 8h6"/></svg><span>存储</span></button>
+          <button class="nav-button" type="button" data-page="network" aria-controls="page-network"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="6" rx="2"/><path d="M12 9v5m-7 3v-3h14v3"/><rect x="2" y="17" width="6" height="4" rx="1"/><rect x="16" y="17" width="6" height="4" rx="1"/></svg><span>网络</span></button>
+        </nav>
+      </footer>
+    </main>
+  </body>
+</html>

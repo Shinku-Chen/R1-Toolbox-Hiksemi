@@ -1,14 +1,20 @@
 #!/bin/sh
-# Runs in the host namespaces/root. UI_DIR is private to the new screen service.
+# Runs in the host namespaces/root. UI is private to the new screen service.
 set -eu
 command -v python3 >/dev/null || { echo '宿主缺少 python3，未修改小屏'; exit 1; }
 exec python3 - <<'PY'
-import os, pathlib, shutil, signal, subprocess, sys, time, unicodedata
+import hashlib, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, unicodedata
 
 app = pathlib.Path('/screen/squashfs-root')
 target = app / 'resources/app/dist'
 unit = 'histor-custom-' + str(os.getpid())
 base_env = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/histor/bin:/histor/sbin'}
+runtime_root = pathlib.Path('/run/r1-toolbox')
+MAX_FILES = 512
+MAX_TOTAL = 32 * 1024 * 1024
+MAX_FILE = 16 * 1024 * 1024
+MAX_MANIFEST = 128 * 1024
+MAX_ARCHIVE = 40 * 1024 * 1024
 
 
 def require(condition, message):
@@ -21,6 +27,166 @@ def run(*args, env=None):
         return subprocess.run(args, env=env or base_env, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         raise RuntimeError('宿主命令失败或超时：' + args[0]) from None
+
+
+def select_mode(environ):
+    require(not environ.get('NEW_HTML', ''),
+            'NEW_HTML 已停用；请移除此配置，使用 UI_MODE=image 或 UI_MODE=directory 与 UI_DIR')
+    source = environ.get('UI_DIR', '')
+    mode = environ.get('UI_MODE', '') or ('directory' if source else 'diagnostic')
+    require(mode in ('image', 'directory', 'diagnostic'), 'UI_MODE 只能是 image、directory 或 diagnostic')
+    require(mode != 'image' or not source, 'UI_MODE=image 不接受 UI_DIR；请清空 UI_DIR 或改用 directory 模式')
+    require(mode != 'directory' or source, 'UI_MODE=directory 需要设置宿主 UI_DIR 目录')
+    return mode, source
+
+
+def require_tmpfs(path=pathlib.Path('/run'), mountinfo=pathlib.Path('/proc/self/mountinfo')):
+    """Find the deepest mount covering the path, including escaped mount names."""
+    resolved, candidates = path.resolve(), []
+    for order, row in enumerate(mountinfo.read_text().splitlines()):
+        before, separator, after = row.partition(' - ')
+        fields, filesystem = before.split(), after.split()
+        if not separator or len(fields) < 5 or not filesystem:
+            continue
+        mount = pathlib.Path(re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), fields[4]))
+        if mount == resolved or mount in resolved.parents:
+            candidates.append((len(mount.parts), order, filesystem[0]))
+    require(candidates and max(candidates, key=lambda item: item[:2])[2] == 'tmpfs',
+            str(path) + ' 必须位于 tmpfs；内置界面只允许在 RAM 中暂存和展开')
+
+
+def regular_file(path, maximum):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, '内置界面文件必须是无链接的普通文件：' + str(path))
+    require(info.st_size <= maximum, '内置界面文件超过大小限制：' + str(path))
+    return info
+
+
+def read_bundle(tar_path, expected_sha):
+    """Validate the entire bounded archive in memory; never use tar extraction."""
+    require(re.fullmatch(r'[0-9a-f]{64}', expected_sha), '内置界面 SHA256 格式错误')
+    regular_file(tar_path, MAX_ARCHIVE)
+    require(hashlib.sha256(tar_path.read_bytes()).hexdigest() == expected_sha, '内置 ui.tar 的 SHA256 不匹配')
+    files, names, total = {}, set(), 0
+    with tarfile.open(tar_path, mode='r:') as archive:
+        for member in archive:
+            name = member.name
+            if member.isdir() and name.endswith('/'):
+                name = name[:-1]
+            parts = pathlib.PurePosixPath(name)
+            require(name and not parts.is_absolute() and str(parts) == name
+                    and '..' not in parts.parts and '\\' not in name
+                    and not any(unicodedata.category(c) == 'Cc' for c in name),
+                    'ui.tar 包含不安全的路径')
+            require(name not in names, 'ui.tar 包含重复路径：' + name)
+            names.add(name)
+            require(len(names) <= MAX_FILES * 2, 'ui.tar 条目过多')
+            require(member.isfile() or member.isdir(), 'ui.tar 不允许链接或特殊文件：' + name)
+            require(not member.issparse(), 'ui.tar 不允许稀疏文件：' + name)
+            if member.isdir():
+                require(name in ('frontend', 'frontend/assets', 'runtime') or name.startswith('frontend/assets/'),
+                        'ui.tar 包含不支持的目录：' + name)
+                continue
+            require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py')
+                    or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
+            require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
+            limit = MAX_MANIFEST if name == 'manifest.json' else MAX_FILE
+            require(0 <= member.size <= limit, 'ui.tar 单文件超过限制：' + name)
+            total += member.size
+            require(total <= MAX_TOTAL, 'ui.tar 展开后超过 32 MiB')
+            handle = archive.extractfile(member)
+            require(handle is not None, 'ui.tar 文件不可读取：' + name)
+            with handle:
+                data = handle.read(member.size + 1)
+            require(len(data) == member.size, 'ui.tar 文件长度错误：' + name)
+            files[name] = data
+    require('manifest.json' in files, 'ui.tar 缺少 manifest.json')
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'manifest 包含重复字段：' + key)
+            result[key] = value
+        return result
+    manifest = json.loads(files['manifest.json'].decode('utf-8'), object_pairs_hook=unique_object)
+    require(isinstance(manifest, dict) and type(manifest.get('schema_version')) is int
+            and manifest['schema_version'] == 1 and isinstance(manifest.get('files'), dict),
+            '内置界面 manifest 格式不支持')
+    hashes = manifest['files']
+    require(set(hashes) == set(files) - {'manifest.json'}, 'manifest 必须列出所有且仅列出非 manifest 文件')
+    for name, digest in hashes.items():
+        require(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)
+                and hashlib.sha256(files[name]).hexdigest() == digest, 'manifest 文件校验失败：' + name)
+    require(files.get('frontend/index.html') and files.get('runtime/ui_service.py'),
+            '内置界面必须包含非空 frontend/index.html 和 runtime/ui_service.py')
+    return manifest, files
+
+
+def verify_cache(cache, expected_tarhash):
+    """Anchor cached extracted bytes to the hash of the retained original tar."""
+    require(cache.is_dir() and not cache.is_symlink(), '内置界面缓存不是普通目录')
+    _, files = read_bundle(cache / 'ui.tar', expected_tarhash)
+    expected = set(files) | {'ui.tar'}
+    directories = {str(parent) for name in files for parent in pathlib.PurePosixPath(name).parents
+                   if str(parent) != '.'}
+    for item in cache.rglob('*'):
+        name, info = item.relative_to(cache).as_posix(), item.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            require(name in directories, '内置界面缓存包含意外目录：' + name)
+        else:
+            require(name in expected, '内置界面缓存包含意外文件：' + name)
+            maximum = MAX_ARCHIVE if name == 'ui.tar' else len(files[name])
+            regular_file(item, maximum)
+    for name, data in files.items():
+        installed = cache / name
+        require(regular_file(installed, len(data)).st_size == len(data)
+                and hashlib.sha256(installed.read_bytes()).digest() == hashlib.sha256(data).digest(),
+                '内置界面缓存校验失败：' + name)
+
+
+def write_cache(stage, files, tar_path, tarhash):
+    assembled = stage / 'cache'
+    assembled.mkdir(mode=0o700)
+    for name, data in files.items():
+        output = assembled / name
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open('xb') as handle:
+            handle.write(data)
+    with tar_path.open('rb') as source, (assembled / 'ui.tar').open('xb') as destination:
+        shutil.copyfileobj(source, destination)
+    verify_cache(assembled, tarhash)
+    cache = runtime_root / ('ui-' + tarhash)
+    if cache.exists() or cache.is_symlink():
+        verify_cache(cache, tarhash)
+        return cache
+    assembled.rename(cache)
+    verify_cache(cache, tarhash)
+    return cache
+
+
+def prepare_image_bundle(container):
+    require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', container or ''), 'TASK_CONTAINER 不是有效容器名称或 ID')
+    require_tmpfs(pathlib.Path('/run'))
+    require(not runtime_root.is_symlink(), 'RAM 暂存目录不能是符号链接')
+    runtime_root.mkdir(mode=0o700, exist_ok=True)
+    require_tmpfs(runtime_root)
+    stage = pathlib.Path(tempfile.mkdtemp(prefix='stage-', dir=runtime_root))
+    print('内置界面 RAM 暂存目录:', stage)
+    bundle = stage / 'bundle'
+    bundle.mkdir()
+    result = run('docker', '--host', 'unix:///var/run/docker.sock', 'cp',
+                 container + ':/opt/r1-toolbox/ui-bundle/.', str(bundle))
+    require(result.returncode == 0, '无法从当前镜像复制内置 UI 包；暂存目录保留至重启')
+    require({item.name for item in bundle.iterdir()} == {'ui.tar', 'ui.sha256'}, '内置 UI 包目录必须仅包含 ui.tar 与 ui.sha256')
+    regular_file(bundle / 'ui.sha256', 65)
+    checksum = (bundle / 'ui.sha256').read_bytes()
+    require(re.fullmatch(rb'[0-9a-fA-F]{64}\n?', checksum), 'ui.sha256 必须为一行 64 位十六进制 SHA256')
+    tarhash = checksum.decode('ascii').strip().lower()
+    _, files = read_bundle(bundle / 'ui.tar', tarhash)
+    cache = runtime_root / ('ui-' + tarhash)
+    if cache.exists() or cache.is_symlink():
+        verify_cache(cache, tarhash)
+        return cache
+    return write_cache(stage, files, bundle / 'ui.tar', tarhash)
 
 
 def resolve_source(value):
@@ -60,16 +226,16 @@ def preflight_binding(name, bind_source):
 path, device, inode = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 actual = os.stat(path)
 if (actual.st_dev, actual.st_ino) != (device, inode):
-    raise SystemExit("UI_DIR mount identity mismatch")
+    raise SystemExit("frontend mount identity mismatch")
 if not (os.statvfs(path).f_flag & os.ST_RDONLY):
-    raise SystemExit("UI_DIR mount is not read-only")
+    raise SystemExit("frontend mount is not read-only")
 '''
     python = shutil.which('python3')
     require(python is not None, '宿主缺少 python3，无法验证只读挂载')
     result = run(*service_options(name + '-check', bind_source), '--wait', python, '-c', check,
                  str(target), str(identity.st_dev), str(identity.st_ino))
     require(result.returncode == 0,
-            '宿主只读挂载预检失败：需 systemd 233+ 支持 BindReadOnlyPaths，且目标挂载必须只读并指向 UI_DIR')
+            '宿主只读挂载预检失败：需 systemd 233+ 支持 BindReadOnlyPaths，且目标挂载必须只读并指向已验证的前端目录')
 
 
 def verify_binding(pid, bind_source):
@@ -99,10 +265,22 @@ def processes():
     return found
 
 
-def start(name, environment, bind_source=None):
+def start(name, environment, bind_source=None, backend=None):
     options = service_options(name, bind_source)
-    options += ['--setenv=' + k + '=' + v for k, v in environment.items()]
-    if run(*options, str(app / 'AppRun'), '--no-sandbox').returncode:
+    launch_environment = dict(environment)
+    if backend is not None:
+        # The host Python interpreter must not load Electron's bundled libs.
+        if 'LD_LIBRARY_PATH' in launch_environment:
+            launch_environment['R1_TOOLBOX_APP_LD_LIBRARY_PATH'] = launch_environment['LD_LIBRARY_PATH']
+        launch_environment['LD_LIBRARY_PATH'] = ''
+    options += ['--setenv=' + k + '=' + v for k, v in launch_environment.items()]
+    if backend is None:
+        command = [str(app / 'AppRun'), '--no-sandbox']
+    else:
+        python = shutil.which('python3')
+        require(python is not None, '宿主缺少 python3，无法启动内置界面服务')
+        command = [python, '-B', str(backend), '--app', str(app)]
+    if run(*options, *command).returncode:
         raise RuntimeError('宿主 systemd-run 启动失败（请查 journalctl -u ' + name + '）')
     deadline, stable = time.monotonic() + 10, None
     while time.monotonic() < deadline:
@@ -133,17 +311,25 @@ def main():
     print('宿主依赖:', ', '.join(k + '=' + ('有' if shutil.which(k) else '无')
           for k in ('systemd-run', 'systemctl')))
     print('小屏进程数:', len(current))
-    if os.environ.get('NEW_HTML', ''):
-        print('预检失败，未停止原程序：NEW_HTML 已停用；请移除此配置，改用 UI_DIR 指向完整前端目录。')
+    try:
+        mode, source_value = select_mode(os.environ)
+    except ValueError as error:
+        print('预检失败，未停止原程序：', error)
         return 1
-    source_value = os.environ.get('UI_DIR', '')
-    if not source_value:
-        print('UI_DIR 未设置：仅诊断，未停止进程、未挂载目录。')
+    print('界面模式:', mode)
+    if mode == 'diagnostic':
+        print('诊断模式：未停止进程、未挂载目录。')
         return 0
 
     try:
-        incoming = resolve_source(source_value)
-        print('等待 UI_DIR、官方 dist 和小屏主进程就绪（最多 120 秒）。', flush=True)
+        backend = None
+        if mode == 'image':
+            cache = prepare_image_bundle(os.environ.get('TASK_CONTAINER', 'r1-toolbox'))
+            incoming = resolve_source(str(cache / 'frontend'))
+            backend = cache / 'runtime/ui_service.py'
+        else:
+            incoming = resolve_source(source_value)
+        print('等待前端目录、官方 dist 和小屏主进程就绪（最多 120 秒）。', flush=True)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             current = processes()
@@ -152,7 +338,7 @@ def main():
             time.sleep(1)
 
         # Resolve again after the shared disk is ready, including any symlinks.
-        incoming = resolve_source(source_value)
+        incoming = resolve_source(source_value if mode == 'directory' else str(incoming))
         require(incoming.is_dir() and (incoming / 'index.html').is_file()
                 and (incoming / 'index.html').stat().st_size > 0,
                 'UI_DIR 必须是宿主已有的前端目录，且包含非空 index.html')
@@ -179,7 +365,7 @@ def main():
         require(not environment.get('XAUTHORITY') or pathlib.Path(environment['XAUTHORITY']).is_file(),
                 'XAUTHORITY 文件不存在')
         preflight_binding(unit, incoming)
-    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError, tarfile.TarError) as error:
         print('预检失败，未停止原程序：', error)
         return 1
 
@@ -197,7 +383,10 @@ def main():
                 time.sleep(0.1)
         if processes():
             raise RuntimeError('小屏仍在运行或被官方守护程序拉起；未启动新界面')
-        start(unit, environment, bind_source=incoming)
+        if backend is None:
+            start(unit, environment, bind_source=incoming)
+        else:
+            start(unit, environment, bind_source=incoming, backend=backend)
         print('前端目录已在新小屏服务内只读挂载:', incoming)
         print('宿主原 dist 保持原样；小屏服务:', unit + '.service')
         return 0
