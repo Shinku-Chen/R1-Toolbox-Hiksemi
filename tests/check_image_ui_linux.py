@@ -24,6 +24,14 @@ PORT = 18731
 WEB_PORT = 18732
 STATUS_URL = f'http://127.0.0.1:{PORT}/api/status'
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+FAN_FIXTURE_CONFIG = {'schema_version': 1, 'channels': {
+    'cpu': {'mode': 'temperature', 'sources': ['ci:cpu-package', 'ci:disk-a'],
+            'quiet_below': 33, 'normal_at': 57, 'full_at': 74,
+            'quiet_percent': 55, 'normal_percent': 79, 'manual_percent': 70},
+    'system': {'mode': 'temperature', 'sources': ['ci:disk-a', 'ci:disk-b'],
+               'quiet_below': 28, 'normal_at': 43, 'full_at': 58,
+               'quiet_percent': 60, 'normal_percent': 80, 'manual_percent': 75},
+}}
 
 
 def command(*arguments, check=True, timeout=20):
@@ -120,6 +128,59 @@ def save_fixture_settings(token_file):
                                              'Origin': 'null'})
     with HTTP.open(request, timeout=3) as response:
         assert response.status == 200 and json.load(response).get('ok') is True, '测试设置没有保存成功'
+    return token
+
+
+def check_native_bundle(cache, manifest):
+    name = 'runtime/fan_guard.so'
+    expected = manifest.get('files', {}).get(name)
+    assert isinstance(expected, str), '镜像 UI 清单缺少风扇保护适配层'
+    path = cache / name
+    assert not path.is_symlink() and path.is_file(), '风扇保护适配层不是普通文件'
+    value = path.read_bytes()
+    assert hashlib.sha256(value).hexdigest() == expected, '风扇保护适配层与镜像清单不一致'
+    assert (len(value) >= 64 and value[:7] == b'\x7fELF\x02\x01\x01'
+            and value[16:20] == b'\x03\x00\x3e\x00'), '镜像未包含 Linux x86-64 ELF 共享库'
+
+
+def read_fixture_fan_policy():
+    with HTTP.open(f'http://127.0.0.1:{PORT}/api/fan-policy', timeout=2) as response:
+        assert response.status == 200, '独立温控设置接口不可用'
+        state = json.load(response)
+    # Hosted CI has no verified NAS firmware/device. Save-only must work here
+    # without applying a rule or attempting to start the native watchdog.
+    assert state.get('capability', {}).get('available') is False, 'CI fixture 意外识别为可接管硬件'
+    assert state.get('active') is False and state.get('busy') is False, '仅保存配置触发了风扇接管'
+    assert state.get('active_on_boot') is False, '仅保存配置意外启用了开机接管'
+    return state
+
+
+def save_fixture_fan_policy(token, data_directory):
+    read_fixture_fan_policy()
+    body = json.dumps({'action': 'fan.policy.update', 'config': FAN_FIXTURE_CONFIG, 'apply': False}).encode()
+    request = urllib.request.Request(f'http://127.0.0.1:{PORT}/api/action', data=body,
+                                    headers={'Content-Type': 'application/json', 'X-R1-Token': token,
+                                             'Origin': 'null'})
+    with HTTP.open(request, timeout=3) as response:
+        result = json.load(response)
+        assert (response.status == 200 and result.get('ok') is True
+                and result.get('settings_saved') is True and result.get('applied') is False
+                and result.get('pending') is False), '两路温控配置没有明确完成仅保存'
+    check_fixture_fan_policy(data_directory)
+
+
+def check_fixture_fan_policy(data_directory):
+    state = read_fixture_fan_policy()
+    assert state.get('config') == FAN_FIXTURE_CONFIG, '重建后没有读回两路独立温控配置'
+    assert state.get('pending_changes') is True, '仅保存配置没有保持待应用状态'
+    path = data_directory / 'fan-policy.json'
+    assert path.is_file() and not path.is_symlink(), '数据卷没有保存普通温控配置文件'
+    saved = json.loads(path.read_text())
+    assert saved.get('config') == FAN_FIXTURE_CONFIG, '数据卷内温控配置与保存结果不一致'
+    assert saved.get('resume_on_boot') is False, '未应用的温控配置意外持久启用'
+    active = saved.get('active_config', {}).get('channels', {})
+    assert (set(active) == {'cpu', 'system'}
+            and all(item.get('mode') == 'vendor' for item in active.values())), '仅保存覆盖了原厂活动策略'
 
 
 def check_fixture_settings():
@@ -200,6 +261,7 @@ def main():
         tarhash = cache.name.removeprefix('ui-')
         runtime['verify_cache'](cache, tarhash)
         manifest, _ = runtime['read_bundle'](cache / 'ui.tar', tarhash)
+        check_native_bundle(cache, manifest)
         frontend = cache / 'frontend'
         expected_hash = manifest['files']['frontend/index.html']
         runtime['require_tmpfs'](cache)
@@ -216,8 +278,9 @@ def main():
         check_web_config()
         pid = service_pid(unit)
         check_view(runtime, pid, frontend, expected_hash, original, original_identity)
-        save_fixture_settings(token_file)
+        token = save_fixture_settings(token_file)
         check_fixture_settings()
+        save_fixture_fan_policy(token, data_directory)
 
         # The UI and API belong to the host service, not this source container.
         command('docker', 'stop', '--timeout', '2', container)
@@ -229,6 +292,7 @@ def main():
         wait_for_status()
         check_web_config()
         check_fixture_settings()
+        check_fixture_fan_policy(data_directory)
         check_view(runtime, pid, frontend, expected_hash, original, original_identity)
         runtime['verify_cache'](cache, tarhash)
 
@@ -236,6 +300,7 @@ def main():
         service_attempted = False
         wait_for_port_release()
         assert (data_directory / 'settings.json').is_file(), '容器删除后设置数据卷文件丢失'
+        assert (data_directory / 'fan-policy.json').is_file(), '容器删除后温控设置数据卷文件丢失'
         assert command('docker', 'volume', 'inspect', volume).returncode == 0, '容器删除误删了设置数据卷'
         # Recreate a host service with the retained volume, without the source
         # container. This verifies the actual storage boundary, not a mock save.
@@ -246,6 +311,7 @@ def main():
                 sys.executable, '-B', str(cache / 'runtime/ui_service.py'), '--app', str(app))
         wait_for_status()
         check_fixture_settings()
+        check_fixture_fan_policy(data_directory)
         check_web_config()
         check_view(runtime, service_pid(unit), frontend, expected_hash, original, original_identity)
         command('systemctl', 'stop', unit)
@@ -253,9 +319,10 @@ def main():
         wait_for_port_release()
         assert original.read_bytes() == b'official', '停止服务后宿主原始页面发生变化'
         assert (original.stat().st_dev, original.stat().st_ino) == original_identity, '宿主原始页面标识发生变化'
-        print('PASS: built image Docker copy, verified tmpfs UI cache, real read-only service mount, '
+        print('PASS: built image Docker copy, verified tmpfs UI cache and x86-64 native guard, real read-only service mount, '
               'live API and authenticated web config surviving container stop/removal, '
-              'persistent Docker volume settings after service recreation, released ports and unchanged host files')
+              'persistent Docker volume settings and independent save-only fan rules after service recreation '
+              'without hardware capability or takeover, released ports and unchanged host files')
     finally:
         if service_attempted:
             logs = cleanup_command('journalctl', '--unit', unit, '--no-pager', '--lines', '40')

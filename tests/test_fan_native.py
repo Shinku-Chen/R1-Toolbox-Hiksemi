@@ -1,0 +1,616 @@
+"""Synthetic fan takeover tests. No firmware, processes, devices or ioctls run."""
+import importlib.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("fan_native", ROOT / "runtime/fan_native.py")
+native = importlib.util.module_from_spec(spec)
+sys.modules["fan_native"] = native
+spec.loader.exec_module(native)
+spec = importlib.util.spec_from_file_location("histor", ROOT / "runtime/histor.py")
+histor_module = importlib.util.module_from_spec(spec)
+sys.modules["histor"] = histor_module
+spec.loader.exec_module(histor_module)
+spec = importlib.util.spec_from_file_location("fan_watchdog", ROOT / "runtime/fan_watchdog.py")
+watchdog = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(watchdog)
+
+
+class FakeBackend:
+    def __init__(self):
+        self.owner = {"pid": 10, "starttime": 100, "exe": "/fixture/python3"}
+        self.vendor = {"pid": 20, "starttime": 200, "exe": "/histor/bin/temp_control"}
+        self.guarded = {"pid": 30, "starttime": 300, "exe": "/histor/bin/temp_control"}
+        self.live = {10: dict(self.owner), 20: dict(self.vendor)}
+        self.policy, self.verified = "auto", True
+        self.events, self.failures = [], set()
+
+    def probe(self):
+        self.verify_live()
+        return {"guard_available": True}
+
+    def verify_live(self):
+        if not self.verified:
+            raise ValueError("fixture driver identity changed")
+
+    def owner_identity(self):
+        return dict(self.owner)
+
+    def alive(self, identity):
+        return bool(identity and self.live.get(identity["pid"]) == identity)
+
+    def capture(self):
+        return {"identity": dict(self.vendor), "argv": ["temp_control", "--original-arg"],
+                "env": {"DISK_AUTOSLEEP": "preserved", "PRIVATE_TOKEN": "fixture-secret"}, "cwd": "/histor/bin"}
+
+    def mode(self):
+        return self.policy
+
+    def sync_mode(self, folder, expected=None, safe_auto=False, apply_manual=True):
+        self.events.append(("sync_mode", expected, safe_auto, apply_manual))
+        if expected is not None and self.policy != expected:
+            raise RuntimeError("vendor_policy_changed")
+        if "sync_mode" in self.failures:
+            raise ValueError("fixture GET signal synchronization fails")
+        return self.policy
+
+    def write(self, targets):
+        self.verify_live()
+        self.events.append(("write", dict(targets)))
+        if "write" in self.failures:
+            raise ValueError("fixture ioctl failed")
+
+    def stop_process(self, identity):
+        self.events.append(("stop", identity["pid"]))
+        if self.alive(identity):
+            self.live.pop(identity["pid"])
+
+    def spawn(self, original, lease=None, mask=None):
+        self.events.append(("spawn", bool(lease), mask, dict(original)))
+        if "spawn" in self.failures:
+            raise RuntimeError("fixture preload load failed")
+        identity = self.guarded if lease else self.vendor
+        self.live[identity["pid"]] = dict(identity)
+        return dict(identity)
+
+    def assert_single(self, identity):
+        vendors = [item for item in self.live.values() if item["exe"] == self.vendor["exe"]]
+        if vendors != [identity]:
+            raise RuntimeError("fixture competing vendor process")
+
+    def restore_daemon(self, original, guarded, lease=None):
+        self.events.append(("restore_daemon", dict(original)))
+        if guarded:
+            self.live.pop(guarded["pid"], None)
+        else:
+            self.live.pop(self.guarded["pid"], None)  # Orphan from this fixture lease.
+        self.live[original["identity"]["pid"]] = dict(original["identity"])
+        return original["identity"]
+
+
+class NativeFanTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp(prefix="r1-fan-native-test-"))
+        self.backend = FakeBackend()
+        self.now = 100_000_000_000
+        self.addCleanup(self.preserve)
+
+    def preserve(self):
+        trash = Path.home() / ".Trash"
+        if sys.platform == "darwin" and trash.is_dir():
+            shutil.move(str(self.folder), str(trash / self.folder.name))
+
+    def make(self, channels):
+        native.atomic_json(self.folder / "descriptor.json", {"version": 1, "owner": self.backend.owner,
+                           "channels": sorted(channels), "folder": str(self.folder)})
+        self.renew(channels)
+        return watchdog.FanWatchdog(self.folder, self.backend, clock_ns=lambda: self.now)
+
+    def renew(self, channels, targets=None, sequence=1):
+        native.atomic_bytes(self.folder / "lease.bin", native.encode_lease(
+            set(channels), targets or {name: 255 for name in channels}, sequence, self.now))
+
+    def test_lease_exact_abi_raw_values_and_zero_bool_unknown_channels_rejected(self):
+        value = native.encode_lease({"cpu", "system"}, {"cpu": 128, "system": 255}, 7, self.now)
+        self.assertEqual(len(value), 32)
+        self.assertEqual(struct.unpack("<8sQIIII", value), (native.MAGIC, self.now + 5_000_000_000, 3, 128, 255, 7))
+        self.assertEqual(native.decode_lease(value, self.now, 3)["targets"], {"cpu": 128, "system": 255})
+        for targets in ({"cpu": 0}, {"cpu": True}, {"cpu": 127}, {"cpu": 256}, {}, {"cpu": 200, "system": 200}):
+            with self.subTest(targets=targets), self.assertRaises(ValueError):
+                native.encode_lease({"cpu"}, targets, 1, self.now)
+        for channels in (set(), {"other"}, ["cpu"]):
+            with self.assertRaises(ValueError):
+                native.valid_channels(channels)
+
+    def test_lease_missing_corrupt_wrong_mask_and_future_are_rejected(self):
+        value = native.encode_lease({"cpu"}, {"cpu": 200}, 1, self.now)
+        for raw, tick, mask in ((None, self.now, 1), (value[:-1], self.now, 1),
+                                (b"badmagic" + value[8:], self.now, 1), (value, self.now, 2),
+                                (value, self.now + 5_000_000_000, 1), (value, self.now - 1, 1)):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                native.decode_lease(raw, tick, mask)
+
+    def test_cpu_only_restarts_once_preserves_original_environment_and_system_policy(self):
+        owner = self.make({"cpu"})
+        owner.begin()
+        self.assertEqual(self.backend.policy, "auto")
+        self.assertFalse(any(item[0] == "mode" for item in self.backend.events))
+        spawns = [item for item in self.backend.events if item[0] == "spawn"]
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(spawns[0][2], 1)
+        self.assertEqual(spawns[0][3]["argv"], ["temp_control", "--original-arg"])
+        self.assertEqual(spawns[0][3]["env"]["DISK_AUTOSLEEP"], "preserved")
+        descriptor = self.folder / "descriptor.json"
+        self.assertEqual(descriptor.stat().st_mode & 0o777, 0o600)
+        self.assertIn("fixture-secret", descriptor.read_text())
+        self.assertNotIn("fixture-secret", (self.folder / "status.json").read_text())
+
+    def test_system_only_shim_mask_never_claims_cpu_or_persists_a_policy_change(self):
+        owner = self.make({"system"})
+        owner.begin()
+        self.assertEqual(self.backend.policy, "auto")
+        spawns = [item for item in self.backend.events if item[0] == "spawn"]
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(spawns[0][2], 2)
+        self.assertEqual([item[1] for item in self.backend.events if item[0] == "write"], [{"system": 255}])
+        owner.restore("release_requested")
+        self.assertEqual(self.backend.policy, "auto")
+        self.assertEqual(self.backend.events[-1], ("sync_mode", "auto", True, True))
+
+    def test_both_channels_reassert_same_target_bounded_without_restarting(self):
+        owner = self.make({"cpu", "system"})
+        owner.begin()
+        self.renew({"cpu", "system"}, {"cpu": 150, "system": 210}, 2)
+        owner.tick()
+        writes = len([item for item in self.backend.events if item[0] == "write"])
+        self.renew({"cpu", "system"}, {"cpu": 150, "system": 210}, 3)
+        owner.tick()
+        self.assertEqual(len([item for item in self.backend.events if item[0] == "write"]), writes)
+        self.now += 800_000_000
+        self.renew({"cpu", "system"}, {"cpu": 150, "system": 210}, 4)
+        owner.tick()
+        self.assertEqual(len([item for item in self.backend.events if item[0] == "write"]), writes + 1)
+        self.assertEqual(len([item for item in self.backend.events if item[0] == "spawn"]), 1)
+        self.assertEqual(native.read_json(self.folder / "status.json")["applied_sequence"], 4)
+
+    def test_expired_lease_recovers_high_before_daemon_and_policy(self):
+        owner = self.make({"cpu", "system"})
+        owner.begin()
+        self.now += 5_000_000_001
+        with self.assertRaises(ValueError):
+            owner.tick()
+        self.backend.events.clear()
+        self.assertTrue(owner.restore("lease_or_identity_failed"))
+        self.assertEqual([event[0] for event in self.backend.events], ["write", "restore_daemon", "sync_mode"])
+        self.assertEqual(self.backend.events[0][1], {"cpu": 255, "system": 255})
+        self.assertEqual(native.read_json(self.folder / "descriptor.json"), {"version": 1, "recovered": True})
+
+    def test_owner_pid_reuse_and_release_request_trigger_recovery(self):
+        owner = self.make({"system"})
+        owner.begin()
+        self.backend.live[10]["starttime"] += 1
+        with self.assertRaisesRegex(RuntimeError, "owner_stopped"):
+            owner.tick()
+        self.backend.live[10] = dict(self.backend.owner)
+        native.atomic_json(self.folder / "release.json", {"release": True})
+        with self.assertRaisesRegex(RuntimeError, "release_requested"):
+            owner.tick()
+
+    def test_external_vendor_policy_wins_without_fighting_or_restoring_old_policy(self):
+        owner = self.make({"cpu", "system"})
+        owner.begin()
+        self.backend.policy = "low"
+        self.now += 800_000_000  # Competition wins even when reassertion is due.
+        count = len([item for item in self.backend.events if item[0] == "write"])
+        with self.assertRaisesRegex(RuntimeError, "vendor_policy_changed"):
+            owner.tick()
+        self.assertEqual(len([item for item in self.backend.events if item[0] == "write"]), count)
+        self.backend.events.clear()
+        owner.restore("vendor_policy_changed")
+        self.assertEqual(self.backend.policy, "low")
+        self.assertEqual(self.backend.events[0], ("write", {"cpu": 255}))
+        self.assertFalse(any(event[0] == "mode" for event in self.backend.events))
+        self.assertEqual(native.read_json(self.folder / "status.json")["release_cause"], "vendor_policy_changed")
+
+    def test_sync_failure_still_has_original_executor_and_policy_recovery_record(self):
+        owner = self.make({"system"})
+        self.backend.failures.add("sync_mode")
+        with self.assertRaises(ValueError):
+            owner.begin()
+        self.assertTrue(native.read_json(self.folder / "descriptor.json")["daemon_changed"])
+        self.assertEqual(native.read_json(self.folder / "descriptor.json")["old_mode"], "auto")
+        self.backend.failures.clear()
+        self.assertTrue(owner.restore("lease_or_identity_failed"))
+        self.assertEqual(self.backend.policy, "auto")
+
+    def test_preload_spawn_failure_restores_original_executor(self):
+        owner = self.make({"cpu"})
+        self.backend.failures.add("spawn")
+        with self.assertRaises(RuntimeError):
+            owner.begin()
+        self.assertFalse(self.backend.alive(self.backend.vendor))
+        self.assertTrue(owner.restore("lease_or_identity_failed"))
+        self.assertTrue(self.backend.alive(self.backend.vendor))
+
+    def test_identity_change_prevents_custom_write_but_still_restores_daemon(self):
+        owner = self.make({"cpu"})
+        owner.begin()
+        self.backend.verified = False
+        with self.assertRaises(ValueError):
+            owner.tick()
+        self.assertFalse(owner.restore("lease_or_identity_failed"))
+        self.assertTrue(self.backend.alive(self.backend.vendor))
+        self.assertFalse(native.read_json(self.folder / "status.json")["restore_ok"])
+
+    def test_unknown_original_system_mode_refuses_before_any_mutation(self):
+        owner = self.make({"system"})
+        self.backend.policy = None
+        with self.assertRaises(ValueError):
+            owner.begin()
+        self.assertEqual(self.backend.events, [])
+
+    def test_default_adapter_capability_is_passive_and_does_not_expose_private_state(self):
+        adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram", backend=self.backend)
+        with patch("subprocess.Popen", side_effect=AssertionError("不能启动程序")), \
+                patch("os.kill", side_effect=AssertionError("不能停止程序")), \
+                patch("fcntl.ioctl", side_effect=AssertionError("不能访问硬件")):
+            self.assertFalse(adapter.capabilities()["available"])
+            self.assertEqual(adapter.snapshot()["phase"], "idle")
+            adapter.release()
+        self.assertEqual(self.backend.events, [])
+        self.assertNotIn("fixture-secret", json.dumps(adapter.capabilities()))
+
+    def test_failed_probe_hides_capability_even_when_writes_enabled(self):
+        self.backend.verified = False
+        adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram",
+                                          backend=self.backend, allow_writes=True)
+        self.assertFalse(adapter.capabilities()["available"])
+        with self.assertRaises(ValueError):
+            adapter.start({"cpu"})
+        self.assertEqual(self.backend.events, [])
+
+    def test_proc_identity_parses_parentheses_and_rejects_zombie_or_reused_pid(self):
+        proc = self.folder / "proc/123"
+        proc.mkdir(parents=True)
+        (proc / "exe").symlink_to("/fixture/python")
+        (proc / "stat").write_text("123 (odd) name) S " + " ".join(["0"] * 18 + ["777"] + ["0"] * 4))
+        self.assertEqual(native.process_identity(123, proc.parent), {"pid": 123, "starttime": 777, "exe": "/fixture/python"})
+        (proc / "stat").write_text("123 (dead) Z " + " ".join(["0"] * 18 + ["777"] + ["0"] * 4))
+        self.assertIsNone(native.process_identity(123, proc.parent))
+
+    def test_state_reader_rejects_oversize_symlink_and_nonregular_without_blocking(self):
+        path = self.folder / "state"
+        path.write_bytes(b"x" * 33)
+        self.assertIsNone(native.read_bytes(path, 32))
+        (self.folder / "link").symlink_to(path)
+        self.assertIsNone(native.read_bytes(self.folder / "link", 64))
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.folder / "fifo")
+            self.assertIsNone(native.read_bytes(self.folder / "fifo", 64))
+
+    def fake_child_factory(self, command, **options):
+        folder = Path(command[command.index("--descriptor") + 1]).parent
+        test = self
+
+        class Child:
+            def __init__(child):
+                child.owner = watchdog.FanWatchdog(folder, test.backend, clock_ns=lambda: test.now)
+                child.started = child.done = False
+
+            def poll(child):
+                if child.done:
+                    return 0
+                try:
+                    if not child.started:
+                        child.owner.begin()
+                        child.started = True
+                    elif native.read_json(folder / "release.json") is not None:
+                        child.owner.restore("release_requested")
+                        child.done = True
+                        return 0
+                    else:
+                        child.owner.tick()
+                except (ValueError, RuntimeError):
+                    child.owner.restore("lease_or_identity_failed")
+                    child.done = True
+                    return 1
+                return None
+
+            def wait(child, timeout):
+                return child.poll()
+
+        return Child()
+
+    def fake_sleep(self, seconds):
+        self.now += int(seconds * 1_000_000_000)
+
+    def adapter(self):
+        return native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram", backend=self.backend,
+            allow_writes=True, popen=self.fake_child_factory, clock=lambda: self.now / 1_000_000_000, sleep=self.fake_sleep)
+
+    def test_adapter_start_write_sequence_ack_and_release_are_fake_only_and_idempotent(self):
+        adapter = self.adapter()
+        adapter.start({"cpu", "system"})
+        self.assertEqual(adapter.snapshot()["owner"], "custom")
+        adapter.write({"cpu": 190, "system": 220})
+        self.assertEqual(adapter.snapshot()["targets"], {"cpu": 190, "system": 220})
+        before = (adapter.folder / "lease.bin").read_bytes()
+        with self.assertRaises(ValueError):
+            adapter.write({"cpu": 190})
+        self.assertEqual((adapter.folder / "lease.bin").read_bytes(), before)
+        adapter.release()
+        events = list(self.backend.events)
+        adapter.release()
+        self.assertEqual(self.backend.events, events)
+        self.assertEqual(adapter.snapshot()["active_channels"], [])
+        self.assertEqual(adapter.channels, set())
+
+    def test_adapter_driver_change_releases_instead_of_renewing_an_unsafe_lease(self):
+        adapter = self.adapter()
+        adapter.start({"cpu"})
+        self.backend.verified = False
+        with self.assertRaises(RuntimeError):
+            adapter.write({"cpu": 200})
+        self.assertEqual(adapter.channels, set())
+        self.assertTrue(self.backend.alive(self.backend.vendor))
+
+    def test_independent_systemd_handle_tracks_watchdog_not_launcher_or_control_owner(self):
+        identity = {"pid": 99, "starttime": 990, "exe": "/fixture/python3"}
+        self.backend.live[99] = identity
+        native.atomic_json(self.folder / "status.json", {"watchdog": identity, "phase": "active"})
+        launcher = type("Launcher", (), {"poll": lambda _: 0})()
+        handle = native.SystemdSupervisor(launcher, self.folder, self.backend)
+        self.assertIsNone(handle.poll())
+        self.backend.live.pop(10)  # Killing the control owner does not kill WDT.
+        self.assertIsNone(handle.poll())
+        self.backend.live[99] = {**identity, "starttime": 991}  # PID reuse is exit.
+        self.assertEqual(handle.poll(), 0)
+
+    def test_production_launch_uses_independent_transient_unit_and_no_restart_job(self):
+        backend = watchdog.SystemBackend(root="/")
+        calls = []
+        launcher = type("Launcher", (), {"poll": lambda _: None})()
+
+        def fake_popen(argv, **options):
+            calls.append((argv, options))
+            return launcher
+
+        backend.launch_watchdog(["/usr/bin/python3", "-B", "/run/r1-toolbox/fan_watchdog.py"],
+                                "/run/r1-toolbox/fan-abc123", fake_popen)
+        argv = calls[0][0]
+        self.assertEqual(argv[0], "systemd-run")
+        self.assertIn("--collect", argv)
+        self.assertIn("--property=KillMode=process", argv)
+        self.assertIn("--property=Restart=no", argv)
+        self.assertNotIn("enable", argv)
+        with self.assertRaises(ValueError):
+            backend.launch_watchdog(["python3"], "/tmp/persistent-descriptor", fake_popen)
+
+    def test_backend_integer_ioctl_abi_uses_only_fake_opened_file_and_mocked_ioctl(self):
+        device = self.folder / "dev/hikio"
+        device.parent.mkdir()
+        device.write_bytes(b"fixture-only")
+        info = device.stat()
+        backend = watchdog.SystemBackend(root=self.folder)
+        backend._device = (info.st_dev, info.st_ino, info.st_rdev)
+        with patch.object(backend, "verify_live"), patch.object(watchdog.stat, "S_ISCHR", return_value=True), \
+                patch.object(watchdog.fcntl, "ioctl", return_value=0) as ioctl:
+            backend.write({"cpu": 128, "system": 240})
+        self.assertEqual([(call.args[1], call.args[2]) for call in ioctl.call_args_list], [(0x5798, 128), (0x5799, 240)])
+        with patch.object(backend, "verify_live"), patch.object(watchdog.stat, "S_ISCHR", return_value=True), \
+                patch.object(watchdog.fcntl, "ioctl", return_value=-1):
+            with self.assertRaises(ValueError):
+                backend.write({"cpu": 180})
+
+    def test_backend_immutable_firmware_and_exact_loaded_note_gate(self):
+        program = self.folder / "histor/bin/temp_control"
+        program.parent.mkdir(parents=True)
+        program.write_bytes(b"fake-firmware-not-executable")
+        note = self.folder / "sys/module/hikio/notes/.note.gnu.build-id"
+        note.parent.mkdir(parents=True)
+        note.write_bytes(native.DRIVER_NOTE)
+        device = self.folder / "dev/hikio"
+        device.parent.mkdir()
+        device.write_bytes(b"fake-char-identity")
+        digest = hashlib.sha256(program.read_bytes()).hexdigest()
+        backend = watchdog.SystemBackend(root=self.folder)
+        with patch.object(watchdog, "FIRMWARE_SHA256", digest), \
+                patch.object(watchdog.stat, "S_ISCHR", return_value=True):
+            backend.verify_live()
+            note.write_bytes(native.DRIVER_NOTE[:-1] + b"\0")
+            with self.assertRaises(ValueError):
+                backend.verify_live()
+            note.write_bytes(native.DRIVER_NOTE)
+            program.write_bytes(b"replaced-firmware-not-executable")
+            with self.assertRaises(ValueError):
+                backend.verify_live()
+
+    def test_backend_sync_uses_only_get_existing_mode_and_exact_manual_factory_value(self):
+        backend = watchdog.SystemBackend(root=self.folder)
+        rpc = type("RPC", (), {"_has_socket": lambda _: True, "_config_mode": lambda _: 2,
+                                "_get_mode": lambda _: 2})()
+        with patch.object(backend, "verify_live"), patch.object(backend, "_histor", return_value=rpc), \
+                patch.object(backend, "mode", return_value="low"), patch.object(backend, "_write") as write:
+            backend.sync_mode(self.folder, expected="low")
+            write.assert_called_once_with({"system": 120}, minimum=120)
+        self.assertFalse(hasattr(rpc, "_rpc"))  # There is no SET primitive here.
+
+    def test_oversized_recovery_descriptor_is_refused_before_writing(self):
+        with self.assertRaises(ValueError):
+            native.atomic_json(self.folder / "descriptor-too-large.json", {"environment": "x" * 140000})
+        self.assertFalse((self.folder / "descriptor-too-large.json").exists())
+
+    def test_recovery_hardware_does_not_depend_on_writable_status_or_redaction(self):
+        owner = self.make({"cpu", "system"})
+        owner.begin()
+        self.backend.events.clear()
+        with patch.object(watchdog, "atomic_json", side_effect=OSError("fixture ENOSPC")):
+            self.assertTrue(owner.restore("lease_or_identity_failed"))
+        self.assertEqual([event[0] for event in self.backend.events], ["write", "restore_daemon", "sync_mode"])
+        self.assertEqual(self.backend.events[0][1], {"cpu": 255, "system": 255})
+        self.assertEqual(owner.phase, "released")
+        events = list(self.backend.events)
+        self.assertTrue(owner.restore("release_requested"))
+        self.assertEqual(events, self.backend.events)
+
+    def test_watchdog_owner_death_full_loop_restores_independently(self):
+        owner = self.make({"system"})
+
+        def owner_dies(seconds):
+            self.now += int(seconds * 1_000_000_000)
+            self.backend.live.pop(10, None)
+
+        owner.run(sleep=owner_dies)
+        status = native.read_json(self.folder / "status.json")
+        self.assertEqual(status["phase"], "released")
+        self.assertEqual(status["release_cause"], "owner_stopped")
+        self.assertTrue(self.backend.alive(self.backend.vendor))
+
+    def test_recovery_handles_spawn_success_before_guarded_pid_journal_commit(self):
+        owner = self.make({"cpu"})
+        owner.begin()
+        descriptor = native.read_json(self.folder / "descriptor.json")
+        descriptor["guarded"] = None
+        native.atomic_json(self.folder / "descriptor.json", descriptor)
+        recovery = watchdog.FanWatchdog(self.folder, self.backend, clock_ns=lambda: self.now)
+        self.assertTrue(recovery.restore("supervisor_stopped"))
+        self.assertTrue(self.backend.alive(self.backend.vendor))
+        self.assertFalse(self.backend.alive(self.backend.guarded))
+
+    def test_system_backend_recognizes_only_this_exact_guard_and_lease(self):
+        backend = watchdog.SystemBackend(root=self.folder, guard_path=self.folder / "fan_guard.so")
+        proc = self.folder / f"proc/{self.backend.guarded['pid']}"
+        proc.mkdir(parents=True)
+        maps = proc / "maps"
+        env = proc / "environ"
+        guard = str(backend.guard_path.resolve())
+        lease = self.folder / "lease.bin"
+        maps.write_text(f"0000-1000 r-xp 0000 00:01 123 {guard}\n")
+        env.write_bytes(b"R1_FAN_LEASE=" + os.fsencode(lease) + b"\0LD_PRELOAD=" + os.fsencode(guard) + b"\0")
+        with patch.object(backend, "alive", return_value=True):
+            self.assertEqual(backend._owner_kind(self.backend.guarded, lease), "ours")
+            self.assertEqual(backend._owner_kind(self.backend.guarded, self.folder / "other-lease"), "unknown")
+            maps.write_text(f"0000-1000 r-xp 0000 00:01 123 {guard}.backup\n")
+            self.assertEqual(backend._owner_kind(self.backend.guarded, lease), "unknown")
+            env.write_bytes(b"PATH=/fixture\0")
+            maps.write_text("0000-1000 r-xp 0000 00:01 123 /fixture/libc.so\n")
+            self.assertEqual(backend._owner_kind(self.backend.guarded, lease), "vendor")
+
+    def test_system_backend_stops_journalless_own_guard_but_reuses_verified_vendor(self):
+        backend = watchdog.SystemBackend(root=self.folder)
+        original = self.backend.capture()
+        with patch.object(backend, "_firmware_signature"), \
+                patch.object(backend, "_vendors", side_effect=[[self.backend.guarded], []]), \
+                patch.object(backend, "_owner_kind", return_value="ours"), \
+                patch.object(backend, "stop_process") as stop, \
+                patch.object(backend, "spawn", return_value=self.backend.vendor) as spawn:
+            self.assertEqual(backend.restore_daemon(original, None, lease=self.folder / "lease.bin"), self.backend.vendor)
+            stop.assert_called_once_with(self.backend.guarded)
+            spawn.assert_called_once_with(original)
+        with patch.object(backend, "_firmware_signature"), \
+                patch.object(backend, "_vendors", return_value=[self.backend.vendor]), \
+                patch.object(backend, "_owner_kind", return_value="vendor"), \
+                patch.object(backend, "stop_process") as stop, patch.object(backend, "spawn") as spawn:
+            self.assertEqual(backend.restore_daemon(original, None, lease=self.folder / "lease.bin"), self.backend.vendor)
+            stop.assert_not_called()
+            spawn.assert_not_called()
+
+    def recovery_adapter(self, phase, child, events):
+        native.atomic_json(self.folder / "descriptor.json", {"version": 1, "original": self.backend.capture(),
+                           "channels": ["cpu"], "owner": self.backend.owner})
+        native.atomic_json(self.folder / "status.json", {"phase": phase, "restore_ok": False})
+
+        def recover(command, **options):
+            events.append("recover")
+            self.assertIn("--recover", command)
+            native.atomic_json(self.folder / "status.json", {"phase": "released", "restore_ok": True})
+            native.atomic_json(self.folder / "descriptor.json", {"version": 1, "recovered": True})
+            return type("Completed", (), {"wait": lambda _, timeout: 0, "poll": lambda _: 0})()
+
+        adapter = native.FanNativeAdapter(self.folder / "persistent", self.folder / "ram", backend=self.backend,
+                                          allow_writes=True, popen=recover)
+        adapter.folder, adapter.channels, adapter.child = self.folder, {"cpu"}, child
+        return adapter
+
+    def test_explicit_release_retries_recovery_failed_once_and_then_is_idempotent(self):
+        events = []
+        completed = type("Completed", (), {"wait": lambda _, timeout: 0, "poll": lambda _: 0})()
+        adapter = self.recovery_adapter("recovery_failed", completed, events)
+        adapter.release()
+        self.assertEqual(events, ["recover"])
+        self.assertEqual(adapter.channels, set())
+        adapter.release()
+        self.assertEqual(events, ["recover"])
+
+    def test_hung_live_supervisor_is_terminated_before_one_bounded_recovery(self):
+        events = []
+
+        class Hung:
+            terminated = False
+
+            def wait(child, timeout):
+                if not child.terminated:
+                    raise subprocess.TimeoutExpired("fixture-watchdog", timeout)
+                return 0
+
+            def terminate_verified(child):
+                events.append("terminate-own-watchdog")
+                child.terminated = True
+
+        adapter = self.recovery_adapter("active", Hung(), events)
+        adapter.release()
+        self.assertEqual(events, ["terminate-own-watchdog", "recover"])
+        self.assertTrue(native.read_json(self.folder / "status.json")["restore_ok"])
+
+    def test_hung_watchdog_identity_replacement_is_never_signalled(self):
+        identity = {"pid": 99, "starttime": 990, "exe": "/fixture/python3"}
+        self.backend.live[99] = {**identity, "starttime": 991}
+        launcher = type("Launcher", (), {"poll": lambda _: 0})()
+        handle = native.SystemdSupervisor(launcher, self.folder, self.backend)
+        handle.identity = identity
+        with self.assertRaises(RuntimeError):
+            handle.terminate_verified()
+        self.assertFalse(any(event[0] == "stop" for event in self.backend.events))
+        self.backend.live[99] = identity
+        handle.terminate_verified()
+        self.assertIn(("stop", 99), self.backend.events)
+        self.assertTrue(self.backend.alive(self.backend.vendor))
+
+    def test_each_explicit_recovery_gets_a_new_transient_unit_name(self):
+        backend = watchdog.SystemBackend(root="/")
+        calls = []
+
+        def popen(command, **options):
+            calls.append(command)
+            return type("Launcher", (), {"poll": lambda _: None})()
+
+        for _ in range(2):
+            backend.launch_watchdog(["/usr/bin/python3", "--recover"], "/run/r1-toolbox/fan-abc123", popen)
+        units = [next(arg for arg in command if arg.startswith("--unit=")) for command in calls]
+        self.assertNotEqual(units[0], units[1])
+
+    def test_unknown_guard_is_not_signalled_or_replaced_during_recovery(self):
+        backend = watchdog.SystemBackend(root=self.folder)
+        original = self.backend.capture()
+        with patch.object(backend, "_firmware_signature"), \
+                patch.object(backend, "_vendors", return_value=[self.backend.guarded]), \
+                patch.object(backend, "_owner_kind", return_value="unknown"), \
+                patch.object(backend, "stop_process") as stop, patch.object(backend, "spawn") as spawn:
+            with self.assertRaises(RuntimeError):
+                backend.restore_daemon(original, None, lease=self.folder / "lease.bin")
+            stop.assert_not_called()
+            spawn.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

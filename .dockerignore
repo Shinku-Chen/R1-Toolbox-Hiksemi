@@ -13,3 +13,14 @@ tools/boot-once/*
 build/*
 !build/ui-bundle.tar
 !build/ui-bundle.sha256
+!scripts/
+scripts/*
+!scripts/build-ui.py
+!ui/
+!ui/**
+!runtime/
+runtime/*
+!runtime/*.py
+!native/
+native/*
+!native/fan_guard.c

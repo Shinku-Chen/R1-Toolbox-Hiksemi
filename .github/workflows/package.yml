@@ -2,7 +2,7 @@ name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection', 'fix/histor-window-handshake', 'feat/interactive-toolbox', 'feat/device-controls', 'feat/readable-network']
+    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection', 'fix/histor-window-handshake', 'feat/interactive-toolbox', 'feat/device-controls', 'feat/readable-network', 'feat/independent-fan-policy']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -45,6 +45,8 @@ jobs:
           node tests/check_web_config.cjs
       - name: Check Python syntax
         run: python -m compileall -q scripts tools/boot-once runtime tests
+      - name: Check native fan adapter without NAS devices
+        run: python tests/check_fan_guard_linux.py
       - name: Validate Compose configuration
         run: |
           docker compose -f composer.yml config --quiet
