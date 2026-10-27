@@ -292,49 +292,89 @@ class ToolboxTests(unittest.TestCase):
         self.assertTrue(self.controller.stopped.is_set())
         self.assertFalse(self.controller.thread.is_alive())
 
-    def test_rgb_only_probes_explicit_bus_without_force_and_refuses_failed_probe(self):
-        (self.dev / "i2c-0").touch()
-        self.assertEqual([0], self.controller.snapshot()["rgb"]["availableBuses"])
-        self.assertEqual([], self.calls)
-        self.assertFalse(self.controller.action("rgb.set", {"mode": 1, "color": "#ff0000"})["ok"])
-        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 1, "", "busy")
-        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#ff0000"})["ok"])
-        self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
-        self.controller.runner = self.runner
-        self.assertTrue(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#ff0000"})["ok"])
-        self.assertEqual(["/usr/sbin/i2cget", "-y", "0", "0x26", "0x01", "b"], self.calls[0])
-        self.assertTrue(all("-f" not in argv for argv in self.calls))
-        self.assertEqual(7, len(self.calls))
+    def rgb_fixture(self, buses=(0,), name="Synopsys DesignWare I2C adapter"):
+        self.rgb_registers = {}
+        for bus in buses:
+            (self.dev / ("i2c-" + str(bus))).touch()
+            self.write(self.sys / "class/i2c-dev" / ("i2c-" + str(bus)) / "name", name)
+            self.rgb_registers[bus] = {1: 0x55, 0x90: 1, 0x91: 73, 0x92: 3, 0x93: 4, 0x94: 5}
+        check = mock.patch.object(MODULE.stat, "S_ISCHR", return_value=True)
+        check.start()
+        self.addCleanup(check.stop)
 
-    def test_rgb_probe_performs_no_writes_and_requires_an_explicit_existing_bus(self):
-        (self.dev / "i2c-1").touch()
-        self.assertFalse(self.controller.action("rgb.probe", {"bus": True})["ok"])
-        self.assertFalse(self.controller.action("rgb.probe", {"bus": 2})["ok"])
-        self.assertEqual([], self.calls)
-        result = self.controller.action("rgb.probe", {"bus": 1})
+        def runner(argv):
+            self.calls.append(list(argv))
+            bus, register = int(argv[2]), int(argv[4], 16)
+            if Path(argv[0]).name == "i2cset":
+                self.rgb_registers[bus][register] = int(argv[5], 16)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, hex(self.rgb_registers[bus][register]), "")
+        self.controller.runner = runner
+
+    def test_rgb_automatically_uses_only_designware_fixed_address_nonforce_reads(self):
+        self.rgb_fixture((7,))
+        (self.dev / "i2c-2").touch()
+        self.write(self.sys / "class/i2c-dev/i2c-2/name", "SMBus I801 adapter")
+        result = self.controller.action("rgb.probe", {})
         self.assertTrue(result["ok"], result)
-        self.assertTrue(result["state"]["capabilities"]["rgb"]["available"])
-        self.assertIsNone(result["state"]["rgb"]["color"])
-        self.assertEqual([["/usr/sbin/i2cget", "-y", "1", "0x26", register, "b"]
-                          for register in ("0x01", "0x90", "0x91")], self.calls)
+        self.assertEqual(result["state"]["rgb"]["bus"], 7)
+        self.assertEqual(result["state"]["rgb"]["color"], "#030405")
+        self.assertEqual([["/usr/sbin/i2cget", "-y", "7", "0x26", f"0x{register:02x}", "b"]
+                          for register in (1, 0x90, 0x91, 0x92, 0x93, 0x94)], self.calls)
+        self.assertTrue(all("-f" not in argv and Path(argv[0]).name == "i2cget" for argv in self.calls))
 
-    def test_rgb_wrong_chip_is_rejected_and_brightness_is_an_independent_register(self):
-        (self.dev / "i2c-0").touch()
-        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 0, "0x01", "")
-        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#00ff00"})["ok"])
+    def test_rgb_no_manual_bus_or_noncharacter_device_can_enable_control(self):
+        self.rgb_fixture()
+        self.assertFalse(self.controller.action("rgb.probe", {"bus": 0})["ok"])
+        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#FF0000"})["ok"])
         self.assertEqual([], self.calls)
+        with mock.patch.object(MODULE.stat, "S_ISCHR", return_value=False):
+            self.assertFalse(self.controller.action("rgb.probe", {})["ok"])
+        self.assertEqual([], self.calls)
+
+    def test_rgb_wrong_chip_or_multiple_matching_controllers_never_write(self):
+        self.rgb_fixture((0, 1))
+        self.assertFalse(self.controller.action("rgb.probe", {})["ok"])
         self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
-        self.controller.runner = self.runner
-        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#00ff00", "brightness": 101})["ok"])
-        self.assertEqual([], self.calls)
-        result = self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#00ff00", "brightness": 40})
+        self.rgb_registers[0][1] = self.rgb_registers[1][1] = 0x12
+        self.assertFalse(self.controller.action("rgb.set", {"mode": 1, "color": "#00FF00"})["ok"])
+        self.assertTrue(all(Path(argv[0]).name == "i2cget" for argv in self.calls))
+        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 1, "", "busy")
+        self.assertFalse(self.controller.action("rgb.probe", {})["ok"])
+
+    def test_rgb_brightness_independent_readback_and_repeated_target_skip_writes(self):
+        self.rgb_fixture()
+        target = {"mode": 3, "color": "#00FF00", "brightness": 40}
+        result = self.controller.action("rgb.set", target)
         self.assertTrue(result["ok"], result)
         self.assertIn(["/usr/sbin/i2cset", "-y", "0", "0x26", "0x91", "0x66", "b"], self.calls)
         self.assertIn(["/usr/sbin/i2cset", "-y", "0", "0x26", "0x93", "0xff", "b"], self.calls)
-        self.assertEqual(40, result["state"]["rgb"]["brightness"])
-        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 0, "0x01", "")
-        self.assertFalse(self.controller.action("rgb.probe", {"bus": 0})["ok"])
+        before = len([argv for argv in self.calls if Path(argv[0]).name == "i2cset"])
+        self.assertTrue(self.controller.action("rgb.set", target)["ok"])
+        self.assertEqual(before, len([argv for argv in self.calls if Path(argv[0]).name == "i2cset"]))
+        self.assertEqual(result["state"]["rgb"]["brightness"], 40)
+
+    def test_rgb_failed_write_revokes_capability_instead_of_claiming_success(self):
+        self.rgb_fixture()
+        original = self.controller.runner
+        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 1, "", "failed") if Path(argv[0]).name == "i2cset" else original(argv)
+        self.assertFalse(self.controller.action("rgb.set", {"mode": 1, "color": "#00FF00"})["ok"])
         self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
+
+    def test_rgb_policy_ownership_restores_exact_bytes_or_preserves_external_change(self):
+        self.rgb_fixture()
+        owner = object()
+        original = self.controller.lighting_claim(owner)
+        actual = self.controller.lighting_apply(owner, {"mode": 1, "color": "#FF0000", "brightness": 40}, expected=original)
+        self.assertFalse(self.controller.action("rgb.set", {"mode": 0, "color": "#000000"})["ok"])
+        self.assertTrue(self.controller.lighting_release(owner, original, actual))
+        self.assertEqual(self.controller.lighting_probe()["registers"], original["registers"])
+        original = self.controller.lighting_claim(owner)
+        actual = self.controller.lighting_apply(owner, {"mode": 1, "color": "#00FF00", "brightness": 40}, expected=original)
+        self.rgb_registers[0][0x92] = 88
+        self.assertFalse(self.controller.lighting_release(owner, original, actual))
+        self.assertEqual(self.rgb_registers[0][0x92], 88)
+        self.assertIsNone(self.controller._rgb_owner)
 
     def test_official_strategy_is_separate_from_pwm_and_requires_confirmation(self):
         native = mock.Mock()

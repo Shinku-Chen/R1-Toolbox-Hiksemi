@@ -91,7 +91,8 @@ def read_bundle(tar_path, expected_sha):
                              'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
                              'runtime/web_config.py', 'runtime/fan_policy.py', 'runtime/fan_native.py',
                              'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'runtime/fan_guard.so', 'frontend/web/index.html',
-                             'frontend/web/config.css', 'frontend/web/config.js')
+                             'frontend/web/config.css', 'frontend/web/config.js', 'frontend/web/monitor.js',
+                             'runtime/light_policy.py', 'runtime/monitoring.py')
                     or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
             require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
             limit = MAX_MANIFEST if name == 'manifest.json' else MAX_FILE
@@ -124,7 +125,8 @@ def read_bundle(tar_path, expected_sha):
                                            'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
                                            'runtime/web_config.py', 'runtime/fan_policy.py', 'runtime/fan_native.py',
                                            'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'frontend/web/index.html',
-                                           'frontend/web/config.css', 'frontend/web/config.js')),
+                                           'frontend/web/config.css', 'frontend/web/config.js', 'frontend/web/monitor.js',
+                                           'runtime/light_policy.py', 'runtime/monitoring.py')),
             '内置界面缺少页面、采集或控制模块')
     return manifest, files
 

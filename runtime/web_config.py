@@ -1,5 +1,6 @@
-"""Paired LAN HTTP settings. Never accepts the Electron control credential."""
+"""Public LAN monitoring and paired controls with independent credentials."""
 import copy
+import datetime
 import hashlib
 import http.client
 import http.server
@@ -17,6 +18,8 @@ SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', '
                       'night_enabled', 'night_start', 'night_end', 'night_brightness', 'enabled_pages'))
 COOKIE = 'r1_web_session'
 PAIR_TTL, SESSION_TTL = 180, 8 * 3600
+PUBLIC_ROUTES = frozenset(('/api/v1', '/api/v1/status', '/api/v1/history', '/api/v1/traffic',
+                           '/api/v1/alerts', '/api/v1/report', '/api/v1/export.csv', '/api/v1/openapi.json'))
 
 
 class _Reader:
@@ -91,12 +94,14 @@ class _Server(http.server.ThreadingHTTPServer):
 
 
 class WebConfigServer:
-    def __init__(self, controller, insights=None, *, fan_policy=None, host='0.0.0.0', port=18732,
+    def __init__(self, controller, insights=None, *, fan_policy=None, light_policy=None, monitoring=None,
+                 monitor=None, host='0.0.0.0', port=18732,
                  asset_dir=None, clock=None):
         if host not in ('127.0.0.1', '0.0.0.0') or type(port) is not int or not (port == 0 or 1024 <= port <= 65535):
             raise ValueError('网页监听只允许 127.0.0.1/0.0.0.0 和 1024–65535 端口')
         self.controller, self.insights = controller, insights
         self.fan_policy = fan_policy
+        self.light_policy, self.monitoring, self.monitor = light_policy, monitoring, monitor
         self.host, self.port = host, port
         self.asset_dir = Path(asset_dir) if asset_dir is not None else Path(__file__).resolve().parent.parent / 'frontend/web'
         self.clock = clock or time.monotonic
@@ -167,7 +172,7 @@ class WebConfigServer:
                 raise ValueError('网页配置服务未启用')
             result = self.snapshot()
             if rotate is True:
-                code = f'{secrets.randbelow(10 ** 10):010d}'
+                code = f'{secrets.randbelow(10 ** 5):05d}'
                 self.pair_hash = hashlib.sha256(code.encode()).digest()
                 self.pair_until = self.clock() + PAIR_TTL
                 result = self.snapshot()
@@ -184,7 +189,7 @@ class WebConfigServer:
                 return None, 429
             self.attempts[peer] = attempts + [self.clock()]
             self.global_attempts.append(self.clock())
-            digest = hashlib.sha256(code.encode()).digest() if isinstance(code, str) and re.fullmatch(r'[0-9]{10}', code) else b''
+            digest = hashlib.sha256(code.encode()).digest() if isinstance(code, str) and re.fullmatch(r'[0-9]{5}', code) else b''
             if self.pair_hash is None or not secrets.compare_digest(digest, self.pair_hash):
                 return None, 403
             self.pair_hash = None
@@ -220,10 +225,87 @@ class WebConfigServer:
                 'screen': {key: screen.get(key) for key in ('brightness', 'asleep')},
                 'rgb': {key: raw.get('rgb', {}).get(key) for key in ('mode', 'color', 'brightness')}}
 
+    @staticmethod
+    def _read(component):
+        """Read component state without commands, SMART probes or I²C writes."""
+        if component is None:
+            return {}
+        try:
+            value = component.snapshot()
+            return copy.deepcopy(value) if isinstance(value, dict) else {}
+        except Exception:
+            return {'available': False, 'reason': '监控来源暂不可用'}
+
+    def public_status(self):
+        raw = self._read(self.controller)
+        controls = {key: raw.get(key) for key in ('capabilities', 'screen', 'rgb', 'fans', 'power')}
+        fan = self._read(self.fan_policy)
+        # Runtime is public; drafts and settings write acknowledgements stay in
+        # the paired session. No pairing code, CSRF, token or environment here.
+        fan = {key: fan[key] for key in ('active', 'busy', 'capability', 'channels', 'sources',
+                                        'last_error', 'recovery_confirmed') if key in fan}
+        light = self._read(self.light_policy)
+        light = {key: value for key, value in light.items() if key not in ('config', 'settings_error')}
+        status, insights = self._read(self.monitor), self._read(self.insights)
+        return {'schema_version': 1, 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+                'available': status.get('available', bool(insights)), 'status': status,
+                'insights': insights, 'controls': controls, 'fan_policy': fan,
+                'light_policy': light, 'analytics': self._read(self.monitoring)}
+
+    def _public(self, route, query):
+        parameters = urllib.parse.parse_qs(query, keep_blank_values=True, max_num_fields=4)
+        if set(parameters) - {'range'} or any(len(values) != 1 for values in parameters.values()):
+            raise ValueError('查询参数无效')
+        span = parameters.get('range', ['1h'])[0]
+        if span not in ('10m', '1h', '6h', '24h', '7d', '30d'):
+            raise ValueError('时间范围无效')
+        if parameters and route not in ('/api/v1/history', '/api/v1/export.csv'):
+            raise ValueError('此接口不接受查询参数')
+        if route == '/api/v1':
+            return {'schema_version': 1, 'read_only': True, 'endpoints': sorted(PUBLIC_ROUTES),
+                    'settings': 'POST /api/action 需要五位配对码建立的会话与 CSRF'}, 'application/json; charset=utf-8'
+        if route == '/api/v1/status':
+            return self.public_status(), 'application/json; charset=utf-8'
+        if route == '/api/v1/openapi.json':
+            paths = {}
+            for path in sorted(PUBLIC_ROUTES):
+                if path == '/api/v1/openapi.json':
+                    continue
+                csv = path.endswith('.csv')
+                operation = {'summary': '公开只读监控；写操作另需配对', 'security': [],
+                    'responses': {'200': {'description': '无读数使用null；保留每项实际采样时间',
+                        'content': {'text/csv' if csv else 'application/json': {
+                            'schema': {'type': 'string'} if csv else {'type': 'object', 'additionalProperties': True}}}},
+                        '400': {'description': '查询参数无效'}, '503': {'description': '来源暂不可用'}}}
+                if path in ('/api/v1/history', '/api/v1/export.csv'):
+                    operation['parameters'] = [{'name': 'range', 'in': 'query', 'required': False,
+                        'schema': {'type': 'string', 'enum': ['10m', '1h', '6h', '24h', '7d', '30d'], 'default': '1h'}}]
+                paths[path] = {'get': operation}
+            return {'openapi': '3.1.0', 'info': {'title': 'R1 Toolbox 只读监控 API', 'version': '1.0.0'},
+                    'servers': [{'url': '/'}], 'paths': paths}, 'application/json; charset=utf-8'
+        if self.monitoring is None:
+            raise RuntimeError('统计服务尚不可用')
+        method = {'/api/v1/history': lambda: self.monitoring.history(span),
+                  '/api/v1/traffic': self.monitoring.traffic,
+                  '/api/v1/alerts': self.monitoring.alerts,
+                  '/api/v1/report': self.monitoring.report,
+                  '/api/v1/export.csv': lambda: self.monitoring.export_csv(span)}[route]
+        value = method()
+        if route.endswith('.csv'):
+            return value.encode('utf-8-sig') if isinstance(value, str) else value, 'text/csv; charset=utf-8'
+        return value, 'application/json; charset=utf-8'
+
     def _action(self, body):
         if not isinstance(body, dict) or set(body) != {'action', 'payload'} or not isinstance(body['payload'], dict):
             raise ValueError('操作格式错误')
         action, payload = body['action'], body['payload']
+        if action in ('light.policy.update', 'monitor.settings.update'):
+            service = self.light_policy if action == 'light.policy.update' else self.monitoring
+            if service is None:
+                raise ValueError('配置服务未启用')
+            result = service.action(action, copy.deepcopy(payload))
+            return {**result, 'saved': result.get('settings_saved') is True, 'state': self._state(),
+                    **({'light_policy': service.snapshot()} if action == 'light.policy.update' else {'analytics': service.snapshot()})}
         if action in ('fan.policy.update', 'fan.policy.release'):
             if self.fan_policy is None:
                 raise ValueError('独立温控服务未启用')
@@ -231,6 +313,15 @@ class WebConfigServer:
             return {**result, 'saved': result.get('settings_saved') is True,
                     'state': self._state(), 'fan_policy': self.fan_policy.snapshot()}
         state = self._state()
+        if action in ('container.action', 'vm.action', 'power.request', 'power.cancel'):
+            if action != 'power.cancel' and payload.get('confirmed') is not True:
+                raise ValueError('设备操作需要明确确认')
+            destination = self.insights if action in ('container.action', 'vm.action') else self.controller
+            if destination is None:
+                raise ValueError('设备控制服务不可用')
+            result = destination.action(action, copy.deepcopy(payload))
+            return {'ok': result.get('ok') is True, 'applied': result.get('ok') is True,
+                    'state': self._state(), 'error': None if result.get('ok') else '操作未完成，请检查设备状态'}
         if action == 'settings.update':
             changes = payload.get('settings')
             if set(payload) != {'settings'} or not isinstance(changes, dict) or not changes or set(changes) - SETTINGS:
@@ -286,7 +377,7 @@ class WebConfigServer:
                 def log_message(self, *args):
                     pass
 
-                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8'):
+                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False):
                     data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
                     self.send_response(code)
                     for key, content in {'Content-Type': mime, 'Content-Length': str(len(data)), 'Cache-Control': 'no-store',
@@ -295,6 +386,11 @@ class WebConfigServer:
                         self.send_header(key, content)
                     if cookie:
                         self.send_header('Set-Cookie', cookie)
+                    if public:
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                    if mime.startswith('text/csv'):
+                        self.send_header('Content-Disposition', 'attachment; filename="r1-monitoring.csv"')
                     self.end_headers()
                     try:
                         self.wfile.write(data)
@@ -302,7 +398,7 @@ class WebConfigServer:
                         pass
                     self.close_connection = True
 
-                def valid(self, post=False):
+                def valid(self, post=False, public=False):
                     for name in ('Host', 'Origin', 'Cookie', 'Content-Length', 'Connection', 'X-R1-CSRF'):
                         if len(self.headers.get_all(name, [])) > 1:
                             self.send(400, {'error': '重复请求头'})
@@ -315,13 +411,13 @@ class WebConfigServer:
                     expected = {f'{local}:{outer.port}'}
                     if local == '127.0.0.1':
                         expected.add(f'localhost:{outer.port}')
-                    if host not in expected or (self.headers.get('Origin') is not None and self.headers.get('Origin') != 'http://' + host):
+                    if host not in expected or (not public and self.headers.get('Origin') is not None and self.headers.get('Origin') != 'http://' + host):
                         self.send(403, {'error': '请求来源不允许'})
                         return False
                     if post and self.headers.get('Origin') != 'http://' + host:
                         self.send(403, {'error': '写入请求需要同源网页'})
                         return False
-                    if urllib.parse.urlsplit(self.path).query:
+                    if urllib.parse.urlsplit(self.path).query and not public:
                         self.send(400, {'error': '接口不接受查询参数'})
                         return False
                     return True
@@ -355,11 +451,23 @@ class WebConfigServer:
                     return key, session
 
                 def do_GET(self):
-                    if not self.valid():
+                    parsed = urllib.parse.urlsplit(self.path)
+                    route = parsed.path
+                    public = route in PUBLIC_ROUTES
+                    if not self.valid(public=public):
                         return
-                    route = urllib.parse.urlsplit(self.path).path
+                    if public:
+                        try:
+                            value, mime = outer._public(route, parsed.query)
+                            self.send(200, value, mime=mime, public=True)
+                        except ValueError:
+                            self.send(400, {'error': '查询参数无效'}, public=True)
+                        except Exception:
+                            self.send(503, {'error': '监控来源暂不可用'}, public=True)
+                        return
                     static = {'/': ('index.html', 'text/html; charset=utf-8'), '/config.css': ('config.css', 'text/css; charset=utf-8'),
-                              '/config.js': ('config.js', 'application/javascript; charset=utf-8')}
+                              '/config.js': ('config.js', 'application/javascript; charset=utf-8'),
+                              '/monitor.js': ('monitor.js', 'application/javascript; charset=utf-8')}
                     if route in static:
                         name, mime = static[route]
                         path = outer.asset_dir / name
@@ -374,7 +482,9 @@ class WebConfigServer:
                     if route == '/api/session':
                         try:
                             self.send(200, {'csrf': session['csrf'], 'state': outer._state(), 'http': True,
-                                **({'fan_policy': outer.fan_policy.snapshot()} if outer.fan_policy is not None else {})})
+                                **({'fan_policy': outer.fan_policy.snapshot()} if outer.fan_policy is not None else {}),
+                                **({'light_policy': outer.light_policy.snapshot()} if outer.light_policy is not None else {}),
+                                **({'analytics': outer.monitoring.snapshot()} if outer.monitoring is not None else {})})
                         except Exception:
                             self.send(503, {'error': '设置服务暂不可用'})
                     else:
@@ -427,7 +537,13 @@ class WebConfigServer:
                 def unsupported(self):
                     self.send(405, {'error': '请求方法不支持'})
 
-                do_PUT = do_PATCH = do_DELETE = do_OPTIONS = do_HEAD = unsupported
+                def do_OPTIONS(self):
+                    if urllib.parse.urlsplit(self.path).path not in PUBLIC_ROUTES:
+                        self.unsupported()
+                    elif self.valid(public=True):
+                        self.send(200, {'read_only': True}, public=True)
+
+                do_PUT = do_PATCH = do_DELETE = do_HEAD = unsupported
 
             try:
                 server = _Server((self.host, self.port), Handler)

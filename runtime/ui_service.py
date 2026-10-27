@@ -311,7 +311,8 @@ def allowed_origin(origin, port):
         return False
 
 
-def make_http_server(monitor, port=PORT, controller=None, insights=None, control_token=None, web_config=None, fan_policy=None):
+def make_http_server(monitor, port=PORT, controller=None, insights=None, control_token=None, web_config=None,
+                     fan_policy=None, light_policy=None, monitoring=None):
     class StatusHandler(http.server.BaseHTTPRequestHandler):
         def request_origin(self):
             origin = self.headers.get("Origin")
@@ -343,6 +344,10 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                     "enabled": False, "reason": "网页配置未启用", "addresses": []}
             elif route == "/api/fan-policy" and fan_policy is not None:
                 value = fan_policy.snapshot()
+            elif route == "/api/light-policy" and light_policy is not None:
+                value = light_policy.snapshot()
+            elif route == "/api/monitoring" and monitoring is not None:
+                value = monitoring.snapshot()
             else:
                 self.send_json(404, {"error": "接口不存在"}, origin)
                 return
@@ -407,6 +412,14 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                     value = fan_policy.action(action, payload)
                     self.send_json(200 if value.get("ok") else 400, value, origin)
                 return
+            if action in ("light.policy.update", "monitor.settings.update"):
+                destination = light_policy if action == "light.policy.update" else monitoring
+                if destination is None:
+                    self.send_json(400, {"ok": False, "error": "配置服务未启用"}, origin)
+                else:
+                    value = destination.action(action, payload)
+                    self.send_json(200 if value.get("ok") else 400, value, origin)
+                return
             if action in ("fan.set", "fan.restore", "fan.official") and fan_policy is not None:
                 state = fan_policy.snapshot()
                 if state.get("active") or state.get("busy") or state.get("recovery_confirmed") is False:
@@ -462,7 +475,8 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             route = urllib.parse.urlsplit(self.path).path
             method = self.headers.get("Access-Control-Request-Method")
             headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",") if part.strip()}
-            can_read = route in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config", "/api/fan-policy") and method == "GET" and not headers
+            can_read = route in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config", "/api/fan-policy",
+                                 "/api/light-policy", "/api/monitoring") and method == "GET" and not headers
             can_control = (route == "/api/action" and controller is not None and control_token
                            and method == "POST" and headers <= {"content-type", "x-r1-token"})
             if (
@@ -540,7 +554,17 @@ def create_fan_policy(controller, insights):
     return FanPolicyController(controller.state_dir, TemperatureSources(insights), native)
 
 
-def create_web_config(controller, insights, fan_policy=None):
+def create_light_policy(controller, fan_policy):
+    from light_policy import LightPolicyController
+    return LightPolicyController(controller, fan_policy.sources, state_dir=controller.state_dir)
+
+
+def create_monitoring(controller, insights, monitor, fan_policy):
+    from monitoring import MonitoringService
+    return MonitoringService(controller.state_dir, insights, monitor, fan_policy.sources, fan_policy=fan_policy)
+
+
+def create_web_config(controller, insights, fan_policy=None, *, light_policy=None, monitoring=None, monitor=None):
     """Use a separate authenticated LAN endpoint; never share the Electron token."""
     raw_port = os.environ.get("R1_WEB_PORT", "18732")
     host = os.environ.get("R1_WEB_BIND", "0.0.0.0")
@@ -551,7 +575,8 @@ def create_web_config(controller, insights, fan_policy=None):
     if int(raw_port) == 0:
         return None
     from web_config import WebConfigServer
-    return WebConfigServer(controller, insights, fan_policy=fan_policy, host=host, port=int(raw_port))
+    return WebConfigServer(controller, insights, fan_policy=fan_policy, light_policy=light_policy,
+                           monitoring=monitoring, monitor=monitor, host=host, port=int(raw_port))
 
 
 def run_service(app, port=PORT, controller=None, insights=None):
@@ -575,7 +600,7 @@ def run_service(app, port=PORT, controller=None, insights=None):
         insights = InsightsCollector()
     stopped, monitor = threading.Event(), StatusMonitor()
     control_token = secrets.token_hex(32)
-    server = server_thread = child = web = fan = None
+    server = server_thread = child = web = fan = light = analytics = None
     handlers = {}
 
     def request_stop(signum, frame):
@@ -586,11 +611,21 @@ def run_service(app, port=PORT, controller=None, insights=None):
             handlers[sig] = signal.signal(sig, request_stop)
         fan = create_fan_policy(controller, insights)
         try:
-            web = create_web_config(controller, insights, fan_policy=fan)
+            light = create_light_policy(controller, fan)
+        except Exception as error:
+            print("[WARN] 灯光联动不可用：" + type(error).__name__, file=sys.stderr, flush=True)
+        try:
+            analytics = create_monitoring(controller, insights, monitor, fan)
+        except Exception as error:
+            print("[WARN] 历史统计不可用：" + type(error).__name__, file=sys.stderr, flush=True)
+        try:
+            web = create_web_config(controller, insights, fan_policy=fan, light_policy=light,
+                                    monitoring=analytics, monitor=monitor)
         except (OSError, ValueError) as error:
             print("[WARN] 网页配置未启用：" + str(error), file=sys.stderr, flush=True)
         server = bind_server(monitor, port, stopped, controller=controller, insights=insights,
-                             control_token=control_token, web_config=web, fan_policy=fan)
+                             control_token=control_token, web_config=web, fan_policy=fan,
+                             light_policy=light, monitoring=analytics)
         if server is None:
             return 0
         server_thread = threading.Thread(
@@ -600,6 +635,14 @@ def run_service(app, port=PORT, controller=None, insights=None):
         controller.start()
         insights.start()
         fan.start()
+        for name, companion in (("灯光联动", light), ("历史统计", analytics)):
+            if companion is None:
+                continue
+            try:
+                companion.start()
+            except Exception as error:
+                # Optional monitoring or lighting must never hide the display.
+                print("[WARN] " + name + "未启动：" + type(error).__name__, file=sys.stderr, flush=True)
         if web is not None:
             try:
                 web.start()
@@ -635,6 +678,10 @@ def run_service(app, port=PORT, controller=None, insights=None):
         cleanup = [("停止接收控制请求", stop_http)]
         if web is not None:
             cleanup.append(("停止网页配置", web.stop))
+        if light is not None:
+            cleanup.append(("恢复灯光接管", light.stop))
+        if analytics is not None:
+            cleanup.append(("保存历史统计", analytics.stop))
         if fan is not None:
             cleanup.append(("恢复原厂风扇管理", fan.stop))
         cleanup += [("恢复硬件", controller.stop),

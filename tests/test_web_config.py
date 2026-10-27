@@ -108,7 +108,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('code', self.web.snapshot())
         self.assertNotIn('code', self.web.pairing_info())
         pairing = self.web.pairing_info(rotate=True)
-        self.assertRegex(pairing['code'], r'^[0-9]{10}$')
+        self.assertRegex(pairing['code'], r'^[0-9]{5}$')
         self.assertEqual(pairing['expires_in'], 180)
         self.assertNotIn(pairing['code'], json.dumps(self.web.snapshot()))
         for route in ('/api/session', '/api/pair', '/api/web-config', '/api/toolbox'):
@@ -187,7 +187,7 @@ class WebTests(unittest.TestCase):
 
     def test_forbidden_commands_payloads_and_unverified_devices_never_reach_controller(self):
         self.login()
-        for action in ('fan.set', 'fan.official', 'power.request', 'container.action', 'vm.action', 'rgb.probe', 'web.pairing'):
+        for action in ('fan.set', 'fan.official', 'rgb.probe', 'web.pairing'):
             self.assertEqual(self.action(action, {'confirmed': True})[0], 400)
         self.assertEqual(self.action(payload={'settings': {'command': 'anything'}})[0], 400)
         self.assertEqual(self.action('rgb.set', {'bus': 4, 'mode': 1, 'color': '#112233'})[0], 400)
@@ -196,6 +196,63 @@ class WebTests(unittest.TestCase):
                               ('settings.update', {'settings': {'night_enabled': True}})):
             self.assertEqual(self.action(name, payload)[0], 400)
         self.assertEqual(self.controller.calls, [])
+
+    def test_public_monitoring_never_requires_pairing_or_discloses_write_material(self):
+        from types import SimpleNamespace
+        self.web.monitor = SimpleNamespace(snapshot=lambda: {'available': True, 'cpu': {'usage_percent': 42}})
+        self.web.insights = SimpleNamespace(snapshot=lambda: {'timestamp': 'fixture', 'interfaces': [{'name': 'eth0'}]})
+        code = self.web.pairing_info(rotate=True)['code']
+        status, headers, value = self.request('GET', '/api/v1/status', extra={'Origin': 'https://third-party.example'})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Access-Control-Allow-Origin'], '*')
+        self.assertNotIn('Access-Control-Allow-Credentials', headers)
+        self.assertEqual(value['schema_version'], 1)
+        self.assertEqual(value['status']['cpu']['usage_percent'], 42)
+        self.assertEqual(value['insights']['interfaces'], [{'name': 'eth0'}])
+        self.assertNotIn('settings', value['controls'])
+        self.assertNotIn('csrf', value)
+        self.assertNotIn(code, json.dumps(value))
+        self.assertEqual(self.controller.calls, [])
+        self.assertEqual(self.request('GET', '/api/session')[0], 401)
+        self.assertEqual(self.action('power.request', {'operation': 'reboot', 'confirmed': True})[0], 401)
+        self.assertEqual(self.request('OPTIONS', '/api/v1/status', extra={'Origin': 'https://third-party.example'})[0], 200)
+        self.assertEqual(self.request('GET', '/api/v1/status', extra={'Host': 'evil.invalid'})[0], 403)
+
+    def test_public_history_ranges_exports_and_failures_are_bounded(self):
+        from types import SimpleNamespace
+        calls = []
+        self.web.monitoring = SimpleNamespace(
+            history=lambda span: calls.append(span) or {'range': span, 'series': []},
+            traffic=lambda: {'totals': {}}, alerts=lambda: {'active': []}, report=lambda: {'schema_version': 1},
+            export_csv=lambda span: 'timestamp,cpu_usage_percent\r\n1,42\r\n')
+        self.assertEqual(self.request('GET', '/api/v1/history?range=7d')[2]['range'], '7d')
+        for route in ('/api/v1/history?range=forever', '/api/v1/history?range=1h&range=7d',
+                      '/api/v1/history?command=anything', '/api/v1/status?range=1h'):
+            self.assertEqual(self.request('GET', route)[0], 400)
+        self.assertEqual(calls, ['7d'])
+        status, headers, data = self.request('GET', '/api/v1/export.csv?range=24h')
+        self.assertEqual(status, 200)
+        self.assertIn('attachment', headers['Content-Disposition'])
+        self.assertTrue(data.startswith(bytes([239,187,191])))
+        self.assertEqual(self.request('GET', '/api/v1/openapi.json')[2]['openapi'], '3.1.0')
+        self.web.monitoring = None
+        self.assertEqual(self.request('GET', '/api/v1/history')[0], 503)
+
+    def test_paired_workload_and_power_controls_still_require_boolean_confirmation(self):
+        from unittest.mock import Mock
+        self.web.insights = Mock()
+        self.web.insights.action.return_value = {'ok': True}
+        for action in ('power.request', 'container.action', 'vm.action'):
+            self.assertEqual(self.action(action, {'confirmed': True})[0], 401)
+        self.login()
+        for action in ('power.request', 'container.action', 'vm.action'):
+            for confirmation in (None, False, 1, 'true'):
+                self.assertEqual(self.action(action, {'confirmed': confirmation})[0], 400)
+        self.assertEqual(self.controller.calls, [])
+        self.web.insights.action.assert_not_called()
+        self.assertEqual(self.action('power.request', {'operation': 'reboot', 'confirmed': True})[0], 200)
+        self.assertEqual(self.action('container.action', {'id': 'a'*12, 'operation': 'restart', 'confirmed': True})[0], 200)
+        self.web.insights.action.assert_called_once_with('container.action', {'id': 'a'*12, 'operation': 'restart', 'confirmed': True})
 
     def test_json_limits_duplicates_and_no_arbitrary_file_route(self):
         self.login()

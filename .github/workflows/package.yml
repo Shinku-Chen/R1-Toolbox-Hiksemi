@@ -2,7 +2,7 @@ name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection', 'fix/histor-window-handshake', 'feat/interactive-toolbox', 'feat/device-controls', 'feat/readable-network', 'feat/independent-fan-policy']
+    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection', 'fix/histor-window-handshake', 'feat/interactive-toolbox', 'feat/device-controls', 'feat/readable-network', 'feat/independent-fan-policy', 'feat/integrated-dashboard']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -36,6 +36,7 @@ jobs:
           python scripts/build-ui.py
           for script in ui/assets/*.js; do node --check "$script"; done
           node --check ui/web/config.js
+          node --check ui/web/monitor.js
       - name: Check the official hidden-window handshake
         run: node tests/check_histor_bridge.cjs
       - name: Check touch controls in an isolated browser with fixture APIs
