@@ -2,7 +2,8 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const labels = {overview:"概览",storage:"存储",network:"网络",controls:"控制",apps:"应用",system:"系统",settings:"设置"};
-  let csrf = "", busy = false;
+  let csrf = "", busy = false, rgbCapability = false;
+  let lightSnapshot = null, lightDirty = false, analyticsDirty = false, lightAwaiting = false;
   let fanSnapshot = null, fanDirty = false, fanPollRunning = false, fanAwaitingTransition = null;
   const fanSourceSignatures = {};
   const fanNames = { cpu: "CPU 风扇", system: "系统风扇" };
@@ -15,12 +16,12 @@
   });
   function message(text) { $("message").textContent = text; }
   function signedOut() {
-    csrf = ""; $("login").hidden = false; $("editor").hidden = true; $("logout").hidden = true;
+    csrf = ""; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:false})); $("login").hidden = false; $("editor").hidden = true; $("logout").hidden = true;
     $("code").value = ""; fanSnapshot = null; fanDirty = false; fanAwaitingTransition = null;
     $("fan-policy-section").hidden = true;
   }
   async function request(path, body, auth = true) {
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 8000);
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 18000);
     const options = {credentials:"same-origin",cache:"no-store",signal:controller.signal};
     if (body !== undefined) {
       options.method = "POST"; options.headers = {"Content-Type":"application/json"};
@@ -30,7 +31,7 @@
     try {
       const response = await fetch(path, options), value = await response.json();
       if (response.status === 401) signedOut();
-      if (!response.ok && !(value.saved === true || value.settings_saved === true)) throw new Error(value.error || "请求未完成，请稍后重试");
+      if ((!response.ok || value.ok === false) && !(value.saved === true || value.settings_saved === true)) throw new Error(value.reason || value.error || "请求未完成，请稍后重试");
       return value;
     } finally { clearTimeout(timeout); }
   }
@@ -54,9 +55,9 @@
     disable("brightness", !brightness); disable("night", !brightness); disable("sleep", !screen);
     $("screen-sleep").disabled = !screen; $("screen-wake").disabled = !screen;
     $("screen-hint").textContent = brightness ? `当前实际亮度：${state.screen.brightness}%${state.screen.asleep ? " · 已息屏" : ""}` : "背光能力尚未验证，相关控制暂不可用。";
-    const rgb = caps.rgb && caps.rgb.available === true;
+    const rgb = caps.rgb && caps.rgb.available === true; rgbCapability = rgb;
     $("rgb-card").hidden = !rgb;
-    disable("rgb", !rgb); $("rgb-hint").textContent = rgb ? "灯控芯片已在小屏验证。本次仅立即应用。" : "请先在小屏明确选择总线并验证灯控芯片，网页不会自行探测。";
+    disable("rgb", !rgb); $("rgb-hint").textContent = rgb ? "灯控芯片已自动识别并验证。本次仅立即应用。" : "灯光接口尚未自动验证，相关操作暂不可用。";
     if (state.rgb && Number.isInteger(state.rgb.mode)) $("rgb-mode").value = state.rgb.mode;
     if (state.rgb && /^#[a-fA-F0-9]{6}$/.test(state.rgb.color || "")) $("rgb-color").value = state.rgb.color;
     if (state.rgb && Number.isInteger(state.rgb.brightness)) $("rgb-brightness").value = state.rgb.brightness;
@@ -64,7 +65,7 @@
   }
   async function refresh() {
     const value = await request("/api/session");
-    csrf = value.csrf; render(value.state); renderFanPolicy(value.fan_policy || value.state.fan_policy, true); $("login").hidden = true; $("editor").hidden = false; $("logout").hidden = false;
+    csrf = value.csrf; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:true})); render(value.state); renderFanPolicy(value.fan_policy || value.state.fan_policy, true); renderOtherPolicies(value, true); $("login").hidden = true; $("editor").hidden = false; $("logout").hidden = false;
   }
   function fanElement(tag, className, text) {
     const node = document.createElement(tag); node.className = className;
@@ -179,7 +180,7 @@
     fanPollRunning = true;
     try {
       const value = await request("/api/session"); csrf = value.csrf;
-      renderFanPolicy(value.fan_policy || value.state.fan_policy, force);
+      renderFanPolicy(value.fan_policy || value.state.fan_policy, force); renderOtherPolicies(value, force);
     } catch (_) {
       if (!$("editor").hidden) { $("fan-policy-capability").textContent = "实时状态暂不可读取。请重新读取后再提交，当前温度与输出尚未确认。"; $("fan-policy-form").querySelectorAll("button").forEach(node => { node.disabled = true; }); Object.keys(fanNames).forEach(id => { $("fan-" + id + "-live").textContent = "实时数据暂不可读取，参考温度与输出尚未确认。"; }); }
     } finally { fanPollRunning = false; }
@@ -225,7 +226,7 @@
   $("pair-form").addEventListener("submit", async (event) => {
     event.preventDefault(); if (busy) return;
     const code = $("code").value.replace(/\s/g, "");
-    if (!/^[0-9]{10}$/.test(code)) { message("请输入小屏显示的 10 位数字配对码。"); return; }
+    if (!/^[0-9]{5}$/.test(code)) { message("请输入小屏显示的 5 位数字配对码。"); return; }
     busy = true;
     try { await request("/api/pair", {code}, false); $("code").value = ""; await refresh(); message("已连接。请按区域保存设置。"); }
     catch (error) { message(error.name === "AbortError" ? "连接超时，请检查 NAS 地址后重试。" : error.message); }
@@ -254,6 +255,49 @@
     if (busy) return;
     try { await request("/api/logout", {}); signedOut(); message("已退出。再次登录需要在小屏生成新的配对码。"); }
     catch (error) { message(error.message); }
+  });
+
+  const monitorThresholds = [["cpu","CPU 使用率", "%"],["memory","内存使用率","%"],["cpu_temp","CPU 温度","°C"],["disk_temp","硬盘温度","°C"],["capacity","空间使用率","%"]];
+  monitorThresholds.forEach(([key,label,unit]) => {
+    const box=fanElement("fieldset",""); box.append(fanElement("legend","",label));
+    for(const [level,name] of [["warn","提醒"],["critical","严重"]]) { const row=fanElement("label","",name+"（"+unit+"）"), input=document.createElement("input");input.type="number";input.min="0";input.max="150";input.id="monitor-"+key+"-"+level;input.required=true;row.append(input);box.append(row); } $("monitor-thresholds").append(box);
+  });
+  function lightModes() { const temperature=$("light-mode").value==="temperature";$("light-manual-fields").hidden=temperature;$("light-temperature-fields").hidden=!temperature; }
+  function addLightStop(value={temperature:70,color:"#e0a170"}) { if($("light-stops").children.length>=8)return;const row=fanElement("div","light-stop"),label=fanElement("label","","温度 °C"),temp=document.createElement("input"),colorLabel=fanElement("label","","颜色"),color=document.createElement("input"),remove=fanElement("button","quiet-button","移除");temp.type="number";temp.min="-40";temp.max="150";temp.required=true;temp.value=value.temperature;temp.dataset.stopTemperature="true";color.type="color";color.value=value.color;color.dataset.stopColor="true";remove.type="button";remove.addEventListener("click",()=>{if($("light-stops").children.length<=2){$("light-policy-result").textContent="至少保留 2 个颜色节点。";return;}row.remove();lightDirty=true;});label.append(temp);colorLabel.append(color);row.append(label,colorLabel,remove);$("light-stops").append(row); }
+  function renderOtherPolicies(value,force=false) {
+    const light=value.light_policy;
+    if(light && light.config) {
+      lightSnapshot=light;$("light-policy-section").hidden=false;$("rgb-card").hidden=!rgbCapability||light.active||light.busy;const c=light.config;
+      if(force||!lightDirty) {
+        $("light-enabled").checked=c.enabled;$("light-mode").value=c.mode;
+        $("light-brightness").value=c.brightness;$("light-manual-mode").value=c.manual.mode;$("light-manual-color").value=c.manual.color;$("light-manual-brightness").value=c.manual.brightness;
+        $("light-night-enabled").checked=c.schedule.enabled;$("light-night-start").value=c.schedule.start;$("light-night-end").value=c.schedule.end;$("light-night-brightness").value=c.schedule.brightness;
+        $("light-stops").replaceChildren();(c.stops||[]).forEach(addLightStop);
+        const box=$("light-sources");box.querySelectorAll("label").forEach(n=>n.remove());const sources=new Map((light.sources||[]).map(s=>[s.id,s]));c.sources.forEach(id=>{if(!sources.has(id))sources.set(id,{id,label:"已保存来源暂缺 · "+id});});sources.forEach(source=>{const label=fanElement("label","fan-source"),input=document.createElement("input");input.type="checkbox";input.value=source.id;input.checked=c.sources.includes(source.id);label.append(input,fanElement("span","",source.label||source.id));box.append(label);});
+      }
+      const target=light.target||{};$("light-policy-state").textContent=light.busy?"正在切换":light.last_error?"应用异常":light.pending_changes?"有待生效配置":light.active?"运行中":"未接管";
+      $("light-policy-live").textContent=(typeof light.reference_c==="number"?"参考 max "+light.reference_c+" °C · "+(light.source_label||"--")+"\n":"")+(light.reason||"尚未取得运行状态")+(target.color?" · 目标颜色 "+target.color:"")+(Number.isInteger(target.brightness)?" · 目标亮度 "+target.brightness+"%":"")+(light.schedule_active?" · 夜间上限生效":"");
+      $("light-policy-capability").textContent=light.last_error||light.settings_error||(light.capability && light.capability.available?"灯控设备已自动识别。保存与应用分开；应用成功后服务持续管理灯光。":"尚未验证唯一灯控设备，仍可保存草稿，不能启用。 "+(light.capability && light.capability.reason||""));
+      $("light-policy-form").querySelectorAll("input,select,button").forEach(n=>n.disabled=busy||light.busy===true);$("light-policy-apply").disabled=busy||light.busy===true||!(light.capability && light.capability.available);
+      if(light.busy)$("light-policy-result").textContent="配置已保存，正在切换灯光控制。请等待运行状态确认。";
+      else if(lightAwaiting){$("light-policy-result").textContent=light.last_error?"已保存，但应用未完成："+light.last_error:light.applied?"灯光策略切换完成，请核对当前状态。":"已保存，应用结果尚未确认，请核对运行状态。";lightAwaiting=false;}
+      lightModes();
+    }
+    const settings=value.analytics_settings || value.analytics && value.analytics.settings;
+    if(settings) { $("analytics-settings-section").hidden=false;if(force||!analyticsDirty){$("history-enabled").checked=settings.history_enabled;$("history-retention").value=settings.retention_days;$("traffic-exclude-virtual").checked=settings.traffic_exclude_virtual;monitorThresholds.forEach(([key])=>["warn","critical"].forEach(level=>{$("monitor-"+key+"-"+level).value=settings.thresholds && settings.thresholds[key+"_"+level];}));} }
+  }
+  function lightConfig() { const n=id=>Number($(id).value), sources=Array.from($("light-sources").querySelectorAll("input:checked"),n=>n.value), stops=Array.from($("light-stops").children,n=>({temperature:Number(n.querySelector("[data-stop-temperature]").value),color:n.querySelector("[data-stop-color]").value}));if(stops.length<2||stops.length>8||stops.some((n,i)=>!Number.isInteger(n.temperature)||n.temperature< -40||n.temperature>150||i&&n.temperature<=stops[i-1].temperature))throw new Error("请填写 2–8 个温度递增的颜色节点。");if($("light-enabled").checked&&$("light-mode").value==="temperature"&&!sources.length)throw new Error("温度联动至少选择一个来源。");return{schema_version:1,enabled:$("light-enabled").checked,mode:$("light-mode").value,sources,stops,brightness:n("light-brightness"),manual:{mode:n("light-manual-mode"),color:$("light-manual-color").value,brightness:n("light-manual-brightness")},schedule:{enabled:$("light-night-enabled").checked,start:$("light-night-start").value,end:$("light-night-end").value,brightness:n("light-night-brightness")}}; }
+  async function saveLight(apply) { if(busy||!lightSnapshot||lightSnapshot.busy)return;let config;try{config=lightConfig();}catch(error){$("light-policy-result").textContent=error.message;return;}if(apply&&!window.confirm(config.enabled?"将持续应用当前灯光策略，并在以后启动时恢复。温度联动取所选来源最高温；缺测使用低亮警示色。确认继续？":"将关闭持续灯光策略并释放接管。确认继续？"))return;busy=true;$("light-policy-result").textContent="正在保存灯光配置…";try{const result=await request("/api/action",{action:"light.policy.update",payload:{config,apply}});if(result.ok||result.saved)lightDirty=false;lightAwaiting=result.pending===true;$("light-policy-result").textContent=result.pending?"灯光配置已保存，正在切换，请核对实时状态。":apply?(result.applied?"灯光配置已保存并应用。":"已保存，应用结果尚未确认。"):"灯光配置已保存，尚未应用。";if(result.light_policy)renderOtherPolicies(result,true);}catch(error){$("light-policy-result").textContent=error.message;}finally{busy=false;await pollFanPolicy();} }
+  $("light-policy-form").addEventListener("input",()=>{lightDirty=true;lightModes();});$("light-policy-form").addEventListener("change",()=>{lightDirty=true;lightModes();});$("light-policy-form").addEventListener("submit",event=>{event.preventDefault();saveLight(false);});$("light-policy-apply").addEventListener("click",()=>saveLight(true));$("light-add-stop").addEventListener("click",()=>{addLightStop();lightDirty=true;});
+  $("analytics-form").addEventListener("input",()=>{analyticsDirty=true;});$("analytics-form").addEventListener("submit",async event=>{event.preventDefault();if(busy)return;const settings={history_enabled:$("history-enabled").checked,retention_days:Number($("history-retention").value),traffic_exclude_virtual:$("traffic-exclude-virtual").checked,thresholds:{}};for(const[key]of monitorThresholds){const warn=Number($("monitor-"+key+"-warn").value),critical=Number($("monitor-"+key+"-critical").value);if(!(warn<critical)){$("analytics-result").textContent="各项提醒阈值必须小于严重阈值。";return;}settings.thresholds[key+"_warn"]=warn;settings.thresholds[key+"_critical"]=critical;}busy=true;$("analytics-result").textContent="正在保存…";try{const result=await request("/api/action",{action:"monitor.settings.update",payload:{settings}});if(result.ok||result.saved){analyticsDirty=false;$("analytics-result").textContent="统计与提醒设置已保存。";}}catch(error){$("analytics-result").textContent=error.message;}finally{busy=false;}});
+  document.addEventListener("r1:web-action", async event => {
+    const command = event.detail || {};
+    if (!csrf) { command.reject && command.reject(new Error("请先使用小屏配对码解锁设置。")); return; }
+    if (busy) { command.reject && command.reject(new Error("已有操作正在进行，请稍候。")); return; }
+    busy = true;
+    try { command.resolve(await request("/api/action", {action:command.action,payload:command.payload || {}})); }
+    catch (error) { command.reject(error); }
+    finally { busy = false; }
   });
   refresh().catch((error) => { signedOut(); if (error.message !== "请在小屏生成新的配对码后登录") message(error.message); });
 })();

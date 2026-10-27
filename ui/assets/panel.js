@@ -27,6 +27,7 @@
   let lastStatus = null;
   let fanDetailSignature = null;
   let independentFanPolicy = null;
+  let lightPolicy = null;
   let requestRunning = false;
   let pointerStart = null;
   let suppressGestureClick = false;
@@ -282,7 +283,7 @@
   function showControlModules() {
     const official = toolbox && toolbox.fans && toolbox.fans.official;
     const available = { screen: cap("screen").available === true, fans: familyFanControl(), power: cap("power").available === true,
-      rgb: cap("rgb").available === true || Boolean(toolbox && toolbox.rgb && list(toolbox.rgb.availableBuses).length) };
+      rgb: cap("rgb").available === true };
     let count = 0;
     document.querySelectorAll("[data-control-entry]").forEach((button) => {
       const name = button.dataset.controlEntry;
@@ -484,10 +485,10 @@
   $("web-pairing-generate").addEventListener("click", async () => {
     await action("web.pairing", { rotate: true }, null, { onResult(result) {
       const pairing = result.web || result.pairing || result;
-      if (!currentDetail || currentDetail.name !== "web-config" || !webConfig || !webConfig.enabled || !/^\d{10}$/.test(pairing.code || "") || !finite(pairing.expires_in) || pairing.expires_in <= 0) return;
+      if (!currentDetail || currentDetail.name !== "web-config" || !webConfig || !webConfig.enabled || !/^\d{5}$/.test(pairing.code || "") || !finite(pairing.expires_in) || pairing.expires_in <= 0) return;
       clearWebPairing();
       pairingDeadline = Date.now() + Math.min(180, pairing.expires_in) * 1000;
-      $("web-pairing-code").append(element("span", "", pairing.code.slice(0, 5)), element("span", "", pairing.code.slice(5)));
+      $("web-pairing-code").append(element("span", "", pairing.code));
       $("web-pairing").hidden = false; updatePairingCountdown();
       $("web-pairing").scrollIntoView({ block: "center" });
     } });
@@ -521,7 +522,7 @@
     const executing = Boolean(toolbox && toolbox.power && toolbox.power.executing);
     setAllowed("brightness-save", screenAvailable);
     setAllowed("screen-sleep", screenAvailable && !pending);
-    setAllowed("rgb-save", rgbAvailable);
+    setAllowed("rgb-save", rgbAvailable && !(lightPolicy && (lightPolicy.active || lightPolicy.busy)));
     setAllowed("rgb-probe", rgbProbeAvailable);
     setAllowed("web-pairing-generate", Boolean(webConfig && webConfig.enabled));
     setAllowed("power-reboot", powerAvailable && !pending && !executing);
@@ -1021,6 +1022,16 @@
     catch (_) { renderInsights(null); }
     finally { insightsRunning = false; }
   }
+  function renderLightPolicy(data) {
+    lightPolicy = data && data.config ? data : null;
+    $("small-light-policy").hidden = !lightPolicy;
+    if (lightPolicy) {
+      const runtime = lightPolicy.runtime || lightPolicy;
+      const line = lightPolicy.busy ? "灯光控制正在切换" : lightPolicy.last_error ? "灯光应用未确认：" + lightPolicy.last_error : lightPolicy.active ? "灯光策略运行中 · " + (runtime.reason || "") : "持续灯光策略未接管";
+      text("small-light-policy-state", line + (finite(runtime.reference_c) ? "\n参考 max：" + runtime.reference_c + " °C · " + (runtime.source_label || "--") : "") + (runtime.target && finite(runtime.target.brightness) ? "\n目标亮度：" + runtime.target.brightness + "%" : ""));
+    }
+    syncControls();
+  }
   async function poll() {
     if (requestRunning) return;
     requestRunning = true;
@@ -1031,6 +1042,7 @@
       }).catch(() => { render(null); setConnection("offline"); }),
       request("/toolbox").then(renderToolbox).catch(() => renderToolbox(null)),
       request("/fan-policy").then(renderIndependentFanPolicy).catch(() => renderIndependentFanPolicy(null)),
+      request("/light-policy").then(renderLightPolicy).catch(() => renderLightPolicy(null)),
       pollInsights(),
       currentDetail && currentDetail.name === "web-config" ? pollWebConfig() : Promise.resolve(),
     ];
