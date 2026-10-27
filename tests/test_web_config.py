@@ -276,6 +276,35 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.action('container.action', {'id': 'a'*12, 'operation': 'restart', 'confirmed': True})[0], 200)
         self.web.insights.action.assert_called_once_with('container.action', {'id': 'a'*12, 'operation': 'restart', 'confirmed': True})
 
+    def test_workload_refresh_ack_and_safe_error_reasons_reach_paired_browser(self):
+        from unittest.mock import Mock
+        self.web.insights = Mock()
+        self.login()
+        payload = {'id': 'a'*64, 'operation': 'stop', 'confirmed': True}
+        self.web.insights.action.return_value = {'ok': True, 'state': {'refresh_pending': True}}
+        status, _, value = self.action('container.action', payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(value['ok'] and value['pending'] and value['refresh_pending'])
+        self.assertFalse(value['applied'])
+        for code, text in (('operation_unconfirmed', '结果未确认'), ('invalid_state', '容器状态已改变'),
+                           ('protected_container', 'Toolbox'), ('busy', '勿连续提交')):
+            self.web.insights.action.return_value = {'ok': False, 'error': code, 'reason': '/secret/engine-message',
+                                                     'refresh_pending': True}
+            status, _, value = self.action('container.action', payload)
+            self.assertEqual(status, 400)
+            self.assertFalse(value['ok'] or value['applied'] or value['pending'])
+            self.assertEqual(value['error_code'], code)
+            self.assertIn(text, value['error'])
+            self.assertNotIn('/secret', json.dumps(value))
+        self.web.insights.action.return_value = {'ok': False, 'error': 'operation_failed', 'exit_code': 125,
+                                                 'reason': '/secret/raw-stderr'}
+        value = self.action('container.action', payload)[2]
+        self.assertEqual(value['exit_code'], 125)
+        self.assertNotIn('/secret', json.dumps(value))
+        self.web.insights.action.return_value = {'ok': False, 'error': '/secret/unknown-code', 'reason': '/secret/detail'}
+        value = self.action('container.action', payload)[2]
+        self.assertNotIn('/secret', json.dumps(value))
+
     def test_json_limits_duplicates_and_no_arbitrary_file_route(self):
         self.login()
         for body in (b'{}' * 5000, b'{"code":"1","code":"2"}', b'{"x":NaN}', b'[]'):

@@ -14,6 +14,17 @@
     label.className = "check"; input.type = "checkbox"; input.value = value;
     label.append(input, document.createTextNode(text)); $("pages").append(label);
   });
+  let settingsTab = "panel";
+  function selectSettings(name) {
+    if (!["panel","fans","lighting","monitoring","connection"].includes(name)) return;
+    settingsTab = name;
+    document.querySelectorAll(".settings-panel[data-settings-view]").forEach(node => { node.hidden = node.dataset.settingsView !== name; });
+    document.querySelectorAll("[data-settings-tab]").forEach(node => node.setAttribute("aria-selected", String(node.dataset.settingsTab === name)));
+    document.documentElement.dataset.settingsView = name;
+  }
+  document.querySelectorAll("[data-settings-tab]").forEach(node => node.addEventListener("click", () => selectSettings(node.dataset.settingsTab)));
+  document.addEventListener("r1:settings-open", event => selectSettings(event.detail));
+  selectSettings(settingsTab);
   function message(text) { $("message").textContent = text; }
   function signedOut() {
     csrf = ""; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:false})); $("login").hidden = false; $("editor").hidden = true; $("logout").hidden = true;
@@ -21,7 +32,7 @@
     $("fan-policy-section").hidden = true;
   }
   async function request(path, body, auth = true) {
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 18000);
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), body && body.action === "container.action" ? 25000 : 18000);
     const options = {credentials:"same-origin",cache:"no-store",signal:controller.signal};
     if (body !== undefined) {
       options.method = "POST"; options.headers = {"Content-Type":"application/json"};
@@ -65,7 +76,7 @@
   }
   async function refresh() {
     const value = await request("/api/session");
-    csrf = value.csrf; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:true})); render(value.state); renderFanPolicy(value.fan_policy || value.state.fan_policy, true); renderOtherPolicies(value, true); $("login").hidden = true; $("editor").hidden = false; $("logout").hidden = false;
+    csrf = value.csrf; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:true})); render(value.state); renderFanPolicy(value.fan_policy || value.state.fan_policy, true); renderOtherPolicies(value, true); $("login").hidden = true; $("editor").hidden = false; $("logout").hidden = false; selectSettings(settingsTab);
   }
   function fanElement(tag, className, text) {
     const node = document.createElement(tag); node.className = className;
@@ -180,7 +191,7 @@
     fanPollRunning = true;
     try {
       const value = await request("/api/session"); csrf = value.csrf;
-      renderFanPolicy(value.fan_policy || value.state.fan_policy, force); renderOtherPolicies(value, force);
+      renderFanPolicy(value.fan_policy || value.state.fan_policy, force); renderOtherPolicies(value, false);
     } catch (_) {
       if (!$("editor").hidden) { $("fan-policy-capability").textContent = "实时状态暂不可读取。请重新读取后再提交，当前温度与输出尚未确认。"; $("fan-policy-form").querySelectorAll("button").forEach(node => { node.disabled = true; }); Object.keys(fanNames).forEach(id => { $("fan-" + id + "-live").textContent = "实时数据暂不可读取，参考温度与输出尚未确认。"; }); }
     } finally { fanPollRunning = false; }
@@ -290,7 +301,7 @@
     if(settings) { $("analytics-settings-section").hidden=false;if(force||!analyticsDirty){$("history-enabled").checked=settings.history_enabled;$("history-retention").value=settings.retention_days;$("traffic-exclude-virtual").checked=settings.traffic_exclude_virtual;monitorThresholds.forEach(([key])=>["warn","critical"].forEach(level=>{$("monitor-"+key+"-"+level).value=settings.thresholds && settings.thresholds[key+"_"+level];}));} }
   }
   function lightConfig() { const n=id=>Number($(id).value), sources=Array.from($("light-sources").querySelectorAll("input:checked"),n=>n.value), stops=Array.from($("light-stops").children,n=>({temperature:Number(n.querySelector("[data-stop-temperature]").value),color:n.querySelector("[data-stop-color]").value}));if(stops.length<2||stops.length>8||stops.some((n,i)=>!Number.isInteger(n.temperature)||n.temperature< -40||n.temperature>150||i&&n.temperature<=stops[i-1].temperature))throw new Error("请填写 2–8 个温度递增的颜色节点。");if($("light-enabled").checked&&$("light-mode").value==="temperature"&&!sources.length)throw new Error("温度联动至少选择一个来源。");return{schema_version:1,enabled:$("light-enabled").checked,mode:$("light-mode").value,sources,stops,brightness:n("light-brightness"),manual:{mode:n("light-manual-mode"),color:$("light-manual-color").value,brightness:n("light-manual-brightness")},schedule:{enabled:$("light-night-enabled").checked,start:$("light-night-start").value,end:$("light-night-end").value,brightness:n("light-night-brightness")}}; }
-  async function saveLight(apply) { if(busy||!lightSnapshot||lightSnapshot.busy)return;if(apply&&!monitorOnline){$("light-policy-result").textContent="实时连接未确认，未提交灯光操作；仍可保存配置草稿。";return;}let config;try{config=lightConfig();}catch(error){$("light-policy-result").textContent=error.message;return;}if(apply&&!window.confirm(config.enabled?"将持续应用当前灯光策略，并在以后启动时恢复。温度联动取所选来源最高温；缺测使用低亮警示色。确认继续？":"将关闭持续灯光策略并释放接管。确认继续？"))return;busy=true;$("light-policy-result").textContent="正在保存灯光配置…";try{const result=await request("/api/action",{action:"light.policy.update",payload:{config,apply}});if(result.ok||result.saved)lightDirty=false;lightAwaiting=result.pending===true;$("light-policy-result").textContent=result.pending?"灯光配置已保存，正在切换，请核对实时状态。":apply?(result.applied?"灯光配置已保存并应用。":"已保存，应用结果尚未确认。"):"灯光配置已保存，尚未应用。";if(result.light_policy)renderOtherPolicies(result,true);}catch(error){$("light-policy-result").textContent=error.message;}finally{busy=false;await pollFanPolicy();} }
+  async function saveLight(apply) { if(busy||!lightSnapshot||lightSnapshot.busy)return;if(apply&&!monitorOnline){$("light-policy-result").textContent="实时连接未确认，未提交灯光操作；仍可保存配置草稿。";return;}let config;try{config=lightConfig();}catch(error){$("light-policy-result").textContent=error.message;return;}if(apply&&!window.confirm(config.enabled?"将持续应用当前灯光策略，并在以后启动时恢复。温度联动取所选来源最高温；缺测使用低亮警示色。确认继续？":"将关闭持续灯光策略并释放接管。确认继续？"))return;busy=true;$("light-policy-result").textContent="正在保存灯光配置…";try{const result=await request("/api/action",{action:"light.policy.update",payload:{config,apply}});if(result.ok||result.saved)lightDirty=false;lightAwaiting=result.pending===true;$("light-policy-result").textContent=result.pending?"灯光配置已保存，正在切换，请核对实时状态。":apply?(result.applied?"灯光配置已保存并应用。":"已保存，应用结果尚未确认。"):"灯光配置已保存，尚未应用。";if(result.light_policy)renderOtherPolicies({light_policy:result.light_policy},true);}catch(error){$("light-policy-result").textContent=error.message;}finally{busy=false;await pollFanPolicy();} }
   $("light-policy-form").addEventListener("input",()=>{lightDirty=true;lightModes();});$("light-policy-form").addEventListener("change",()=>{lightDirty=true;lightModes();});$("light-policy-form").addEventListener("submit",event=>{event.preventDefault();saveLight(false);});$("light-policy-apply").addEventListener("click",()=>saveLight(true));$("light-add-stop").addEventListener("click",()=>{addLightStop();lightDirty=true;});
   $("analytics-form").addEventListener("input",()=>{analyticsDirty=true;});$("analytics-form").addEventListener("submit",async event=>{event.preventDefault();if(busy)return;const settings={history_enabled:$("history-enabled").checked,retention_days:Number($("history-retention").value),traffic_exclude_virtual:$("traffic-exclude-virtual").checked,thresholds:{}};for(const[key]of monitorThresholds){const warn=Number($("monitor-"+key+"-warn").value),critical=Number($("monitor-"+key+"-critical").value);if(!(warn<critical)){$("analytics-result").textContent="各项提醒阈值必须小于严重阈值。";return;}settings.thresholds[key+"_warn"]=warn;settings.thresholds[key+"_critical"]=critical;}busy=true;$("analytics-result").textContent="正在保存…";try{const result=await request("/api/action",{action:"monitor.settings.update",payload:{settings}});if(result.ok||result.saved){analyticsDirty=false;$("analytics-result").textContent="统计与提醒设置已保存。";}}catch(error){$("analytics-result").textContent=error.message;}finally{busy=false;}});
   function syncHardwareAvailability() {

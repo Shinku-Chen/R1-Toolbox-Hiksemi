@@ -14,7 +14,7 @@
     <main class="panel">
       <header class="masthead">
         <div class="brand-row">
-          <span class="brand"><span class="brand-mark" aria-hidden="true"></span>R1 TOOLBOX</span>
+          <span class="brand"><span class="brand-mark" aria-hidden="true"></span>R1</span><time id="header-clock" class="header-clock">--:--</time><button id="control-center-toggle" class="control-center-toggle" type="button" aria-controls="page-controls" aria-expanded="false" aria-label="打开控制中心"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="2.5"/><circle cx="16" cy="17" r="2.5"/></svg><span>控制</span></button>
           <span class="connection" id="connection" data-state="connecting" role="status"><i aria-hidden="true"></i><span id="connection-label">连接中</span></span>
         </div>
 
@@ -22,25 +22,25 @@
       <div hidden class="global-power-notice" id="global-power-notice"><span id="global-power-label"></span><button class="button button-secondary" type="button" id="global-power-cancel">取消</button></div><p hidden aria-live="polite" role="status" class="action-status" id="action-status">正在执行操作，请稍候</p></header>
 
       <div class="viewport" id="viewport">
-        <section class="page is-active" id="page-overview" aria-labelledby="title-overview"><div class="overview-clock"><div class="clock-row"><time id="clock">--:--</time><span class="clock-seconds" id="seconds">--</span></div><div class="date-row"><time id="date">本机时间</time><span class="device-name" data-field="hostname">本机面板</span></div></div>
-          <div class="page-heading"><h1 id="title-overview">此刻</h1><span class="page-number">01 <span>/ 07</span></span></div>
+        <section class="page is-active" id="page-overview" aria-labelledby="title-overview"><div class="overview-clock card"><p class="clock-caption">本机时间</p><div class="clock-row"><time id="clock" aria-label="本机时间">--:--</time><span id="clock-matrix" class="clock-matrix" aria-hidden="true"></span><span class="clock-seconds" id="seconds">--</span></div><div class="date-row"><time id="date">本机时间</time><span class="device-name" data-field="hostname">本机面板</span></div></div>
+          <div class="page-heading"><h1 id="title-overview">核心指标</h1><span class="page-number">01 <span>/ 07</span></span></div>
 
 
 
 
 
 
-          <div class="overview-metrics"><div class="resource-grid">
+          <article class="card overview-state"><div class="overview-state-top"><span class="state-symbol" aria-hidden="true"></span><span id="overview-state-label">等待采样</span></div><h2 id="overview-state-headline">正在连接这台 NAS</h2><p id="overview-state-note">状态以本机真实采样为准</p><div class="overview-state-facts"><span data-field="uptime">--</span><span data-field="ipv4">--</span></div></article><div class="overview-metrics"><div class="resource-grid">
             <article tabindex="0" role="button" data-open-view="cpu" class="card resource-card">
               <div class="card-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="3" /><path d="M9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3" /><rect x="10" y="10" width="4" height="4" rx="1" /></svg><h2>CPU</h2></div>
               <div class="metric resource-metric"><span data-field="cpu">--</span><span class="metric-unit">%</span></div>
-              <div class="meter" role="img" aria-label="CPU 使用率"><span id="cpu-meter"></span></div>
+              <div class="meter" role="img" aria-label="CPU 使用率"><span id="cpu-meter"></span></div><svg class="summary-sparkline" id="overview-cpu-chart" viewBox="0 0 300 45" aria-label="CPU 最近采样"><path id="overview-cpu-history"/></svg>
               <div class="card-foot"><span data-field="cpu-status">等待采样</span><span><b data-field="temperature">--</b> °C</span></div>
             </article>
             <article tabindex="0" role="button" data-open-view="memory" class="card resource-card">
               <div class="card-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2" /><path d="M6 17v3m4-3v3m4-3v3m4-3v3M7 9v4m5-4v4m5-4v4" /></svg><h2>内存</h2></div>
               <div class="metric resource-metric"><span data-field="memory">--</span><span class="metric-unit">%</span></div>
-              <div class="meter meter-secondary" role="img" aria-label="内存使用率"><span id="memory-meter"></span></div>
+              <div class="meter meter-secondary" role="img" aria-label="内存使用率"><span id="memory-meter"></span></div><svg class="summary-sparkline" id="overview-memory-chart" viewBox="0 0 300 45" aria-label="内存最近采样"><path id="overview-memory-history"/></svg>
               <div class="card-foot"><span data-field="memory-usage">等待读取</span></div>
             </article>
           </div><article tabindex="0" role="button" data-open-page="network" class="card network-summary">
@@ -66,7 +66,7 @@
         </section>
 
         <section class="page" id="page-controls" aria-labelledby="title-controls" hidden>
-          <div class="page-heading"><h1 id="title-controls">设备控制</h1><span class="page-number">04 <span>/ 07</span></span></div>
+          <div class="page-heading"><h1 id="title-controls">设备控制</h1><button id="control-center-close" type="button" class="control-center-close" hidden>返回</button><span class="page-number">04 <span>/ 07</span></span></div>
           <p class="access-notice" id="control-access">正在读取设备控制能力</p>
 
 
@@ -79,7 +79,7 @@
           <div class="page-heading"><h1 id="title-apps">应用与虚拟机</h1><span class="page-number">05 <span>/ 07</span></span></div>
 
 
-        <p class="section-intro">应用只在你确认后执行操作。</p><div class="menu-list"><button class="menu-row" type="button" data-open-view="containers" id="container-entry"><span><strong>Docker 容器</strong><small>查看状态与管理容器</small></span><span class="menu-chevron" aria-hidden="true">›</span></button><button class="menu-row" type="button" data-open-view="vms" id="vm-entry"><span><strong>虚拟机</strong><small>状态与生命周期</small></span><span class="menu-chevron" aria-hidden="true">›</span></button></div><div class="empty-state" id="apps-empty" hidden><p>暂无可用应用服务</p><span>此处仅展示宿主已检测到的服务</span></div></section>
+        <article class="card docker-summary" id="docker-summary" hidden><p class="summary-caption">DOCKER · 容器</p><div class="docker-count-value"><strong id="docker-running">--</strong><span>/</span><span id="docker-total">--</span></div><p id="docker-summary-note">正在读取容器状态</p></article><div id="apps-container-preview" class="application-preview" hidden></div><p class="section-intro">点击容器查看详情，操作前需要确认。</p><div class="menu-list"><button class="menu-row" type="button" data-open-view="containers" id="container-entry"><span><strong>Docker 容器</strong><small>查看状态与管理容器</small></span><span class="menu-chevron" aria-hidden="true">›</span></button><button class="menu-row" type="button" data-open-view="vms" id="vm-entry"><span><strong>虚拟机</strong><small>状态与生命周期</small></span><span class="menu-chevron" aria-hidden="true">›</span></button></div><div class="empty-state" id="apps-empty" hidden><p>暂无可用应用服务</p><span>此处仅展示宿主已检测到的服务</span></div></section>
 
         <section class="page" id="page-system" aria-labelledby="title-system" hidden>
           <div class="page-heading"><h1 id="title-system">系统详情</h1><span class="page-number">06 <span>/ 07</span></span></div>
@@ -101,7 +101,7 @@
             <label class="control-label" for="brightness">亮度 <output id="brightness-value">--%</output></label>
             <input class="touch-range" id="brightness" type="range" min="5" max="100" step="1" value="50" disabled>
             <div class="button-row"><button class="button requires-write" id="brightness-save" type="button" disabled>应用亮度</button><button class="button button-secondary requires-write" id="screen-sleep" type="button" disabled>立即息屏</button></div><p class="capability-note" id="screen-reason"></p>
-          </article></div><div hidden data-detail-view="power" class="detail-view"><article class="card control-card power-card"><h2>电源</h2><p class="capability-note" id="power-reason">确认后有 5 秒可取消倒计时</p><div id="power-pending" class="pending-operation" hidden><strong id="power-countdown"></strong><button class="button button-secondary" id="power-cancel" type="button">取消操作</button></div><div class="button-row"><button class="button button-secondary requires-write" id="power-reboot" type="button" disabled>重启 NAS</button><button class="button button-danger requires-write" id="power-off" type="button" disabled>关闭 NAS</button></div></article></div><div hidden data-detail-view="rgb-probe" class="detail-view"><article class="card control-card"><h2>验证灯光接口</h2><p class="capability-note">先确认可用接口，再开放颜色和灯效控制。</p><label class="control-label" for="rgb-bus">I²C 总线（需明确选择后验证）</label><select id="rgb-bus" disabled><option value="">请选择已检测到的总线</option></select><button class="button full-width requires-write" id="rgb-probe" type="button" disabled>验证接口</button><p class="capability-note" id="rgb-probe-reason"></p></article></div><div hidden data-detail-view="rgb" class="detail-view"><article class="card control-card"><div class="card-topline"><h2>机身灯光</h2><span class="subtle" id="rgb-state">--</span></div><p class="capability-note" id="rgb-reason">正在检测灯光控制接口</p><article id="small-light-policy" hidden><p id="small-light-policy-state" class="capability-note"></p><button class="button button-secondary full-width" type="button" data-open-view="web-config">网页灯光策略</button></article>
+          </article></div><div hidden data-detail-view="power" class="detail-view"><article class="card control-card power-card"><h2>电源</h2><p class="capability-note" id="power-reason">确认后有 5 秒可取消倒计时</p><div id="power-pending" class="pending-operation" hidden><strong id="power-countdown"></strong><button class="button button-secondary" id="power-cancel" type="button">取消操作</button></div><div class="button-row"><button class="button button-secondary requires-write" id="power-reboot" type="button" disabled>重启 NAS</button><button class="button button-danger requires-write" id="power-off" type="button" disabled>关闭 NAS</button></div></article></div><div hidden data-detail-view="rgb" class="detail-view"><article class="card control-card"><div class="card-topline"><h2>机身灯光</h2><span class="subtle" id="rgb-state">--</span></div><p class="capability-note" id="rgb-reason">正在检测灯光控制接口</p><article id="small-light-policy" hidden><p id="small-light-policy-state" class="capability-note"></p><button class="button button-secondary full-width" type="button" data-open-view="web-config">网页灯光策略</button></article>
 
             <div class="form-row"><label for="rgb-color">颜色</label><input id="rgb-color" type="color" value="#82ddc2" disabled></div>
             <label class="control-label" for="rgb-mode">灯光模式</label><select id="rgb-mode" disabled><option value="0">关闭</option><option value="1">常亮</option><option value="2">彩虹</option><option value="3">呼吸</option></select>
