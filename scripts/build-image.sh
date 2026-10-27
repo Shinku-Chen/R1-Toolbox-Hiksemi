@@ -28,7 +28,8 @@ else
 fi
 
 mkdir -p dist
-docker build --platform linux/amd64 --build-arg "TOOLBOX_VERSION=$version" -t "$image" .
+docker build --platform linux/amd64 --build-arg "TOOLBOX_VERSION=$version" \
+  --label "org.opencontainers.image.revision=$commit" -t "$image" .
 docker image inspect "$image" > dist/build-image-inspect.json
 python - dist/build-image-inspect.json "$version" <<'PY'
 import json
