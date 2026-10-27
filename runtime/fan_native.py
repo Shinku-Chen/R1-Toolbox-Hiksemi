@@ -22,6 +22,16 @@ LEASE = struct.Struct("<8sQIIII")
 MAGIC = b"R1FAN01\0"
 CHANNEL_BITS = {"cpu": 1, "system": 2}
 LEASE_NS = 5_000_000_000
+PREFLIGHT_REASONS = frozenset((
+    "独立风扇接管尚未启用", "独立风扇控制仅在 Linux 宿主 root 服务中启用",
+    "独立恢复需要宿主 systemd-run", "已加载的风扇驱动身份已经改变或未验证",
+    "原厂程序路径不在设备根目录内", "原厂温控程序格式不受支持", "原厂温控程序不可读",
+    "原厂温控程序版本尚未验证", "原厂温控程序身份已经改变", "风扇字符设备身份无法确认",
+    "缺少已编译的 Linux amd64 风扇保护模块", "进程数量超出有界身份检测范围",
+    "发现来源或版本无法确认的同名温控执行者", "原厂温控进程身份无法读取",
+    "必须存在唯一身份已验证的原厂温控进程", "原厂系统风扇策略配置无效或不可读",
+    "原厂系统风扇同步接口不可用",
+))
 
 
 def read_bytes(path, limit):
@@ -188,8 +198,13 @@ class FanNativeAdapter:
                         "active_channels": sorted(self.channels), "owner": "custom" if self.channels else "vendor",
                         "driver_build_id": DRIVER_NOTE[16:].hex(), "firmware_sha256": FIRMWARE_SHA256,
                         "rpm_available": False, **info}
-            except (OSError, ValueError, RuntimeError):
-                return {"available": False, "reason": "当前固件、驱动、设备或守护程序身份尚未验证；独立控制已隐藏",
+            except (OSError, ValueError, RuntimeError) as error:
+                # Only these static checks may reach either UI. OS errors and
+                # arbitrary backend exception text may include private paths.
+                message = str(error)
+                reason = message if type(error) in (ValueError, RuntimeError) and message in PREFLIGHT_REASONS else (
+                    "当前固件、驱动、设备或守护程序身份尚未验证；独立控制已隐藏")
+                return {"available": False, "reason": reason,
                         "channels": [], "active_channels": sorted(self.channels), "rpm_available": False}
 
     def _status(self):

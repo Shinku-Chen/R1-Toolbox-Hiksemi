@@ -4,7 +4,7 @@
   const labels = {overview:"概览",storage:"存储",network:"网络",controls:"控制",apps:"应用",system:"系统",settings:"设置"};
   let csrf = "", busy = false, rgbCapability = false, monitorOnline = document.documentElement.dataset.monitorOnline === "true", controlCaps = {};
   let lightSnapshot = null, lightDirty = false, analyticsDirty = false, lightAwaiting = false;
-  let fanSnapshot = null, fanDirty = false, fanPollRunning = false, fanAwaitingTransition = null;
+  let fanSnapshot = null, fanDirty = false, fanPollRunning = false, fanAwaitingTransition = null, fanReadError = null;
   const fanSourceSignatures = {};
   const fanNames = { cpu: "CPU 风扇", system: "系统风扇" };
   const fanModes = { vendor: "原厂管理", manual: "手动固定输出", temperature: "自定义温控" };
@@ -76,7 +76,7 @@
   }
   async function refresh() {
     const value = await request("/api/session");
-    csrf = value.csrf; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:true})); render(value.state); renderFanPolicy(value.fan_policy || value.state.fan_policy, true); renderOtherPolicies(value, true); $("login").hidden = true; $("editor").hidden = false; $("logout").hidden = false; selectSettings(settingsTab);
+    csrf = value.csrf; fanReadError = null; document.dispatchEvent(new CustomEvent("r1:authorized", {detail:true})); render(value.state); renderFanPolicy(value.fan_policy || value.state.fan_policy, true); renderOtherPolicies(value, true); $("login").hidden = true; $("editor").hidden = false; $("logout").hidden = false; selectSettings(settingsTab);
   }
   function fanElement(tag, className, text) {
     const node = document.createElement(tag); node.className = className;
@@ -143,7 +143,7 @@
   function renderFanPolicy(snapshot, force = false) {
     if (!snapshot || !snapshot.config || !snapshot.config.channels || !snapshot.config.channels.cpu || !snapshot.config.channels.system) { fanSnapshot = null; $("fan-policy-section").hidden = true; return; }
     fanSnapshot = snapshot; $("fan-policy-section").hidden = false;
-    const sources = Array.isArray(snapshot.sources) ? snapshot.sources : [], capability = snapshot.capability || {};
+    const sources = (Array.isArray(snapshot.sources) ? snapshot.sources : []).map(source => fanReadError ? {...source,temperature_c:null,status:"unavailable",fresh:false,age_seconds:null} : source), capability = fanReadError ? {available:false,reason:fanReadError} : snapshot.capability || {};
     Object.keys(fanNames).forEach(channel => {
       const config = snapshot.config.channels[channel], runtime = snapshot.channels && snapshot.channels[channel] || {};
       if (force || !fanDirty) ["mode", "quiet_below", "normal_at", "full_at", "quiet_percent", "normal_percent", "manual_percent"].forEach(key => { if (config[key] !== undefined) $("fan-" + channel + "-" + key).value = config[key]; });
@@ -152,15 +152,20 @@
       const reference = typeof runtime.reference_c === "number" ? runtime.reference_c + " °C" : "-- °C";
       const target = typeof runtime.target_percent === "number" ? "请求输出 " + runtime.target_percent + "%" : "输出未提供";
       const rpm = typeof runtime.rpm === "number" ? runtime.rpm + " RPM" : "RPM 未知";
-      $("fan-" + channel + "-live").textContent = (runtime.active ? "运行中 · " : "当前 · ") + fanRuntimeLabel(runtime) + "\n参考 max：" + reference + "\n来源：" + (runtime.source_label || "未提供") + " · " + fanFreshness(source) + "\n" + target + " · " + rpm + (runtime.reason ? "\n" + runtime.reason : "");
+      $("fan-" + channel + "-live").textContent = fanReadError ? "设置状态未确认，当前参考温度与请求输出暂不可读取。" : (runtime.active ? "运行中 · " : "当前 · ") + fanRuntimeLabel(runtime) + "\n参考 max：" + reference + "\n来源：" + (runtime.source_label || "未提供") + " · " + fanFreshness(source) + "\n" + target + " · " + rpm + (runtime.reason ? "\n" + runtime.reason : "");
     });
-    const state = snapshot.busy ? "正在切换控制方式" : snapshot.last_error ? "控制异常 · 请核对恢复状态" : fanDirty ? "有尚未保存的修改" : snapshot.pending_changes ? "已保存 · 有待生效的配置" : snapshot.active ? "两路分别执行中" : "当前由原厂管理";
+    const state = snapshot.busy && !fanReadError ? "正在切换控制方式" : fanReadError ? "设置状态未确认" : snapshot.last_error ? "控制异常 · 请核对恢复状态" : fanDirty ? "有尚未保存的修改" : snapshot.pending_changes ? "已保存 · 有待生效的配置" : snapshot.active ? "两路分别执行中" : "当前由原厂管理";
     $("fan-policy-save-state").textContent = state;
-    $("fan-policy-capability").textContent = capability.available ? "已验证独立控制接口。应用前需要确认接管；保存配置本身不会修改当前风扇输出。" : "当前不能接管：" + (capability.reason || "独立控制能力未验证") + "。仍可编辑并保存配置，保存不代表已应用。";
+    $("fan-policy-capability").textContent = capability.available ? "独立控制接口已通过检查。" : "独立控制前置检查未通过；仍可编辑并保存配置。";
     $("fan-policy-runtime-note").textContent = snapshot.last_error || snapshot.settings_error || (snapshot.active_on_boot ? "已启用开机恢复；每次恢复仍须通过硬件与温度源检查。" : "开机接管尚未启用。纯保存只保存草稿，不改变当前控制方式。");
     const locked = busy || snapshot.busy === true;
     $("fan-policy-form").querySelectorAll("input,select,button").forEach(node => { node.disabled = locked; });
     $("fan-policy-apply").disabled = locked || !monitorOnline || capability.available !== true;
+    $("fan-policy-apply-reason").textContent = snapshot.busy && !fanReadError ? "正在切换控制方式，请等待完成后再应用。"
+      : busy ? "正在提交操作，请等待完成后再应用。"
+      : !monitorOnline ? "监控连接已中断，暂不能应用；连接恢复后会重新检查。"
+      : capability.available !== true ? "暂不能应用：" + (capability.reason || "独立控制能力尚未验证")
+      : "可应用；保存并应用后需确认接管，仅保存配置不会改变当前控制。";
     $("fan-policy-release").disabled = locked || !monitorOnline || !(snapshot.active || snapshot.active_on_boot || snapshot.last_error || Object.values(snapshot.config.channels).some(item => item.mode !== "vendor"));
     $("fan-policy-release").textContent = Object.values(snapshot.channels || {}).some(item => String(item.reason || "").includes("恢复未确认")) ? "重试两路恢复原厂管理" : "两路恢复原厂管理";
     if (snapshot.busy) $("fan-policy-result").textContent = "配置已保存，正在切换控制方式。请等待实时状态确认，勿重复提交。";
@@ -190,10 +195,11 @@
     if (fanPollRunning || busy || $("editor").hidden) return;
     fanPollRunning = true;
     try {
-      const value = await request("/api/session"); csrf = value.csrf;
+      const value = await request("/api/session"); csrf = value.csrf; fanReadError = null;
       renderFanPolicy(value.fan_policy || value.state.fan_policy, force); renderOtherPolicies(value, false);
     } catch (_) {
-      if (!$("editor").hidden) { $("fan-policy-capability").textContent = "实时状态暂不可读取。请重新读取后再提交，当前温度与输出尚未确认。"; $("fan-policy-form").querySelectorAll("button").forEach(node => { node.disabled = true; }); Object.keys(fanNames).forEach(id => { $("fan-" + id + "-live").textContent = "实时数据暂不可读取，参考温度与输出尚未确认。"; }); }
+      fanReadError = "设置状态未确认：实时风扇状态暂不可读取，请恢复连接后重试。";
+      if (!$("editor").hidden) { $("fan-policy-capability").textContent = "实时状态暂不可读取。请重新读取后再提交，当前温度与输出尚未确认。"; $("fan-policy-apply-reason").textContent = "暂不能应用：" + fanReadError; $("fan-policy-form").querySelectorAll("button").forEach(node => { node.disabled = true; }); Object.keys(fanNames).forEach(id => { $("fan-" + id + "-live").textContent = "设置状态未确认，当前参考温度与请求输出暂不可读取。"; }); }
     } finally { fanPollRunning = false; }
   }
   async function submitFanPolicy(apply, release = false) {
