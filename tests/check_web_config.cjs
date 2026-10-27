@@ -23,12 +23,14 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 repo, fixture = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
 sys.path.insert(0, str(repo / 'runtime'))
 from toolbox import ToolboxController
 from web_config import WebConfigServer
+from fan_policy import FanPolicyController
 
 assert fixture.name.startswith('r1-web-browser-') and fixture.is_dir()
 registers = {1: 0x55, 0x90: 1, 0x91: 204}
@@ -61,8 +63,40 @@ def controller(folder):
     controllers.append(value)
     return value
 
-primary = WebConfigServer(controller(fixture), host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
-unsupported = WebConfigServer(controller(fixture / 'unsupported'), host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
+board_stale = False
+class Sources:
+    def snapshot(self):
+        now = time.monotonic()
+        return [{'id': name, 'label': label, 'kind': kind, 'temperature_c': temperature, 'status': 'ok',
+                 'sampled_monotonic': now - (30 if name == 'board' and board_stale else 0),
+                 'max_age_seconds': 10, 'critical_celsius': 95 if kind == 'cpu' else None}
+                for name, label, kind, temperature in [('cpu', 'CPU Package', 'cpu', 62), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]]
+class Adapter:
+    def __init__(self, available):
+        self.available, self.channels, self.targets = available, set(), {}
+        self.fail_release = False
+    def capabilities(self):
+        return {'available': self.available, 'reason': '' if self.available else '模拟设备：独立驱动未验证',
+                'channels': ['cpu', 'system'] if self.available else [], 'rpm_available': False}
+    def start(self, channels):
+        assert self.available
+        time.sleep(0.15)
+        self.channels = set(channels)
+    def write(self, targets):
+        assert set(targets) <= self.channels and all(type(value) is int and 128 <= value <= 255 for value in targets.values())
+        self.targets = dict(targets)
+    def release(self):
+        if self.fail_release:
+            raise OSError("fixture restore not acknowledged")
+        self.channels, self.targets = set(), {}
+policies = []
+def policy(folder, available):
+    value = FanPolicyController(folder / 'data', Sources(), Adapter(available), interval=0.1)
+    policies.append(value)
+    value.start()
+    return value
+primary = WebConfigServer(controller(fixture), fan_policy=policy(fixture, True), host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
+unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False), host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
 try:
     print(json.dumps({'ready': True, 'primary': {'origin': 'http://127.0.0.1:' + str(primary.port), 'code': primary.pairing_info(rotate=True)['code']},
                       'unsupported': {'origin': 'http://127.0.0.1:' + str(unsupported.port), 'code': unsupported.pairing_info(rotate=True)['code']}}), flush=True)
@@ -73,6 +107,16 @@ try:
             primary.controller._probe_rgb(4)
         elif operation == 'reconstruct':
             primary.controller = controller(fixture)
+            primary.fan_policy.stop()
+            primary.fan_policy = policy(fixture, True)
+        elif operation == 'stale_board':
+            board_stale = True
+        elif operation == 'fresh_board':
+            board_stale = False
+        elif operation == 'fail_release':
+            primary.fan_policy.adapter.fail_release = True
+        elif operation == 'allow_release':
+            primary.fan_policy.adapter.fail_release = False
         elif operation != 'stop':
             raise AssertionError('unknown fixture operation')
         print(json.dumps({'id': request['id'], 'ok': True, 'command_count': len(commands)}), flush=True)
@@ -81,6 +125,9 @@ try:
 finally:
     primary.stop()
     unsupported.stop()
+    for value in policies:
+        value.adapter.fail_release = False
+        value.stop()
     for value in controllers:
         value.stop()
 `;
@@ -88,7 +135,7 @@ finally:
 (async () => {
   const child = spawn(process.env.PYTHON_BIN || 'python3', ['-u', '-c', pythonFixture, root, fixtureDir], { stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '', sequence = 0, bootResolve, bootReject, browser;
-  const pending = new Map(), checks = [], sizes = [], pageErrors = [], blocked = [], actionHeaders = [];
+  const pending = new Map(), checks = [], sizes = [], pageErrors = [], blocked = [], actionHeaders = [], actionBodies = [];
   const ready = new Promise((resolve, reject) => { bootResolve = resolve; bootReject = reject; });
   const bootTimer = setTimeout(() => bootReject(new Error('本地测试网页服务启动超时')), 10000);
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-4096); });
@@ -122,7 +169,7 @@ finally:
     });
     const page = await context.newPage();
     page.on('pageerror', error => pageErrors.push(error.message));
-    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/action')) actionHeaders.push(request.headers()); });
+    page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/action')) { actionHeaders.push(request.headers()); actionBodies.push(request.postDataJSON()); } });
     const screenshot = async name => {
       if (!screenshotDir) return;
       const original = await page.locator('header .eyebrow').textContent();
@@ -179,10 +226,45 @@ finally:
     await page.waitForFunction(() => document.querySelector('[data-section="rgb"] .result').textContent.includes('即时应用'));
     assert.ok(!Object.keys(persisted()).some(key => key.startsWith('rgb')));
     await reload(); assert.equal(await page.locator('#rgb-mode').inputValue(), '3'); assert.equal(await page.locator('#rgb-brightness').inputValue(), '35');
+    assert.equal(await page.locator('.fan-policy-channel').count(), 2);
+    await page.locator('#fan-cpu-mode').selectOption('temperature'); await page.locator('#fan-system-mode').selectOption('temperature');
+    await page.locator('#fan-cpu-sources input[value="cpu"]').check(); await page.locator('#fan-cpu-sources input[value="board"]').check();
+    await page.locator('#fan-system-sources input[value="disk"]').check(); await page.locator('#fan-system-sources input[value="disk2"]').check();
+    const channelValues = { cpu: { quiet_below:42,normal_at:54,full_at:71,quiet_percent:58,normal_percent:78,manual_percent:76 }, system: { quiet_below:33,normal_at:44,full_at:56,quiet_percent:52,normal_percent:68,manual_percent:66 } };
+    for (const [channel, values] of Object.entries(channelValues)) for (const [key,value] of Object.entries(values)) {
+      const input = page.locator('#fan-' + channel + '-' + key); await input.evaluate((node, value) => { node.value = value; node.dispatchEvent(new Event('input', {bubbles:true})); }, String(value));
+    }
+    await page.locator('#fan-policy-save').click(); await page.waitForFunction(() => document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
+    const fanPersisted = () => JSON.parse(fs.readFileSync(path.join(fixtureDir,'data/fan-policy.json'),'utf8'));
+    assert.deepEqual(fanPersisted().config.channels.cpu.sources,['cpu','board']); assert.deepEqual(fanPersisted().config.channels.system.sources,['disk','disk2']); assert.equal(fanPersisted().config.channels.cpu.full_at,71); assert.equal(fanPersisted().config.channels.system.full_at,56); assert.equal(fanPersisted().resume_on_boot,false);
+    await reload(); assert.equal(await page.locator('#fan-cpu-normal_at').inputValue(),'54'); assert.equal(await page.locator('#fan-system-normal_at').inputValue(),'44'); assert.equal(await page.locator('#fan-cpu-sources input:checked').count(),2);
+    await page.locator('#fan-cpu-quiet_below').fill('80'); const beforeInvalid=actionBodies.length; await page.locator('#fan-policy-save').click(); assert.match(await page.locator('#fan-policy-result').textContent(),/回到静音温度/); assert.equal(actionBodies.length,beforeInvalid); await page.locator('#fan-cpu-quiet_below').fill('42');
+    const beforeCancel=actionBodies.length; page.once('dialog',dialog=>dialog.dismiss()); await page.locator('#fan-policy-apply').click(); assert.equal(actionBodies.length,beforeCancel);
+    page.once('dialog',dialog=>dialog.accept()); await page.locator('#fan-policy-apply').click();
+    await page.waitForFunction(() => document.getElementById('fan-cpu-live').textContent.includes('66 °C') && document.getElementById('fan-cpu-live').textContent.includes('78%') && document.getElementById('fan-system-live').textContent.includes('47 °C') && document.getElementById('fan-system-live').textContent.includes('68%'));
+    assert.match(await page.locator('#fan-cpu-live').textContent(),/主板温度/); assert.match(await page.locator('#fan-system-live').textContent(),/硬盘 A/); assert.match(await page.locator('#fan-cpu-live').textContent(),/有效/); assert.ok(!(await page.locator('#fan-policy-result').textContent()).includes('正在切换'));
+    assert.equal(fanPersisted().resume_on_boot,true); assert.ok(actionBodies.some(body=>body.action==='fan.policy.update'&&body.payload.apply===true&&body.payload.confirmed===true));
+    checks.push('independent CPU/system drafts preserve separate thresholds/sources; save-only does not take ownership; invalid order and cancelled confirmation emit no POST; async apply confirms both independent max winners and actual target percentages');
+    await command('stale_board'); await page.waitForFunction(() => document.getElementById('fan-cpu-live').textContent.includes('保护全速') && document.getElementById('fan-cpu-live').textContent.includes('100%'));
+    assert.match(await page.locator('#fan-system-live').textContent(),/68%/); assert.match(await page.locator('#fan-cpu-sources').textContent(),/已过期/);
+    await command('fresh_board'); await page.waitForFunction(() => document.getElementById('fan-cpu-live').textContent.includes('78%'));
+    checks.push('stale selected board sensor makes only its CPU policy fail safe at 100%; system policy stays independent and source freshness is visible');
     await measure('desktop-editor'); await screenshot('preview-web-desktop-fixture');
     await page.setViewportSize({ width: 320, height: 960 }); await measure('320-editor'); await screenshot('preview-web-320-fixture');
     checks.push('verified RGB uses only in-memory I2C fixture commands, stays an immediate operation, and is not saved as boot configuration; desktop/320 have no horizontal overflow');
 
+    await page.locator('#fan-cpu-mode').selectOption('manual'); await page.locator('#fan-cpu-manual_percent').fill('82'); page.once('dialog',dialog=>dialog.accept()); await page.locator('#fan-policy-apply').click();
+    await page.waitForFunction(() => document.getElementById('fan-cpu-live').textContent.includes('82%') && document.getElementById('fan-system-live').textContent.includes('68%'));
+    await page.locator('#fan-cpu-manual_percent').fill('84'); await page.locator('#fan-policy-save').click(); await page.waitForFunction(() => document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
+    assert.equal(fanPersisted().config.channels.cpu.manual_percent,84); assert.match(await page.locator('#fan-cpu-live').textContent(),/82%/); assert.match(await page.locator('#fan-policy-save-state').textContent(),/待生效/);
+    page.once('dialog',dialog=>dialog.accept()); await page.locator('#fan-policy-release').click(); await page.waitForFunction(() => document.getElementById('fan-policy-result').textContent.includes('两路已恢复原厂管理'));
+    assert.equal(fanPersisted().resume_on_boot,false); assert.equal(fanPersisted().config.channels.cpu.mode,'vendor'); assert.equal(fanPersisted().config.channels.system.mode,'vendor');
+    checks.push('CPU can switch to manual 82% while system remains on its own temperature rule; saving 84% stays pending without changing 82%; confirmed release restores both vendor policies');
+    await page.locator('#fan-cpu-mode').selectOption('manual');await page.locator('#fan-cpu-manual_percent').fill('82');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-apply').click();await page.waitForFunction(()=>document.getElementById('fan-cpu-live').textContent.includes('82%'));
+    await command('fail_release');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-release').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('未生效'));
+    assert.match(await page.locator('#fan-cpu-live').textContent(),/恢复未确认/);assert.match(await page.locator('#fan-policy-save-state').textContent(),/控制异常/);assert.equal(await page.locator('#fan-policy-release').isEnabled(),true);
+    await command('allow_release');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-release').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('两路已恢复原厂管理'));
+    checks.push('an unacknowledged vendor restoration never becomes a success label; both channel cards flag restore-unconfirmed and allow an explicit retry');
     await command('reconstruct'); await reload();
     assert.equal(await page.locator('#theme').inputValue(), 'jade'); assert.equal(await page.locator('#font_scale').inputValue(), '125'); assert.equal(await page.locator('#page_interval').inputValue(), '15'); assert.equal(await page.locator('#sleep_timeout').inputValue(), '90'); assert.equal(await page.locator('#rgb-card').isHidden(), true);
     assert.ok(actionHeaders.filter(headers => headers['x-r1-csrf']).length >= 6); assert.ok(actionHeaders.every(headers => !headers['x-r1-token']));
@@ -197,6 +279,11 @@ finally:
     assert.equal(await page.locator('#screen-card').isHidden(), true); assert.equal(await page.locator('#night-card').isHidden(), true); assert.equal(await page.locator('#rgb-card').isHidden(), true);
     assert.equal(await page.locator('[data-section="appearance"]').isVisible(), true); assert.equal(await page.locator('[data-section="pages"]').isVisible(), true); await measure('320-unsupported-device');
     checks.push('real controller with empty temporary sys/dev hides all unsupported screen/night/RGB modules while keeping appearance/pages usable');
+    assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true); assert.equal(await page.locator('#fan-policy-save').isEnabled(),true);
+    await page.locator('#fan-cpu-mode').selectOption('temperature'); await page.locator('#fan-cpu-sources input[value="cpu"]').check(); await page.locator('#fan-cpu-normal_at').fill('58'); await page.locator('#fan-policy-save').click(); await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
+    const unsupportedFan=JSON.parse(fs.readFileSync(path.join(fixtureDir,'unsupported/data/fan-policy.json'),'utf8')); assert.equal(unsupportedFan.config.channels.cpu.normal_at,58); assert.equal(unsupportedFan.resume_on_boot,false); assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true);
+    checks.push('unverified hardware still permits independent configuration persistence but keeps apply disabled and never claims hardware success');
+
     assert.equal(blocked.length, 0, 'unexpected external requests'); assert.deepEqual(pageErrors, []);
     console.log(JSON.stringify({ passed: true, checks, sizes, pageErrors, externalRequests: blocked.length, fixtureDirectory: fixtureDir, fixtureFilesRetained: true }, null, 2));
   } finally {

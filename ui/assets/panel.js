@@ -26,6 +26,7 @@
   let navigationStack = [];
   let lastStatus = null;
   let fanDetailSignature = null;
+  let independentFanPolicy = null;
   let requestRunning = false;
   let pointerStart = null;
   let suppressGestureClick = false;
@@ -225,7 +226,7 @@
       return data;
     } finally { window.clearTimeout(timeout); }
   }
-  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", "rgb-probe": "验证灯光接口", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
+  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "fan-policy-detail": "独立风扇状态", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", "rgb-probe": "验证灯光接口", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
   function activeScroller() { return currentDetail ? $("detail-body") : $("page-" + pages[currentPage]); }
   function drawNavigation() {
     pages.forEach((name, index) => { $("page-" + name).hidden = Boolean(currentDetail) || index !== currentPage; });
@@ -276,7 +277,7 @@
   }
   function familyFanControl() {
     const official = toolbox && toolbox.fans && toolbox.fans.official;
-    return Boolean(cap("fans").available === true && list(toolbox && toolbox.fans && toolbox.fans.channels).length) || Boolean(official && official.control_available === true);
+    return Boolean(independentFanPolicy) || Boolean(cap("fans").available === true && list(toolbox && toolbox.fans && toolbox.fans.channels).length) || Boolean(official && official.control_available === true);
   }
   function showControlModules() {
     const official = toolbox && toolbox.fans && toolbox.fans.official;
@@ -292,7 +293,7 @@
         button.querySelector("strong").textContent = cap("rgb").available ? "灯光" : "验证灯光接口";
         button.querySelector("small").textContent = cap("rgb").available ? "颜色与灯效" : "验证通过后开放调色";
       }
-      if (name === "fans" && official && official.control_available) button.querySelector("small").textContent = "原厂系统风扇策略" + (list(toolbox.fans.channels).length ? "与可用通道" : "");
+      if (name === "fans") button.querySelector("small").textContent = independentFanPolicy ? "CPU 与系统风扇 · 各自独立状态" : official && official.control_available ? "原厂系统风扇策略 · 仅系统风扇" : "可用风扇通道";
     });
     $("control-empty").hidden = count > 0;
     if (currentDetail && ["screen", "power", "rgb", "rgb-probe", "fans", "fan-detail", "official-fan"].includes(currentDetail.name)) {
@@ -318,6 +319,7 @@
     const device = insights && insights.device || {}, system = insights && insights.system || {};
     if (name === "fan-detail") renderFanDetail(list(toolbox && toolbox.fans && toolbox.fans.channels).find((channel) => channel.id === params.id));
     if (name === "official-fan") renderOfficialFan();
+    if (name === "fan-policy-detail") renderIndependentFanDetail(params.id);
     if (name === "app-detail") renderAppDetail(params.kind, params.id);
     if (name === "volume-detail") {
       const volume = list(lastStatus && lastStatus.disks).find((item) => item.mount === params.mount);
@@ -643,20 +645,58 @@
     }
   });
 
+  function independentFanFreshness(source) {
+    if (!source) return "来源暂不可用";
+    const age = finite(source.age_seconds) ? Math.max(0, Math.round(source.age_seconds)) + " 秒前" : "采样时间未知";
+    return (source.status === "standby" ? "休眠" : source.fresh && source.status === "ok" ? "有效" : "缺测或过期") + " · " + age;
+  }
+  const independentFanNames = { cpu: "CPU 风扇", system: "系统风扇" };
+  const independentFanLevels = { vendor: "原厂管理", quiet: "静音", normal: "普通", full: "全速", manual: "手动固定", failsafe: "保护全速" };
+  function independentFanStateLabel(state) { return String(state.reason || "").includes("恢复未确认") ? "恢复未确认" : independentFanLevels[state.level] || "状态未知"; }
+  function independentFanBlocksLegacy() { return Boolean(independentFanPolicy && (independentFanPolicy.active || independentFanPolicy.busy || Object.values(independentFanPolicy.channels || {}).some(state => String(state.reason || "").includes("恢复未确认")))); }
+  function renderIndependentFanPolicy(snapshot) {
+    independentFanPolicy = snapshot && snapshot.config && snapshot.channels && snapshot.channels.cpu && snapshot.channels.system ? snapshot : null;
+    $("independent-fans").hidden = !independentFanPolicy;
+    clear($("independent-fan-list"));
+    if (independentFanPolicy) {
+      const data = independentFanPolicy;
+      text("independent-fan-note", data.busy ? "配置已保存，正在切换控制方式" : data.last_error || (data.pending_changes ? "已保存 · 有待生效的配置" : data.active ? "CPU 与系统风扇分别执行配置" : "当前原厂管理；规则可在网页分别配置"));
+      Object.entries(independentFanNames).forEach(([id, title]) => {
+        const state = data.channels[id], source = list(data.sources).find(item => item.id === state.source_id);
+        const button = element("button", "menu-row fan-policy-summary"); button.type = "button";
+        const content = element("span", "");
+        content.append(element("strong", "", title + " · " + independentFanStateLabel(state)), element("span", "fan-reference", finite(state.reference_c) ? state.reference_c + " °C" : "参考温度 --"), element("small", "", (state.source_label || "触发来源未提供") + "\n" + independentFanFreshness(source)), element("small", "", (finite(state.target_percent) ? "请求输出 " + state.target_percent + "%" : String(state.reason || "").includes("恢复未确认") ? "输出未确认" : "输出由原厂管理") + " · " + (finite(state.rpm) ? state.rpm + " RPM" : "RPM 未知")));
+        button.append(content, element("span", "menu-chevron", "›")); button.addEventListener("click", () => openView("fan-policy-detail", { id }, title)); $("independent-fan-list").append(button);
+      });
+      if (currentDetail && currentDetail.name === "fan-policy-detail") renderIndependentFanDetail(currentDetail.params.id);
+    }
+    if (!independentFanPolicy && currentDetail && currentDetail.name === "fan-policy-detail") renderIndependentFanDetail(currentDetail.params.id);
+    fanSignature = null;
+    if (toolbox) renderFans(toolbox.fans);
+    showControlModules();
+  }
+  function renderIndependentFanDetail(id) {
+    const policy = independentFanPolicy, state = policy && policy.channels && policy.channels[id];
+    if (!state) { fillDetails("fan-policy-channel-detail", [], "实时风扇状态暂不可用，请等待重新连接"); return; }
+    const source = list(policy.sources).find(item => item.id === state.source_id), config = policy.config.channels[id];
+    const modes = { vendor: "原厂管理", manual: "手动固定输出", temperature: "自定义温控" };
+    fillDetails("fan-policy-channel-detail", [["当前运行", independentFanStateLabel(state)], ["当前控制模式", String(state.reason || "").includes("恢复未确认") ? "原厂恢复未确认" : modes[state.mode]], ["已保存模式", modes[config.mode]], ["参考温度 · 所选有效来源 max", finite(state.reference_c) ? state.reference_c + " °C" : "暂不可读"], ["触发来源", state.source_label || "未提供"], ["采样新鲜度", independentFanFreshness(source)], ["请求目标输出", finite(state.target_percent) ? state.target_percent + "%（不是 RPM）" : String(state.reason || "").includes("恢复未确认") ? "输出未确认" : "原厂管理"], ["实际转速", finite(state.rpm) ? state.rpm + " RPM" : "接口未提供，保持未知"], ["当前原因", state.reason], ["独立控制能力", policy.capability && policy.capability.available ? "已验证" : policy.capability && policy.capability.reason || "尚未验证"], ["开机恢复", policy.active_on_boot ? "已启用；启动时仍需通过验证" : "未启用"]]);
+  }
   function renderFans(data) {
     const channels = list(data && data.channels), official = data && data.official;
-    const signature = JSON.stringify([cap("fans"), data && data.last_error, official, channels.map((item) => [item.id, item.driver, item.owned, item.mode, item.duty_percent])]);
+    const policyOwns = independentFanBlocksLegacy();
+    const signature = JSON.stringify([cap("fans"), data && data.last_error, policyOwns, official, channels.map((item) => [item.id, item.driver, item.owned, item.mode, item.duty_percent])]);
     if (signature !== fanSignature) {
       fanSignature = signature; clear($("fan-list"));
       if (data && data.last_error) $("fan-list").append(element("p", "capability-note fan-error", data.last_error));
-      if (official && official.control_available) {
+      if (official && official.control_available && !policyOwns) {
         const readings = [];
         if (finite(official.cpu_rpm)) readings.push("CPU " + official.cpu_rpm + " RPM");
         if (finite(official.system_rpm)) readings.push("系统 " + official.system_rpm + " RPM");
-        $("fan-list").append(menuButton("原厂系统风扇策略", readings.length ? readings.join(" · ") : "策略可设 · 转速读数不可用", () => openView("official-fan")));
+        $("fan-list").append(menuButton("原厂系统风扇策略", readings.length ? "仅系统风扇 · " + readings.join(" · ") : "仅原厂系统风扇 · 转速读数不可用", () => openView("official-fan")));
       }
-      channels.forEach((channel) => $("fan-list").append(menuButton(channel.label || channel.driver + " · " + channel.id, percentage(channel.duty_percent) + "% PWM · " + (channel.owned ? "Toolbox 接管" : "原控制模式"), () => openView("fan-detail", { id: channel.id }, channel.label || channel.id))));
-      if (!channels.length && !(official && official.control_available)) $("fan-list").append(element("p", "capability-note", "此设备当前没有可控制的风扇接口"));
+      if (!policyOwns) channels.forEach((channel) => $("fan-list").append(menuButton(channel.label || channel.driver + " · " + channel.id, percentage(channel.duty_percent) + "% PWM · " + (channel.owned ? "Toolbox 接管" : "原控制模式"), () => openView("fan-detail", { id: channel.id }, channel.label || channel.id))));
+      if (!channels.length && !(official && official.control_available && !policyOwns) && !independentFanPolicy) $("fan-list").append(element("p", "capability-note", "此设备当前没有可控制的风扇接口"));
     }
     if (currentDetail && currentDetail.name === "fan-detail") renderFanDetail(channels.find((channel) => channel.id === currentDetail.params.id));
     if (currentDetail && currentDetail.name === "official-fan") renderOfficialFan();
@@ -667,7 +707,9 @@
     fillDetails("official-fan-readings", official ? [["CPU 风扇", finite(official.cpu_rpm) ? official.cpu_rpm + " RPM" : null], ["系统风扇", finite(official.system_rpm) ? official.system_rpm + " RPM" : null], ["当前系统风扇策略", modes[official.mode] || "未读取到策略"]] : [], "接口当前不可用");
     text("official-fan-reason", official && !finite(official.cpu_rpm) && !finite(official.system_rpm) ? "系统风扇策略可设，转速读数不可用" : official && official.reason || "该策略会保存到海康配置");
     clear($("official-fan-modes"));
-    if (!official || !official.control_available) return;
+    const policyOwns = independentFanBlocksLegacy();
+    text("official-fan-scope", policyOwns ? "此入口仅对应原厂系统风扇。独立温控运行中，请先在网页恢复原厂管理，再设置原厂档位。" : "此入口仅设置原厂系统风扇。CPU 风扇继续由原厂温控管理；物理风扇对应需实机确认。");
+    if (!official || !official.control_available || policyOwns) return;
     Object.entries(modes).forEach(([mode, label]) => {
       const button = element("button", "button button-secondary requires-write" + (official.mode === mode ? " is-selected" : ""), label);
       button.type = "button";
@@ -680,6 +722,7 @@
     syncControls();
   }
   function renderFanDetail(channel) {
+    if (independentFanBlocksLegacy()) { fanDetailSignature = null; clear($("fan-controls")); $("fan-controls").append(element("p", "capability-note", "独立温控运行中或原厂恢复尚未确认。请先在网页确认两路恢复原厂管理，再使用其他风扇控制。")); return; }
     const signature = JSON.stringify(channel ? [channel.id, channel.driver, channel.owned, channel.mode, channel.curve, toolbox && toolbox.fans && toolbox.fans.last_error] : null);
     if (signature === fanDetailSignature) return;
     fanDetailSignature = signature; clear($("fan-controls"));
@@ -987,6 +1030,7 @@
         render(data); setConnection("online", data.timestamp);
       }).catch(() => { render(null); setConnection("offline"); }),
       request("/toolbox").then(renderToolbox).catch(() => renderToolbox(null)),
+      request("/fan-policy").then(renderIndependentFanPolicy).catch(() => renderIndependentFanPolicy(null)),
       pollInsights(),
       currentDetail && currentDetail.name === "web-config" ? pollWebConfig() : Promise.resolve(),
     ];
