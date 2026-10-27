@@ -36,6 +36,33 @@ def keys(payload, allowed):
     require(isinstance(payload, dict) and not (set(payload) - set(allowed)), "参数包含未知字段")
 
 
+def validated_curve(points):
+    """Validate a monotone CPU-temperature/duty curve before taking fan ownership."""
+    require(isinstance(points, list) and 2 <= len(points) <= 8, "温控曲线需要 2–8 个节点")
+    result = []
+    for point in points:
+        keys(point, ("temperature", "duty"))
+        temperature = integer(point.get("temperature"), 20, 90, "曲线温度")
+        duty = integer(point.get("duty"), 50, 100, "曲线占空比")
+        require(not result or temperature > result[-1]["temperature"], "曲线温度必须递增")
+        require(not result or duty >= result[-1]["duty"], "曲线转速不能随温度升高而降低")
+        result.append({"temperature": temperature, "duty": duty})
+    return result
+
+
+def curve_duty(points, temperature):
+    """Interpolate duty; missing readings and >=80 °C always request full speed."""
+    if temperature is None or temperature >= 80:
+        return 100
+    if temperature <= points[0]["temperature"]:
+        return points[0]["duty"]
+    for left, right in zip(points, points[1:]):
+        if temperature <= right["temperature"]:
+            ratio = (temperature - left["temperature"]) / (right["temperature"] - left["temperature"])
+            return round(left["duty"] + ratio * (right["duty"] - left["duty"]))
+    return points[-1]["duty"]
+
+
 def validated_settings(changes, original):
     keys(changes, DEFAULTS)
     result = copy.deepcopy(original)
@@ -57,7 +84,7 @@ def validated_settings(changes, original):
 
 
 class ToolboxController:
-    def __init__(self, state_dir=None, sys_root="/sys", runner=None, dev_root="/dev", clock=None):
+    def __init__(self, state_dir=None, sys_root="/sys", runner=None, dev_root="/dev", clock=None, histor=None):
         self.state_dir = Path(state_dir) if state_dir is not None else Path("/run/r1-toolbox")
         self.sys_root, self.dev_root = Path(sys_root), Path(dev_root)
         self.runner = runner or self._run
@@ -75,16 +102,23 @@ class ToolboxController:
         self.owned_fans = {}
         self.fan_error = None
         self.rgb_bus = self.rgb_mode = self.rgb_color = None
+        self.rgb_brightness = None
         self.pending = None
         self.executing = False
         self.power_error = None
+        # The optional native adapter is injected by the production entrypoint;
+        # tests and generic hwmon use never contact the manufacturer's service.
+        self.histor = histor
         self.systemctl = shutil.which("systemctl")
         self.i2cget, self.i2cset = shutil.which("i2cget"), shutil.which("i2cset")
         self._load_settings()
 
     @staticmethod
     def _run(argv):
-        return subprocess.run(argv, capture_output=True, text=True, timeout=3)
+        # A bounded RGB transaction can contain several sequential byte reads
+        # and writes; keep its total below the UI action deadline.
+        timeout = 1 if Path(argv[0]).name in ("i2cget", "i2cset") else 3
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
     @staticmethod
     def _read_int(path):
@@ -213,6 +247,7 @@ class ToolboxController:
                     rpm = None
                 result.append({"id": identifier, "driver": driver, "duty_percent": round(value * 100 / 255),
                                "owned": owned is not None, "mode": owned["mode"] if owned else "native",
+                               "curve": copy.deepcopy(owned.get("curve")) if owned else None,
                                "rpm": rpm, "rpm_verified": rpm is not None,
                                "rpm_reason": "同号 fanN_input；与实际风扇的对应仍需确认" if rpm is not None
                                else "无同号 fanN_input，无法验证实际转速"})
@@ -248,23 +283,28 @@ class ToolboxController:
         del self.owned_fans[channel]
 
     def _set_fan(self, payload):
-        keys(payload, ("channel", "mode", "value", "takeover"))
+        keys(payload, ("channel", "mode", "value", "takeover", "curve"))
         require(payload.get("takeover") is True, "需要明确确认接管并选择风扇通道")
         channel, mode = payload.get("channel"), payload.get("mode")
-        require(mode in ("manual", "auto", "low", "medium", "high"), "不支持的风扇模式")
+        require(mode in ("manual", "auto", "low", "medium", "high", "curve"), "不支持的风扇模式")
         value = integer(payload.get("value", 100), 50, 100, "风扇占空比")
+        curve = validated_curve(payload.get("curve")) if mode == "curve" else None
+        require(curve is not None or "curve" not in payload, "只有曲线模式接受温控节点")
         path, enable = self._fan_paths(channel)
         if mode == "auto":
             temperature = self._temperature()
             value = 100 if temperature is None else max(60, min(100, round(60 + (temperature - 40) * 2)))
         elif mode in ("low", "medium", "high"):
             value = {"low": 60, "medium": 80, "high": 100}[mode]
+        elif mode == "curve":
+            value = curve_duty(curve, self._temperature())
         if channel not in self.owned_fans:
             self.owned_fans[channel] = {"pwm": self._read_int(path), "enable": self._read_int(enable), "mode": mode}
         try:
             self._write_int(enable, 1)
             self._write_int(path, round(255 * value / 100))
             self.owned_fans[channel]["mode"] = mode
+            self.owned_fans[channel]["curve"] = curve
             self._check_fan_rpm(channel, path, value)
             self.fan_error = None
         except OSError:
@@ -280,38 +320,69 @@ class ToolboxController:
             self.fan_error = "同号 RPM 读数为 0，已回退满速；请确认通道对应或检查风扇"
             raise RuntimeError(self.fan_error)
 
+    def _probe_rgb(self, bus):
+        """Read only the explicitly selected bus; never scan or force I²C access."""
+        integer(bus, 0, 255, "I2C bus")
+        require(self.i2cget and self.i2cset and (self.dev_root / ("i2c-" + str(bus))).exists(),
+                "I2C 工具或指定总线不存在；未写入 RGB")
+        # A failed revalidation must revoke old write capability, including when
+        # the user selected another controller/bus since the previous request.
+        self.rgb_bus = self.rgb_mode = self.rgb_color = self.rgb_brightness = None
+        def read(register):
+            probe = self.runner([self.i2cget, "-y", str(bus), "0x26", register, "b"])
+            try:
+                value = int(probe.stdout.strip(), 16)
+            except (ValueError, AttributeError):
+                value = -1
+            require(probe.returncode == 0 and 0 <= value <= 255, "0x26 非强制读取验证失败；未写入 RGB")
+            return value
+        require(read("0x01") == 0x55, "灯控芯片识别值不匹配；未写入 RGB")
+        current = read("0x90")
+        require(current in (0, 1, 2, 3), "灯控模式寄存器无法确认；未写入 RGB")
+        brightness = read("0x91")
+        self.rgb_bus, self.rgb_mode = bus, current
+        self.rgb_brightness = (brightness * 100 + 254) // 255
+        return current
+
     def _set_rgb(self, payload):
-        keys(payload, ("bus", "mode", "color"))
+        keys(payload, ("bus", "mode", "color", "brightness"))
         bus = payload.get("bus", self.rgb_bus)
         integer(bus, 0, 255, "I2C bus")
         mode = integer(payload.get("mode"), 0, 3, "RGB 模式")
         color = payload.get("color")
         require(isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color), "颜色必须是 #RRGGBB")
-        require(self.i2cget and self.i2cset and (self.dev_root / ("i2c-" + str(bus))).exists(),
-                "I2C 工具或指定总线不存在；未写入 RGB")
-        if bus != self.rgb_bus:
-            probe = self.runner([self.i2cget, "-y", str(bus), "0x26", "0x90", "b"])
-            try:
-                current = int(probe.stdout.strip(), 16)
-            except (ValueError, AttributeError):
-                current = -1
-            require(probe.returncode == 0 and current in (0, 1, 2, 3), "0x26 非强制读取验证失败；未写入 RGB")
+        brightness = integer(payload["brightness"], 0, 100, "RGB 亮度") if "brightness" in payload else None
+        self._probe_rgb(bus)
         channels = [int(color[index:index + 2], 16) for index in (1, 3, 5)]
-        for register, value in list(zip((0x92, 0x93, 0x94), channels)) + [(0x90, mode)]:
+        writes = list(zip((0x92, 0x93, 0x94), channels))
+        if brightness is not None:
+            writes.append((0x91, round(255 * brightness / 100)))
+        for register, value in writes + [(0x90, mode)]:
             result = self.runner([self.i2cset, "-y", str(bus), "0x26", hex(register), hex(value), "b"])
             require(result.returncode == 0, "RGB 写入失败；请检查总线状态")
         self.rgb_bus, self.rgb_mode, self.rgb_color = bus, mode, color.upper()
+        if brightness is not None:
+            self.rgb_brightness = brightness
 
     def _is_night(self):
         now = datetime.datetime.now().strftime("%H:%M")
         start, end = self.settings["night_start"], self.settings["night_end"]
         return start <= now < end if start < end else now >= start or now < end
 
+    def _official_snapshot(self):
+        if self.histor is None:
+            return {"available": False, "rpm_available": False, "control_available": False,
+                    "cpu_rpm": None, "system_rpm": None, "mode": None,
+                    "reason": "未启用海康原厂接口适配"}
+        value = self.histor.snapshot()
+        return value
+
     def snapshot(self):
         with self.lock:
             folder, maximum = self._backlight()
             blank = self.sys_root / "class/graphics/fb0/blank"
             fans = self._fan_channels()
+            official = self._official_snapshot()
             buses = sorted(int(path.name.split("-", 1)[1]) for path in self.dev_root.glob("i2c-*")
                            if re.fullmatch(r"i2c-[0-9]+", path.name))
             screen_available = folder is not None or blank.is_file()
@@ -319,15 +390,19 @@ class ToolboxController:
             return {
                 "capabilities": {
                     "screen": {"available": screen_available, "reason": "" if screen_available else "未发现背光或 fb0 息屏接口"},
-                    "fans": {"available": bool(fans), "reason": "" if fans else "缺少 IT87 hwmon 风扇驱动/PWM 通道；gpio-it87 不提供风扇控制，不加载模块或使用 /dev/port"},
+                    "fans": {"available": bool(fans) or bool(official.get("control_available")),
+                             "reason": "" if fans or official.get("control_available") else
+                             "未发现可用的原厂策略接口或 IT87 PWM；详见设备接口诊断"},
                     "rgb": {"available": self.rgb_bus is not None, "reason": "" if self.rgb_bus is not None else "需明确指定 I2C bus 并验证 0x26；默认不写入"},
                     "power": {"available": self.systemctl is not None, "reason": "" if self.systemctl else "宿主缺少 systemctl"},
                 },
                 "settings": copy.deepcopy(self.settings), "settings_error": self.settings_error,
                 "screen": {"brightness": self._brightness(), "asleep": self.asleep or (self._read_int(blank) or 0) != 0,
                            "max_brightness": maximum},
-                "fans": {"channels": fans, "temperature_c": self._temperature(), "last_error": self.fan_error},
-                "rgb": {"bus": self.rgb_bus, "mode": self.rgb_mode, "color": self.rgb_color, "availableBuses": buses},
+                "fans": {"channels": fans, "official": official,
+                         "temperature_c": self._temperature(), "last_error": self.fan_error},
+                "rgb": {"bus": self.rgb_bus, "mode": self.rgb_mode, "color": self.rgb_color,
+                        "brightness": self.rgb_brightness, "availableBuses": buses},
                 "power": {"pending": {"operation": self.pending["operation"], "seconds_remaining": remaining} if self.pending else None,
                           "executing": self.executing, "last_error": self.power_error},
             }
@@ -367,11 +442,21 @@ class ToolboxController:
                     self.last_activity = self.clock()
                 elif name == "fan.set":
                     self._set_fan(payload)
+                elif name == "fan.official":
+                    keys(payload, ("mode", "confirmed"))
+                    require(payload.get("confirmed") is True, "原厂风扇策略需要明确确认")
+                    mode = payload.get("mode")
+                    require(isinstance(mode, str) and mode in ("low", "medium", "high", "auto"), "不支持的原厂风扇策略")
+                    require(self.histor is not None, "海康原厂风扇接口不可用")
+                    self.histor.set_mode(mode, confirmed=True)
                 elif name == "fan.restore":
                     keys(payload, ("channel",))
                     self._restore_fan(payload.get("channel"))
                 elif name == "rgb.set":
                     self._set_rgb(payload)
+                elif name == "rgb.probe":
+                    keys(payload, ("bus",))
+                    self._probe_rgb(payload.get("bus"))
                 elif name == "power.request":
                     keys(payload, ("operation", "confirmed"))
                     require(payload.get("confirmed") is True, "电源操作需要明确确认")
@@ -417,6 +502,9 @@ class ToolboxController:
                             temperature = self._temperature()
                             value = 100 if temperature is None else max(60, min(100, round(60 + (temperature - 40) * 2)))
                             self._write_int(path, round(255 * value / 100))
+                        elif original["mode"] == "curve":
+                            value = curve_duty(original["curve"], self._temperature())
+                            self._write_int(path, round(255 * value / 100))
                         else:
                             value = self._read_int(path) * 100 / 255
                         self._check_fan_rpm(channel, path, value)
@@ -447,6 +535,8 @@ class ToolboxController:
             # Persisted brightness is a wake/action target, not boot-time ownership.
             # Only an explicitly enabled saved night schedule may apply it on tick.
             self.stopped.clear()
+            if self.histor is not None:
+                self.histor.start()
             self.thread = threading.Thread(target=self._loop, name="r1-controls", daemon=True)
             self.thread.start()
 
@@ -455,6 +545,8 @@ class ToolboxController:
         thread = self.thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1)
+        if self.histor is not None:
+            self.histor.stop()
         with self.lock:
             self.pending = None
             for channel in list(self.owned_fans):
