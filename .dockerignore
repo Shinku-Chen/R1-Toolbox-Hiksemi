@@ -9,3 +9,7 @@ tools/*
 !tools/boot-once/
 tools/boot-once/*
 !tools/boot-once/runner.sh
+!build/
+build/*
+!build/ui-bundle.tar
+!build/ui-bundle.sha256
