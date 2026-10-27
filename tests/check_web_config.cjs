@@ -407,6 +407,10 @@ finally:
     page.once('dialog',dialog=>dialog.accept()); await page.locator('#fan-policy-release').click(); await page.waitForFunction(() => document.getElementById('fan-policy-result').textContent.includes('两路已恢复原厂管理'));
     assert.equal(fanPersisted().resume_on_boot,false); assert.equal(fanPersisted().config.channels.cpu.mode,'vendor'); assert.equal(fanPersisted().config.channels.system.mode,'vendor');
     checks.push('CPU can switch to manual 82% while system remains on its own temperature rule; saving 84% stays pending without changing 82%; confirmed release restores both vendor policies');
+    // Begin the next independent scenario from persisted vendor settings, after
+    // the previous submission's final forced refresh has left the old page.
+    await reload(); await setting('fans');
+    assert.equal(await page.locator('#fan-cpu-mode').inputValue(), 'vendor');
     await page.locator('#fan-cpu-mode').selectOption('manual');await page.locator('#fan-cpu-manual_percent').fill('82');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-apply').click();await page.waitForFunction(()=>document.getElementById('fan-cpu-live').textContent.includes('82%'));
     await command('fail_release');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-release').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('未生效'));
     assert.match(await page.locator('#fan-cpu-live').textContent(),/恢复未确认/);assert.match(await page.locator('#fan-policy-save-state').textContent(),/控制异常/);assert.equal(await page.locator('#fan-policy-release').isEnabled(),true);

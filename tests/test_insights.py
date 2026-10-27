@@ -27,6 +27,7 @@ CONTAINER = "a" * 64
 PROTECTED = "b" * 64
 LABEL_PROTECTED = "c" * 64
 VM = "12345678-1234-4234-8234-123456789abc"
+DOCKER = ["/fixture/bin/docker", "--host", "unix:///var/run/docker.sock"]
 
 
 class InsightsTests(unittest.TestCase):
@@ -71,8 +72,14 @@ class InsightsTests(unittest.TestCase):
             response = response()
         return types.SimpleNamespace(returncode=response[0], stdout=response[1], stderr="")
 
+    @staticmethod
+    def response_key(program, arguments):
+        if program == "docker":
+            arguments = [*DOCKER[1:], *arguments]
+        return (program, *arguments)
+
     def respond(self, program, arguments, body, code=0):
-        self.responses[(program, *arguments)] = (code, body if isinstance(body, str) else json.dumps(body))
+        self.responses[self.response_key(program, arguments)] = (code, body if isinstance(body, str) else json.dumps(body))
 
     def cpu(self, user=100, idle=900):
         self.write(self.proc / "stat", f"cpu {user} 0 0 {idle} 0 0 0 0\ncpu0 {user} 0 0 {idle} 0 0 0 0\n")
@@ -311,6 +318,71 @@ class InsightsTests(unittest.TestCase):
         self.assertFalse(failure["available"])
         self.assertEqual(failure["items"], [])
 
+    def test_docker_realistic_thirteen_second_latency_fits_read_and_action_budgets(self):
+        self.container_list()
+        runner = self.collector.runner
+
+        def delayed(argv, timeout=3):
+            # Model the measured NAS's 13.26-second response without sleeping
+            # or running a real daemon. Old 3/2-second budgets must fail here.
+            if Path(argv[0]).name == "docker" and timeout < 13.26:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            return runner(argv, timeout=timeout)
+
+        self.collector.runner = delayed
+        self.calls.clear()
+        capability = self.collector._containers()
+        self.assertTrue(capability["available"])
+        self.assertEqual(len(capability["items"]), 3)
+        result = self.collector.action("container.action", {"id": CONTAINER, "operation": "restart", "confirmed": True})
+        self.assertTrue(result["ok"])
+        self.assertEqual([timeout for _, timeout in self.calls], [20, 20, 20, 30])
+        self.assertTrue(all(argv[:3] == DOCKER for argv, _ in self.calls))
+
+    def test_stats_timeout_keeps_seventeen_containers_and_unknown_resource_values(self):
+        rows = [{"ID": f"{index + 1:064x}", "Names": f"fixture-{index}", "State": "running"}
+                for index in range(17)]
+        self.respond("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"],
+                     "\n".join(json.dumps(row) for row in rows))
+        key = self.response_key("docker", ["stats", "--all", "--no-stream", "--format", "{{json .}}"])
+        self.responses[key] = subprocess.TimeoutExpired("docker", 20)
+        capability = self.collector._containers()
+        self.assertTrue(capability["available"])
+        self.assertEqual(len(capability["items"]), 17)
+        self.assertIn("超时", capability["stats_reason"])
+        self.assertTrue(all(row["cpu_percent"] is None and row["memory_bytes"] is None
+                            for row in capability["items"]))
+        self.assertEqual([timeout for _, timeout in self.calls], [20, 20])
+        self.assertTrue(all(argv[:3] == DOCKER for argv, _ in self.calls))
+
+    def test_live_docker_timeout_refuses_write_and_requests_refresh_without_retry(self):
+        self.container_list()
+        self.calls.clear()
+        self.collector._refresh["containers"].clear()
+        key = self.response_key("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"])
+        self.responses[key] = subprocess.TimeoutExpired("docker", 20)
+        result = self.collector.action("container.action", {"id": CONTAINER, "operation": "stop", "confirmed": True})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "state_unconfirmed")
+        self.assertTrue(self.collector._refresh["containers"].is_set())
+        self.assertEqual(self.calls, [(DOCKER + ["ps", "--all", "--no-trunc", "--format", "{{json .}}"], 20)])
+
+    def test_default_command_clears_only_docker_connection_environment(self):
+        environment = {name: "fixture-private-connection" for name in (
+            "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_API_VERSION", "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH")}
+        environment.update(HOME="/fixture/home", DOCKER_CONFIG="/fixture/docker-config", DOCKER_BUILDKIT="1",
+                           KEEP_OTHER="present", LC_ALL="fixture-locale")
+        with mock.patch.dict(insights.os.environ, environment, clear=True), \
+                mock.patch.object(insights.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)) as run:
+            insights._command(DOCKER + ["ps"], timeout=20)
+            docker_environment = run.call_args.kwargs["env"]
+            self.assertEqual(docker_environment, {"HOME": "/fixture/home", "DOCKER_CONFIG": "/fixture/docker-config",
+                                                   "DOCKER_BUILDKIT": "1", "KEEP_OTHER": "present", "LC_ALL": "C"})
+            for program in ("smartctl", "virsh"):
+                insights._command(["/fixture/bin/" + program, "--fixture-read"])
+                self.assertEqual(run.call_args.kwargs["env"], {**environment, "LC_ALL": "C"})
+                self.assertEqual(run.call_args.kwargs["timeout"], 3)
+
     def test_container_actions_require_confirmation_known_id_and_allowed_operation(self):
         self.container_list()
         self.calls.clear()
@@ -325,8 +397,8 @@ class InsightsTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         result = self.collector.action("container.action", {"id": CONTAINER[:12], "operation": "restart", "confirmed": True})
         self.assertTrue(result["ok"])
-        self.assertEqual(self.calls, [(["/fixture/bin/docker", "ps", "--all", "--no-trunc", "--format", "{{json .}}"], 2),
-                                      (["/fixture/bin/docker", "container", "restart", CONTAINER], 15)])
+        self.assertEqual(self.calls, [(DOCKER + ["ps", "--all", "--no-trunc", "--format", "{{json .}}"], 20),
+                                      (DOCKER + ["container", "restart", CONTAINER], 30)])
 
     def test_container_actions_recheck_current_state_instead_of_stale_running_cache(self):
         self.container_list()
@@ -337,10 +409,10 @@ class InsightsTests(unittest.TestCase):
         self.assertEqual(result["error"], "invalid_state")
         self.assertTrue(self.collector._refresh["containers"].is_set())
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0][0][1], "ps")
+        self.assertEqual(self.calls[0][0][3], "ps")
         result = self.collector.action("container.action", {"id": CONTAINER, "operation": "start", "confirmed": True})
         self.assertTrue(result["ok"])
-        self.assertEqual(self.calls[-1], (["/fixture/bin/docker", "container", "start", CONTAINER], 3))
+        self.assertEqual(self.calls[-1], (DOCKER + ["container", "start", CONTAINER], 20))
 
     def test_container_transitional_unknown_and_paused_states_expose_no_actions(self):
         self.container_list()
@@ -354,7 +426,7 @@ class InsightsTests(unittest.TestCase):
                     result = self.collector.action("container.action", {"id": CONTAINER, "operation": operation, "confirmed": True})
                     self.assertEqual(result["error"], "invalid_state")
                     self.assertEqual(len(self.calls), 1)
-                    self.assertEqual(self.calls[0][0][1], "ps")
+                    self.assertEqual(self.calls[0][0][3], "ps")
 
     def test_container_protection_disappearance_and_service_failure_are_rechecked(self):
         self.container_list()
@@ -367,7 +439,7 @@ class InsightsTests(unittest.TestCase):
                 result = self.collector.action("container.action", {"id": CONTAINER, "operation": "stop", "confirmed": True})
                 self.assertEqual(result["error"], expected)
                 self.assertEqual(len(self.calls), 1)
-                self.assertEqual(self.calls[0][0][1], "ps")
+                self.assertEqual(self.calls[0][0][3], "ps")
 
     def test_busy_application_actions_are_rejected_without_queuing_or_blocking_snapshot(self):
         self.container_list()
@@ -381,7 +453,7 @@ class InsightsTests(unittest.TestCase):
             release.wait(timeout=2)
             return 0, ""
 
-        self.responses[("docker", "container", "stop", CONTAINER)] = slow_stop
+        self.responses[self.response_key("docker", ["container", "stop", CONTAINER])] = slow_stop
         thread = threading.Thread(target=lambda: completed.append(self.collector.action(
             "container.action", {"id": CONTAINER, "operation": "stop", "confirmed": True})))
         thread.start()
@@ -464,7 +536,7 @@ class InsightsTests(unittest.TestCase):
         self.assertEqual(unsupported["error"], "unsupported")
         self.assertFalse(self.collector.action("shell.run", {"confirmed": True})["ok"])
         self.container_list()
-        self.responses[("docker", "container", "stop", CONTAINER)] = subprocess.TimeoutExpired("docker", 3)
+        self.responses[self.response_key("docker", ["container", "stop", CONTAINER])] = subprocess.TimeoutExpired("docker", 30)
         result = self.collector.action("container.action", {"id": CONTAINER, "operation": "stop", "confirmed": True})
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "operation_unconfirmed")
@@ -472,8 +544,8 @@ class InsightsTests(unittest.TestCase):
         self.assertIn("结果未确认", result["reason"])
         self.assertTrue(result["refresh_pending"])
         self.assertTrue(self.collector._refresh["containers"].is_set())
-        self.assertEqual([call for call in self.calls if call[0][1:3] == ["container", "stop"]],
-                         [(["/fixture/bin/docker", "container", "stop", CONTAINER], 15)])
+        self.assertEqual([call for call in self.calls if call[0][3:5] == ["container", "stop"]],
+                         [(DOCKER + ["container", "stop", CONTAINER], 30)])
         self.respond("docker", ["container", "stop", CONTAINER], "private engine details", 125)
         result = self.collector.action("container.action", {"id": CONTAINER, "operation": "stop", "confirmed": True})
         self.assertFalse(result["ok"])

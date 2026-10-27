@@ -32,7 +32,8 @@
     $("fan-policy-section").hidden = true;
   }
   async function request(path, body, auth = true) {
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), body && body.action === "container.action" ? 25000 : 18000);
+    // Docker may need 20s to recheck state plus 30s for a graceful lifecycle command.
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), body && body.action === "container.action" ? 60000 : 18000);
     const options = {credentials:"same-origin",cache:"no-store",signal:controller.signal};
     if (body !== undefined) {
       options.method = "POST"; options.headers = {"Content-Type":"application/json"};

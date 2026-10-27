@@ -32,6 +32,15 @@ try:
 except ImportError:
     fcntl = None
 
+# Use the installer's local daemon. On the NAS, ps took 13.26 seconds;
+# allow bounded reads and a normal graceful stop without retrying writes.
+DOCKER_LOCAL_HOST = "unix:///var/run/docker.sock"
+DOCKER_READ_TIMEOUT = 20
+DOCKER_START_TIMEOUT = 20
+DOCKER_STOP_TIMEOUT = 30
+_DOCKER_CONNECTION_ENV = frozenset(("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_API_VERSION",
+                                     "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"))
+
 
 def _text(path, limit=262144):
     try:
@@ -95,6 +104,10 @@ def _ipv4_addresses():
 def _command(argv, timeout=3):
     environment = os.environ.copy()
     environment["LC_ALL"] = "C"
+    if Path(argv[0]).name == "docker":
+        # Ignore inherited remote contexts, TLS and forced API negotiation.
+        for name in _DOCKER_CONNECTION_ENV:
+            environment.pop(name, None)
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
                           check=False, env=environment)
 
@@ -262,6 +275,8 @@ class InsightsCollector:
         executable = self.command_finder(program)
         if not executable:
             return None, "未安装 " + program
+        if program == "docker":
+            arguments = ["--host", DOCKER_LOCAL_HOST, *arguments]
         try:
             result = self.runner([executable, *arguments], timeout=timeout)
             output = result.stdout
@@ -606,7 +621,7 @@ class InsightsCollector:
         self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
         return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows}
 
-    def _container_listing(self, timeout=3):
+    def _container_listing(self, timeout=DOCKER_READ_TIMEOUT):
         command, error = self._run("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"], timeout=timeout)
         if error:
             return None, error
@@ -639,7 +654,8 @@ class InsightsCollector:
         if error:
             return _capability(error)
         stats = {}
-        stats_command, stats_error = self._run("docker", ["stats", "--all", "--no-stream", "--format", "{{json .}}"])
+        stats_command, stats_error = self._run("docker", ["stats", "--all", "--no-stream", "--format", "{{json .}}"],
+                                                timeout=DOCKER_READ_TIMEOUT)
         if not stats_error and stats_command[0] == 0:
             for row in _json_lines(stats_command[1]):
                 identity = row.get("ID") or row.get("Container")
@@ -724,7 +740,7 @@ class InsightsCollector:
                 # Re-read the non-sensitive ps view immediately before a write.
                 # A stale cached running state must never restart a now-stopped
                 # container, and a changed protection label must take effect.
-                rows, failure = self._container_listing(timeout=2)
+                rows, failure = self._container_listing()
                 self._refresh["containers"].set()
                 if failure:
                     return {"ok": False, "error": "state_unconfirmed", "reason": "Docker 当前状态未确认，请刷新列表后再决定"}
@@ -740,7 +756,7 @@ class InsightsCollector:
             arguments = ["container", operation, selected["id"]] if container else [operation, selected["id"]]
             # Docker may need its normal graceful-stop period. No new flags or
             # forced stop are added, and uncertain results are never retried.
-            timeout = 15 if container and operation in ("stop", "restart") else 3
+            timeout = (DOCKER_STOP_TIMEOUT if operation in ("stop", "restart") else DOCKER_START_TIMEOUT) if container else 3
             command, error = self._run("docker" if container else "virsh", arguments, timeout=timeout)
             self._refresh["containers" if container else "vms"].set()
             if error:
