@@ -116,7 +116,7 @@ class Insights:
                     'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
                   'interfaces':[{'name':'eth0','ipv4':['192.168.1.10'],'mac':'00:11:22:33:44:55','operstate':'up','rx_bytes':400000000,'tx_bytes':100000000,'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000}],
                   'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'health':{'passed':True}}]},
-                  'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
+                  'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False,'cpu_percent':3.2,'memory_bytes':134217728,'memory_limit_bytes':1073741824,'ports':'0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp'},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
                   'vms':{'available':False,'reason':'fixture: no VM','items':[]},'ports':[{'protocol':'tcp','address':'127.0.0.1','port':18731}],
                   'processes':[{'pid':101,'name':'fixture-monitor','cpu_percent':1.2,'memory_bytes':40000000}],
                   'gpu':{'available':False,'reason':'fixture: no GPU','devices':[]},
@@ -127,6 +127,7 @@ class Insights:
         item=next(n for n in self.data['containers']['items'] if n['id']==payload['id'])
         assert not item['protected']
         item['state']='exited' if payload['operation']=='stop' else 'running'
+        item['available_actions']=['start'] if item['state']=='exited' else ['stop','restart']
         return {'ok':True}
 class Lamp:
     def __init__(self, folder):self.state_dir=folder/'data';self.available=False;self.value={'mode':1,'color':'#4A9170','brightness':60};self.owner=None
@@ -173,6 +174,13 @@ try:
             primary.fan_policy.adapter.fail_release = True
         elif operation == 'allow_release':
             primary.fan_policy.adapter.fail_release = False
+        elif operation == 'app_refresh':
+            item = insights.data['containers']['items'][0]
+            item['cpu_percent'] = round(item.get('cpu_percent', 0) + 1, 1)
+        elif operation == 'app_paused':
+            insights.data['containers']['items'][0].update(state='paused', available_actions=[])
+        elif operation == 'app_running':
+            insights.data['containers']['items'][0].update(state='running', available_actions=['stop','restart'])
         elif operation != 'stop':
             raise AssertionError('unknown fixture operation')
         print(json.dumps({'id': request['id'], 'ok': True, 'command_count': len(commands)}), flush=True)
@@ -230,10 +238,12 @@ finally:
     page.on('request', request => { if (request.method() === 'POST' && request.url().endsWith('/api/action')) { actionHeaders.push(request.headers()); actionBodies.push(request.postDataJSON()); } });
     const screenshot = async name => {
       if (!screenshotDir) return;
-      const original = await page.locator('header .eyebrow').textContent();
-      await page.locator('header .eyebrow').evaluate(node => { node.textContent += ' · 模拟设备数据'; });
-      await page.screenshot({ path: path.join(screenshotDir, name + '.png'), fullPage: true });
-      await page.locator('header .eyebrow').evaluate((node, value) => { node.textContent = value; }, original);
+      const dialogOpen = await page.locator('#app-detail[open]').count();
+      const caption = page.locator(dialogOpen ? '#app-detail-kind' : '.topbar .eyebrow');
+      const original = await caption.textContent();
+      await caption.evaluate(node => { node.textContent += ' · 模拟设备数据'; });
+      await page.screenshot({ path: path.join(screenshotDir, name + '.png'), fullPage: !dialogOpen });
+      await caption.evaluate((node, value) => { node.textContent = value; }, original);
     };
     const measure = async name => {
       const value = await page.evaluate(() => ({ width: innerWidth, body: document.body.scrollWidth, root: document.documentElement.scrollWidth }));
@@ -253,7 +263,16 @@ finally:
       await form.locator('button[type="submit"]').click();
       await page.waitForFunction(section => document.querySelector(`[data-section="${section}"] .result`).textContent.includes('已保存'), section);
     };
-    const reload = async () => { await page.reload(); await page.waitForFunction(() => !document.getElementById('editor').hidden); };
+    const setting = async name => {
+      await page.locator('[data-web-page="settings"]').click();
+      await page.locator('[data-settings-tab="'+name+'"]').click();
+      assert.equal(await page.locator('[data-settings-tab="'+name+'"]').getAttribute('aria-selected'),'true'); assert.equal(await page.locator('.settings-panel[data-settings-view="'+name+'"]').isVisible(),true);
+    };
+    const reload = async () => {
+      const tab = await page.evaluate(() => document.documentElement.dataset.settingsView || 'panel');
+      await page.reload(); await page.waitForFunction(() => !document.getElementById('editor').hidden);
+      await setting(tab);
+    };
 
     await page.goto(fixture.primary.origin + '/#overview');
     await page.waitForFunction(() => document.getElementById('host-name').textContent === 'R1-Fixture');
@@ -265,11 +284,11 @@ finally:
     const publicPosts=actionBodies.length;
     for(const width of [1440,1120,760,376,320]) {
       await page.setViewportSize({width,height:1000});
-      for(const view of ['overview','trends','storage','network','apps','device']) {
+      for(const view of ['overview','trends','storage','network','apps','device','controls']) {
         await page.locator('[data-web-page="'+view+'"]').click();
         if(view==='trends') await page.waitForFunction(()=>!document.getElementById('history-note').textContent.includes('正在读取'));
         await measure('public-'+width+'-'+view);
-        if(['overview','network'].includes(view)&&[1440,376,320].includes(width)) await screenshot('preview-web-'+width+'-'+view+'-fixture');
+        if(['overview','network','apps','controls'].includes(view)&&[1440,376,320].includes(width)) await screenshot('preview-web-'+width+'-'+view+'-fixture');
       }
     }
     assert.equal(actionBodies.length,publicPosts,'public navigation must never emit device writes');
@@ -279,6 +298,18 @@ finally:
     assert.match(await page.locator('#network-routes').textContent(),/直连路由（无下一跳网关）/);
     assert.match(await page.locator('#network-dns').textContent(),/默认域名/);
     await page.locator('[data-web-page="apps"]').click();assert.equal(await page.locator('#web-containers [data-device-action]').count(),0);
+    assert.match(await page.locator('#docker-running').textContent(),/1\s*\/\s*2/);
+    assert.equal(await page.locator('#web-containers .port-badge').count(),2);
+    await page.locator('[data-container-filter="running"]').click();assert.equal(await page.locator('#web-containers .application-row').count(),1);
+    await page.locator('[data-container-filter="all"]').click();await page.locator('#container-search').fill('r1-toolbox');assert.equal(await page.locator('#web-containers .application-row').count(),1);
+    assert.match(await page.locator('#web-containers').textContent(),/受保护，仅查看/);assert.ok(!(await page.locator('#web-containers').textContent()).includes('解锁后管理'));
+    await page.locator('#web-containers .app-title').click();assert.match(await page.locator('#app-detail-note').textContent(),/安装任务完成后停止属正常/);assert.equal(await page.locator('#app-detail [data-device-action]').count(),0);await page.keyboard.press('Escape');
+    await page.locator('#container-search').fill('');await page.locator('#web-containers .application-row').first().getByRole('button',{name:'查看详情 ↗',exact:true}).click();
+    assert.match(await page.locator('#app-detail-fields').textContent(),/134|128 MB/);assert.match(await page.locator('#app-detail-fields').textContent(),new RegExp('a'.repeat(64)));
+    for(const width of [1440,376,320]){await page.setViewportSize({width,height:1000});await measure('public-docker-detail-'+width);await screenshot('preview-web-'+width+'-docker-detail-fixture');}
+    await page.locator('#app-detail-close').click();assert.equal(await page.locator('#app-detail').isVisible(),false);
+    await page.locator('[data-web-page="controls"]').click();await page.waitForFunction(()=>document.getElementById('control-brightness').textContent==='80%');
+    checks.push('Docker running/total, search, status filters and raw port badges use real fixture fields; anonymous and protected details are read-only, Toolbox stopped-after-install is normal; drawer fits desktop/376/320; control center reads actual public brightness');
     checks.push('public real HTTP dashboard requires no pairing; CORS read-only; six monitoring sections at five widths; IPv6/source wrapping and on-link routes; no unauthorized controls or POST');
     const historyRoute='**/api/v1/history?range=*';
     await page.route(historyRoute,route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({available:true,range:'1h',series:[{id:'temperature.cpu-fixture',label:'CPU fixture sensor',unit:'°C',points:[[100,40],[130,50],[160,null],[190,60]]},{id:'fan_cpu_target_percent',label:'CPU 风扇请求输出',unit:'%',points:[[100,55],[130,75],[160,null],[190,100]]},{id:'fan_rpm.fixture',label:'实测传感器 fixture',unit:'rpm',points:[[100,1200],[130,1400],[160,null],[190,1600]]}]})}));
@@ -305,21 +336,33 @@ finally:
     assert.equal(await page.locator('#screen-card').isVisible(), true);
     checks.push('real pairing login; HttpOnly/SameSite cookie hidden from JavaScript; missing CSRF rejected; unverified RGB hidden');
 
+    await setting('lighting');await page.locator('#light-mode').selectOption('temperature');await page.locator('#light-brightness').fill('17');
+    await setting('monitoring');await page.locator('#history-retention').fill('11');
+    await setting('fans');await page.locator('#fan-cpu-manual_percent').evaluate(node=>{node.value='83';node.dispatchEvent(new Event('input',{bubbles:true}));});
+    await page.locator('#fan-policy-save').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
+    await setting('lighting');assert.equal(await page.locator('#light-brightness').inputValue(),'17');
+    await setting('monitoring');assert.equal(await page.locator('#history-retention').inputValue(),'11');
+    for(const width of [1440,760,376,320]){await page.setViewportSize({width,height:1000});for(const tab of ['panel','fans','lighting','monitoring','connection']){await setting(tab);await measure('settings-'+tab+'-'+width);if([1440,320].includes(width)&&['fans','lighting','connection'].includes(tab))await screenshot('preview-web-'+width+'-settings-'+tab+'-fixture');}}
+    await setting('panel');
+    checks.push('all five settings subpages are truly separate and readable at four widths; fan save plus forced state poll preserves independent light/history drafts without hiding any existing controls');
+
     await page.locator('#theme').selectOption('jade'); await page.locator('#font_scale').fill('125'); await save('appearance');
     assert.equal(persisted().theme, 'jade'); assert.equal(persisted().font_scale, 125); await reload(); assert.equal(await page.locator('#theme').inputValue(), 'jade'); assert.equal(await page.locator('#font_scale').inputValue(), '125');
     for (const node of await page.locator('#pages input').all()) await node.setChecked(['overview', 'network', 'settings'].includes(await node.inputValue()));
     await page.locator('#page_interval').fill('15'); await save('pages'); assert.deepEqual(persisted().enabled_pages, ['overview', 'network', 'settings']); await reload(); assert.equal(await page.locator('#pages input:checked').count(), 3); assert.equal(await page.locator('#page_interval').inputValue(), '15');
-    await page.locator('#brightness').fill('65'); await save('brightness'); assert.equal(persisted().brightness, 65); assert.equal(fs.readFileSync(path.join(fixtureDir, 'sys/class/backlight/intel_backlight/brightness'), 'utf8'), '65'); await reload(); assert.equal(await page.locator('#brightness').inputValue(), '65');
+    await page.locator('#brightness').fill('55'); await save('brightness'); assert.equal(persisted().brightness, 55); assert.equal(fs.readFileSync(path.join(fixtureDir, 'sys/class/backlight/intel_backlight/brightness'), 'utf8'), '55'); await reload(); assert.equal(await page.locator('#brightness').inputValue(), '55');
+    await page.locator('[data-web-page="controls"]').click();await page.waitForFunction(()=>document.getElementById('control-brightness').textContent==='55%');await setting('panel');
     await page.locator('#night_enabled').check(); await page.locator('#night_start').fill('22:30'); await page.locator('#night_end').fill('06:45'); await page.locator('#night_brightness').fill('15'); await save('night'); await reload(); assert.equal(await page.locator('#night_enabled').isChecked(), true); assert.equal(await page.locator('#night_start').inputValue(), '22:30'); assert.equal(await page.locator('#night_end').inputValue(), '06:45'); assert.equal(await page.locator('#night_brightness').inputValue(), '15');
     await page.locator('#sleep_timeout').fill('90'); await save('sleep'); await reload(); assert.equal(persisted().sleep_timeout, 90); assert.equal(await page.locator('#sleep_timeout').inputValue(), '90');
     checks.push('appearance/pages/brightness/night/sleep save through real API, persist to actual fixture settings.json, and survive page reload');
 
-    await command('verify_rgb'); await reload(); assert.equal(await page.locator('#rgb-card').isVisible(), true);
+    await command('verify_rgb'); await reload(); await setting('lighting'); assert.equal(await page.locator('#rgb-card').isVisible(), true);
     await page.locator('#rgb-mode').selectOption('3'); await page.locator('#rgb-color').fill('#123456'); await page.locator('#rgb-brightness').fill('35'); await page.locator('[data-section="rgb"] button').click();
     await page.waitForFunction(() => document.querySelector('[data-section="rgb"] .result').textContent.includes('即时应用'));
     assert.ok(!Object.keys(persisted()).some(key => key.startsWith('rgb')));
     await reload(); assert.equal(await page.locator('#rgb-mode').inputValue(), '3'); assert.equal(await page.locator('#rgb-brightness').inputValue(), '35');
-    assert.equal(await page.locator('.fan-policy-channel').count(), 2);
+    await page.locator('[data-web-page="controls"]').click();await page.waitForFunction(()=>document.getElementById('control-light-note').textContent.includes('当前亮度 35%'));assert.match(await page.locator('#control-light-title').textContent(),/呼吸/);assert.equal(await page.locator('#control-light-color').evaluate(node=>node.style.backgroundColor),'rgb(18, 52, 86)');await setting('lighting');
+    await setting('fans'); assert.equal(await page.locator('.fan-policy-channel').count(), 2);
     await page.locator('#fan-cpu-mode').selectOption('temperature'); await page.locator('#fan-system-mode').selectOption('temperature');
     await page.locator('#fan-cpu-sources input[value="cpu"]').check(); await page.locator('#fan-cpu-sources input[value="board"]').check();
     await page.locator('#fan-system-sources input[value="disk"]').check(); await page.locator('#fan-system-sources input[value="disk2"]').check();
@@ -359,7 +402,7 @@ finally:
     await page.locator('[data-web-page="overview"]').click();await page.waitForFunction(()=>document.getElementById('overview-fans').textContent.includes('控制 / 恢复未确认'));assert.ok(!(await page.locator('#overview-fans').textContent()).includes('原厂管理'));await page.locator('[data-web-page="settings"]').click();
     await command('allow_release');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-release').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('两路已恢复原厂管理'));
     checks.push('an unacknowledged vendor restoration never becomes a success label; both channel cards flag restore-unconfirmed and allow an explicit retry');
-    await command('reconstruct'); await reload();
+    await command('reconstruct'); await reload(); await setting('panel');
     assert.equal(await page.locator('#theme').inputValue(), 'jade'); assert.equal(await page.locator('#font_scale').inputValue(), '125'); assert.equal(await page.locator('#page_interval').inputValue(), '15'); assert.equal(await page.locator('#sleep_timeout').inputValue(), '90'); assert.equal(await page.locator('#rgb-card').isHidden(), true);
     assert.ok(actionHeaders.filter(headers => headers['x-r1-csrf']).length >= 6); assert.ok(actionHeaders.every(headers => !headers['x-r1-token']));
     const storage = await page.evaluate(() => [...Object.keys(localStorage), ...Object.keys(sessionStorage)]);
@@ -367,10 +410,15 @@ finally:
     checks.push('new real controller reconstructs settings from the same data directory; RGB verification is not persisted; UI uses CSRF without any Electron token or browser storage');
 
     await page.locator('[data-web-page="apps"]').click();await page.waitForFunction(()=>document.querySelectorAll('#web-containers [data-device-action]').length>0);
+    const stopFocused=await page.locator('#web-containers .application-row').first().getByRole('button',{name:'停止',exact:true}).elementHandle();await stopFocused.focus();await command('app_refresh');await page.waitForFunction(()=>document.querySelector('#web-containers .app-resources').textContent.includes('4.2%'));assert.equal(await stopFocused.evaluate(node=>node===document.activeElement&&node.isConnected),true);
+    const appStopBox=await stopFocused.boundingBox();await page.mouse.move(appStopBox.x+appStopBox.width/2,appStopBox.y+appStopBox.height/2);await page.mouse.down();await command('app_refresh');await page.waitForFunction(()=>document.querySelector('#web-containers .app-resources').textContent.includes('5.2%'));await page.mouse.up();await page.waitForFunction(()=>document.getElementById('web-confirm').open);await page.locator('#web-confirm button[value="cancel"]').click();
+    await page.locator('#web-containers .application-row').first().getByRole('button',{name:'查看详情 ↗',exact:true}).click();const drawerStop=await page.locator('#app-detail-actions').getByRole('button',{name:'停止',exact:true}).elementHandle();await drawerStop.focus();await command('app_refresh');await page.waitForFunction(()=>document.getElementById('app-detail-fields').textContent.includes('6.2%'));assert.equal(await drawerStop.evaluate(node=>node===document.activeElement&&node.isConnected),true);await screenshot('preview-web-paired-docker-detail-fixture');await page.keyboard.press('Escape');
+    const beforeChangedState=actionBodies.length;await page.locator('#web-containers .application-row').first().getByRole('button',{name:'停止',exact:true}).click();await command('app_paused');await page.waitForFunction(()=>document.querySelector('#web-containers .status-pill').dataset.state==='paused');await page.locator('#web-confirm-accept').click();await page.waitForFunction(()=>document.getElementById('message').textContent.includes('状态已改变'));assert.equal(actionBodies.length,beforeChangedState);assert.equal(await page.locator('#web-containers .application-row').first().locator('[data-device-action]').count(),0);await command('app_running');await page.waitForFunction(()=>document.querySelectorAll('#web-containers .application-row:first-child [data-device-action]').length===2);
+    checks.push('keyed container cards and drawer retain keyboard focus and pointerdown through real metric refreshes; paused state exposes no start; confirmation rechecks latest state and emits no write after state changes');
     const beforeAppCancel=actionBodies.length;await page.locator('#web-containers .application-row').first().getByRole('button',{name:'停止',exact:true}).click();await page.locator('#web-confirm button[value="cancel"]').click();assert.equal(actionBodies.length,beforeAppCancel);
     await page.locator('#web-containers .application-row').first().getByRole('button',{name:'停止',exact:true}).click();await page.locator('#web-confirm-accept').click();await page.waitForFunction(()=>document.querySelector('#web-containers .application-row').textContent.includes('exited'));
     assert.ok(actionBodies.some(body=>body.action==='container.action'&&body.payload.confirmed===true));
-    assert.equal(await page.locator('#web-containers .application-row').nth(1).getByRole('button',{name:'启动',exact:true}).isDisabled(),true);
+    assert.equal(await page.locator('#web-containers .application-row').nth(1).locator('[data-device-action]').count(),0); assert.match(await page.locator('#web-containers .application-row').nth(1).textContent(),/Toolbox 受保护/);
     checks.push('paired container changes use explicit confirm, cancellation emits no POST, protected toolbox stays disabled, actual fixture state updates');
     await page.locator('#web-containers .application-row').first().getByRole('button',{name:'启动',exact:true}).click();
     const beforeOfflineConfirm=actionBodies.length;
@@ -384,9 +432,9 @@ finally:
 
     await page.locator('[data-web-page="settings"]').click();
     await page.waitForFunction(()=>!document.getElementById('analytics-settings-section').hidden);
-    await page.locator('#history-retention').fill('14');await page.locator('#monitor-cpu-warn').fill('82');await page.locator('#monitor-cpu-critical').fill('96');await page.locator('#analytics-form button[type="submit"]').click();await page.waitForFunction(()=>document.getElementById('analytics-result').textContent.includes('已保存'));
+    await setting('monitoring'); await page.locator('#history-retention').fill('14');await page.locator('#monitor-cpu-warn').fill('82');await page.locator('#monitor-cpu-critical').fill('96');await page.locator('#analytics-form button[type="submit"]').click();await page.waitForFunction(()=>document.getElementById('analytics-result').textContent.includes('已保存'));
     const analyticsSaved=JSON.parse(fs.readFileSync(path.join(fixtureDir,'data/monitoring.json'),'utf8')).settings;assert.equal(analyticsSaved.retention_days,14);assert.equal(analyticsSaved.thresholds.cpu_warn,82);await reload();assert.equal(await page.locator('#history-retention').inputValue(),'14');
-    await page.locator('#light-mode').selectOption('temperature');await page.locator('#light-enabled').check();await page.locator('#light-sources input[value="cpu"]').check();await page.locator('#light-sources input[value="board"]').check();await page.locator('#light-brightness').fill('44');await page.locator('#light-policy-save').click();await page.waitForFunction(()=>document.getElementById('light-policy-result').textContent.includes('尚未应用'));
+    await setting('lighting'); await page.locator('#light-mode').selectOption('temperature');await page.locator('#light-enabled').check();await page.locator('#light-sources input[value="cpu"]').check();await page.locator('#light-sources input[value="board"]').check();await page.locator('#light-brightness').fill('44');await page.locator('#light-policy-save').click();await page.waitForFunction(()=>document.getElementById('light-policy-result').textContent.includes('尚未应用'));
     const lightSaved=()=>JSON.parse(fs.readFileSync(path.join(fixtureDir,'data/light-policy.json'),'utf8'));assert.deepEqual(lightSaved().config.sources,['cpu','board']);assert.equal(lightSaved().resume_on_boot,false);
     await command('verify_rgb');await reload();page.once('dialog',dialog=>dialog.accept());await page.locator('#light-policy-apply').click();await page.waitForFunction(()=>document.getElementById('light-policy-state').textContent==='运行中');assert.match(await page.locator('#light-policy-live').textContent(),/66 °C/);assert.match(await page.locator('#light-policy-live').textContent(),/主板温度/);assert.equal(lightSaved().resume_on_boot,true);assert.equal(await page.locator('#rgb-card').isVisible(),false,'active light policy must hide immediate RGB overrides');
     await page.locator('#light-night-enabled').check();await page.locator('#light-night-brightness').fill('12');await page.locator('#light-policy-save').click();await page.waitForFunction(()=>document.getElementById('light-policy-result').textContent.includes('尚未应用'));assert.equal(lightSaved().config.schedule.brightness,12);
@@ -401,7 +449,7 @@ finally:
     assert.equal(await page.locator('[data-section="appearance"]').isVisible(), true); assert.equal(await page.locator('[data-section="pages"]').isVisible(), true); await measure('320-unsupported-device');
     checks.push('real controller with empty temporary sys/dev hides all unsupported screen/night/RGB modules while keeping appearance/pages usable');
     assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true); assert.equal(await page.locator('#fan-policy-save').isEnabled(),true);
-    await page.locator('#fan-cpu-mode').selectOption('temperature'); await page.locator('#fan-cpu-sources input[value="cpu"]').check(); await page.locator('#fan-cpu-normal_at').fill('58'); await page.locator('#fan-policy-save').click(); await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
+    await setting('fans'); await page.locator('#fan-cpu-mode').selectOption('temperature'); await page.locator('#fan-cpu-sources input[value="cpu"]').check(); await page.locator('#fan-cpu-normal_at').fill('58'); await page.locator('#fan-policy-save').click(); await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('尚未应用'));
     const unsupportedFan=JSON.parse(fs.readFileSync(path.join(fixtureDir,'unsupported/data/fan-policy.json'),'utf8')); assert.equal(unsupportedFan.config.channels.cpu.normal_at,58); assert.equal(unsupportedFan.resume_on_boot,false); assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true);
     checks.push('unverified hardware still permits independent configuration persistence but keeps apply disabled and never claims hardware success');
 

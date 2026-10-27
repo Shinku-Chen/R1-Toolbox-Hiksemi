@@ -606,22 +606,15 @@ class InsightsCollector:
         self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
         return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows}
 
-    def _containers(self):
-        command, error = self._run("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"])
+    def _container_listing(self, timeout=3):
+        command, error = self._run("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"], timeout=timeout)
         if error:
-            return _capability(error)
+            return None, error
         if command[0] != 0:
-            return _capability("Docker 未运行或当前进程没有访问权限")
+            return None, "Docker 未运行或当前进程没有访问权限"
         listed = _json_lines(command[1])
         if command[1].strip() and not listed:
-            return _capability("Docker 返回了无效的容器列表")
-        stats = {}
-        stats_command, stats_error = self._run("docker", ["stats", "--all", "--no-stream", "--format", "{{json .}}"])
-        if not stats_error and stats_command[0] == 0:
-            for row in _json_lines(stats_command[1]):
-                identity = row.get("ID") or row.get("Container")
-                if isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{12,64}", identity):
-                    stats[identity] = row
+            return None, "Docker 返回了无效的容器列表"
         rows = []
         for row in listed:
             identity = row.get("ID")
@@ -630,13 +623,35 @@ class InsightsCollector:
             name = str(row.get("Names") or "").lstrip("/")
             labels = [value.strip() for value in str(row.get("Labels") or "").split(",")]
             protected = name.lower() in {"r1-toolbox", "r1-boot-once"} or "com.docker.compose.service=r1-toolbox" in labels
-            detail = next((value for key, value in stats.items() if identity.startswith(key) or key.startswith(identity)), {})
-            memory = str(detail.get("MemUsage") or "").split("/", 1)[0]
+            state = str(row.get("State") or "")
+            available_actions = ([] if protected else ["stop", "restart"] if state == "running"
+                                 else ["start"] if state in ("created", "exited") else [])
             rows.append({"id": identity, "name": name, "image": str(row.get("Image") or ""),
-                         "state": str(row.get("State") or ""), "status": str(row.get("Status") or ""),
+                         "state": state, "status": str(row.get("Status") or ""),
                          "ports": str(row.get("Ports") or ""), "protected": protected,
-                         "cpu_percent": _percent_string(detail.get("CPUPerc")),
-                         "memory_bytes": _size_string(memory), "memory_percent": _percent_string(detail.get("MemPerc"), maximum=100)})
+                         "available_actions": available_actions})
+        if command[1].strip() and not rows:
+            return None, "Docker 返回了无效的容器标识"
+        return rows, None
+
+    def _containers(self):
+        rows, error = self._container_listing()
+        if error:
+            return _capability(error)
+        stats = {}
+        stats_command, stats_error = self._run("docker", ["stats", "--all", "--no-stream", "--format", "{{json .}}"])
+        if not stats_error and stats_command[0] == 0:
+            for row in _json_lines(stats_command[1]):
+                identity = row.get("ID") or row.get("Container")
+                if isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{12,64}", identity):
+                    stats[identity] = row
+        for row in rows:
+            identity = row["id"]
+            matches = [value for key, value in stats.items() if identity.startswith(key) or key.startswith(identity)]
+            detail = matches[0] if len(matches) == 1 else {}
+            memory = str(detail.get("MemUsage") or "").split("/", 1)[0]
+            row.update(cpu_percent=_percent_string(detail.get("CPUPerc")), memory_bytes=_size_string(memory),
+                       memory_percent=_percent_string(detail.get("MemPerc"), maximum=100))
         return {"available": True, "reason": None, "items": rows,
                 "stats_reason": stats_error or ("容器统计暂不可用" if stats_command and stats_command[0] != 0 else None)}
 
@@ -687,7 +702,11 @@ class InsightsCollector:
         valid_id = isinstance(identifier, str) and (bool(re.fullmatch(r"[0-9a-f]{12,64}", identifier)) if container else self._valid_uuid(identifier))
         if not valid_id or operation not in allowed:
             return {"ok": False, "error": "invalid_request", "reason": "操作或设备标识不合法"}
-        with self._action_lock:
+        if not self._action_lock.acquire(blocking=False):
+            return {"ok": False, "error": "busy", "reason": "已有应用操作正在执行，请先刷新状态，勿连续提交"}
+        try:
+            if self._stop.is_set():
+                return {"ok": False, "error": "stopping", "reason": "应用控制服务正在停止，请稍后重新读取状态"}
             with self._lock:
                 capability = copy.deepcopy(self._state["containers" if container else "vms"])
             if not capability["available"]:
@@ -701,9 +720,36 @@ class InsightsCollector:
             selected = matches[0]
             if container and selected["protected"]:
                 return {"ok": False, "error": "protected_container", "reason": "保留的 Toolbox 容器不允许在此操作"}
+            if container:
+                # Re-read the non-sensitive ps view immediately before a write.
+                # A stale cached running state must never restart a now-stopped
+                # container, and a changed protection label must take effect.
+                rows, failure = self._container_listing(timeout=2)
+                self._refresh["containers"].set()
+                if failure:
+                    return {"ok": False, "error": "state_unconfirmed", "reason": "Docker 当前状态未确认，请刷新列表后再决定"}
+                current = next((row for row in rows if row["id"] == selected["id"]), None)
+                if current is None:
+                    return {"ok": False, "error": "not_found", "reason": "容器已不存在，请刷新列表"}
+                if current["protected"]:
+                    return {"ok": False, "error": "protected_container", "reason": "保留的 Toolbox 容器不允许在此操作"}
+                if operation not in current["available_actions"]:
+                    return {"ok": False, "error": "invalid_state", "reason": "容器状态已改变或不支持此操作，请刷新列表后再决定"}
+            if self._stop.is_set():
+                return {"ok": False, "error": "stopping", "reason": "应用控制服务正在停止，请稍后重新读取状态"}
             arguments = ["container", operation, selected["id"]] if container else [operation, selected["id"]]
-            command, error = self._run("docker" if container else "virsh", arguments)
-            if error or command[0] != 0:
-                return {"ok": False, "error": "operation_failed", "reason": error or "宿主机拒绝了操作，请查看服务状态"}
+            # Docker may need its normal graceful-stop period. No new flags or
+            # forced stop are added, and uncertain results are never retried.
+            timeout = 15 if container and operation in ("stop", "restart") else 3
+            command, error = self._run("docker" if container else "virsh", arguments, timeout=timeout)
             self._refresh["containers" if container else "vms"].set()
+            if error:
+                return {"ok": False, "error": "operation_unconfirmed", "refresh_pending": True,
+                        "reason": ("操作超时，" if "响应超时" in error else "操作响应异常，")
+                                  + "结果未确认；请先刷新列表核对，勿连续重试"}
+            if command[0] != 0:
+                return {"ok": False, "error": "operation_failed", "exit_code": command[0],
+                        "refresh_pending": True, "reason": "宿主机未完成操作，请刷新列表并查看服务状态"}
             return {"ok": True, "state": {"id": selected["id"], "operation": operation, "refresh_pending": True}}
+        finally:
+            self._action_lock.release()
