@@ -111,7 +111,7 @@ class Insights:
         self.data={'system':{'model':'HIKSEMI R1','cpu_model':'Intel N100','cpu_logical_cores':4,'uptime_seconds':201600,
                      'cpu_usage_percent':24.5,'load_average':[.2,.3,.5],'memory':{'used_bytes':3e9,'total_bytes':8e9,'usage_percent':37.5},
                      'cpu_cores':[{'id':n,'usage_percent':10+n*5} for n in range(4)]},
-                  'device':{'identity':{'hostname':'R1-Fixture','os':'Fixture Linux','kernel':'6.1-fixture','firmware':'fixture'},
+                  'device':{'identity':{'hostname':'R1-Fixture','os':{'PRETTY_NAME':'Fixture Linux 12 (R1)','NAME':'Fixture Linux','VERSION_ID':'12'},'kernel':'6.1-fixture','firmware':{'version':'V6.3.3_Build_260907','build':'260907','model':'R1'}},
                     'cpu':{'physical_cores':4,'architecture':'x86_64'},'thermal':[{'driver':'coretemp','label':'Package','celsius':62}],
                     'network':[{'name':'eth0','speed_mbps':2500,'ipv6_addresses':[{'address':'2001:db8:1234:5678:90ab:cdef:1234:5678','prefix_length':64,'scope':'global'}]}],
                     'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
@@ -289,6 +289,9 @@ finally:
     await page.waitForFunction(() => document.getElementById('host-name').textContent === 'R1-Fixture');
     const publicStatus = await page.request.get(fixture.primary.origin + '/api/v1/status');
     assert.equal(publicStatus.status(),200); assert.equal(publicStatus.headers()['access-control-allow-origin'],'*');
+    const baselineStatus = await publicStatus.json();
+    assert.equal(typeof baselineStatus.insights.device.identity.os,'object','public API must preserve structured OS metadata');
+    assert.equal(typeof baselineStatus.insights.device.identity.firmware,'object','public API must preserve structured firmware metadata');
     assert.equal((await page.request.get(fixture.primary.origin + '/api/session')).status(),401);
     assert.equal(await page.locator('#editor').isVisible(),false);
     assert.match(await page.locator('#overview-fans').textContent(),/RPM 未知/);
@@ -322,6 +325,51 @@ finally:
     await page.locator('[data-web-page="controls"]').click();await page.waitForFunction(()=>document.getElementById('control-brightness').textContent==='80%');
     checks.push('Docker running/total, search, status filters and raw port badges use real fixture fields; anonymous and protected details are read-only, Toolbox stopped-after-install is normal; drawer fits desktop/376/320; control center reads actual public brightness');
     checks.push('public real HTTP dashboard requires no pairing; CORS read-only; six monitoring sections at five widths; IPv6/source wrapping and on-link routes; no unauthorized controls or POST');
+
+    // Inventory returns structured identity metadata. Exercise the real browser
+    // renderer rather than replacing those public API objects with test strings.
+    const identityFields = () => page.locator('#web-identity .reading-row').evaluateAll(nodes => Object.fromEntries(nodes.map(node => [node.querySelector('span').textContent,node.querySelector('strong').textContent])));
+    await page.locator('[data-web-page="device"]').click();
+    const actualIdentity = await identityFields();
+    assert.equal(actualIdentity['系统'],'Fixture Linux 12 (R1)');
+    assert.match(actualIdentity['固件'],/V6\.3\.3_Build_260907/);
+    assert.match(actualIdentity['固件'],/R1/);
+    assert.match(actualIdentity['固件'],/260907/);
+    assert.ok(!(await page.locator('#web-identity').textContent()).includes('[object Object]'));
+    const xssName = '<img src=x onerror="window.identityXss=1"> NAS ' + 'W'.repeat(100);
+    const xssFirmware = '<svg onload="window.identityXss=2"></svg> Legacy 1.0';
+    const identityCases = [
+      {name:'empty',os:{},firmware:{},osValues:['--'],firmwareValues:['--'],exact:true},
+      {name:'null',os:null,firmware:null,osValues:['--'],firmwareValues:['--'],exact:true},
+      {name:'legacy',os:'  Legacy NAS OS 1.0  ',firmware:'  Legacy R1 firmware 2.0  ',osValues:['Legacy NAS OS 1.0'],firmwareValues:['Legacy R1 firmware 2.0'],exact:true},
+      {name:'name-version',os:{NAME:'Fixture Linux',VERSION:'13 (R1)',VERSION_ID:'13',BUILD_ID:'20261028'},firmware:{'hiksemi-release':'Hiksemi release 6.3.0'},osValues:['Fixture Linux','13 (R1)','20261028'],firmwareValues:['Hiksemi release 6.3.0']},
+      {name:'name-version-id',os:{NAME:'Hiksemi Fixture',VERSION_ID:'6.3.3'},firmware:{version:'V6.3.3_Build_260907',firmware_version:'ignored-secondary-version','hiksemi-release':'ignored-tertiary-version',model:'R1',build:260907,build_date:'2026-09-07',build_time:'12:30:00',unknown:'never-display-unknown',extra:{secret:'never-display-nested'}},osValues:['Hiksemi Fixture','6.3.3'],firmwareValues:['V6.3.3_Build_260907','R1','260907','2026-09-07','12:30:00'],absent:['ignored-secondary-version','ignored-tertiary-version','never-display-unknown','never-display-nested']},
+      {name:'version-only-nested',os:{PRETTY_NAME:{secret:'never-display-nested'},NAME:['never-display-array'],VERSION_ID:'2026.10',BUILD_ID:true,unknown:'never-display-unknown'},firmware:{version:{secret:'never-display-nested'},firmware_version:['never-display-array'],model:{name:'never-display-nested'},build:true,unknown:'never-display-unknown'},osValues:['2026.10'],firmwareValues:['--'],exact:true,absent:['never-display-nested','never-display-array','never-display-unknown','true']},
+      {name:'text-only-xss',os:{PRETTY_NAME:xssName},firmware:{'histor-release':xssFirmware},osValues:[xssName],firmwareValues:[xssFirmware],exact:true},
+    ];
+    let renderedIdentity;
+    const identityRoute = fixture.primary.origin + '/api/v1/status';
+    await page.route(identityRoute,route => route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({...baselineStatus,insights:{...baselineStatus.insights,device:{...baselineStatus.insights.device,identity:renderedIdentity}}})}));
+    for (const sample of identityCases) {
+      renderedIdentity = {...baselineStatus.insights.device.identity,os:sample.os,firmware:sample.firmware};
+      await page.reload();
+      await page.waitForFunction(() => document.getElementById('live-status').textContent==='实时连接');
+      const fields = await identityFields();
+      for (const [label,values] of [['系统',sample.osValues],['固件',sample.firmwareValues]]) {
+        if (sample.exact) assert.equal(fields[label],values[0],sample.name+' '+label);
+        else for (const value of values) assert.ok(fields[label].includes(value),sample.name+' '+label+' missing '+value+': '+fields[label]);
+      }
+      const text = await page.locator('#web-identity').textContent();
+      assert.ok(!text.includes('[object Object]'),sample.name+' must not stringify metadata objects');
+      for (const value of sample.absent || []) assert.ok(!text.includes(value),sample.name+' unexpectedly rendered '+value);
+      assert.equal(await page.locator('#web-identity img, #web-identity svg, #web-identity script').count(),0,sample.name+' metadata must remain text nodes');
+      assert.equal(await page.evaluate(() => window.identityXss),undefined);
+      for (const width of [1120,320]) { await page.setViewportSize({width,height:1000}); await measure('identity-'+sample.name+'-'+width); }
+    }
+    await page.unroute(identityRoute);
+    await page.goto(fixture.primary.origin+'/#overview');
+    await page.waitForFunction(() => document.getElementById('host-name').textContent==='R1-Fixture');
+    checks.push('device identity consumes real structured public metadata; PRETTY_NAME, NAME+VERSION/VERSION_ID, version-only, build and firmware metadata stay readable; empty/null and legacy strings work, nested/unknown fields are ignored, XSS stays literal text, and desktop/320 never overflow');
     const historyRoute='**/api/v1/history?range=*';
     await page.route(historyRoute,route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({available:true,range:'1h',series:[{id:'temperature.cpu-fixture',label:'CPU fixture sensor',unit:'°C',points:[[100,40],[130,50],[160,null],[190,60]]},{id:'fan_cpu_target_percent',label:'CPU 风扇请求输出',unit:'%',points:[[100,55],[130,75],[160,null],[190,100]]},{id:'fan_rpm.fixture',label:'实测传感器 fixture',unit:'rpm',points:[[100,1200],[130,1400],[160,null],[190,1600]]}]})}));
     await page.locator('[data-web-page="trends"]').click();await page.waitForFunction(()=>document.querySelectorAll('#history-charts .card').length===3);
