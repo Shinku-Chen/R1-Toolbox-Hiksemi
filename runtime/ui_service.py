@@ -311,7 +311,7 @@ def allowed_origin(origin, port):
         return False
 
 
-def make_http_server(monitor, port=PORT, controller=None, insights=None, control_token=None):
+def make_http_server(monitor, port=PORT, controller=None, insights=None, control_token=None, web_config=None):
     class StatusHandler(http.server.BaseHTTPRequestHandler):
         def request_origin(self):
             origin = self.headers.get("Origin")
@@ -338,6 +338,9 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 value = controller.snapshot()
             elif route == "/api/insights" and insights is not None:
                 value = insights.snapshot()
+            elif route == "/api/web-config":
+                value = web_config.snapshot() if web_config is not None else {
+                    "enabled": False, "reason": "网页配置未启用", "addresses": []}
             else:
                 self.send_json(404, {"error": "接口不存在"}, origin)
                 return
@@ -382,6 +385,18 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                     raise ValueError("缺少操作名称")
             except (ValueError, UnicodeError):
                 self.send_json(400, {"ok": False, "error": "请求格式无效或缺少明确确认"}, origin)
+                return
+            if action == "web.pairing":
+                if web_config is None:
+                    self.send_json(400, {"ok": False, "error": "网页配置未启用"}, origin)
+                elif set(payload) - {"rotate"} or type(payload.get("rotate", False)) is not bool:
+                    self.send_json(400, {"ok": False, "error": "配对参数无效"}, origin)
+                else:
+                    try:
+                        value = web_config.pairing_info(rotate=payload.get("rotate", False))
+                        self.send_json(200, {"ok": True, "web": value}, origin)
+                    except Exception:
+                        self.send_json(400, {"ok": False, "error": "网页配对暂不可用，请检查网页服务状态"}, origin)
                 return
             allowed_controls = {"settings.update", "screen.brightness", "screen.sleep", "screen.wake",
                                 "screen.activity", "fan.set", "fan.restore", "fan.official", "rgb.set", "rgb.probe", "power.request", "power.cancel"}
@@ -433,7 +448,7 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             route = urllib.parse.urlsplit(self.path).path
             method = self.headers.get("Access-Control-Request-Method")
             headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",") if part.strip()}
-            can_read = route in ("/api/status", "/api/toolbox", "/api/insights") and method == "GET" and not headers
+            can_read = route in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config") and method == "GET" and not headers
             can_control = (route == "/api/action" and controller is not None and control_token
                            and method == "POST" and headers <= {"content-type", "x-r1-token"})
             if (
@@ -501,6 +516,20 @@ def stop_child(child):
         child.wait(timeout=1)
 
 
+def create_web_config(controller, insights):
+    """Use a separate authenticated LAN endpoint; never share the Electron token."""
+    raw_port = os.environ.get("R1_WEB_PORT", "18732")
+    host = os.environ.get("R1_WEB_BIND", "0.0.0.0")
+    if (host not in ("0.0.0.0", "127.0.0.1") or not raw_port.isascii()
+            or not raw_port.isdigit() or len(raw_port) > 5
+            or (int(raw_port) != 0 and not 1024 <= int(raw_port) <= 65535)):
+        raise ValueError("网页监听配置无效")
+    if int(raw_port) == 0:
+        return None
+    from web_config import WebConfigServer
+    return WebConfigServer(controller, insights, host=host, port=int(raw_port))
+
+
 def run_service(app, port=PORT, controller=None, insights=None):
     app = Path(app).resolve()
     executable = app / "AppRun"
@@ -522,7 +551,7 @@ def run_service(app, port=PORT, controller=None, insights=None):
         insights = InsightsCollector()
     stopped, monitor = threading.Event(), StatusMonitor()
     control_token = secrets.token_hex(32)
-    server = server_thread = child = None
+    server = server_thread = child = web = None
     handlers = {}
 
     def request_stop(signum, frame):
@@ -531,7 +560,12 @@ def run_service(app, port=PORT, controller=None, insights=None):
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             handlers[sig] = signal.signal(sig, request_stop)
-        server = bind_server(monitor, port, stopped, controller=controller, insights=insights, control_token=control_token)
+        try:
+            web = create_web_config(controller, insights)
+        except (OSError, ValueError) as error:
+            print("[WARN] 网页配置未启用：" + str(error), file=sys.stderr, flush=True)
+        server = bind_server(monitor, port, stopped, controller=controller, insights=insights,
+                             control_token=control_token, web_config=web)
         if server is None:
             return 0
         server_thread = threading.Thread(
@@ -540,6 +574,13 @@ def run_service(app, port=PORT, controller=None, insights=None):
         monitor.start()
         controller.start()
         insights.start()
+        if web is not None:
+            try:
+                web.start()
+                print("[OK] 局域网网页配置已启动；请在小屏生成配对码登录。", flush=True)
+            except (OSError, ValueError) as error:
+                # An occupied optional LAN port must not black out the screen.
+                print("[WARN] 网页配置启动失败，小屏继续运行：" + str(error), file=sys.stderr, flush=True)
         server_thread.start()
         if stopped.is_set():
             return 0
@@ -565,7 +606,10 @@ def run_service(app, port=PORT, controller=None, insights=None):
             if server_thread is not None and server_thread.is_alive():
                 server.shutdown()
                 server_thread.join(timeout=0.5)
-        cleanup = [("停止接收控制请求", stop_http), ("恢复硬件", controller.stop),
+        cleanup = [("停止接收控制请求", stop_http)]
+        if web is not None:
+            cleanup.append(("停止网页配置", web.stop))
+        cleanup += [("恢复硬件", controller.stop),
                    ("停止小屏进程", lambda: stop_child(child)), ("停止详细采集", insights.stop)]
         if monitor.thread.is_alive():
             cleanup.append(("停止指标采集", monitor.stop))

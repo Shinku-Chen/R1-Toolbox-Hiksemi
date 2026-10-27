@@ -362,23 +362,242 @@ def _storage(reader, proc, sys):
     return {"devices": devices, "raid": raid, "mdstat": mdstat}
 
 
-def _network(reader, proc, sys):
-    addresses = {}
-    for line in (reader.text(proc / "net/if_inet6", 65536) or "").splitlines()[:1024]:
+_INTERFACE_PATTERN = r"[A-Za-z0-9_.:@-]{1,64}"
+_DNS_LIMIT = 16
+
+
+def _parse_status(valid, invalid):
+    return "partial" if valid and invalid else "malformed" if invalid else "ok"
+
+
+def _default_routes(reader, proc, version):
+    """Parse kernel default routes; unreadable is different from an empty table."""
+    filename = "route" if version == 4 else "ipv6_route"
+    text = reader.text(proc / "net" / filename, 262144)
+    if text is None:
+        return [], "unavailable"
+    lines = text.splitlines()
+    valid = invalid = 0
+    if version == 4:
+        if not lines or lines[0].split()[:3] != ["Iface", "Destination", "Gateway"]:
+            return [], "malformed"
+        lines = lines[1:]
+    routes, limited = [], len(lines) > _SCAN_LIMIT
+    for line in lines[:4096]:
+        if not line.strip():
+            continue
         fields = line.split()
-        if len(fields) != 6 or not re.fullmatch(r"[0-9a-fA-F]{32}", fields[0]):
+        try:
+            if version == 4:
+                if len(fields) < 8 or not re.fullmatch(_INTERFACE_PATTERN, fields[0]):
+                    raise ValueError()
+                if not all(re.fullmatch(r"[0-9a-fA-F]{8}", fields[index]) for index in (1, 2, 7)):
+                    raise ValueError()
+                if not re.fullmatch(r"[0-9a-fA-F]{1,8}", fields[3]) or not re.fullmatch(r"[0-9]{1,10}", fields[6]):
+                    raise ValueError()
+                flags, metric = int(fields[3], 16), int(fields[6])
+                if metric > 2**32 - 1:
+                    raise ValueError()
+                interface = fields[0]
+                default = int(fields[1], 16) == 0 and int(fields[7], 16) == 0
+                gateway = str(ipaddress.IPv4Address(int(fields[2], 16).to_bytes(4, "little")))
+                source_prefix = None
+            else:
+                if len(fields) != 10 or not re.fullmatch(_INTERFACE_PATTERN, fields[9]):
+                    raise ValueError()
+                if not all(re.fullmatch(r"[0-9a-fA-F]{32}", fields[index]) for index in (0, 2, 4)):
+                    raise ValueError()
+                if not all(re.fullmatch(r"[0-9a-fA-F]{1,8}", fields[index]) for index in (1, 3, 5, 6, 7, 8)):
+                    raise ValueError()
+                prefix, source_length = int(fields[1], 16), int(fields[3], 16)
+                if prefix > 128 or source_length > 128:
+                    raise ValueError()
+                interface, metric, flags = fields[9], int(fields[5], 16), int(fields[8], 16)
+                default = int(fields[0], 16) == 0 and prefix == 0
+                gateway = str(ipaddress.IPv6Address(int(fields[4], 16)))
+                source_prefix = str(ipaddress.IPv6Address(int(fields[2], 16))) + "/" + str(source_length)
+            valid += 1
+            # UP routes only. A reject default is not an operational gateway.
+            if not default or not flags & 1 or flags & 0x200:
+                continue
+            row = {"interface": interface, "gateway": None if gateway in ("0.0.0.0", "::") else gateway,
+                   "metric": metric, "source": "/proc/net/" + filename}
+            if source_prefix is not None:
+                row["source_prefix"] = source_prefix
+            if row not in routes and len(routes) < _ITEM_LIMIT:
+                routes.append(row)
+            elif row not in routes:
+                limited = True
+        except (ValueError, OverflowError):
+            invalid += 1
+    status = "partial" if limited else _parse_status(valid, invalid)
+    return sorted(routes, key=lambda row: (row["metric"], row["interface"], row["gateway"] or "")), status
+
+
+def _dns_address(value):
+    address, separator, zone = value.partition("%")
+    try:
+        parsed = ipaddress.ip_address(address)
+        if separator and (parsed.version != 6 or not re.fullmatch(_INTERFACE_PATTERN, zone)):
+            return None
+        return str(parsed) + ("%" + zone if separator else "")
+    except ValueError:
+        return None
+
+
+def _dns_domain(value):
+    if value == ".":
+        return value
+    try:
+        domain = value.encode("idna").decode("ascii").lower()
+    except (UnicodeError, ValueError):
+        return None
+    if len(domain) > 253:
+        return None
+    labels = domain.rstrip(".").split(".")
+    return domain if all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels) else None
+
+
+def _unique(values, limit=_DNS_LIMIT):
+    return list(dict.fromkeys(values))[:limit]
+
+
+def _resolv_data(text):
+    servers, search, domains = [], [], []
+    valid = invalid = 0
+    lines = text.splitlines()
+    limited = len(lines) > 1024
+    for line in lines[:1024]:
+        fields = re.split(r"[;#]", line, maxsplit=1)[0].split()
+        if not fields:
+            continue
+        keyword, values = fields[0], fields[1:]
+        if keyword == "nameserver":
+            value = _dns_address(values[0]) if len(values) == 1 else None
+            if value is None:
+                invalid += 1
+            else:
+                valid += 1
+                if value in servers:
+                    continue
+                if len(servers) < _DNS_LIMIT:
+                    servers.append(value)
+                else:
+                    limited = True
+        elif keyword in ("search", "domain"):
+            parsed = [_dns_domain(value) for value in values[:_DNS_LIMIT]]
+            if not values or any(value is None for value in parsed) or keyword == "domain" and len(values) != 1:
+                invalid += 1
+                continue
+            valid += 1
+            limited = limited or len(values) > _DNS_LIMIT
+            if keyword == "search":
+                search = parsed
+            else:
+                domains = parsed
+        # All other configuration, comments and credentials are discarded.
+    return {"servers": _unique(servers), "search": _unique(search), "domains": _unique(domains),
+            "status": "partial" if limited else _parse_status(valid, invalid)}
+
+
+def _dns(reader, etc, run):
+    """Read fixed resolver state files only, never NetworkManager profiles."""
+    etc_base, run_base = etc.resolve(), run.resolve()
+    files = (
+        ("resolv.conf", "/etc/resolv.conf", etc_base / "resolv.conf"),
+        ("systemd-resolved", "/run/systemd/resolve/resolv.conf", run_base / "systemd/resolve/resolv.conf"),
+        ("systemd-stub", "/run/systemd/resolve/stub-resolv.conf", run_base / "systemd/resolve/stub-resolv.conf"),
+        ("NetworkManager", "/run/NetworkManager/resolv.conf", run_base / "NetworkManager/resolv.conf"),
+        ("NetworkManager-upstream", "/run/NetworkManager/no-stub-resolv.conf", run_base / "NetworkManager/no-stub-resolv.conf"),
+    )
+    allowed = {path for _, _, path in files}
+    sources = []
+    resolved_primary = None
+    for name, display, path in files:
+        entry = {"source": name, "path": display, "servers": [], "search": [], "domains": [],
+                 "status": "unavailable", "reason": "文件不存在、不可读或超出读取限制"}
+        try:
+            resolved = path.resolve()
+            # A resolv.conf symlink may target the known stub/upstream files,
+            # but never arbitrary /etc or /run files, even inside fixture roots.
+            if resolved not in allowed:
+                entry["reason"] = "符号链接目标不在已知 DNS 状态文件范围"
+            else:
+                text = reader.text(resolved, 65536)
+                if name == "resolv.conf":
+                    resolved_primary = resolved
+                if text is not None:
+                    entry.update(_resolv_data(text))
+                    entry["reason"] = "部分 DNS 字段格式无效或超出采集限制" if entry["status"] in ("partial", "malformed") else None
+        except (OSError, RuntimeError, ValueError):
+            entry["reason"] = "DNS 状态路径无法确认"
+        sources.append(entry)
+    primary = sources[0]
+    selected = primary if primary["status"] != "unavailable" else next(
+        (item for item in sources[1:] if item["servers"]), primary)
+    servers = selected["servers"]
+    stub = [value for value in servers if ipaddress.ip_address(value.split("%", 1)[0]).is_loopback]
+    upstream = [value for value in servers if value not in stub]
+    # Associate runtime upstreams with the selected resolver, rather than merge
+    # stale configuration from several unrelated resolver services.
+    additional_source = None
+    if any(value.split("%", 1)[0] in ("127.0.0.53", "127.0.0.54") for value in stub) or resolved_primary == files[2][2]:
+        additional_source = sources[1]
+    elif resolved_primary == files[3][2]:
+        additional_source = sources[4]
+    additional = additional_source["servers"] if additional_source else []
+    upstream = _unique(upstream + [value for value in additional
+                                  if not ipaddress.ip_address(value.split("%", 1)[0]).is_loopback])
+    status, reason = selected["status"], selected["reason"]
+    if selected is not primary and servers:
+        status, reason = "partial", "主 resolv.conf 不可读，以下是运行时报告的 DNS，未确认系统实际选择"
+    elif not servers:
+        status = "unavailable" if all(item["status"] == "unavailable" for item in sources) else "malformed" if selected["status"] == "malformed" else "partial"
+        reason = "未获得可确认的 DNS 服务器；不能据此判断系统未配置 DNS"
+    elif stub and not upstream:
+        status, reason = "partial", "已读取本地 DNS 代理，上游服务器尚无法确认"
+    elif additional_source and additional_source["status"] in ("partial", "malformed") and status == "ok":
+        status, reason = "partial", "已读取本地 DNS 代理，关联上游 DNS 状态仅部分可确认"
+    return {"servers": servers, "upstream_servers": upstream, "stub_servers": stub,
+            "search": selected["search"], "domains": selected["domains"], "sources": sources,
+            "status": status, "reason": reason}
+
+
+def _network(reader, proc, sys, default_routes, route_status):
+    addresses = {}
+    ipv6_text = reader.text(proc / "net/if_inet6", 65536)
+    valid = invalid = 0
+    lines = (ipv6_text or "").splitlines()
+    limited = len(lines) > 1024
+    for line in lines[:1024]:
+        if not line.strip():
+            continue
+        fields = line.split()
+        if (len(fields) != 6 or not re.fullmatch(r"[0-9a-fA-F]{32}", fields[0])
+                or not all(re.fullmatch(r"[0-9a-fA-F]{1,8}", value) for value in fields[1:5])
+                or not re.fullmatch(_INTERFACE_PATTERN, fields[5])):
+            invalid += 1
             continue
         try:
-            prefix = int(fields[2], 16)
-            if not 0 <= prefix <= 128:
-                continue
-            address = str(ipaddress.IPv6Address(int(fields[0], 16))) + "/" + str(prefix)
-            addresses.setdefault(fields[5], []).append(address)
+            index, prefix, scope, flags = [int(value, 16) for value in fields[1:5]]
+            if not 0 <= prefix <= 128 or not 0 <= scope <= 255 or not 0 <= flags <= 2**32 - 1 or not 0 <= index <= 2**32 - 1:
+                raise ValueError()
+            address = {"address": str(ipaddress.IPv6Address(int(fields[0], 16))), "prefix_length": prefix,
+                       "scope": {0: "global", 0x10: "host", 0x20: "link", 0x40: "site", 0x80: "compat"}.get(scope, "unknown"),
+                       "scope_id": scope, "flags": flags}
+            current = addresses.setdefault(fields[5], [])
+            if address not in current and len(current) < 16:
+                current.append(address)
+            elif address not in current:
+                limited = True
+            valid += 1
         except ValueError:
+            invalid += 1
             continue
+    address_status = "unavailable" if ipv6_text is None else "partial" if limited else _parse_status(valid, invalid)
     items = []
     base = sys / "class/net"
-    for name in reader.names(base, r"[A-Za-z0-9_.:@-]{1,64}", 128):
+    for name in reader.names(base, _INTERFACE_PATTERN, 128):
         root = base / name
         mac = reader.text(root / "address", 64)
         items.append({
@@ -388,7 +607,11 @@ def _network(reader, proc, sys):
             "speed_mbps": reader.number(root / "speed", minimum=1, maximum=10000000),
             "duplex": reader.text(root / "duplex", 64),
             "mtu": reader.number(root / "mtu", minimum=1, maximum=2**24),
-            "ipv6": addresses.get(name, [])[:16],
+            "ipv6": [item["address"] + "/" + str(item["prefix_length"]) for item in addresses.get(name, [])],
+            "ipv6_addresses": addresses.get(name, []), "address_status": {"ipv6": address_status},
+            "default_gateways": {family: [dict(item) for item in rows if item["interface"] == name]
+                                 for family, rows in default_routes.items()},
+            "route_status": dict(route_status),
         })
     return items
 
@@ -398,8 +621,8 @@ def collect_device_info(proc_root="/proc", sys_root="/sys", etc_root="/etc", run
 
     Serial numbers and MAC addresses are for local display only.  No network,
     shell, hardware writes, automatic driver loading, or socket calls occur.
-    ``run_root`` is reserved for future allowlisted runtime metadata; arbitrary
-    files from it are deliberately not enumerated or read.
+    ``run_root`` supplies exact resolver state filenames only; arbitrary files,
+    NetworkManager connection profiles and credentials are never enumerated.
     """
     proc, sys, etc, run = map(Path, (proc_root, sys_root, etc_root, run_root))
     reader = _Reader((proc, sys, etc, run, etc.parent / "usr/share/misc", etc.parent / "usr/share/hwdata",
@@ -407,11 +630,17 @@ def collect_device_info(proc_root="/proc", sys_root="/sys", etc_root="/etc", run
     thermal, fans = _sensors(reader, sys)
     backlight = _backlights(reader, sys)
     storage = _storage(reader, proc, sys)
-    network = _network(reader, proc, sys)
+    routes4, status4 = _default_routes(reader, proc, 4)
+    routes6, status6 = _default_routes(reader, proc, 6)
+    default_routes = {"ipv4": routes4, "ipv6": routes6}
+    route_status = {"ipv4": status4, "ipv6": status6}
+    network = _network(reader, proc, sys, default_routes, route_status)
     return {
         "identity": _identity(reader, proc, sys, etc), "cpu": _cpu(reader, proc, sys),
         "thermal": thermal, "fans": fans, "backlight": backlight,
         "storage": storage, "network": network,
+        "network_config": {"default_routes": default_routes, "route_status": route_status,
+                           "dns": _dns(reader, etc, run)},
         "capabilities": {
             "thermal": any(item["celsius"] is not None for item in thermal),
             "fan_rpm": any(item["rpm"] is not None for item in fans),

@@ -54,6 +54,10 @@
   let resolveConfirmation = null;
   let powerDeadline = null;
   let powerOperation = null;
+  let webConfig = null;
+  let webConfigRunning = false;
+  let lastWebConfigPoll = 0;
+  let pairingDeadline = null;
 
   function field(name, value) {
     (fieldNodes.get(name) || []).forEach((node) => { node.textContent = value; });
@@ -221,7 +225,7 @@
       return data;
     } finally { window.clearTimeout(timeout); }
   }
-  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", "rgb-probe": "验证灯光接口", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置" };
+  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", "rgb-probe": "验证灯光接口", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
   function activeScroller() { return currentDetail ? $("detail-body") : $("page-" + pages[currentPage]); }
   function drawNavigation() {
     pages.forEach((name, index) => { $("page-" + name).hidden = Boolean(currentDetail) || index !== currentPage; });
@@ -238,13 +242,16 @@
   }
   function openView(name, params = {}, title, replace = false) {
     if (!document.querySelector('[data-detail-view="' + name + '"]')) return;
+    if (currentDetail && currentDetail.name === "web-config" && name !== "web-config") clearWebPairing();
     if (!replace) navigationStack.push({ detail: currentDetail, scroll: activeScroller().scrollTop });
     currentDetail = { name, params, title: title || detailTitles[name] };
     drawNavigation(); renderFocusedDetail(); $("detail-body").scrollTop = 0;
     lastCarousel = lastInteraction = Date.now();
+    if (name === "web-config") pollWebConfig(true);
   }
   function backView() {
     if (!currentDetail) return;
+    if (currentDetail.name === "web-config") clearWebPairing();
     const previous = navigationStack.pop();
     currentDetail = previous ? previous.detail : null;
     drawNavigation(); renderFocusedDetail();
@@ -323,11 +330,29 @@
       fillDetails("disk-detail", disk ? [["型号", disk.model], ["设备", disk.device || disk.id], ["容量", bytes(disk.size_bytes)], ["类型", disk.type], ["温度", finite(disk.temp_c) ? disk.temp_c + " °C" : "暂无读数"], ["状态", disk.standby ? "待机 · 未主动唤醒" : "可读取"], ["SMART", health.passed === true ? "检测正常" : health.passed === false ? "检测异常" : health.reason || "暂不可用", health.passed === false ? "unhealthy" : ""], ["序列号", raw && raw.serial], ["厂商", raw && raw.vendor], ["介质状态", raw && raw.state]] : [], "此磁盘当前不可用");
     }
     if (name === "interface-detail") {
-      const network = list(insights && insights.interfaces).find((item) => item.name === params.id);
-      const raw = list(device.network).find((item) => item.name === params.id) || {};
+      const network = networkInterfaces().find((item) => item.name === params.id);
+      const raw = network && network.raw || {};
       const rx = speed(network && network.rx_bytes_per_sec), tx = speed(network && network.tx_bytes_per_sec);
-      fillDetails("interface-detail", network ? [["接口", network.name], ["状态", network.operstate], ["IPv4", list(network.ipv4).join(" · ") || "未配置"], ["IPv6", list(raw.ipv6).join(" · ")], ["MAC", network.mac], ["接收", rx.value + " " + rx.unit], ["发送", tx.value + " " + tx.unit], ["累计接收", bytes(network.rx_bytes)], ["累计发送", bytes(network.tx_bytes)], ["连接速率", finite(raw.speed_mbps) && raw.speed_mbps > 0 ? raw.speed_mbps + " Mbps" : null], ["双工", raw.duplex], ["MTU", raw.mtu]] : [], "此网络接口当前不可用");
+      const rows = [];
+      if (network) {
+        ["ipv4", "ipv6"].forEach((family) => {
+          const addresses = interfaceAddresses(network, family);
+          addresses.forEach((entry, index) => rows.push([ipFamilyLabel(family) + " · 地址 " + (index + 1), formatAddress(entry)]));
+          if (!addresses.length) {
+            const status = raw.address_status && raw.address_status[family];
+            rows.push([ipFamilyLabel(family), status && status !== "ok" ? networkStatus(status) : "当前未报告地址"]);
+          } else if (raw.address_status && raw.address_status[family] && raw.address_status[family] !== "ok") rows.push([ipFamilyLabel(family) + " 地址状态", networkStatus(raw.address_status[family])]);
+          const routes = list(raw.default_gateways && raw.default_gateways[family]);
+          const status = raw.route_status && raw.route_status[family];
+          rows.push([ipFamilyLabel(family) + " 默认网关", routes.length ? routes.map(formatGateway).join("\n\n") : status === "ok" ? "未发现默认网关" : "默认网关暂不可读取"]);
+        });
+        rows.push(["状态", network.operstate || "未提供"], ["MAC", network.mac || raw.mac], ["接收速度", rx.value + " " + rx.unit], ["发送速度", tx.value + " " + tx.unit], ["累计接收", bytes(network.rx_bytes)], ["累计发送", bytes(network.tx_bytes)], ["连接速率", finite(raw.speed_mbps) && raw.speed_mbps > 0 ? raw.speed_mbps + " Mbps" : null], ["双工", raw.duplex], ["MTU", raw.mtu]);
+      }
+      fillDetails("interface-detail", rows, "此网络接口当前不可用");
     }
+    if (name === "network-routes") renderNetworkRoutes();
+    if (name === "network-dns") renderNetworkDNS();
+    if (name === "web-config") renderWebConfig();
     if (name === "memory") {
       const memory = system.memory || lastStatus && lastStatus.memory || {};
       fillDetails("memory-detail", [["内存使用率", percentage(memory.usage_percent) + "%"], ["已用", bytes(memory.used_bytes)], ["可用", bytes(memory.available_bytes)], ["总量", bytes(memory.total_bytes)], ["交换空间", number(memory.swap_total_bytes) === 0 ? "未启用" : bytes(memory.swap_used_bytes) + " / " + bytes(memory.swap_total_bytes)]]);
@@ -361,6 +386,110 @@
       fillDetails("capabilities-detail", rows, "服务未连接，无法读取设备能力");
     }
   }
+  function ipFamilyLabel(family) { return family === "ipv4" ? "IPv4" : "IPv6"; }
+  function networkInterfaces() {
+    const items = new Map();
+    list(insights && insights.interfaces).forEach((item) => { if (item && item.name) items.set(item.name, Object.assign({}, item, { raw: {} })); });
+    list(insights && insights.device && insights.device.network).forEach((raw) => {
+      if (!raw || !raw.name) return;
+      const network = items.get(raw.name) || { name: raw.name, ipv4: [], operstate: raw.state };
+      network.raw = raw; items.set(raw.name, network);
+    });
+    return Array.from(items.values());
+  }
+  function interfaceAddresses(network, family) {
+    const raw = network.raw || {};
+    const structured = list(raw[family + "_addresses"]).length ? raw[family + "_addresses"] : list(network[family + "_addresses"]);
+    if (structured.length) return structured.filter((entry) => entry && typeof entry.address === "string");
+    return list(family === "ipv4" ? network.ipv4 : raw.ipv6).filter((entry) => typeof entry === "string").map((entry) => {
+      const parts = entry.split("/"); return { address: parts[0], prefix_length: parts.length > 1 && /^\d+$/.test(parts[1]) ? Number(parts[1]) : null, scope: null };
+    });
+  }
+  function formatAddress(entry) {
+    const prefix = Number.isInteger(entry.prefix_length) ? "/" + entry.prefix_length : "前缀未提供";
+    const scopeNames = { global: "全局", link: "链路本地", host: "本机", site: "站点本地" };
+    const scope = entry.scope === undefined || entry.scope === null ? "未提供" : String(entry.scope) + (scopeNames[entry.scope] ? "（" + scopeNames[entry.scope] + "）" : "");
+    if (prefix[0] !== "/" && scope === "未提供") return entry.address + "\n前缀与 scope 暂未提供";
+    return entry.address + (prefix[0] === "/" ? prefix : "\n" + prefix) + "\nscope：" + scope;
+  }
+  function formatGateway(route) {
+    return (route.gateway === null ? "直连路由（无下一跳网关）" : route.gateway || "网关地址未提供") + (finite(route.metric) ? "\nmetric：" + route.metric : "") + (route.source ? "\n来源\n" + route.source : "");
+  }
+  function networkStatus(value) {
+    return { ok: "读取正常", partial: "部分来源可用", unavailable: "暂不可读取", malformed: "来源格式异常" }[value] || "状态未提供";
+  }
+  function renderNetworkOverview() {
+    const interfaces = networkInterfaces();
+    ["ipv4", "ipv6"].forEach((family) => {
+      const addresses = interfaces.flatMap((item) => interfaceAddresses(item, family));
+      text("network-" + family + "-summary", ipFamilyLabel(family) + " · " + (addresses.length ? addresses[0].address + (addresses.length > 1 ? " · 共 " + addresses.length + " 个" : "") : "当前未报告地址"));
+    });
+  }
+  function renderNetworkRoutes() {
+    const config = insights && insights.device && insights.device.network_config || {};
+    const rows = [];
+    ["ipv4", "ipv6"].forEach((family) => {
+      const routes = list(config.default_routes && config.default_routes[family]);
+      const status = config.route_status && config.route_status[family];
+      if (!routes.length) rows.push([ipFamilyLabel(family) + " 默认网关", status === "ok" ? "未发现默认网关" : networkStatus(status)]);
+      routes.forEach((route, index) => rows.push([ipFamilyLabel(family) + " · " + (route.interface || "接口未提供") + (routes.length > 1 ? " · " + (index + 1) : ""), formatGateway(route)]));
+      if (routes.length && status && status !== "ok") rows.push([ipFamilyLabel(family) + " 读取状态", networkStatus(status)]);
+    });
+    fillDetails("network-routes-detail", rows);
+  }
+  function renderNetworkDNS() {
+    const dns = insights && insights.device && insights.device.network_config && insights.device.network_config.dns || {};
+    const rows = [["读取状态", networkStatus(dns.status) + (dns.reason ? "\n" + dns.reason : "")], ["DNS 服务器", list(dns.servers).join("\n") || "当前来源未报告可用地址"], ["上游 DNS", list(dns.upstream_servers).join("\n")], ["本地 stub", list(dns.stub_servers).join("\n")], ["搜索域", list(dns.search).join("\n") || "当前来源未报告搜索域"], ["默认域名", list(dns.domains).join("\n")]];
+    list(dns.sources).forEach((source, index) => {
+      const details = [source.path, "状态：" + networkStatus(source.status)];
+      if (list(source.servers).length) details.push("服务器：\n" + source.servers.join("\n"));
+      if (list(source.search).length) details.push("搜索域：\n" + source.search.join("\n"));
+      if (list(source.domains).length) details.push("默认域名：\n" + source.domains.join("\n"));
+      rows.push(["配置来源 · " + (source.source || index + 1), details.filter(Boolean).join("\n")]);
+    });
+    fillDetails("network-dns-detail", rows);
+  }
+  function clearWebPairing() {
+    pairingDeadline = null; clear($("web-pairing-code")); $("web-pairing").hidden = true;
+    text("web-pairing-expiry", "");
+  }
+  function updatePairingCountdown() {
+    if (pairingDeadline === null) return;
+    const remaining = Math.max(0, Math.ceil((pairingDeadline - Date.now()) / 1000));
+    if (!remaining) { clearWebPairing(); text("web-config-status", "配对码已过期，请重新生成"); return; }
+    text("web-pairing-expiry", remaining + " 秒后失效 · 仅可使用一次");
+  }
+  function renderWebConfig() {
+    const config = webConfig || {};
+    text("web-config-status", !webConfig ? "正在读取网页服务状态" : config.enabled ? "在同一局域网的电脑或手机打开以下地址" : config.reason || "网页服务未启用，可继续使用小屏本地设置");
+    clear($("web-config-addresses"));
+    list(config.addresses).forEach((address) => {
+      const row = detailRow("网页地址", String(address)); row.classList.add("web-address"); $("web-config-addresses").append(row);
+    });
+    text("web-config-security", config.enabled ? (config.scheme === "https" ? "通过配对码登录网页。请仅向你信任的设备提供配对码。" : "HTTP 未加密，仅在可信局域网使用。配对码是临时登录凭据，请勿转发。") : "服务未启用时无法生成配对码。");
+    if (!config.enabled || !canWrite()) clearWebPairing();
+    setAllowed("web-pairing-generate", Boolean(config.enabled));
+    $("web-pairing-generate").disabled = !config.enabled || !canWrite() || actionBusy;
+    updatePairingCountdown();
+  }
+  async function pollWebConfig(force = false) {
+    if (webConfigRunning || (!force && Date.now() - lastWebConfigPoll < 5000)) return;
+    webConfigRunning = true; lastWebConfigPoll = Date.now();
+    try { webConfig = await request("/web-config"); }
+    catch (_) { webConfig = { enabled: false, reason: "网页服务暂不可用，可继续使用小屏本地设置", addresses: [] }; }
+    finally { webConfigRunning = false; if (currentDetail && currentDetail.name === "web-config") renderWebConfig(); }
+  }
+  $("web-pairing-generate").addEventListener("click", async () => {
+    await action("web.pairing", { rotate: true }, null, { onResult(result) {
+      const pairing = result.web || result.pairing || result;
+      if (!currentDetail || currentDetail.name !== "web-config" || !webConfig || !webConfig.enabled || !/^\d{10}$/.test(pairing.code || "") || !finite(pairing.expires_in) || pairing.expires_in <= 0) return;
+      clearWebPairing();
+      pairingDeadline = Date.now() + Math.min(180, pairing.expires_in) * 1000;
+      $("web-pairing-code").append(element("span", "", pairing.code.slice(0, 5)), element("span", "", pairing.code.slice(5)));
+      $("web-pairing").hidden = false; updatePairingCountdown();
+      $("web-pairing").scrollIntoView({ block: "center" });
+    } });
+  });
   function updateInformationModules() {
     const device = insights && insights.device || {};
     const gpu = insights && insights.gpu;
@@ -372,7 +501,8 @@
     $("ports-entry").hidden = !list(insights && insights.ports).length;
     $("raid-entry").hidden = !list(device.storage && device.storage.raid).length;
     $("physical-disks-entry").hidden = !(insights && insights.disks && insights.disks.available);
-    $("interfaces-entry").hidden = !list(insights && insights.interfaces).length;
+    $("interfaces-entry").hidden = false;
+    renderNetworkOverview();
     const system = insights && insights.system || {};
     text("system-summary", system.model ? system.model + (number(system.cpu_logical_cores) !== null ? " · " + system.cpu_logical_cores + " 核" : "") : "设备报告的真实信息与采样");
     renderFocusedDetail();
@@ -391,6 +521,7 @@
     setAllowed("screen-sleep", screenAvailable && !pending);
     setAllowed("rgb-save", rgbAvailable);
     setAllowed("rgb-probe", rgbProbeAvailable);
+    setAllowed("web-pairing-generate", Boolean(webConfig && webConfig.enabled));
     setAllowed("power-reboot", powerAvailable && !pending && !executing);
     setAllowed("power-off", powerAvailable && !pending && !executing);
     document.querySelectorAll(".requires-write").forEach((node) => {
@@ -402,6 +533,7 @@
     document.querySelectorAll("#settings-form input, #settings-form select").forEach((node) => { node.disabled = !writable; });
     document.querySelectorAll(".fan-input").forEach((node) => { node.disabled = !writable || !cap("fans").available; });
     $("power-cancel").disabled = $("global-power-cancel").disabled = !writable || !pending || executing;
+    if (!toolboxOnline) clearWebPairing();
     showControlModules();
     const notice = !controlToken ? "只读预览 · 控制仅限本机小屏授权会话" : !toolboxOnline ? "服务未连接 · 所有设备操作已禁用" : actionBusy ? "正在执行操作，请稍候" : "本机授权会话 · 所有高影响操作均需确认";
     text("control-access", notice);
@@ -418,6 +550,7 @@
       const result = await request("/action", Object.assign({ action: name }, payload));
       if (result.state) renderToolbox(result.state);
       if (result.insights) { insights = result.insights; renderInsights(insights); }
+      if (typeof options.onResult === "function") options.onResult(result);
       if (successMessage && !options.quiet) toast(successMessage);
       return true;
     } catch (error) {
@@ -812,12 +945,12 @@
         $("physical-disks").append(menuButton(disk.model || disk.id || "磁盘", description, () => openView("disk-detail", { id: disk.id || disk.device }, disk.model || disk.id || "磁盘")));
       });
     }
-    const interfaces = list(insights && insights.interfaces);
+    const interfaces = networkInterfaces();
     clear($("interface-list"));
     if (!interfaces.length) emptyList("interface-list", "网络接口信息暂不可用");
     interfaces.forEach((network) => {
-      const rx = speed(network.rx_bytes_per_sec), tx = speed(network.tx_bytes_per_sec);
-      $("interface-list").append(menuButton(network.name + " · " + (network.operstate || "未知"), list(network.ipv4).join(" · ") || "未配置 IPv4", () => openView("interface-detail", { id: network.name }, network.name)));
+      const description = "IPv4 " + interfaceAddresses(network, "ipv4").length + " 个 · IPv6 " + interfaceAddresses(network, "ipv6").length + " 个地址";
+      $("interface-list").append(menuButton(network.name + " · " + (network.operstate || "未知"), description, () => openView("interface-detail", { id: network.name }, network.name)));
     });
     const gpu = insights && insights.gpu;
     if (!gpu || !gpu.available) emptyList("gpu-list", gpu && gpu.reason || "GPU 信息暂不可用");
@@ -855,6 +988,7 @@
       }).catch(() => { render(null); setConnection("offline"); }),
       request("/toolbox").then(renderToolbox).catch(() => renderToolbox(null)),
       pollInsights(),
+      currentDetail && currentDetail.name === "web-config" ? pollWebConfig() : Promise.resolve(),
     ];
     try { await Promise.all(tasks); }
     finally { requestRunning = false; }
@@ -870,6 +1004,7 @@
       name = allowed[(current + value + allowed.length) % allowed.length];
     }
     if (!pages.includes(name) || (!enabledPages.includes(name) && name !== "settings")) return;
+    if (currentDetail && currentDetail.name === "web-config") clearWebPairing();
     currentDetail = null; navigationStack = [];
     currentPage = pages.indexOf(name);
     $("subpage").hidden = true;
@@ -956,7 +1091,7 @@
   updateClock(); render(null); renderToolbox(null); renderInsights(null); setConnection("connecting");
   poll();
   window.setInterval(() => {
-    updateClock(); updatePowerCountdown();
+    updateClock(); updatePowerCountdown(); updatePairingCountdown();
     const interval = number(settings.page_interval);
     if (interval && !currentDetail && !sleeping && !resolveConfirmation && !actionBusy && !settingsDirty && Date.now() - lastInteraction >= interval * 1000 && Date.now() - lastCarousel >= interval * 1000) showPage(1);
   }, 1000);
