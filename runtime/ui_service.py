@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Serve local read-only NAS metrics while the official screen app is running.
+"""Serve local NAS metrics and authenticated touch controls with the screen app.
 
 The one-shot container starts this script through the host service manager.  It
-does not install software, change hardware controls, or write host files.
+does not install software or overwrite official screen files. Explicit user
+actions can adjust supported hardware, manage workloads and request host power.
 """
 
 import argparse
@@ -15,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import socket
 import struct
@@ -309,17 +311,98 @@ def allowed_origin(origin, port):
         return False
 
 
-def make_http_server(monitor, port=PORT):
+def make_http_server(monitor, port=PORT, controller=None, insights=None, control_token=None):
     class StatusHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def request_origin(self):
             origin = self.headers.get("Origin")
-            if not allowed_origin(origin, self.server.server_port):
-                self.send_json(403, {"error": "origin not allowed"})
+            try:
+                host = urllib.parse.urlsplit("http://" + self.headers.get("Host", ""))
+                valid_host = (host.hostname in ("127.0.0.1", "localhost", "::1")
+                              and host.port == self.server.server_port and not host.username
+                              and not host.password and not host.path and not host.query and not host.fragment)
+            except ValueError:
+                valid_host = False
+            if not valid_host or not allowed_origin(origin, self.server.server_port):
+                self.send_json(403, {"error": "请求来源不允许"})
+                return False, None
+            return True, origin
+
+        def do_GET(self):
+            valid, origin = self.request_origin()
+            if not valid:
                 return
-            if urllib.parse.urlsplit(self.path).path != "/api/status":
-                self.send_json(404, {"error": "not found"})
+            route = urllib.parse.urlsplit(self.path).path
+            if route == "/api/status":
+                value = monitor.snapshot()
+            elif route == "/api/toolbox" and controller is not None:
+                value = controller.snapshot()
+            elif route == "/api/insights" and insights is not None:
+                value = insights.snapshot()
+            else:
+                self.send_json(404, {"error": "接口不存在"}, origin)
                 return
-            self.send_json(200, monitor.snapshot(), origin)
+            self.send_json(200, value, origin)
+
+        def do_POST(self):
+            if controller is None or not control_token:
+                self.reject_method()
+                return
+            valid, origin = self.request_origin()
+            if not valid:
+                return
+            if urllib.parse.urlsplit(self.path).path != "/api/action":
+                self.send_json(404, {"error": "接口不存在"}, origin)
+                return
+            supplied = self.headers.get("X-R1-Token", "")
+            if not secrets.compare_digest(supplied.encode("utf-8"), control_token.encode("utf-8")):
+                self.send_json(403, {"ok": False, "error": "控制凭据无效，请在小屏操作"}, origin)
+                return
+            length = self.headers.get("Content-Length", "")
+            if self.headers.get("Transfer-Encoding") or not length.isascii() or not length.isdigit() or len(length) > 5 or not 0 < int(length) <= 16384:
+                self.send_json(413, {"ok": False, "error": "请求内容过大或长度无效"}, origin)
+                return
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                self.send_json(415, {"ok": False, "error": "控制请求需要 JSON"}, origin)
+                return
+            try:
+                def unique_fields(pairs):
+                    value = {}
+                    for key, item in pairs:
+                        if key in value:
+                            raise ValueError("重复字段")
+                        value[key] = item
+                    return value
+                payload = json.loads(self.rfile.read(int(length)), object_pairs_hook=unique_fields)
+                if not isinstance(payload, dict):
+                    raise ValueError("需要对象")
+                action = payload.pop("action", None)
+                if action in ("power.request", "container.action", "vm.action") and payload.get("confirmed") is not True:
+                    raise ValueError("此操作需要在界面明确确认")
+                if not isinstance(action, str):
+                    raise ValueError("缺少操作名称")
+            except (ValueError, UnicodeError):
+                self.send_json(400, {"ok": False, "error": "请求格式无效或缺少明确确认"}, origin)
+                return
+            allowed_controls = {"settings.update", "screen.brightness", "screen.sleep", "screen.wake",
+                                "screen.activity", "fan.set", "fan.restore", "rgb.set", "power.request", "power.cancel"}
+            if action in allowed_controls:
+                destination = controller
+            elif action in ("container.action", "vm.action") and insights is not None:
+                destination = insights
+            else:
+                self.send_json(400, {"ok": False, "error": "不支持此操作"}, origin)
+                return
+            try:
+                value = destination.action(action, payload)
+                if not isinstance(value, dict) or type(value.get("ok")) is not bool:
+                    raise ValueError("控制器返回格式错误")
+                if action in ("container.action", "vm.action") and value["ok"]:
+                    value = {**value, "operation": value.get("state"),
+                             "state": controller.snapshot(), "insights": insights.snapshot()}
+                self.send_json(200 if value["ok"] else 400, value, origin)
+            except Exception:
+                # Keep privileged command output and paths out of the browser.
+                self.send_json(500, {"ok": False, "error": "操作未完成，请检查宿主服务日志"}, origin)
 
         def send_json(self, code, value, origin=None):
             body = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -344,12 +427,18 @@ def make_http_server(monitor, port=PORT):
         def do_OPTIONS(self):
             # Newer Chromium versions can preflight file:// -> loopback reads.
             # Grant only this read route, never a control method or extra headers.
-            origin = self.headers.get("Origin")
+            valid, origin = self.request_origin()
+            if not valid:
+                return
+            route = urllib.parse.urlsplit(self.path).path
+            method = self.headers.get("Access-Control-Request-Method")
+            headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",") if part.strip()}
+            can_read = route in ("/api/status", "/api/toolbox", "/api/insights") and method == "GET" and not headers
+            can_control = (route == "/api/action" and controller is not None and control_token
+                           and method == "POST" and headers <= {"content-type", "x-r1-token"})
             if (
                 origin is None or not allowed_origin(origin, self.server.server_port)
-                or urllib.parse.urlsplit(self.path).path != "/api/status"
-                or self.headers.get("Access-Control-Request-Method") != "GET"
-                or self.headers.get("Access-Control-Request-Headers", "").strip()
+                or not (can_read or can_control)
             ):
                 self.send_json(403, {"error": "preflight not allowed"})
                 return
@@ -358,12 +447,14 @@ def make_http_server(monitor, port=PORT):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Methods", "GET")
+            self.send_header("Access-Control-Allow-Methods", "POST" if can_control else "GET")
+            if can_control:
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-R1-Token")
             if self.headers.get("Access-Control-Request-Private-Network") == "true":
                 self.send_header("Access-Control-Allow-Private-Network", "true")
             self.end_headers()
 
-        do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = reject_method
+        do_PUT = do_PATCH = do_DELETE = do_HEAD = reject_method
 
         def log_message(self, format_string, *args):
             pass
@@ -372,14 +463,19 @@ def make_http_server(monitor, port=PORT):
         daemon_threads = True
         allow_reuse_address = True
 
+        def get_request(self):
+            connection, address = super().get_request()
+            connection.settimeout(5)
+            return connection, address
+
     return LocalServer((HOST, port), StatusHandler)
 
 
-def bind_server(monitor, port, stopped, timeout=5):
+def bind_server(monitor, port, stopped, timeout=20, **options):
     deadline = time.monotonic() + timeout
     while not stopped.is_set():
         try:
-            return make_http_server(monitor, port)
+            return make_http_server(monitor, port, **options)
         except OSError as error:
             remaining = deadline - time.monotonic()
             if error.errno != errno.EADDRINUSE or remaining <= 0:
@@ -405,13 +501,25 @@ def stop_child(child):
         child.wait(timeout=1)
 
 
-def run_service(app, port=PORT):
+def run_service(app, port=PORT, controller=None, insights=None):
     app = Path(app).resolve()
     executable = app / "AppRun"
     if not executable.is_file() or not os.access(executable, os.X_OK):
         print("[ERROR] AppRun 不存在或不可执行：" + str(executable), file=sys.stderr, flush=True)
         return 1
+    # Companions live beside this verified script in the RAM bundle, including
+    # when tests import ui_service.py without using it as the process entrypoint.
+    runtime_dir = str(Path(__file__).resolve().parent)
+    if runtime_dir not in sys.path:
+        sys.path.insert(0, runtime_dir)
+    if controller is None:
+        from toolbox import ToolboxController
+        controller = ToolboxController(state_dir=os.environ.get("R1_TOOLBOX_DATA_DIR", "/run/r1-toolbox/settings"))
+    if insights is None:
+        from insights import InsightsCollector
+        insights = InsightsCollector()
     stopped, monitor = threading.Event(), StatusMonitor()
+    control_token = secrets.token_hex(32)
     server = server_thread = child = None
     handlers = {}
 
@@ -421,17 +529,20 @@ def run_service(app, port=PORT):
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             handlers[sig] = signal.signal(sig, request_stop)
-        server = bind_server(monitor, port, stopped)
+        server = bind_server(monitor, port, stopped, controller=controller, insights=insights, control_token=control_token)
         if server is None:
             return 0
         server_thread = threading.Thread(
             target=lambda: server.serve_forever(poll_interval=0.1), name="r1-status-api", daemon=True
         )
         monitor.start()
+        controller.start()
+        insights.start()
         server_thread.start()
         if stopped.is_set():
             return 0
         environment = dict(os.environ, APPDIR=str(app))
+        environment["R1_TOOLBOX_CONTROL_TOKEN"] = control_token
         app_library_path = environment.pop("R1_TOOLBOX_APP_LD_LIBRARY_PATH", None)
         if app_library_path is not None:
             environment["LD_LIBRARY_PATH"] = app_library_path
@@ -446,14 +557,25 @@ def run_service(app, port=PORT):
         print("[ERROR] 小屏服务启动失败：" + str(error), file=sys.stderr, flush=True)
         return 1
     finally:
-        stop_child(child)
-        if server_thread is not None and server_thread.is_alive():
-            server.shutdown()
-            server_thread.join(timeout=0.5)
-        if server is not None:
-            server.server_close()
+        # Keep the port bound until hardware is restored, so a replacement
+        # service cannot race the previous instance's cleanup.
+        def stop_http():
+            if server_thread is not None and server_thread.is_alive():
+                server.shutdown()
+                server_thread.join(timeout=0.5)
+        cleanup = [("停止接收控制请求", stop_http), ("恢复硬件", controller.stop),
+                   ("停止小屏进程", lambda: stop_child(child)), ("停止详细采集", insights.stop)]
         if monitor.thread.is_alive():
-            monitor.stop()
+            cleanup.append(("停止指标采集", monitor.stop))
+        if server is not None:
+            cleanup.append(("释放本地接口", server.server_close))
+        for description, action in cleanup:
+            try:
+                action()
+            except Exception as error:
+                # One failure must not skip fan/screen restoration or leave
+                # the remaining service resources alive.
+                print("[WARN] " + description + "未完成：" + type(error).__name__, file=sys.stderr, flush=True)
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 
