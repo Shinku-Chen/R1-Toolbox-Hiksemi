@@ -1,0 +1,300 @@
+import importlib.util
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+SPEC = importlib.util.spec_from_file_location("r1_toolbox_controls", Path(__file__).resolve().parents[1] / "runtime/toolbox.py")
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class ToolboxTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.sys, self.dev, self.state = self.root / "sys", self.root / "dev", self.root / "state"
+        self.sys.mkdir()
+        self.dev.mkdir()
+        self.calls, self.now = [], 0.0
+        self.finder = mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: "/usr/sbin/" + name)
+        self.finder.start()
+        self.controller = MODULE.ToolboxController(
+            self.state, self.sys, runner=self.runner, dev_root=self.dev, clock=lambda: self.now)
+        self.backlight = self.sys / "class/backlight/intel_backlight"
+        self.write(self.backlight / "brightness", "48000")
+        self.write(self.backlight / "max_brightness", "96000")
+        self.write(self.sys / "class/graphics/fb0/blank", "0")
+        self.write(self.sys / "class/hwmon/hwmon0/name", "acpitz")
+        self.write(self.sys / "class/hwmon/hwmon1/name", "coretemp")
+
+    def tearDown(self):
+        self.controller.stop()
+        self.finder.stop()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def write(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value)
+
+    def runner(self, argv):
+        self.calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "0x01\n", "")
+
+    def files(self):
+        return {p.relative_to(self.sys).as_posix(): p.read_bytes() for p in self.sys.rglob("*") if p.is_file()}
+
+    def test_default_lifecycle_does_not_touch_hardware_or_probe_i2c(self):
+        before = self.files()
+        self.controller.start()
+        self.controller.tick()
+        snapshot = self.controller.snapshot()
+        self.controller.stop()
+        self.assertEqual(before, self.files())
+        self.assertEqual([], self.calls)
+        self.assertFalse(snapshot["capabilities"]["fans"]["available"])
+        self.assertIn("IT87", snapshot["capabilities"]["fans"]["reason"])
+        self.assertFalse(snapshot["capabilities"]["rgb"]["available"])
+        self.assertFalse(self.state.exists())
+
+    def test_settings_reject_unknown_and_invalid_values_without_saving(self):
+        bad = [{"unknown": 1}, {"font_scale": True}, {"font_scale": float("nan")},
+               {"brightness": float("inf")}, {"brightness": 4}, {"font_scale": 141},
+               {"enabled_pages": []}, {"enabled_pages": ["bad"]},
+               {"enabled_pages": ["overview", "overview"]},
+               {"night_enabled": 1}, {"night_start": "25:00"}, {"page_interval": -1}]
+        before = self.files()
+        for changes in bad:
+            with self.subTest(changes=changes):
+                self.assertFalse(self.controller.action("settings.update", {"settings": changes})["ok"])
+        self.assertEqual(before, self.files())
+        self.assertFalse(self.state.exists())
+
+    def test_settings_save_only_in_state_dir_and_reload(self):
+        result = self.controller.action("settings.update", {"settings": {"theme": "jade", "font_scale": 120}})
+        self.assertTrue(result["ok"], result)
+        self.assertTrue((self.state / "settings.json").is_file())
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, dev_root=self.dev)
+        self.assertEqual(other.snapshot()["settings"]["font_scale"], 120)
+        self.assertEqual(other.snapshot()["settings"]["theme"], "jade")
+
+    def test_oversize_and_symlink_settings_are_not_followed(self):
+        self.state.mkdir()
+        target = self.root / "outside"
+        target.write_text('{"theme":"light"}')
+        (self.state / "settings.json").symlink_to(target)
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner)
+        self.assertEqual("dark", other.settings["theme"])
+        self.assertIsNotNone(other.settings_error)
+        self.assertFalse(other.action("settings.update", {"settings": {"theme": "jade"}})["ok"])
+        self.assertEqual('{"theme":"light"}', target.read_text())
+
+    def test_brightness_sleep_wake_and_activity(self):
+        result = self.controller.action("screen.brightness", {"value": 25})
+        self.assertTrue(result["ok"])
+        self.assertEqual("24000", (self.backlight / "brightness").read_text())
+        self.assertFalse(self.controller.action("screen.brightness", {"value": True})["ok"])
+        self.assertTrue(self.controller.action("screen.sleep", {})["ok"])
+        self.assertEqual("4", (self.sys / "class/graphics/fb0/blank").read_text())
+        self.assertTrue(self.controller.action("screen.wake", {})["ok"])
+        self.assertEqual("0", (self.sys / "class/graphics/fb0/blank").read_text())
+        self.assertEqual("24000", (self.backlight / "brightness").read_text())
+        self.now = 5
+        self.controller.action("screen.activity", {})
+        self.assertEqual(5, self.controller.last_activity)
+
+    def test_detect_zero_backlight_and_preexisting_blank_and_wake(self):
+        self.write(self.backlight / "brightness", "0")
+        self.assertFalse(self.controller.snapshot()["screen"]["asleep"])
+        self.write(self.sys / "class/graphics/fb0/blank", "4")
+        self.assertTrue(self.controller.snapshot()["screen"]["asleep"])
+        self.assertTrue(self.controller.action("screen.wake", {})["ok"])
+        self.assertEqual("0", (self.sys / "class/graphics/fb0/blank").read_text())
+        self.assertGreater(int((self.backlight / "brightness").read_text()), 0)
+
+    def test_sleep_stop_restores_pre_service_raw_screen_state(self):
+        blank = self.sys / "class/graphics/fb0/blank"
+        self.write(self.backlight / "brightness", "0")
+        self.write(blank, "0")
+        self.assertTrue(self.controller.action("screen.sleep", {})["ok"])
+        self.assertEqual("4", blank.read_text())
+        self.controller.stop()
+        self.assertEqual("0", blank.read_text())
+        self.assertEqual("0", (self.backlight / "brightness").read_text())
+        self.assertFalse(self.controller.original_screen)
+
+    def test_brightness_then_sleep_restores_original_values_not_intermediate(self):
+        self.controller.action("screen.brightness", {"value": 25})
+        self.controller.action("screen.sleep", {})
+        self.controller.action("screen.wake", {})
+        self.controller.action("screen.sleep", {})
+        self.controller.stop()
+        self.assertEqual("48000", (self.backlight / "brightness").read_text())
+        self.assertEqual("0", (self.sys / "class/graphics/fb0/blank").read_text())
+
+    def test_theme_only_saved_default_brightness_does_not_take_control_on_restart(self):
+        self.controller.action("settings.update", {"settings": {"theme": "jade"}})
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, clock=lambda: self.now)
+        before = self.files()
+        other.start()
+        other.tick()
+        other.stop()
+        self.assertEqual(before, self.files())
+        self.assertFalse(other.original_screen)
+
+    def test_unsupported_fan_never_writes(self):
+        before = self.files()
+        result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "auto", "takeover": True})
+        self.assertFalse(result["ok"])
+        self.assertEqual(before, self.files())
+        self.assertEqual([], self.calls)
+
+    def test_fan_requires_explicit_mapping_and_restores_on_stop(self):
+        folder = self.sys / "class/hwmon/hwmon2"
+        self.write(folder / "name", "it8688")
+        self.write(folder / "pwm3", "120")
+        self.write(folder / "pwm3_enable", "2")
+        self.assertFalse(self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "auto"})["ok"])
+        self.assertEqual("120", (folder / "pwm3").read_text())
+        result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "auto", "takeover": True})
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["state"]["fans"]["temperature_c"])
+        self.assertEqual("255", (folder / "pwm3").read_text())
+        self.assertEqual("1", (folder / "pwm3_enable").read_text())
+        self.controller.stop()
+        self.assertEqual("120", (folder / "pwm3").read_text())
+        self.assertEqual("2", (folder / "pwm3_enable").read_text())
+
+    def test_low_fan_rpm_zero_falls_back_full_speed_and_reports_error(self):
+        folder = self.sys / "class/hwmon/hwmon2"
+        for name, value in (("name", "it8688"), ("pwm3", "200"), ("pwm3_enable", "2"), ("fan3_input", "0")):
+            self.write(folder / name, value)
+        self.assertFalse(self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "manual",
+                                                            "value": 49, "takeover": True})["ok"])
+        self.assertEqual("200", (folder / "pwm3").read_text())
+        result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "low", "takeover": True})
+        self.assertFalse(result["ok"])
+        self.assertIn("回退满速", result["error"])
+        self.assertEqual("255", (folder / "pwm3").read_text())
+        self.assertEqual("high", self.controller.snapshot()["fans"]["channels"][0]["mode"])
+
+    def test_low_fan_without_rpm_explicitly_reports_unverifiable(self):
+        folder = self.sys / "class/hwmon/hwmon2"
+        for name, value in (("name", "it8688"), ("pwm3", "200"), ("pwm3_enable", "2")):
+            self.write(folder / name, value)
+        result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "low", "takeover": True})
+        self.assertTrue(result["ok"])
+        channel = result["state"]["fans"]["channels"][0]
+        self.assertEqual(60, channel["duty_percent"])
+        self.assertIsNone(channel["rpm"])
+        self.assertFalse(channel["rpm_verified"])
+        self.assertIn("无法验证", channel["rpm_reason"])
+
+    def test_manual_fan_that_stops_later_falls_back_full_speed_on_tick(self):
+        folder = self.sys / "class/hwmon/hwmon2"
+        for name, value in (("name", "it8688"), ("pwm3", "200"), ("pwm3_enable", "2"), ("fan3_input", "900")):
+            self.write(folder / name, value)
+        result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "manual",
+                                                     "value": 60, "takeover": True})
+        self.assertTrue(result["ok"])
+        self.assertEqual("153", (folder / "pwm3").read_text())
+        self.write(folder / "fan3_input", "0")
+        self.controller.tick()
+        self.assertEqual("255", (folder / "pwm3").read_text())
+        fans = self.controller.snapshot()["fans"]
+        self.assertEqual("high", fans["channels"][0]["mode"])
+        self.assertIn("RPM 读数为 0", fans["last_error"])
+        self.assertIn("对应仍需确认", fans["channels"][0]["rpm_reason"])
+
+    def test_saved_setting_brightness_failure_is_explicit(self):
+        with mock.patch.object(self.controller, "_set_brightness", side_effect=OSError("read only")):
+            result = self.controller.action("settings.update", {"settings": {"brightness": 70}})
+        self.assertFalse(result["ok"])
+        self.assertIn("设置已保存，但背光调整失败", result["error"])
+        self.assertTrue((self.state / "settings.json").is_file())
+
+    def test_settings_oversize_is_rejected(self):
+        self.state.mkdir()
+        (self.state / "settings.json").write_bytes(b" " * 16385)
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner)
+        self.assertEqual("dark", other.settings["theme"])
+        self.assertIsNotNone(other.settings_error)
+
+    def test_idle_and_explicit_night_settings(self):
+        result = self.controller.action("settings.update", {"settings": {"sleep_timeout": 10}})
+        self.assertTrue(result["ok"])
+        self.now = 9
+        self.controller.action("screen.activity", {})
+        self.now = 18
+        self.controller.tick()
+        self.assertFalse(self.controller.asleep)
+        self.now = 19
+        self.controller.tick()
+        self.assertTrue(self.controller.asleep)
+        self.controller.action("screen.wake", {})
+        with mock.patch.object(self.controller, "_is_night", return_value=True):
+            result = self.controller.action("settings.update", {"settings": {"night_enabled": True, "night_brightness": 15}})
+        self.assertTrue(result["ok"])
+        self.assertEqual("14400", (self.backlight / "brightness").read_text())
+
+    def test_power_requires_confirmation_delays_and_cancels(self):
+        self.assertFalse(self.controller.action("power.request", {"operation": "reboot", "confirmed": 1})["ok"])
+        self.assertFalse(self.controller.action("power.request", {"operation": "shell", "confirmed": True})["ok"])
+        self.assertTrue(self.controller.action("power.request", {"operation": "reboot", "confirmed": True})["ok"])
+        self.now = 4
+        self.controller.tick()
+        self.assertEqual([], self.calls)
+        self.assertFalse(self.controller.action("power.request", {"operation": "poweroff", "confirmed": True})["ok"])
+        self.assertTrue(self.controller.action("power.cancel", {})["ok"])
+        self.now = 10
+        self.controller.tick()
+        self.assertEqual([], self.calls)
+        self.assertTrue(self.controller.action("power.request", {"operation": "poweroff", "confirmed": True})["ok"])
+        self.now = 15
+        self.controller.tick()
+        self.assertEqual([["/usr/sbin/systemctl", "--no-block", "poweroff"]], self.calls)
+
+    def test_power_failure_is_reported_without_retry(self):
+        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 1, "", "failed")
+        self.controller.action("power.request", {"operation": "reboot", "confirmed": True})
+        self.now = 5
+        self.controller.tick()
+        state = self.controller.snapshot()["power"]
+        self.assertFalse(state["executing"])
+        self.assertIn("failed", state["last_error"])
+        self.assertIsNone(state["pending"])
+
+    def test_stopped_controller_rejects_queued_actions_without_restarting(self):
+        self.controller.start()
+        self.controller.stop()
+        before = self.files()
+        for name, payload in (("power.request", {"operation": "reboot", "confirmed": True}),
+                              ("screen.brightness", {"value": 50}),
+                              ("settings.update", {"settings": {"theme": "jade"}})):
+            result = self.controller.action(name, payload)
+            self.assertFalse(result["ok"])
+            self.assertIn("正在停止", result["error"])
+        self.assertEqual([], self.calls)
+        self.assertEqual(before, self.files())
+        self.assertTrue(self.controller.stopped.is_set())
+        self.assertFalse(self.controller.thread.is_alive())
+
+    def test_rgb_only_probes_explicit_bus_without_force_and_refuses_failed_probe(self):
+        (self.dev / "i2c-0").touch()
+        self.assertEqual([0], self.controller.snapshot()["rgb"]["availableBuses"])
+        self.assertEqual([], self.calls)
+        self.assertFalse(self.controller.action("rgb.set", {"mode": 1, "color": "#ff0000"})["ok"])
+        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 1, "", "busy")
+        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#ff0000"})["ok"])
+        self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
+        self.controller.runner = self.runner
+        self.assertTrue(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#ff0000"})["ok"])
+        self.assertEqual(["/usr/sbin/i2cget", "-y", "0", "0x26", "0x90", "b"], self.calls[0])
+        self.assertTrue(all("-f" not in argv for argv in self.calls))
+        self.assertEqual(5, len(self.calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

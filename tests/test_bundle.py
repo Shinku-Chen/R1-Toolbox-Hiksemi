@@ -30,6 +30,8 @@ class BundleTests(unittest.TestCase):
         (self.root / 'ui/assets/app.js').write_text('const value = 1;')
         (self.root / 'runtime').mkdir()
         (self.root / 'runtime/ui_service.py').write_text('print("local service")\n')
+        (self.root / 'runtime/toolbox.py').write_text('class ToolboxController: pass\n')
+        (self.root / 'runtime/insights.py').write_text('class InsightsCollector: pass\n')
         self.runtime = load_actions()
         self.runtime.runtime_root = self.root / 'ram'
         self.runtime.runtime_root.mkdir()
