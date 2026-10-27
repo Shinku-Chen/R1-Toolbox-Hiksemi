@@ -41,6 +41,7 @@ class BootOnceTests(unittest.TestCase):
             RUNNER_PID_FILE=str(self.pid_file),
             TASK_CONTAINER="r1-boot-once-test",
             TASK_REVISION="1",
+            FAKE_IMAGE_ID="sha256:" + "1" * 64,
         )
         self.install_fake_tools()
 
@@ -75,7 +76,7 @@ args = sys.argv[1:]
 with open(os.environ["EVENT_FILE"], "a") as f:
     f.write(json.dumps(["docker"] + args) + "\n")
 if "inspect" in args:
-    print("true")
+    print(os.environ["FAKE_IMAGE_ID"] if "{{.Image}}" in args else "true")
     raise SystemExit(0)
 if "stop" not in args:
     raise SystemExit("unexpected fake docker operation")
@@ -189,7 +190,7 @@ time.sleep(0.01)
         output, _ = process.communicate(timeout=2)
         self.assertEqual(process.returncode, -signal.SIGTERM, output)
 
-    def run_host_job(self, revision="1", returncode=0):
+    def run_host_job(self, revision="1", returncode=0, image=None, mode=None, ui_dir=None):
         # Only these two host paths are redirected in this temporary copy.
         # All real payload operations are replaced by a harmless event append.
         script = (ROOT / "host-job.sh.in").read_text().replace(
@@ -199,8 +200,15 @@ time.sleep(0.01)
             "cat /proc/sys/kernel/random/boot_id",
             "cat " + shlex.quote(str(self.boot_file)),
         ).replace("__SCREEN_ACTIONS__", self.actions(returncode).rstrip())
+        env = self.env | {"TASK_REVISION": revision}
+        if image is not None:
+            env["FAKE_IMAGE_ID"] = image
+        if mode is not None:
+            env["UI_MODE"] = mode
+        if ui_dir is not None:
+            env["UI_DIR"] = ui_dir
         return subprocess.run(
-            ["/bin/sh", "-s"], input=script, env=self.env | {"TASK_REVISION": revision},
+            ["/bin/sh", "-s"], input=script, env=env,
             capture_output=True, text=True, timeout=4,
         )
 
@@ -210,7 +218,8 @@ time.sleep(0.01)
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self.actions_read(), ["executed"])
-        self.assertEqual((self.state_dir / "last-success").read_text(), "boot-a:1\n")
+        self.assertEqual((self.state_dir / "last-success").read_text(),
+                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic:\n")
 
     def test_revision_change_and_new_boot_run_again(self):
         results = [self.run_host_job(), self.run_host_job(revision="2")]
@@ -219,7 +228,8 @@ time.sleep(0.01)
         for result in results:
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.actions_read(), ["executed"] * 3)
-        self.assertEqual((self.state_dir / "last-success").read_text(), "boot-b:2\n")
+        self.assertEqual((self.state_dir / "last-success").read_text(),
+                         "boot-b:2:sha256:" + "1" * 64 + ":diagnostic:\n")
 
     def test_failure_does_not_mark_success_and_can_be_retried(self):
         failed = self.run_host_job(returncode=23)
@@ -228,7 +238,38 @@ time.sleep(0.01)
         retry = self.run_host_job()
         self.assertEqual(retry.returncode, 0, retry.stderr)
         self.assertEqual(self.actions_read(), ["executed", "executed"])
-        self.assertEqual((self.state_dir / "last-success").read_text(), "boot-a:1\n")
+        self.assertEqual((self.state_dir / "last-success").read_text(),
+                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic:\n")
+
+    def test_new_image_in_the_same_boot_runs_without_revision_change(self):
+        first = self.run_host_job()
+        second = self.run_host_job(image="sha256:" + "2" * 64)
+        third = self.run_host_job(image="sha256:" + "2" * 64)
+        self.assertTrue(all(r.returncode == 0 for r in (first, second, third)))
+        self.assertEqual(self.actions_read(), ["executed", "executed"])
+
+    def test_mode_and_source_changes_have_separate_success_keys(self):
+        results = [self.run_host_job(mode="image"),
+                   self.run_host_job(mode="directory", ui_dir="/drives/data/ui"),
+                   self.run_host_job(mode="directory", ui_dir="/drives/data/ui-next")]
+        self.assertTrue(all(r.returncode == 0 for r in results))
+        self.assertEqual(self.actions_read(), ["executed"] * 3)
+
+    def test_invalid_image_id_cannot_mark_success_or_execute_actions(self):
+        result = self.run_host_job(image="sha256:wrong")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.actions_read(), [])
+        self.assertFalse((self.state_dir / "last-success").exists())
+
+    def test_failed_update_cannot_skip_a_return_to_the_previous_image(self):
+        first = self.run_host_job(mode="image")
+        failed = self.run_host_job(mode="image", image="sha256:" + "2" * 64, returncode=23)
+        self.assertFalse((self.state_dir / "last-success").exists())
+        restored = self.run_host_job(mode="image")
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(failed.returncode, 23)
+        self.assertEqual(restored.returncode, 0)
+        self.assertEqual(self.actions_read(), ["executed"] * 3)
 
 
 if __name__ == "__main__":
