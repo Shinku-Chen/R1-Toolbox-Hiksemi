@@ -41,7 +41,8 @@ class ToolboxTests(unittest.TestCase):
 
     def runner(self, argv):
         self.calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "0x01\n", "")
+        value = "0x55\n" if "0x01" in argv else "0x01\n"
+        return subprocess.CompletedProcess(argv, 0, value, "")
 
     def files(self):
         return {p.relative_to(self.sys).as_posix(): p.read_bytes() for p in self.sys.rglob("*") if p.is_file()}
@@ -291,9 +292,110 @@ class ToolboxTests(unittest.TestCase):
         self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
         self.controller.runner = self.runner
         self.assertTrue(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#ff0000"})["ok"])
-        self.assertEqual(["/usr/sbin/i2cget", "-y", "0", "0x26", "0x90", "b"], self.calls[0])
+        self.assertEqual(["/usr/sbin/i2cget", "-y", "0", "0x26", "0x01", "b"], self.calls[0])
         self.assertTrue(all("-f" not in argv for argv in self.calls))
-        self.assertEqual(5, len(self.calls))
+        self.assertEqual(7, len(self.calls))
+
+    def test_rgb_probe_performs_no_writes_and_requires_an_explicit_existing_bus(self):
+        (self.dev / "i2c-1").touch()
+        self.assertFalse(self.controller.action("rgb.probe", {"bus": True})["ok"])
+        self.assertFalse(self.controller.action("rgb.probe", {"bus": 2})["ok"])
+        self.assertEqual([], self.calls)
+        result = self.controller.action("rgb.probe", {"bus": 1})
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["state"]["capabilities"]["rgb"]["available"])
+        self.assertIsNone(result["state"]["rgb"]["color"])
+        self.assertEqual([["/usr/sbin/i2cget", "-y", "1", "0x26", register, "b"]
+                          for register in ("0x01", "0x90", "0x91")], self.calls)
+
+    def test_rgb_wrong_chip_is_rejected_and_brightness_is_an_independent_register(self):
+        (self.dev / "i2c-0").touch()
+        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 0, "0x01", "")
+        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#00ff00"})["ok"])
+        self.assertEqual([], self.calls)
+        self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
+        self.controller.runner = self.runner
+        self.assertFalse(self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#00ff00", "brightness": 101})["ok"])
+        self.assertEqual([], self.calls)
+        result = self.controller.action("rgb.set", {"bus": 0, "mode": 1, "color": "#00ff00", "brightness": 40})
+        self.assertTrue(result["ok"], result)
+        self.assertIn(["/usr/sbin/i2cset", "-y", "0", "0x26", "0x91", "0x66", "b"], self.calls)
+        self.assertIn(["/usr/sbin/i2cset", "-y", "0", "0x26", "0x93", "0xff", "b"], self.calls)
+        self.assertEqual(40, result["state"]["rgb"]["brightness"])
+        self.controller.runner = lambda argv: subprocess.CompletedProcess(argv, 0, "0x01", "")
+        self.assertFalse(self.controller.action("rgb.probe", {"bus": 0})["ok"])
+        self.assertFalse(self.controller.snapshot()["capabilities"]["rgb"]["available"])
+
+    def test_official_strategy_is_separate_from_pwm_and_requires_confirmation(self):
+        native = mock.Mock()
+        native.snapshot.return_value = {"available": True, "control_available": True, "mode": "auto", "mode_code": 5,
+                                        "cpu_rpm": 1200, "system_rpm": None, "grade": 2}
+        self.controller.histor = native
+        state = self.controller.snapshot()
+        self.assertTrue(state["capabilities"]["fans"]["available"])
+        self.assertEqual([], state["fans"]["channels"])
+        self.assertEqual("auto", state["fans"]["official"]["mode"])
+        self.assertEqual(2, state["fans"]["official"]["grade"])
+        for payload in ({"mode": "low"}, {"mode": "off", "confirmed": True},
+                        {"mode": True, "confirmed": True}, {"mode": "low", "confirmed": 1},
+                        {"mode": "low", "confirmed": True, "channel": "cpu"}):
+            self.assertFalse(self.controller.action("fan.official", payload)["ok"])
+        native.set_mode.assert_not_called()
+        result = self.controller.action("fan.official", {"mode": "medium", "confirmed": True})
+        self.assertTrue(result["ok"], result)
+        native.set_mode.assert_called_once_with("medium", confirmed=True)
+        self.assertEqual([], self.calls)
+
+    def test_official_adapter_lifecycle_and_error_are_preserved(self):
+        native = mock.Mock()
+        native.snapshot.return_value = {"mode": None, "control_available": False}
+        native.set_mode.side_effect = ValueError("原厂接口未就绪")
+        self.controller.histor = native
+        result = self.controller.action("fan.official", {"mode": "auto", "confirmed": True})
+        self.assertFalse(result["ok"])
+        self.assertIn("未就绪", result["error"])
+        self.controller.start()
+        native.start.assert_called_once_with()
+        self.controller.stop()
+        native.stop.assert_called_once_with()
+
+    def test_curve_rejects_invalid_points_before_taking_ownership(self):
+        folder = self.sys / "class/hwmon/hwmon2"
+        for name, value in (("name", "it8688"), ("pwm3", "120"), ("pwm3_enable", "2")):
+            self.write(folder / name, value)
+        invalid = [[], [{"temperature": 40, "duty": 60}],
+                   [{"temperature": 40, "duty": 60}, {"temperature": 40, "duty": 80}],
+                   [{"temperature": 40, "duty": 80}, {"temperature": 70, "duty": 60}],
+                   [{"temperature": 40, "duty": 49}, {"temperature": 70, "duty": 100}],
+                   [{"temperature": True, "duty": 60}, {"temperature": 70, "duty": 100}],
+                   [{"temperature": 40, "duty": 60, "extra": 1}, {"temperature": 70, "duty": 100}]]
+        before = self.files()
+        for curve in invalid:
+            result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "curve",
+                                                        "curve": curve, "takeover": True})
+            self.assertFalse(result["ok"], curve)
+        self.assertEqual(before, self.files())
+        self.assertFalse(self.controller.owned_fans)
+
+    def test_curve_interpolates_and_fails_safe_on_hot_or_missing_sensor(self):
+        folder = self.sys / "class/hwmon/hwmon2"
+        for name, value in (("name", "it8688"), ("pwm3", "120"), ("pwm3_enable", "2"), ("fan3_input", "900")):
+            self.write(folder / name, value)
+        temperature = self.sys / "class/hwmon/hwmon1/temp1_input"
+        self.write(temperature, "50000")
+        curve = [{"temperature": 40, "duty": 60}, {"temperature": 70, "duty": 90}]
+        result = self.controller.action("fan.set", {"channel": "hwmon2:pwm3", "mode": "curve",
+                                                    "curve": curve, "takeover": True})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(str(round(255 * .7)), (folder / "pwm3").read_text())
+        self.assertEqual(curve, result["state"]["fans"]["channels"][0]["curve"])
+        for value in ("80000", "invalid"):
+            self.write(temperature, value)
+            self.controller.tick()
+            self.assertEqual("255", (folder / "pwm3").read_text())
+        self.controller.stop()
+        self.assertEqual("120", (folder / "pwm3").read_text())
+        self.assertEqual("2", (folder / "pwm3_enable").read_text())
 
 
 if __name__ == "__main__":
