@@ -331,8 +331,29 @@ class WebConfigServer:
             if destination is None:
                 raise ValueError('设备控制服务不可用')
             result = destination.action(action, copy.deepcopy(payload))
-            return {'ok': result.get('ok') is True, 'applied': result.get('ok') is True,
-                    'state': self._state(), 'error': None if result.get('ok') else '操作未完成，请检查设备状态'}
+            ok = result.get('ok') is True
+            refresh = (result.get('refresh_pending') is True
+                       or isinstance(result.get('state'), dict) and result['state'].get('refresh_pending') is True)
+            workload_errors = {
+                'busy': '已有应用操作正在执行，请先刷新状态，勿连续提交',
+                'stopping': '应用控制服务正在停止，请稍后重新读取状态',
+                'protected_container': '保留的 Toolbox 容器不允许在此操作',
+                'invalid_state': '容器状态已改变或不支持此操作，请刷新列表后再决定',
+                'state_unconfirmed': 'Docker 当前状态未确认，请刷新列表后再决定',
+                'not_found': '设备已不存在或标识不唯一，请刷新列表',
+                'operation_unconfirmed': '操作超时或响应异常，结果未确认；请先刷新列表核对，勿连续重试',
+                'operation_failed': '宿主机未完成操作，请刷新列表并查看服务状态',
+                'unsupported': '应用服务当前不可用，请刷新列表并检查宿主权限',
+            }
+            code = result.get('error') if action in ('container.action', 'vm.action') else None
+            reason = workload_errors.get(code, '操作未完成，请检查设备状态')
+            response = {'ok': ok, 'applied': ok and not refresh, 'pending': ok and refresh,
+                        'refresh_pending': refresh, 'state': self._state(), 'error': None if ok else reason}
+            if code in workload_errors:
+                response['error_code'] = code
+            if action in ('container.action', 'vm.action') and type(result.get('exit_code')) is int:
+                response['exit_code'] = result['exit_code']
+            return response
         if action == 'settings.update':
             changes = payload.get('settings')
             if set(payload) != {'settings'} or not isinstance(changes, dict) or not changes or set(changes) - SETTINGS:

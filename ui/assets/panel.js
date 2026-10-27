@@ -22,6 +22,7 @@
   });
 
   let currentPage = 0;
+  let controlOrigin = null, headerPointer = null, clockSignature = null, monitoringSnapshot = null;
   let currentDetail = null;
   let navigationStack = [];
   let lastStatus = null;
@@ -40,9 +41,9 @@
   let brightnessDirty = false;
   let rgbDirty = false;
   let rgbBrightnessDirty = false;
-  let rgbBusesSignature = null;
   let fanSignature = null;
   let appsSignature = null;
+  let activeAppPointer = null, pendingAppSnapshot = null, appRefreshTimer = null;
   let enabledPages = pages.slice();
   let settings = {};
   let lastInteraction = Date.now();
@@ -116,9 +117,17 @@
     bar.parentElement.setAttribute("aria-label", `${bar.parentElement.getAttribute("aria-label").split("：")[0]}：${result === null ? "数据暂不可用" : `${Math.round(result)}%`}`);
   }
 
+  const matrixDigits = {"0":["01110","11011","11011","11011","11011","11011","01110"],"1":["00100","01100","00100","00100","00100","00100","01110"],"2":["01110","10001","00001","00010","00100","01000","11111"],"3":["11110","00001","00001","01110","00001","00001","11110"],"4":["00010","00110","01010","10010","11111","00010","00010"],"5":["11111","10000","10000","11110","00001","00001","11110"],"6":["01110","10000","10000","11110","10001","10001","01110"],"7":["11111","00001","00010","00100","01000","01000","01000"],"8":["01110","10001","10001","01110","10001","10001","01110"],"9":["01110","10001","10001","01111","00001","00001","01110"],":":["0","1","1","0","1","1","0"]};
+  function renderMatrixClock(value) {
+    if(value===clockSignature)return;clockSignature=value;clear($("clock-matrix"));
+    const ns="http://www.w3.org/2000/svg",svg=document.createElementNS(ns,"svg");svg.setAttribute("viewBox","0 0 124 35");svg.setAttribute("preserveAspectRatio","xMinYMid meet");
+    let offset=0;for(const glyph of value){const pattern=matrixDigits[glyph];pattern.forEach((line,y)=>{Array.from(line).forEach((point,x)=>{if(point!=="1")return;const dot=document.createElementNS(ns,"circle");dot.setAttribute("cx",offset+x*5+2);dot.setAttribute("cy",y*5+2);dot.setAttribute("r","1.65");svg.append(dot);});});offset+=(glyph===":"?11:28);}
+    $("clock-matrix").append(svg);
+  }
   function updateClock() {
     const now = new Date();
-    document.getElementById("clock").textContent = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const clockValue = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    document.getElementById("clock").textContent = clockValue; text("header-clock",clockValue);renderMatrixClock(clockValue);
     document.getElementById("seconds").textContent = String(now.getSeconds()).padStart(2, "0");
     const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
     document.getElementById("date").textContent = `${now.getMonth() + 1} 月 ${now.getDate()} 日 · ${weekdays[now.getDay()]}`;
@@ -189,9 +198,17 @@
     field("disk-total", total !== null ? `/ ${bytes(total)}` : connected && disks.length === 0 ? "暂未发现数据盘" : "等待读取容量");
     meter("storage-meter", usedPercent);
     meter("storage-detail-meter", usedPercent);
-    renderDisks(disks, connected);
+    renderDisks(disks, connected); renderOverviewState();
   }
 
+  function renderOverviewState() {
+    const summary=monitoringSnapshot && monitoringSnapshot.summary || {}, connected=Boolean(lastStatus);
+    text("overview-state-label",connected?"本机在线":"连接未确认");
+    text("overview-state-headline",!connected?"正在连接这台 NAS":summary.label || "设备数据持续更新");
+    const known=number(summary.known_metrics),unknown=number(summary.unknown_metrics);
+    text("overview-state-note",!connected?"等待真实采样，请稍候":known!==null?"已采集 "+known+" 项"+(unknown!==null?" · "+unknown+" 项缺测":""):"查看读数与详情，缺测保持未知");
+    $("overview-state-headline").parentElement.dataset.state=!connected?"unknown":summary.status||"online";
+  }
   function text(id, value) { $(id).textContent = value === null || value === undefined || value === "" ? "--" : String(value); }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function list(value) { return Array.isArray(value) ? value : []; }
@@ -201,7 +218,7 @@
   }
   function canWrite() { return Boolean(controlToken && toolboxOnline && toolbox); }
   function errorMessage(error) {
-    if (error && error.name === "AbortError") return "请求超时，请稍后重试";
+    if (error && error.name === "AbortError") return "结果尚未确认，请刷新状态，勿连续提交";
     return error && typeof error.message === "string" ? error.message : "连接失败，请稍后重试";
   }
   function toast(message, error = false) {
@@ -213,7 +230,7 @@
   }
   async function request(path, payload) {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), payload ? 18000 : REQUEST_TIMEOUT);
+    const timeout = window.setTimeout(() => controller.abort(), payload ? payload.action === "container.action" ? 25000 : 18000 : REQUEST_TIMEOUT);
     try {
       const options = { method: payload ? "POST" : "GET", cache: "no-store", credentials: "omit", signal: controller.signal };
       if (payload) {
@@ -227,7 +244,20 @@
       return data;
     } finally { window.clearTimeout(timeout); }
   }
-  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "fan-policy-detail": "独立风扇状态", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", "rgb-probe": "验证灯光接口", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
+  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "fan-policy-detail": "独立风扇状态", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
+  function resetControlCenter() {
+    controlOrigin=null;document.documentElement.classList.remove("control-center-open");$("control-center-close").hidden=true;text("title-controls","设备控制");$("control-center-toggle").setAttribute("aria-expanded","false");$("control-center-toggle").setAttribute("aria-label","打开控制中心");
+  }
+  function openControlCenter() {
+    if(controlOrigin){closeControlCenter();return;}
+    if(sleeping||resolveConfirmation||!enabledPages.includes("controls"))return;
+    const origin={page:pages[currentPage],detail:currentDetail,stack:navigationStack.slice(),scroll:activeScroller().scrollTop};
+    showPage("controls");controlOrigin=origin;document.documentElement.classList.add("control-center-open");$("control-center-close").hidden=false;text("title-controls","控制中心");$("control-center-toggle").setAttribute("aria-expanded","true");$("control-center-toggle").setAttribute("aria-label","关闭控制中心");$("page-controls").scrollTop=0;
+  }
+  function closeControlCenter() {
+    if(!controlOrigin)return;const origin=controlOrigin,restoreOrigin=enabledPages.includes(origin.page)||origin.page==="settings";resetControlCenter();showPage(restoreOrigin?origin.page:enabledPages[0]||"settings");if(restoreOrigin){currentDetail=origin.detail;navigationStack=origin.stack;drawNavigation();renderFocusedDetail();activeScroller().scrollTop=origin.scroll;}if(!$("control-center-toggle").hidden)$("control-center-toggle").focus();
+  }
+  $("control-center-toggle").addEventListener("click",openControlCenter);$("control-center-close").addEventListener("click",closeControlCenter);
   function activeScroller() { return currentDetail ? $("detail-body") : $("page-" + pages[currentPage]); }
   function drawNavigation() {
     pages.forEach((name, index) => { $("page-" + name).hidden = Boolean(currentDetail) || index !== currentPage; });
@@ -290,14 +320,14 @@
       button.hidden = !toolboxOnline || !available[name];
       if (!button.hidden) count++;
       if (name === "rgb") {
-        button.dataset.openView = cap("rgb").available ? "rgb" : "rgb-probe";
+        button.dataset.openView = "rgb";
         button.querySelector("strong").textContent = cap("rgb").available ? "灯光" : "验证灯光接口";
         button.querySelector("small").textContent = cap("rgb").available ? "颜色与灯效" : "验证通过后开放调色";
       }
       if (name === "fans") button.querySelector("small").textContent = independentFanPolicy ? "CPU 与系统风扇 · 各自独立状态" : official && official.control_available ? "原厂系统风扇策略 · 仅系统风扇" : "可用风扇通道";
     });
     $("control-empty").hidden = count > 0;
-    if (currentDetail && ["screen", "power", "rgb", "rgb-probe", "fans", "fan-detail", "official-fan"].includes(currentDetail.name)) {
+    if (currentDetail && ["screen", "power", "rgb", "fans", "fan-detail", "official-fan"].includes(currentDetail.name)) {
       const type = currentDetail.name.startsWith("rgb") ? "rgb" : currentDetail.name.includes("fan") ? "fans" : currentDetail.name;
       if (!toolboxOnline || !available[type]) { currentDetail = null; navigationStack = []; drawNavigation(); }
     }
@@ -516,14 +546,12 @@
     const writable = canWrite() && !actionBusy;
     const screenAvailable = cap("screen").available === true;
     const rgbAvailable = cap("rgb").available === true;
-    const rgbProbeAvailable = Boolean(toolbox && toolbox.rgb && list(toolbox.rgb.availableBuses).length);
     const powerAvailable = cap("power").available === true;
     const pending = Boolean(toolbox && toolbox.power && toolbox.power.pending);
     const executing = Boolean(toolbox && toolbox.power && toolbox.power.executing);
     setAllowed("brightness-save", screenAvailable);
     setAllowed("screen-sleep", screenAvailable && !pending);
     setAllowed("rgb-save", rgbAvailable && !(lightPolicy && (lightPolicy.active || lightPolicy.busy)));
-    setAllowed("rgb-probe", rgbProbeAvailable);
     setAllowed("web-pairing-generate", Boolean(webConfig && webConfig.enabled));
     setAllowed("power-reboot", powerAvailable && !pending && !executing);
     setAllowed("power-off", powerAvailable && !pending && !executing);
@@ -532,7 +560,6 @@
     });
     $("brightness").disabled = !writable || !screenAvailable;
     $("rgb-color").disabled = $("rgb-mode").disabled = $("rgb-brightness").disabled = !writable || !rgbAvailable;
-    $("rgb-bus").disabled = !writable || !rgbProbeAvailable;
     document.querySelectorAll("#settings-form input, #settings-form select").forEach((node) => { node.disabled = !writable; });
     document.querySelectorAll(".fan-input").forEach((node) => { node.disabled = !writable || !cap("fans").available; });
     $("power-cancel").disabled = $("global-power-cancel").disabled = !writable || !pending || executing;
@@ -597,6 +624,8 @@
     enabledPages = configured.length ? configured : pages.slice();
     // Settings remains reachable even if every business page is hidden.
     document.querySelectorAll("[data-page]").forEach((button) => { button.hidden = !enabledPages.includes(button.dataset.page) && button.dataset.page !== "settings"; });
+    if(controlOrigin && !enabledPages.includes("controls"))resetControlCenter();
+    $("control-center-toggle").hidden = !enabledPages.includes("controls");
     if (!enabledPages.includes(pages[currentPage]) && pages[currentPage] !== "settings") showPage(enabledPages[0]);
     text("settings-summary", "当前主题：" + ({dark:"深空",light:"晨光",ink:"水墨",jade:"青玉"}[settings.theme] || "深空") + " · 字号 " + (scale || 100) + "%");
     if (settingsDirty) return;
@@ -802,6 +831,7 @@
   }
   function setSleeping(value) {
     sleeping = value === true;
+    if(sleeping && controlOrigin)closeControlCenter();
     $("sleep-overlay").hidden = !sleeping;
     if (sleeping && resolveConfirmation) resolveConfirmation(false);
   }
@@ -829,17 +859,6 @@
     const rgb = toolbox.rgb || {};
     text("rgb-state", cap("rgb").available ? "可控制" : "不可用");
     text("rgb-reason", cap("rgb").available ? "当前使用已验证的灯光接口" : cap("rgb").reason);
-    text("rgb-probe-reason", cap("rgb").reason || "已验证，可进入灯光设置");
-    const buses = list(rgb.availableBuses).filter((bus) => Number.isInteger(bus));
-    if (JSON.stringify(buses) !== rgbBusesSignature) {
-      rgbBusesSignature = JSON.stringify(buses);
-      const previousBus = $("rgb-bus").value;
-      clear($("rgb-bus"));
-      const placeholder = element("option", "", "请选择已检测到的总线"); placeholder.value = ""; $("rgb-bus").append(placeholder);
-      buses.forEach((bus) => { const option = element("option", "", "i2c-" + bus); option.value = String(bus); $("rgb-bus").append(option); });
-      $("rgb-bus").value = previousBus;
-    }
-    if (!rgbDirty && Number.isInteger(rgb.bus)) $("rgb-bus").value = String(rgb.bus);
     text("rgb-save", "应用灯光");
     if (!rgbBrightnessDirty) {
       if (percent(rgb.brightness) !== null) $("rgb-brightness").value = rgb.brightness;
@@ -860,18 +879,12 @@
       if (await action("screen.sleep", {}, null)) setSleeping(true);
     }
   });
-  ["rgb-color", "rgb-mode", "rgb-bus"].forEach((id) => $(id).addEventListener("input", () => { rgbDirty = true; }));
+  ["rgb-color", "rgb-mode"].forEach((id) => $(id).addEventListener("input", () => { rgbDirty = true; }));
   $("rgb-brightness").addEventListener("input", () => { rgbBrightnessDirty = true; text("rgb-brightness-value", $("rgb-brightness").value + "%"); });
-  $("rgb-probe").addEventListener("click", async () => {
-    const value = $("rgb-bus").value, bus = value === "" ? null : Number(value);
-    if (!Number.isInteger(bus) || !list(toolbox && toolbox.rgb && toolbox.rgb.availableBuses).includes(bus)) { toast("请明确选择宿主检测到的 I²C 总线", true); return; }
-    if (!(await confirmOperation("验证灯光接口", "只在 i2c-" + bus + " 的设备地址 0x26 验证接口。验证通过后才开放调色。", "开始验证"))) return;
-    if (await action("rgb.probe", { bus }, "灯光接口验证通过")) { if (cap("rgb").available) openView("rgb", {}, "灯光", true); }
-  });
   $("rgb-save").addEventListener("click", async () => {
     const rgb = toolbox && toolbox.rgb;
-    if (!cap("rgb").available || !rgb || !Number.isInteger(rgb.bus)) { toast("灯光接口尚未验证", true); return; }
-    const payload = { bus: rgb.bus, mode: Number($("rgb-mode").value), color: $("rgb-color").value };
+    if (!cap("rgb").available || !rgb) { toast("灯光接口尚未验证", true); return; }
+    const payload = { mode: Number($("rgb-mode").value), color: $("rgb-color").value };
     if (rgbBrightnessDirty) payload.brightness = Number($("rgb-brightness").value);
     if (await action("rgb.set", payload, "灯光设置已提交")) { rgbDirty = false; rgbBrightnessDirty = false; }
   });
@@ -893,7 +906,19 @@
     row.append(element("strong", "", title), element("span", health || "", description));
     return row;
   }
+  function applicationCard(item,kind) {
+    const name=item.name||String(item.id).slice(0,12), button=element("button","menu-row application-card");button.type="button";button.dataset.appId=item.id;button.dataset.state=item.state||"unknown";
+    const labels={running:"运行中",exited:"已停止",created:"未启动",paused:"已暂停",restarting:"重启中",dead:"异常",removing:"移除中",shutoff:"已关机","shut off":"已关机",suspended:"已挂起"};
+    const heading=element("span","application-heading"),title=element("strong","",name),state=element("span","application-state",labels[item.state]||item.state||"未知状态");heading.append(title,state);button.append(heading);
+    if(item.image)button.append(element("span","application-image",item.image));
+    const resources=element("span","application-resources");resources.append(element("span","","CPU "+(number(item.cpu_percent)===null?"--":item.cpu_percent.toFixed(1)+"%")),element("span","","内存 "+bytes(item.memory_bytes)));button.append(resources);
+    const ports=readable(item.ports);if(kind==="container"&&ports)button.append(element("span","application-ports",ports));
+    if(item.protected)button.append(element("span","application-protected","Toolbox 保护"));
+    button.addEventListener("click",()=>openView("app-detail",{kind,id:item.id},name));return button;
+  }
   function renderApps(data) {
+    if(!data){pendingAppSnapshot=null;activeAppPointer=null;window.clearTimeout(appRefreshTimer);}
+    if(data && activeAppPointer !== null){pendingAppSnapshot=data;return;}
     const containers = data && data.containers, vms = data && data.vms;
     const signature = JSON.stringify([containers, vms, toolboxOnline]);
     if (signature === appsSignature) { syncControls(); return; }
@@ -901,6 +926,9 @@
     $("container-entry").hidden = !(containers && containers.available);
     $("vm-entry").hidden = !(vms && vms.available);
     $("apps-empty").hidden = Boolean(containers && containers.available || vms && vms.available);
+    $("docker-summary").hidden=!(containers && containers.available);$("apps-container-preview").hidden=!(containers && containers.available);
+    const observed=list(containers && containers.items);text("docker-running",observed.filter(item=>item.state==="running").length);text("docker-total",observed.length);text("docker-summary-note",observed.length?"运行中 / 已发现总数":"已读取服务，尚未发现容器");clear($("apps-container-preview"));
+    if(containers && containers.available)observed.slice(0,6).forEach(item=>$("apps-container-preview").append(applicationCard(item,"container")));
     [{ name: "container", value: containers, target: "container-list", count: "container-count", entry: "container-entry" }, { name: "vm", value: vms, target: "vm-list", count: "vm-count", entry: "vm-entry" }].forEach((group) => {
       const values = list(group.value && group.value.items);
       text(group.count, values.length + " 个");
@@ -912,7 +940,7 @@
         const labels = { running: "运行中", exited: "已停止", created: "未启动", paused: "已暂停", restarting: "重启中", dead: "异常", shutoff: "已关机", "shut off": "已关机", suspended: "已挂起" };
         const name = item.name || String(item.id).slice(0, 12);
         const description = [labels[item.state] || item.state || "未知状态", group.name === "container" ? "CPU " + (number(item.cpu_percent) === null ? "--" : item.cpu_percent.toFixed(1)) + "% · " + bytes(item.memory_bytes) : "", item.protected ? "Toolbox 保护" : ""].filter(Boolean).join(" · ");
-        $(group.target).append(menuButton(name, description, () => openView("app-detail", { kind: group.name, id: item.id }, name), "app-summary"));
+        $(group.target).append(applicationCard(item,group.name));
       });
     });
     if (currentDetail && currentDetail.name === "app-detail") renderAppDetail(currentDetail.params.kind, currentDetail.params.id);
@@ -930,18 +958,22 @@
       if (item.ports) card.append(detailRow("端口映射", readable(item.ports)));
     }
     card.append(detailRow("标识", item.id));
-    if (item.protected) card.append(element("p", "capability-note", "Toolbox 容器受保护，请在 NAS 管理页管理"));
+    if (item.protected) card.insertBefore(element("p", "capability-note", "Toolbox 容器受保护；启动任务完成后停止属正常，请在 NAS 管理页管理"),card.children[2]||null);
     const running = item.state === "running";
-    const operations = kind === "container" ? running ? [["停止", "stop"], ["重启", "restart"]] : ["exited", "created"].includes(item.state) ? [["启动", "start"]] : [] : running ? [["关机", "shutdown"], ["重启", "reboot"], ["挂起", "suspend"]] : ["paused", "suspended"].includes(item.state) ? [["恢复", "resume"]] : ["shut off", "shutoff"].includes(item.state) ? [["启动", "start"]] : [];
-    const buttons = element("div", "item-actions");
+    const fallbackOperations = kind === "container" ? running ? [["停止", "stop"], ["重启", "restart"]] : ["exited", "created"].includes(item.state) ? [["启动", "start"]] : [] : running ? [["关机", "shutdown"], ["重启", "reboot"], ["挂起", "suspend"]] : ["paused", "suspended"].includes(item.state) ? [["恢复", "resume"]] : ["shut off", "shutoff"].includes(item.state) ? [["启动", "start"]] : [];
+    const allowedContainerActions = new Set(["start","stop","restart"]);
+    const operationLabels={start:"启动",stop:"停止",restart:"重启"};
+    const operations=kind==="container" && Array.isArray(item.available_actions)?item.available_actions.filter(name=>allowedContainerActions.has(name)).map(name=>[operationLabels[name],name]):fallbackOperations;
+    const buttons = element("div", "item-actions app-primary-actions");
     operations.forEach(([label, operation]) => {
       const button = element("button", "button button-secondary requires-write", label); button.type = "button"; button.dataset.allowed = String(!item.protected && Boolean(group && group.available));
       button.addEventListener("click", async () => {
         if (!(await confirmOperation(label + (kind === "container" ? "容器" : "虚拟机"), "确定" + label + "「" + (item.name || item.id) + "」？正在运行的任务可能受到影响。", "确认" + label, !["start", "resume"].includes(operation)))) return;
-        if (await action(kind + ".action", { id: item.id, operation, confirmed: true }, "应用操作已提交")) await pollInsights(true);
+        try { await action(kind + ".action", { id: item.id, operation, confirmed: true }, "操作请求已提交，请核对列表状态"); } finally { await pollInsights(true); }
       }); buttons.append(button);
     });
-    if (operations.length) card.append(buttons);
+    if (operations.length) card.insertBefore(buttons,card.children[2]||null);
+    else if(!item.protected)card.insertBefore(element("p","capability-note",item.action_reason||"当前状态不提供启停操作，请先刷新列表确认"),card.children[2]||null);
     $("app-detail").append(card); syncControls();
   }
 
@@ -964,6 +996,7 @@
       $("cpu-cores").append(cell);
     });
     const history = list(insights && insights.history).slice(-60);
+    [["overview-cpu-history","cpu_usage_percent"],["overview-memory-history","memory_usage_percent"]].forEach(([id,key])=>{let pen=false;const commands=[];history.forEach((point,index)=>{const value=percent(point[key]);if(value===null){pen=false;return;}commands.push((pen?"L":"M")+(history.length<=1?150:index/(history.length-1)*300).toFixed(1)+" "+(42-value*.38).toFixed(1));pen=true;});$(id).setAttribute("d",commands.join(" "));$(id).parentElement.hidden=!commands.length;});
     [["cpu-history", "cpu_usage_percent"], ["memory-history", "memory_usage_percent"]].forEach(([id, key]) => {
       const commands = []; let pen = false;
       history.forEach((point, index) => {
@@ -1043,6 +1076,7 @@
       request("/toolbox").then(renderToolbox).catch(() => renderToolbox(null)),
       request("/fan-policy").then(renderIndependentFanPolicy).catch(() => renderIndependentFanPolicy(null)),
       request("/light-policy").then(renderLightPolicy).catch(() => renderLightPolicy(null)),
+      request("/monitoring").then(data=>{monitoringSnapshot=data && data.available===true && data.summary?data:null;renderOverviewState();}).catch(()=>{monitoringSnapshot=null;renderOverviewState();}),
       pollInsights(),
       currentDetail && currentDetail.name === "web-config" ? pollWebConfig() : Promise.resolve(),
     ];
@@ -1060,6 +1094,7 @@
       name = allowed[(current + value + allowed.length) % allowed.length];
     }
     if (!pages.includes(name) || (!enabledPages.includes(name) && name !== "settings")) return;
+    resetControlCenter();
     if (currentDetail && currentDetail.name === "web-config") clearWebPairing();
     currentDetail = null; navigationStack = [];
     currentPage = pages.indexOf(name);
@@ -1097,6 +1132,9 @@
     }
   });
   viewport.addEventListener("pointercancel", () => { pointerStart = null; });
+  document.querySelector(".masthead").addEventListener("pointerdown",event=>{headerPointer=null;if(!event.isPrimary||event.target.closest("button,input,select"))return;headerPointer={x:event.clientX,y:event.clientY,id:event.pointerId};});
+  document.addEventListener("pointerup",event=>{if(!headerPointer||headerPointer.id!==event.pointerId)return;const point=headerPointer;headerPointer=null;const dy=event.clientY-point.y,dx=event.clientX-point.x;if(dy>=65&&dy>Math.abs(dx)*1.8&&!sleeping){suppressGestureClick=true;openControlCenter();}});
+  document.addEventListener("pointercancel",()=>{headerPointer=null;activeAppPointer=null;if(pendingAppSnapshot){const latest=pendingAppSnapshot;pendingAppSnapshot=null;renderApps(latest);}});
   async function wakeScreen() {
     if (waking) return;
     waking = true;
@@ -1105,7 +1143,15 @@
   }
   ["pointerdown", "pointerup", "click"].forEach((name) => {
     document.addEventListener(name, (event) => {
-      if (name === "pointerdown") suppressGestureClick = false;
+      if (name === "pointerdown") {
+        suppressGestureClick = false;
+        window.clearTimeout(appRefreshTimer);
+        activeAppPointer = event.target.closest(".application-card") ? event.pointerId : null;
+      }
+      if (name === "pointerup" && activeAppPointer !== null) {
+        activeAppPointer = null;
+        appRefreshTimer = window.setTimeout(() => { if(pendingAppSnapshot && pendingAppSnapshot===insights && activeAppPointer===null){const latest=pendingAppSnapshot;pendingAppSnapshot=null;renderApps(latest);} },80);
+      }
       if (name === "click" && suppressGestureClick) {
         suppressGestureClick = false;
         event.preventDefault(); event.stopImmediatePropagation();
@@ -1135,6 +1181,7 @@
       return;
     }
     if (event.target.closest("input, select, textarea")) return;
+    if(event.key === "Escape" && controlOrigin && !currentDetail){event.preventDefault();closeControlCenter();return;}
     if (event.key === "Escape" && currentDetail) { event.preventDefault(); backView(); return; }
     if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"][data-open-view], [role="button"][data-open-page]')) { event.preventDefault(); event.target.click(); return; }
     if (currentDetail) { if (event.key === "ArrowLeft") backView(); return; }
@@ -1149,7 +1196,7 @@
   window.setInterval(() => {
     updateClock(); updatePowerCountdown(); updatePairingCountdown();
     const interval = number(settings.page_interval);
-    if (interval && !currentDetail && !sleeping && !resolveConfirmation && !actionBusy && !settingsDirty && Date.now() - lastInteraction >= interval * 1000 && Date.now() - lastCarousel >= interval * 1000) showPage(1);
+    if (interval && !controlOrigin && !currentDetail && !sleeping && !resolveConfirmation && !actionBusy && !settingsDirty && Date.now() - lastInteraction >= interval * 1000 && Date.now() - lastCarousel >= interval * 1000) showPage(1);
   }, 1000);
   window.setInterval(poll, POLL_INTERVAL);
 })();
