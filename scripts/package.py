@@ -16,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "r1-toolbox"
 IMAGE_REPOSITORY = "ghcr.io/shinku-chen/r1-toolbox"
 ARCHIVE_NAME = "r1-toolbox-linux-amd64.tar"
+OCI_INDEX_TYPES = {
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+}
+OCI_MANIFEST_TYPES = {
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+}
+OCI_CONFIG_TYPES = {
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+}
+DIGEST_PATTERN = r"sha256:[0-9a-f]{64}"
 
 
 def sha256_file(path):
@@ -66,8 +79,78 @@ def read_member(bundle, name, max_size):
         return source.read()
 
 
+def verify_image_id(bundle, image_id, config_digest):
+    """Bind both classic Docker IDs and containerd OCI IDs to the saved config."""
+    if image_id == config_digest:
+        return
+
+    # The classic image store exposes the config digest as .Id. The containerd
+    # image store exposes its target manifest/index digest instead. Verify every
+    # content-addressed metadata edge from that root, never trusting a filename
+    # or an unrelated valid config blob alone.
+    blob_count = 0
+    total_bytes = 0
+
+    def descriptor_digest(descriptor, allowed_types):
+        if not isinstance(descriptor, dict):
+            raise ValueError("invalid OCI metadata descriptor")
+        digest = descriptor.get("digest")
+        if not isinstance(digest, str) or not re.fullmatch(DIGEST_PATTERN, digest):
+            raise ValueError("OCI metadata digest must be a full sha256 digest")
+        media_type = descriptor.get("mediaType")
+        if media_type is not None and media_type not in allowed_types:
+            raise ValueError("unsupported OCI metadata mediaType")
+        return digest
+
+    def read_blob(descriptor, allowed_types):
+        nonlocal blob_count, total_bytes
+        digest = descriptor_digest(descriptor, allowed_types)
+        blob_count += 1
+        if blob_count > 64:
+            raise ValueError("OCI metadata graph exceeds 64 blobs")
+        data = read_member(bundle, "blobs/sha256/" + digest[7:], 2 * 1024 * 1024)
+        total_bytes += len(data)
+        if total_bytes > 8 * 1024 * 1024:
+            raise ValueError("OCI metadata graph exceeds 8 MiB")
+        if "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("OCI metadata blob content does not match its digest")
+        size = descriptor.get("size")
+        if size is not None and (type(size) is not int or size != len(data)):
+            raise ValueError("OCI metadata blob size does not match its descriptor")
+        return digest, data
+
+    def visit(descriptor, depth):
+        if depth > 8:
+            raise ValueError("OCI metadata graph exceeds 8 levels")
+        _, data = read_blob(descriptor, OCI_INDEX_TYPES | OCI_MANIFEST_TYPES)
+        document = json.loads(data)
+        if not isinstance(document, dict) or document.get("schemaVersion") != 2:
+            raise ValueError("invalid OCI manifest/index document")
+        media_type = document.get("mediaType")
+        if "manifests" in document:
+            children = document["manifests"]
+            if media_type is not None and media_type not in OCI_INDEX_TYPES:
+                raise ValueError("OCI index has an invalid mediaType")
+            if not isinstance(children, list) or not children or len(children) > 64:
+                raise ValueError("OCI index must contain 1–64 manifest descriptors")
+            matched = False
+            for child in children:
+                if visit(child, depth + 1):
+                    matched = True
+            return matched
+        if media_type is not None and media_type not in OCI_MANIFEST_TYPES:
+            raise ValueError("OCI manifest has an invalid mediaType")
+        if not isinstance(document.get("layers"), list):
+            raise ValueError("OCI manifest is missing its layer descriptors")
+        digest, _ = read_blob(document.get("config"), OCI_CONFIG_TYPES)
+        return digest == config_digest
+
+    if not visit({"digest": image_id}, 0):
+        raise ValueError("OCI image id does not reference the docker-save compatibility config")
+
+
 def verify_archive(archive, image, image_id):
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+    if not re.fullmatch(DIGEST_PATTERN, image_id):
         raise ValueError("image id must be a full sha256 digest")
     with tarfile.open(archive, mode="r:*") as bundle:
         names = bundle.getnames()
@@ -80,8 +163,8 @@ def verify_archive(archive, image, image_id):
         if not isinstance(entry, dict) or entry.get("RepoTags") != [image]:
             raise ValueError("docker-save RepoTags do not match the pinned Compose image")
         config_bytes = read_member(bundle, entry.get("Config"), 2 * 1024 * 1024)
-        if "sha256:" + hashlib.sha256(config_bytes).hexdigest() != image_id:
-            raise ValueError("docker-save config digest does not match the built image id")
+        config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        verify_image_id(bundle, image_id, config_digest)
         config = json.loads(config_bytes)
         if not isinstance(config, dict) or (
             config.get("architecture"), config.get("os")
