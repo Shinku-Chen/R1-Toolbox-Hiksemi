@@ -13,8 +13,9 @@ Usage: r1-toolbox [run|--help|--version]
   --version   Show the image version without accessing the NAS host.
 
 Deploy with composer.yml for the required host mounts and namespaces.
-UI_DIR is empty by default: the task only reports diagnostics.
-Set UI_DIR to a NAS directory with index.html and its assets for a read-only mount.
+composer.yml uses UI_MODE=image: the bundled UI runs from the host's /run tmpfs.
+UI_MODE=diagnostic only reports diagnostics; UI_MODE=directory uses a NAS UI_DIR.
+Without UI_MODE or UI_DIR, the task only reports diagnostics.
 HELP
     ;;
   --version|-V|version)
