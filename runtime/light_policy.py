@@ -199,15 +199,31 @@ class LightPolicyController:
                 row['fresh'] = bool(age is not None and type(maximum) in (int, float) and 0 < maximum <= 300 and age <= maximum)
             applied = bool(self.last_apply_ok and not self.busy and self.config == self.active_config
                            and (self.active or not self.config['enabled']))
+            decision = copy.deepcopy(self.decision)
+            if self.active and self.active_config['mode'] == 'temperature':
+                by_id = {row.get('id'): row for row in rows if isinstance(row.get('id'), str)}
+                required = [by_id.get(identity) for identity in self.active_config['sources']]
+                missing = any(not row or not row['fresh'] or row.get('status') not in ('ok', 'standby')
+                              or (row.get('status') == 'ok' and not _finite(row.get('temperature_c')))
+                              for row in required)
+                if missing:
+                    # A cached successful write is not confirmation that a now-stale
+                    # temperature decision has reached its low-brightness safeguard.
+                    decision.update(reference_c=None, source_id=None, source_label=None,
+                                    fallback=True, reason='温度来源已失效，等待下一轮低亮保护确认')
+                    applied = False
+            last_requested = copy.deepcopy(self.target)
             runtime = {'active': self.active, 'busy': self.busy, 'applied': applied,
                        'reason': '尚未启用灯光联动', 'fallback': False, 'schedule_active': False,
-                       **copy.deepcopy(self.decision), 'target': copy.deepcopy(self.target)}
+                       **decision, 'target': last_requested,
+                       'last_requested_target': copy.deepcopy(last_requested)}
             runtime['source_age_seconds'] = next((row['age_seconds'] for row in rows if row.get('id') == runtime.get('source_id')), None)
             return {'config': copy.deepcopy(self.config), 'active_config': copy.deepcopy(self.active_config),
                     'active_on_boot': self.resume_on_boot, 'active': self.active, 'busy': self.busy,
                     'pending_changes': self.config != self.active_config or (self.config['enabled'] and not self.active),
                     'capability': copy.deepcopy(self.capability), 'sources': rows,
-                    **copy.deepcopy(self.decision), 'target': copy.deepcopy(self.target),
+                    **decision, 'target': copy.deepcopy(last_requested),
+                    'last_requested_target': copy.deepcopy(last_requested),
                     'runtime': runtime, 'applied': applied, 'settings_saved': self.settings_saved,
                     'settings_error': self.settings_error, 'last_error': self.last_error}
 
