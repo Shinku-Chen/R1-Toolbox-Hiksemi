@@ -107,7 +107,8 @@ class WebTests(unittest.TestCase):
     def test_only_local_explicit_pairing_returns_a_code(self):
         self.assertNotIn('code', self.web.snapshot())
         self.assertNotIn('code', self.web.pairing_info())
-        pairing = self.web.pairing_info(rotate=True)
+        with patch.object(web.secrets, 'randbelow', return_value=7):
+            pairing = self.web.pairing_info(rotate=True)
         self.assertRegex(pairing['code'], r'^[0-9]{5}$')
         self.assertEqual(pairing['expires_in'], 180)
         self.assertNotIn(pairing['code'], json.dumps(self.web.snapshot()))
@@ -139,8 +140,19 @@ class WebTests(unittest.TestCase):
         self.now += web.SESSION_TTL + 1
         self.assertEqual(self.action()[0], 401)
 
+    def test_five_digit_rotation_invalidates_old_code_even_when_random_repeats(self):
+        with patch.object(web.secrets, 'randbelow', return_value=7):
+            old = self.web.pairing_info(rotate=True)['code']
+            new = self.web.pairing_info(rotate=True)['code']
+        self.assertEqual(old, '00007')
+        self.assertRegex(new, r'^[0-9]{5}$')
+        self.assertNotEqual(old, new)
+        self.assertEqual(self.request('POST', '/api/pair', {'code': old})[0], 403)
+        self.assertEqual(self.request('POST', '/api/pair', {'code': new})[0], 200)
+
     def test_pairing_attempts_are_limited_and_window_expires(self):
-        code = self.web.pairing_info(rotate=True)['code']
+        with patch.object(web.secrets, 'randbelow', return_value=7):
+            code = self.web.pairing_info(rotate=True)['code']
         for _ in range(5):
             self.assertEqual(self.request('POST', '/api/pair', {'code': 'incorrect'})[0], 403)
         self.assertEqual(self.request('POST', '/api/pair', {'code': code})[0], 429)
@@ -201,7 +213,13 @@ class WebTests(unittest.TestCase):
         from types import SimpleNamespace
         self.web.monitor = SimpleNamespace(snapshot=lambda: {'available': True, 'cpu': {'usage_percent': 42}})
         self.web.insights = SimpleNamespace(snapshot=lambda: {'timestamp': 'fixture', 'interfaces': [{'name': 'eth0'}]})
-        code = self.web.pairing_info(rotate=True)['code']
+        self.web.light_policy = SimpleNamespace(snapshot=lambda: {'active': True, 'target': {'color': '#123456'},
+            'config': {'private': 'light-draft-marker'}, 'active_config': {'private': 'active-light-marker'},
+            'settings_saved': True})
+        self.web.monitoring = SimpleNamespace(snapshot=lambda: {'available': True, 'current': {'metrics': []},
+            'settings': {'private': 'analytics-settings-marker'}, 'settings_error': 'private-volume-path-marker'})
+        with patch.object(web.secrets, 'randbelow', return_value=7):
+            code = self.web.pairing_info(rotate=True)['code']
         status, headers, value = self.request('GET', '/api/v1/status', extra={'Origin': 'https://third-party.example'})
         self.assertEqual(status, 200)
         self.assertEqual(headers['Access-Control-Allow-Origin'], '*')
@@ -211,6 +229,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(value['insights']['interfaces'], [{'name': 'eth0'}])
         self.assertNotIn('settings', value['controls'])
         self.assertNotIn('csrf', value)
+        self.assertEqual(value['light_policy'], {'active': True, 'target': {'color': '#123456'}})
+        self.assertEqual(value['analytics'], {'available': True, 'current': {'metrics': []}})
+        for marker in ('light-draft-marker', 'active-light-marker', 'analytics-settings-marker', 'private-volume-path-marker'):
+            self.assertNotIn(marker, json.dumps(value))
         self.assertNotIn(code, json.dumps(value))
         self.assertEqual(self.controller.calls, [])
         self.assertEqual(self.request('GET', '/api/session')[0], 401)
@@ -310,6 +332,27 @@ class WebTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertIn('重新读取', value['error'])
         self.assertEqual(self.controller.calls, [])
+
+    def test_completed_response_does_not_leave_a_busy_lock_for_the_next_request(self):
+        self.login()
+        handler = self.web.server.RequestHandlerClass
+        original = handler.send
+        sent, release = threading.Event(), threading.Event()
+        first = [True]
+        def delayed_reply(connection, *args, **kwargs):
+            original(connection, *args, **kwargs)
+            if connection.path == '/api/action' and first[0]:
+                first[0] = False
+                sent.set()
+                release.wait(2)
+        try:
+            with patch.object(handler, 'send', delayed_reply):
+                self.assertEqual(self.action()[0], 200)
+                self.assertTrue(sent.wait(1))
+                self.assertEqual(self.action(payload={'settings': {'font_scale': 125}})[0], 200)
+        finally:
+            release.set()
+        self.assertEqual(len(self.controller.calls), 2)
 
     def test_concurrent_pairing_consumes_code_once_and_sessions_are_bounded(self):
         code = self.web.pairing_info(rotate=True)['code']

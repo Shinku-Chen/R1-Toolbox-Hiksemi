@@ -356,6 +356,7 @@ finally:
     await page.locator('#fan-cpu-mode').selectOption('manual');await page.locator('#fan-cpu-manual_percent').fill('82');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-apply').click();await page.waitForFunction(()=>document.getElementById('fan-cpu-live').textContent.includes('82%'));
     await command('fail_release');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-release').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('未生效'));
     assert.match(await page.locator('#fan-cpu-live').textContent(),/恢复未确认/);assert.match(await page.locator('#fan-policy-save-state').textContent(),/控制异常/);assert.equal(await page.locator('#fan-policy-release').isEnabled(),true);
+    await page.locator('[data-web-page="overview"]').click();await page.waitForFunction(()=>document.getElementById('overview-fans').textContent.includes('控制 / 恢复未确认'));assert.ok(!(await page.locator('#overview-fans').textContent()).includes('原厂管理'));await page.locator('[data-web-page="settings"]').click();
     await command('allow_release');page.once('dialog',dialog=>dialog.accept());await page.locator('#fan-policy-release').click();await page.waitForFunction(()=>document.getElementById('fan-policy-result').textContent.includes('两路已恢复原厂管理'));
     checks.push('an unacknowledged vendor restoration never becomes a success label; both channel cards flag restore-unconfirmed and allow an explicit retry');
     await command('reconstruct'); await reload();
@@ -371,9 +372,14 @@ finally:
     assert.ok(actionBodies.some(body=>body.action==='container.action'&&body.payload.confirmed===true));
     assert.equal(await page.locator('#web-containers .application-row').nth(1).getByRole('button',{name:'启动',exact:true}).isDisabled(),true);
     checks.push('paired container changes use explicit confirm, cancellation emits no POST, protected toolbox stays disabled, actual fixture state updates');
+    await page.locator('#web-containers .application-row').first().getByRole('button',{name:'启动',exact:true}).click();
+    const beforeOfflineConfirm=actionBodies.length;
     await page.route('**/api/v1/status',route=>route.abort('connectionrefused'));await page.waitForFunction(()=>document.getElementById('live-status').textContent==='连接中断');
     for(const button of await page.locator('[data-device-action]').all())assert.equal(await button.isDisabled(),true);
-    assert.match(await page.locator('#monitor-error').textContent(),/此前读数仅供参考/);await page.unroute('**/api/v1/status');await page.waitForFunction(()=>document.getElementById('live-status').textContent==='实时连接');
+    assert.match(await page.locator('#monitor-error').textContent(),/此前读数仅供参考/);
+    assert.equal(await page.locator('#web-power-cancel').isDisabled(),true);assert.equal(await page.locator('#fan-policy-apply').isDisabled(),true);assert.equal(await page.locator('#fan-policy-release').isDisabled(),true);assert.equal(await page.locator('#fan-policy-save').isEnabled(),true);assert.equal(await page.locator('[data-section="brightness"] button').isDisabled(),true);assert.equal(await page.locator('#screen-sleep').isDisabled(),true);assert.equal(await page.locator('#light-policy-apply').isDisabled(),true);assert.equal(await page.locator('#light-policy-save').isEnabled(),true);
+    await page.locator('#web-confirm-accept').click();assert.equal(actionBodies.length,beforeOfflineConfirm,'confirm after sampling loss must not emit POST');
+    await page.unroute('**/api/v1/status');await page.waitForFunction(()=>document.getElementById('live-status').textContent==='实时连接');
     checks.push('lost public sampling disables paired device actions immediately and labels cached readings unconfirmed; reconnect restores capability-based controls');
 
     await page.locator('[data-web-page="settings"]').click();
