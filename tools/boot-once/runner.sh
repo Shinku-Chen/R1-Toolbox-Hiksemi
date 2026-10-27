@@ -180,7 +180,7 @@ def read_bundle(tar_path, expected_sha):
                         'ui.tar 包含不支持的目录：' + name)
                 continue
             require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py',
-                             'runtime/toolbox.py', 'runtime/insights.py')
+                             'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py')
                     or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
             require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
             limit = MAX_MANIFEST if name == 'manifest.json' else MAX_FILE
@@ -210,7 +210,7 @@ def read_bundle(tar_path, expected_sha):
         require(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)
                 and hashlib.sha256(files[name]).hexdigest() == digest, 'manifest 文件校验失败：' + name)
     require(all(files.get(name) for name in ('frontend/index.html', 'runtime/ui_service.py',
-                                           'runtime/toolbox.py', 'runtime/insights.py')),
+                                           'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py')),
             '内置界面缺少页面、采集或控制模块')
     return manifest, files
 
