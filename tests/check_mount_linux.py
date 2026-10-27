@@ -10,6 +10,24 @@ import tempfile
 import time
 
 
+def wait_for_binding(runtime, unit, source):
+    """Wait for Type=simple to finish the child's mount namespace setup."""
+    deadline = time.monotonic() + 10
+    last = {}
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ['systemctl', 'show', unit, '--property=MainPID', '--property=ActiveState'],
+            capture_output=True, text=True, timeout=5)
+        last = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        value = last.get('MainPID', '')
+        if result.returncode == 0 and last.get('ActiveState') == 'active' and value.isdigit():
+            pid = int(value)
+            if pid > 0 and runtime['verify_binding'](pid, source):
+                return pid
+        time.sleep(0.1)
+    raise AssertionError('Running service did not get the read-only bind within 10 seconds: ' + str(last))
+
+
 def main():
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise SystemExit('此检查需要临时 Linux CI 主机和 root，不在 NAS 上执行。')
@@ -35,8 +53,7 @@ def main():
         subprocess.run(runtime['service_options'](unit, source) + ['/usr/bin/sleep', '30'],
                        check=True, timeout=15)
         started = True
-        pid = int(subprocess.check_output(
-            ['systemctl', 'show', unit, '--property=MainPID', '--value'], text=True))
+        pid = wait_for_binding(runtime, unit, source)
         assert runtime['verify_binding'](pid, source), 'Running service did not get the read-only bind'
         mounted = Path('/proc', str(pid), 'root') / str(target).lstrip('/')
         assert (mounted / 'index.html').read_text() == 'custom'
