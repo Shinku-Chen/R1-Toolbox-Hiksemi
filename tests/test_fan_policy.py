@@ -155,6 +155,20 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(self.controller.worker.is_alive())
         return result
 
+    def test_small_screen_quick_modes_change_one_channel_only(self):
+        with mock.patch.object(self.controller, "_save"):
+            result = self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "low"})
+            self.assertTrue(result["ok"], result)
+            self.controller.worker.join(timeout=3)
+            cpu = self.controller.config["channels"]["cpu"]
+            self.assertEqual((cpu["mode"], cpu["manual_percent"]), ("manual", 50))
+            self.assertEqual(self.controller.config["channels"]["system"]["mode"], "vendor")
+            result = self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "auto"})
+            self.assertTrue(result["ok"], result)
+            self.controller.worker.join(timeout=3)
+            self.assertEqual(self.controller.config["channels"]["cpu"]["mode"], "vendor")
+            self.assertFalse(self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "manual"})["ok"])
+
     def test_save_without_apply_survives_reconstruction_without_hardware(self):
         self.adapter.available = False
         result = self.controller.action("fan.policy.update", {"config": config(), "apply": False})

@@ -25,9 +25,12 @@ class ControlAPITests(unittest.TestCase):
         self.policy = mock.Mock()
         self.policy.snapshot.return_value = {"active": False, "busy": False, "recovery_confirmed": True}
         self.policy.action.return_value = {"ok": True, "settings_saved": True, "pending": True}
+        self.light = mock.Mock()
+        self.light.snapshot.return_value = {"active": False, "busy": False}
+        self.light.action.return_value = {"ok": True, "settings_saved": True, "pending": True}
         monitor = types.SimpleNamespace(snapshot=lambda: {"schema_version": 1, "available": True})
         self.server = service.make_http_server(monitor, 0, self.controller, self.insights, self.token,
-                                              web_config=self.web, fan_policy=self.policy)
+                                              web_config=self.web, fan_policy=self.policy, light_policy=self.light)
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05})
         self.thread.start()
@@ -83,6 +86,13 @@ class ControlAPITests(unittest.TestCase):
         payload = {"config": {"fixture": True}, "apply": False}
         self.assertEqual(self.action({"action": "fan.policy.update", **payload})[0], 200)
         self.policy.action.assert_called_once_with("fan.policy.update", payload)
+        self.policy.action.reset_mock()
+        quick = {"channel": "cpu", "mode": "low"}
+        self.assertEqual(self.action({"action": "fan.policy.quick", **quick})[0], 200)
+        self.policy.action.assert_called_once_with("fan.policy.quick", quick)
+        light = {"hue": 120, "brightness": 40, "effect": 2}
+        self.assertEqual(self.action({"action": "light.policy.quick", **light})[0], 200)
+        self.light.action.assert_called_once_with("light.policy.quick", light)
         for state in ({"active": True}, {"busy": True}, {"recovery_confirmed": False}):
             self.policy.snapshot.return_value = state
             for name, values in (("fan.official", {"mode": "low", "confirmed": True}),

@@ -41,6 +41,9 @@
     online: false,
     brightness: null,
     brightnessDirty: false,
+    lightHue: null,
+    lightBrightness: null,
+    lightEffect: null,
     trendRange: '1h',
     trendCache: {},
     trendPending: {},
@@ -329,9 +332,9 @@
   }
 
   // ------------------------------------------------------------------ render
-  function softRender() {
+  function softRender(force = false) {
     if (state.modal || state.sleeping) { renderPower(); syncSleep(); return; }
-    if (document.activeElement && document.activeElement.id === 'brightness') return;
+    if (!force && document.activeElement && ['brightness', 'light-hue', 'light-brightness', 'light-effect', 'sleep-timeout'].includes(document.activeElement.id)) return;
     const body = $('screen-body');
     render(body ? body.scrollTop : 0);
   }
@@ -477,9 +480,10 @@
 
   function storage() {
     const disk = pool();
-    const drives = list(obj(obj(state.data.insights).disks).items);
-    const mounts = list(obj(state.data.status).disks);
-    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE POOL</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.count ? disk.count + ' 个挂载' : '未发现数据盘'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.count ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article>${mounts.map((mount, index) => `<article class="card"><div class="card-top"><h2>${esc(mount.mount)}</h2><span class="badge neutral">${percentText(mount.usage_percent)}%</span></div>${bar(mount.usage_percent, 'var(--green)')}<p class="caption" style="margin-top:12px">${bytes(mount.used_bytes)} / ${bytes(mount.total_bytes)}</p></article>`).join('')}<div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到物理磁盘；SMART 只使用后台缓存，不主动唤醒休眠盘。</p>'}<p class="info-note">SMART 使用缓存读数。休眠盘温度未知，不因查看页面唤醒。</p>`;
+    const allDrives = list(obj(obj(state.data.insights).disks).items);
+    const drives = allDrives.filter(row => row && row.smart_available === true);
+    const hidden = allDrives.length - drives.length;
+    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.count ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到带 SMART 信息的物理磁盘。</p>'}${hidden ? `<p class="info-note">${hidden} 块磁盘未提供 SMART 信息，已隐藏。</p>` : ''}<p class="info-note">仅显示有 SMART 缓存的物理磁盘；休眠盘温度未知，不因查看页面唤醒。</p>`;
   }
 
   function network() {
@@ -593,6 +597,81 @@
     return `<div class="detail-lead"><p class="kicker">HOST LISTENING PORTS</p><h2>宿主监听</h2><p>读取 /proc/net · 不推测服务归属</p></div>${listeners.map(row => `<article class="card port-row"><span class="port-number">${esc(row.port)}</span><div><p class="port-name">${esc(String(row.protocol || 'tcp').toUpperCase())}</p><p class="port-note mono">${esc(row.address || '')}</p></div></article>`).join('')}${listeners.length ? '' : '<p class="info-note">未读取到监听端口。</p>'}<div class="section-label"><h2>DOCKER / 端口映射</h2></div>${docker.map(item => `<article class="card"><div class="card-top"><h3>${esc(item.name)}</h3><span class="${item.state === 'running' ? 'green' : 'muted'}"><span class="dot"></span></span></div><p class="mono mono-wrap" style="font-size:18px">${esc(item.ports)}</p></article>`).join('')}${docker.length ? '' : '<p class="info-note">没有带端口映射的容器。</p>'}<p class="info-note">Docker 映射与宿主监听来自不同数据源，仅展示各自的原始语义。</p>`;
   }
 
+  const FAN_QUICK_MODES = [['auto', '自动'], ['low', '低档'], ['medium', '中档'], ['high', '高档']];
+  const FAN_QUICK_PERCENT = { low: 50, medium: 75, high: 100 };
+
+  /** Map the policy's vendor/fixed/temperature modes to the four quick buttons. */
+  function fanQuickMode(item) {
+    if (!item || item.mode === 'vendor' || !item.mode) return 'auto';
+    if (item.mode === 'manual') {
+      return Object.keys(FAN_QUICK_PERCENT).find(key => FAN_QUICK_PERCENT[key] === item.manual_percent) || 'manual';
+    }
+    return 'manual';
+  }
+
+  function fanQuickRow(name, item, live, available) {
+    const mode = fanQuickMode(item);
+    const disabled = !canWrite() || !available;
+    const manualDisabled = disabled || !list(item.sources).length;
+    const state = live.active && num(live.target_percent, 0, 100) !== null ? `目标 ${percentText(live.target_percent)}%` : '原厂管理';
+    const label = name === 'cpu' ? 'CPU 风扇' : '系统风扇';
+    return `<div class="fan-quick-row"><div class="fan-quick-head"><strong>${label}</strong><span>${esc(state)}</span></div><div class="fan-quick-grid">${FAN_QUICK_MODES.map(([key, text]) => `<button type="button" class="fan-mode" data-action="fan-quick" data-channel="${name}" data-mode="${key}" aria-pressed="${mode === key}" ${disabled ? 'disabled' : ''}>${text}</button>`).join('')}</div><button type="button" class="fan-manual ${mode === 'manual' ? 'is-current' : ''}" data-action="fan-quick" data-channel="${name}" data-mode="manual" aria-pressed="${mode === 'manual'}" ${manualDisabled ? 'disabled' : ''}>手动${mode === 'manual' ? ' · 当前' : ''}</button></div>`;
+  }
+
+  function fanControl(policy) {
+    const config = obj(policy.config);
+    const current = obj(config.channels);
+    const live = obj(policy.channels);
+    const capability = obj(policy.capability);
+    const available = capability.available === true;
+    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${policy.active ? '' : 'neutral'}">${policy.active ? '独立温控' : '原厂管理'}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), available)).join('')}<p class="caption">低／中／高档固定为 50／75／100%；手动档使用网页保存的曲线。首次使用前请先在网页选择温度来源与阈值。</p>${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置风扇</button></article>`;
+  }
+
+  function hexToHue(value) {
+    const match = /^#?([0-9a-f]{6})$/i.exec(String(value || ''));
+    if (!match) return 0;
+    const raw = parseInt(match[1], 16);
+    const red = raw >> 16, green = raw >> 8 & 255, blue = raw & 255;
+    const max = Math.max(red, green, blue), min = Math.min(red, green, blue), delta = max - min;
+    if (!delta) return 0;
+    let hue;
+    if (max === red) hue = ((green - blue) / delta) % 6;
+    else if (max === green) hue = (blue - red) / delta + 2;
+    else hue = (red - green) / delta + 4;
+    hue *= 60;
+    return Math.round(hue < 0 ? hue + 360 : hue) % 360;
+  }
+
+  function lightHueColor(hue) {
+    return `hsl(${Math.round(hue)} 90% 55%)`;
+  }
+
+  function sleepTimeoutValue(toolbox) {
+    const value = num(obj(toolbox.settings).sleep_timeout, 0, 86400);
+    return value === null ? 0 : value;
+  }
+
+  function lightControl(light) {
+    const config = obj(light.config);
+    const manual = obj(config.manual);
+    const capability = obj(light.capability);
+    const available = capability.available === true;
+    const disabled = !available || !canWrite();
+    const hue = state.lightHue ?? hexToHue(manual.color || config.manual?.color || '#00C832');
+    const brightness = state.lightBrightness ?? pct(manual.brightness) ?? pct(config.brightness) ?? 0;
+    const effect = state.lightEffect ?? num(manual.mode, 0, 3) ?? 1;
+    const mode = config.mode === 'temperature' ? '温度联动' : light.active ? '手动已接管' : '手动待应用';
+    return `<article class="card light-control"><div class="card-top"><h2>机身灯光</h2><span class="badge ${light.active ? '' : 'neutral'}">${esc(mode)}</span></div><div class="light-preview"><span class="light-swatch" style="background:${lightHueColor(hue)}"></span><div><strong>色相 ${Math.round(hue)}°</strong><p class="caption">${config.mode === 'temperature' ? '调整后切换为手动灯效' : '拖动色相、亮度后自动应用'}</p></div></div><label class="control-label" for="light-hue">色相</label><input class="brightness light-hue" id="light-hue" type="range" min="0" max="359" step="1" value="${hue}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-brightness">亮度 <output data-light-brightness>${Math.round(brightness)}%</output></label><input class="brightness" id="light-brightness" type="range" min="0" max="100" step="1" value="${brightness}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-effect">灯光模式</label><select class="control-select" id="light-effect" ${disabled ? 'disabled' : ''}>${[[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']].map(([value, text]) => `<option value="${value}" ${effect === value ? 'selected' : ''}>${text}</option>`).join('')}</select>${available ? '' : `<p class="caption">${esc(capability.reason || '尚未验证唯一灯控设备')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置灯光联动</button></article>`;
+  }
+
+  function screenControl(toolbox, available) {
+    const timeout = sleepTimeoutValue(toolbox);
+    const choices = [[0, '关闭'], [60, '1 分钟'], [300, '5 分钟'], [600, '10 分钟'], [1800, '30 分钟'], [3600, '1 小时']];
+    const custom = !choices.some(([value]) => value === timeout);
+    const disabled = !available || !canWrite();
+    return `<div class="control-select-row"><label class="control-label" for="sleep-timeout">自动息屏</label><select class="control-select" id="sleep-timeout" ${disabled ? 'disabled' : ''}>${choices.map(([value, text]) => `<option value="${value}" ${timeout === value ? 'selected' : ''}>${text}</option>`).join('')}${custom ? `<option value="${timeout}" selected>自定义 ${timeout} 秒</option>` : ''}</select></div>`;
+  }
+
   function controls() {
     const toolbox = obj(state.data.toolbox);
     const screen = obj(toolbox.screen);
@@ -601,10 +680,8 @@
     const brightness = state.brightness ?? pct(screen.brightness);
     const policy = fanPolicy();
     const light = lightPolicy();
-    const lightConfig = obj(light.config);
-    const target = obj(light.target);
     const powerPending = state.powerDeadline !== null;
-    return `<article class="card"><div class="control-heading"><h2 style="font-size:20px;font-weight:400">屏幕亮度</h2><output data-brightness-value for="brightness">${brightness ?? '--'}<small style="font-size:15px;color:var(--dim)"> %</small></output></div><label class="sr-only" for="brightness">屏幕亮度</label><input class="brightness" id="brightness" type="range" min="5" max="100" value="${brightness ?? 50}" ${available && canWrite() ? '' : 'disabled'}><div class="control-hint"><span>暗</span><span>亮</span></div><button type="button" class="action-button" data-action="sleep" style="margin-top:18px" ${available && canWrite() ? '' : 'disabled'}>立即息屏</button>${available ? '' : `<p class="caption" style="margin-top:10px">${esc(obj(caps.screen).reason || '背光能力尚未验证')}</p>`}</article>${menu('thermal', '风扇状态', policy.active ? '独立温控运行中 · 只读' : '原厂管理 · 只读')}<article class="card"><div class="card-top"><h2>机身灯光</h2><span class="badge neutral"><span class="control-color" style="background:${esc(target.color || lightConfig.manual?.color || '#7caf98')}"></span>${light.active ? '联动中' : '原厂主题'}</span></div><p class="caption">${light.active ? '目标亮度 ' + percentText(target.brightness) + '%' : '由原厂主题管理机身灯'}</p><button type="button" class="action-button" data-view="web" style="margin-top:18px">在网页调整灯光</button></article>${menu('web', '网页设置', '温控、灯光、登录与配对')}<div class="section-label"><h2>POWER / 电源</h2><span>${powerPending ? '倒计时中' : '需确认'}</span></div><div class="action-stack"><button type="button" class="action-button" data-action="reboot" ${canWrite() && !powerPending ? '' : 'disabled'}>重新启动 NAS</button><button type="button" class="action-button danger" data-action="shutdown" ${canWrite() && !powerPending ? '' : 'disabled'}>关闭 NAS</button></div><p class="info-note">确认后有 5 秒可取消。关机后不会自动开机。</p>`;
+    return `<article class="card"><div class="control-heading"><h2 style="font-size:20px;font-weight:400">屏幕亮度</h2><output data-brightness-value for="brightness">${brightness ?? '--'}<small style="font-size:15px;color:var(--dim)"> %</small></output></div><label class="sr-only" for="brightness">屏幕亮度</label><input class="brightness" id="brightness" type="range" min="5" max="100" value="${brightness ?? 50}" ${available && canWrite() ? '' : 'disabled'}><div class="control-hint"><span>暗</span><span>亮</span></div>${screenControl(toolbox, available)}<button type="button" class="action-button" data-action="sleep" style="margin-top:12px" ${available && canWrite() ? '' : 'disabled'}>立即息屏</button>${available ? '' : `<p class="caption" style="margin-top:10px">${esc(obj(caps.screen).reason || '背光能力尚未验证')}</p>`}</article>${fanControl(policy)}${lightControl(light)}${menu('thermal', '温度与风扇详情', policy.active ? '参考温度与来源 · 只读' : '原厂管理 · 只读')}${menu('web', '网页设置', '曲线、联动、登录与配对')}<div class="section-label"><h2>POWER / 电源</h2><span>${powerPending ? '倒计时中' : '需确认'}</span></div><div class="action-stack"><button type="button" class="action-button" data-action="reboot" ${canWrite() && !powerPending ? '' : 'disabled'}>重新启动 NAS</button><button type="button" class="action-button danger" data-action="shutdown" ${canWrite() && !powerPending ? '' : 'disabled'}>关闭 NAS</button></div><p class="info-note">确认后有 5 秒可取消。关机后不会自动开机。</p>`;
   }
 
   function web() {
@@ -648,6 +725,8 @@
       if (result.state) state.data.toolbox = result.state;
       if (result.insights) state.data.insights = result.insights;
       if (result.web) state.data.web = result.web;
+      if (result.fan_policy) state.data.fan = result.fan_policy;
+      if (result.light_policy) state.data.light = result.light_policy;
       if (success) toast(success);
       syncPower();
       return result;
@@ -669,7 +748,30 @@
     const ok = await action('screen.brightness', { value }, '亮度已调整');
     state.brightnessDirty = false;
     if (!ok && pct(obj(obj(state.data.toolbox).screen).brightness) !== null) state.brightness = Math.round(obj(obj(state.data.toolbox).screen).brightness);
-    softRender();
+    softRender(true);
+  }
+
+  async function setFanQuick(channel, mode) {
+    const name = channel === 'system' ? '系统风扇' : 'CPU 风扇';
+    const label = { auto: '自动', low: '低档', medium: '中档', high: '高档', manual: '手动' }[mode] || mode;
+    await action('fan.policy.quick', { channel, mode }, `${name}已切换${label}`);
+  }
+
+  async function setLight() {
+    const hue = Number($('light-hue')?.value);
+    const brightness = Number($('light-brightness')?.value);
+    const effect = Number($('light-effect')?.value);
+    if (![hue, brightness, effect].every(Number.isFinite)) return;
+    await action('light.policy.quick', { hue, brightness, effect }, '灯光已调整');
+    state.lightHue = state.lightBrightness = state.lightEffect = null;
+    softRender(true);
+  }
+
+  async function setSleepTimeout() {
+    const value = Number($('sleep-timeout')?.value);
+    if (!Number.isFinite(value)) return;
+    await action('settings.update', { settings: { sleep_timeout: value } }, '息屏时间已保存');
+    softRender(true);
   }
 
   function requestPower(operation) {
@@ -792,6 +894,7 @@
     if (act === 'reboot' || act === 'shutdown') requestPower(act === 'shutdown' ? 'poweroff' : 'reboot');
     if (act === 'cancel-power') cancelPower();
     if (act === 'container') { state.containerId = button.dataset.id; navigate('container'); }
+    if (act === 'fan-quick') setFanQuick(button.dataset.channel, button.dataset.mode);
     if (act === 'container-act') containerAction(button.dataset.id, button.dataset.operation);
     if (act === 'vm-act') vmAction(button.dataset.id, button.dataset.operation);
     if (act === 'pairing') generatePairing();
@@ -810,9 +913,21 @@
       const output = document.querySelector('[data-brightness-value]');
       if (output) output.innerHTML = `${state.brightness}<small style="font-size:15px;color:var(--dim)"> %</small>`;
     }
+    if (event.target.id === 'light-hue') {
+      state.lightHue = Number(event.target.value);
+      const swatch = document.querySelector('.light-swatch');
+      if (swatch) swatch.style.background = lightHueColor(state.lightHue);
+    }
+    if (event.target.id === 'light-brightness') {
+      state.lightBrightness = Number(event.target.value);
+      const output = document.querySelector('[data-light-brightness]');
+      if (output) output.textContent = `${Math.round(state.lightBrightness)}%`;
+    }
   });
   document.addEventListener('change', event => {
     if (event.target.id === 'brightness') setBrightness();
+    if (['light-hue', 'light-brightness', 'light-effect'].includes(event.target.id)) setLight();
+    if (event.target.id === 'sleep-timeout') setSleepTimeout();
   });
 
   document.addEventListener('keydown', event => {

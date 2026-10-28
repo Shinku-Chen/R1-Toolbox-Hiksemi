@@ -5,11 +5,12 @@ fnMonitor adapter against these snapshots.  Nothing touches the host: fans,
 SMART, Docker, power and the screen are simulated in memory.
 
 The small screen and the web panel share one :class:`FakeNas`, so changing the
-brightness on the small screen is visible in the web panel, and web fan/light
-rules show up in the small screen's read-only cards.
+brightness on the small screen is visible in the web panel; web and small-screen
+fan/light quick changes share the same simulated policy.
 """
 
 from collections import deque
+import colorsys
 import copy
 import datetime
 import math
@@ -226,6 +227,20 @@ class FakeNas:
                 self.fan_active = False
                 return {'ok': True, 'settings_saved': True, 'pending': False,
                         'fan_policy': self.fan_snapshot()}
+            if name == 'fan.policy.quick':
+                if not isinstance(payload, dict) or set(payload) != {'channel', 'mode'} or payload.get('channel') not in ('cpu', 'system') or payload.get('mode') not in ('auto', 'low', 'medium', 'high', 'manual'):
+                    return {'ok': False, 'settings_saved': False, 'error': '风扇快速调节参数无效'}
+                config = copy.deepcopy(self.fan_config)
+                item = config['channels'][payload['channel']]
+                if payload['mode'] == 'auto':
+                    item['mode'] = 'vendor'
+                elif payload['mode'] == 'manual':
+                    item['mode'] = 'temperature'
+                else:
+                    item['mode'] = 'manual'
+                    item['manual_percent'] = {'low': 50, 'medium': 75, 'high': 100}[payload['mode']]
+                payload = {'config': config, 'apply': True}
+                name = 'fan.policy.update'
             if name != 'fan.policy.update' or not isinstance(payload, dict) or 'config' not in payload:
                 return {'ok': False, 'settings_saved': False, 'error': '风扇配置参数无效'}
             config = payload['config']
@@ -278,6 +293,19 @@ class FakeNas:
 
     def light_action(self, name, payload):
         with self.lock:
+            if name == 'light.policy.quick':
+                if not isinstance(payload, dict) or set(payload) != {'hue', 'brightness', 'effect'}:
+                    return {'ok': False, 'settings_saved': False, 'error': '灯光快速调节参数无效'}
+                valid = all(type(payload[key]) is int for key in ('hue', 'brightness', 'effect'))
+                if not valid or not 0 <= payload['hue'] <= 359 or not 0 <= payload['brightness'] <= 100 or not 0 <= payload['effect'] <= 3:
+                    return {'ok': False, 'settings_saved': False, 'error': '灯光快速调节参数无效'}
+                red, green, blue = colorsys.hsv_to_rgb(payload['hue'] / 360.0, 1.0, 1.0)
+                color = '#%02X%02X%02X' % (round(red * 255), round(green * 255), round(blue * 255))
+                config = copy.deepcopy(self.light_config)
+                config.update(enabled=True, mode='manual', brightness=payload['brightness'])
+                config['manual'] = {'mode': payload['effect'], 'color': color, 'brightness': payload['brightness']}
+                payload = {'config': config, 'apply': True}
+                name = 'light.policy.update'
             if name != 'light.policy.update' or not isinstance(payload, dict) or 'config' not in payload:
                 return {'ok': False, 'settings_saved': False, 'error': '灯光配置参数无效'}
             config = payload['config']

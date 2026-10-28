@@ -419,15 +419,15 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                     except Exception:
                         self.send_json(400, {"ok": False, "error": "网页配对暂不可用，请检查网页服务状态"}, origin)
                 return
-            if action in ("fan.policy.update", "fan.policy.release"):
+            if action in ("fan.policy.update", "fan.policy.release", "fan.policy.quick"):
                 if fan_policy is None:
                     self.send_json(400, {"ok": False, "error": "独立温控服务未启用"}, origin)
                 else:
                     value = fan_policy.action(action, payload)
                     self.send_json(200 if value.get("ok") else 400, value, origin)
                 return
-            if action in ("light.policy.update", "monitor.settings.update"):
-                destination = light_policy if action == "light.policy.update" else monitoring
+            if action in ("light.policy.update", "light.policy.quick", "monitor.settings.update"):
+                destination = light_policy if action in ("light.policy.update", "light.policy.quick") else monitoring
                 if destination is None:
                     self.send_json(400, {"ok": False, "error": "配置服务未启用"}, origin)
                 else:

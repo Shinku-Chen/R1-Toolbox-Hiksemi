@@ -23,3 +23,26 @@ body{background:var(--bg);color:var(--text);font:20px/1.5 "Microsoft YaHei","Pin
 .mono-wrap{overflow-wrap:anywhere}
 
 @media(max-width:360px){.metric-row .spark.small{display:none}.metric-row{gap:8px}}
+
+/* Touch quick controls for the two fan channels, light and screen timeout. */
+.fan-quick-row{margin-top:16px}
+.fan-quick-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:9px}
+.fan-quick-head strong{font-size:19px;font-weight:500}
+.fan-quick-head span{font:13px var(--mono);color:var(--dim)}
+.fan-quick-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.fan-mode,.fan-manual{min-height:56px;border:1px solid var(--line);border-radius:12px;background:var(--raised);color:var(--text);font-size:17px}
+.fan-mode[aria-pressed=true],.fan-manual.is-current{background:var(--text);color:var(--bg);border-color:var(--text)}
+.fan-manual{width:100%;margin-top:8px;color:var(--muted)}
+.control-label{display:block;font-size:15px;color:var(--muted);margin:16px 0 4px}
+.control-label output{float:right;font:17px var(--mono);color:var(--text)}
+.control-select{width:100%;min-height:56px;border:1px solid var(--line);border-radius:12px;background:var(--raised);color:var(--text);font-size:18px;font-family:inherit;padding:0 14px}
+.control-select:disabled,.fan-mode:disabled,.fan-manual:disabled{opacity:.45}
+.control-select-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:18px}
+.control-select-row .control-label{margin:0}
+.control-select-row .control-select{width:auto;min-width:150px}
+.light-preview{display:flex;align-items:center;gap:14px;margin:4px 0 10px}
+.light-swatch{width:46px;height:46px;flex-shrink:0;border-radius:50%;border:1px solid #ffffff22;box-shadow:0 0 0 5px #ffffff05}
+.light-preview strong{font-size:18px;font-weight:500}
+.light-hue{accent-color:var(--lime)}
+.light-hue::-webkit-slider-runnable-track{background:linear-gradient(90deg,#ff3b30,#ffd60a,#34c759,#32ade6,#5856d6,#ff2d95,#ff3b30)}
+.light-hue::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;margin-top:-6px;border-radius:50%;background:#fff;box-shadow:0 0 0 3px #0006}

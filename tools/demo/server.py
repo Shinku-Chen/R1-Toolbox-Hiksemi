@@ -167,9 +167,9 @@ class _ScreenHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, {'ok': True, 'web': value})
             return
-        if action in ('fan.policy.update', 'fan.policy.release'):
+        if action in ('fan.policy.update', 'fan.policy.release', 'fan.policy.quick'):
             result = self.demo.fan_policy.action(action, payload)
-        elif action == 'light.policy.update':
+        elif action in ('light.policy.update', 'light.policy.quick'):
             result = self.demo.light_policy.action(action, payload)
         elif action == 'monitor.settings.update':
             result = self.demo.monitoring.action(action, payload)

@@ -15,6 +15,7 @@ import time
 
 
 CHANNELS = ("cpu", "system")
+QUICK_PERCENT = {"low": 50, "medium": 75, "high": 100}
 FIELDS = {"mode", "sources", "quiet_below", "normal_at", "full_at",
           "quiet_percent", "normal_percent", "manual_percent"}
 DEFAULT_CONFIG = {"schema_version": 1, "channels": {
@@ -359,19 +360,37 @@ class FanPolicyController:
         saved = False
         try:
             _require(isinstance(payload, dict), "需要配置对象")
+            confirmed = False
             if name == "fan.policy.release":
                 _require(set(payload) == {"confirmed"} and payload["confirmed"] is True, "恢复原厂管理需要明确确认")
                 config = copy.deepcopy(self.config)
                 for item in config["channels"].values():
                     item["mode"] = "vendor"
-                apply = True
+                apply, confirmed = True, True
+            elif name == "fan.policy.quick":
+                _require(set(payload) == {"channel", "mode"}, "风扇快速调节参数无效")
+                channel, mode = payload["channel"], payload["mode"]
+                _require(channel in CHANNELS, "风扇通道无效")
+                _require(mode in ("auto", "low", "medium", "high", "manual"), "风扇快速模式无效")
+                config = copy.deepcopy(self.config)
+                item = config["channels"][channel]
+                if mode == "auto":
+                    item["mode"] = "vendor"
+                elif mode in QUICK_PERCENT:
+                    item["mode"] = "manual"
+                    item["manual_percent"] = QUICK_PERCENT[mode]
+                else:
+                    item["mode"] = "temperature"
+                apply, confirmed = True, True
             elif name == "fan.policy.update":
                 _require(not set(payload) - {"config", "apply", "confirmed"} and "config" in payload
                          and type(payload.get("apply", False)) is bool, "风扇配置请求无效")
-                config, apply = validate_config(payload["config"]), payload.get("apply", False)
-                _require(not apply or payload.get("confirmed") is True, "应用风扇温控需要明确确认")
+                config, apply = payload["config"], payload.get("apply", False)
+                confirmed = payload.get("confirmed") is True
             else:
                 raise ValueError("不支持的风扇配置操作")
+            config = validate_config(config)
+            _require(not apply or confirmed, "应用风扇温控需要明确确认")
             with self.lock:
                 _require(not self.busy and not self.stop_event.is_set(), "风扇控制正在切换或停止，请稍后重试")
                 resume = self.active_on_boot

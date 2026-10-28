@@ -81,6 +81,14 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(request(self.screen + '/api/history?range=2h')[0], 400)
         self.assertNotEqual(request(self.screen + '/../runtime/web_config.py')[0], 200)
 
+    def test_small_screen_quick_fan_and_light_actions(self):
+        code, value = self.action({'action': 'fan.policy.quick', 'channel': 'cpu', 'mode': 'low'})
+        self.assertEqual(code, 200)
+        self.assertEqual(value['fan_policy']['config']['channels']['cpu']['manual_percent'], 50)
+        code, value = self.action({'action': 'light.policy.quick', 'hue': 120, 'brightness': 40, 'effect': 2})
+        self.assertEqual(code, 200)
+        self.assertEqual(value['light_policy']['config']['manual'], {'mode': 2, 'color': '#00FF00', 'brightness': 40})
+
     def test_action_requires_token_and_updates_both_panels(self):
         code, _ = self.action({'action': 'screen.brightness', 'value': 66}, token=False)
         self.assertEqual(code, 403)

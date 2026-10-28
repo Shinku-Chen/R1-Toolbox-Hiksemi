@@ -18,7 +18,17 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
   const checks = [], sizes = [], pageErrors = [], posts = [], external = [];
   let offline = false, failNextAction = false, failNextCancel = false, delayAction = false, historyFail = false, pairingExpires = 180;
-  let independentPolicy = null, lightPolicy = null;
+  const fanConfig = { schema_version: 1, channels: {
+    cpu: { mode: 'vendor', sources: [], quiet_below: 40, normal_at: 55, full_at: 70, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
+    system: { mode: 'vendor', sources: [], quiet_below: 35, normal_at: 45, full_at: 55, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
+  } };
+  let independentPolicy = { config: fanConfig, active: false, busy: false, capability: { available: true, reason: '' }, channels: {
+    cpu: { active: false, target_percent: null, reference_c: null }, system: { active: false, target_percent: null, reference_c: null },
+  }, sources: [] };
+  const lightConfig = { schema_version: 1, enabled: false, mode: 'manual', sources: [], stops: [], brightness: 70,
+    manual: { mode: 1, color: '#00C832', brightness: 70 }, schedule: { enabled: false, start: '22:00', end: '07:00', brightness: 15 } };
+  let lightPolicy = { config: lightConfig, active: false, busy: false, capability: { available: true, reason: '' },
+    target: { mode: 1, color: '#00C832', brightness: 70 }, runtime: {} };
   const monitoring = { available: true, settings: { thresholds: { cpu_temp_warn: 70, cpu_temp_critical: 80 } }, power: { available: true, cpu_package_w: 12.5 }, disk_io: [{ name: 'sda', read_bytes_per_sec: 1048576, write_bytes_per_sec: 0 }], summary: { status: 'ok', label: '已采集指标未见告警', known_metrics: 12, unknown_metrics: 2 } };
   const historyFixture = { available: true, range: '1h', series: [
     { id: 'cpu_usage_percent', points: [[Date.now() / 1000 - 1800, 20], [Date.now() / 1000 - 900, 35], [Date.now() / 1000, 18]] },
@@ -31,7 +41,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
   const webConfig = { enabled: true, host: '0.0.0.0', port: 18732, scheme: 'http', addresses: ['http://192.168.1.10:18732'], pairing: { active: false, expires_in: 0 } };
   const settings = { theme: 'dark', font_scale: 100, page_interval: 0, sleep_timeout: 0, brightness: 80, night_enabled: false, night_start: '22:00', night_end: '07:00', night_brightness: 20, enabled_pages: ['overview', 'storage', 'network', 'controls', 'apps', 'system', 'settings'] };
   const state = {
-    capabilities: { screen: { available: true, reason: '' }, fans: { available: false, reason: '缺少可控制的风扇通道' }, rgb: { available: false, reason: '接口尚未验证' }, power: { available: true, reason: '' } },
+    capabilities: { screen: { available: true, reason: '' }, fans: { available: true, reason: '' }, rgb: { available: true, reason: '' }, power: { available: true, reason: '' } },
     settings, screen: { brightness: 55, asleep: false, max_brightness: 96000 },
     fans: { channels: [], official: { control_available: false, cpu_rpm: null, system_rpm: null, mode: 'auto' } },
     rgb: { bus: null, mode: 1, color: '#82ddc2', brightness: 60, availableBuses: [0, 4] }, power: { pending: null, executing: false, last_error: null },
@@ -41,7 +51,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     system: { model: 'HIKSEMI R1', cpu_model: 'Intel N100', cpu_logical_cores: 4, load_average: [.34, .52, .6], process_count: 142, memory: { used_bytes: 3e9, available_bytes: 13e9, total_bytes: 16e9, usage_percent: 18.75, swap_used_bytes: 0, swap_total_bytes: 0 }, cpu_cores: [0, 1, 2, 3].map(id => ({ id, usage_percent: 16 + id })) },
     device: { identity: { hostname: 'R1-NAS', os: 'Linux fixture', firmware: 'fixture-firmware', kernel: '6.1-fixture', dmi: { model: 'R1' } }, cpu: { architecture: 'x86_64', physical_cores: 4, sockets: 1 }, thermal: [{ id: 'coretemp:0', driver: 'coretemp', label: 'Package', celsius: 46, critical_celsius: 100 }], fans: [{ id: 'hwmon0:fan1', label: 'fan1', rpm: 1200 }], network: [{ name: 'eth0', mtu: 1500, speed_mbps: 2500, duplex: 'full', ipv6_addresses: [{ address: '2001:db8:1234:5678:90ab:cdef:1234:5678', prefix_length: 64, scope: 'global' }], address_status: { ipv6: 'ok' }, default_gateways: { ipv4: [{ gateway: '192.168.1.1', metric: 100, source: '/proc/net/route' }], ipv6: [{ gateway: 'fe80::1', metric: 200, source: '/proc/net/ipv6_route' }] }, route_status: { ipv4: 'ok', ipv6: 'ok' } }], network_config: { default_routes: { ipv4: [{ interface: 'eth0', gateway: '192.168.1.1', metric: 100, source: '/proc/net/route' }], ipv6: [{ interface: 'eth0', gateway: 'fe80::1', metric: 200, source: '/proc/net/ipv6_route' }] }, route_status: { ipv4: 'ok', ipv6: 'ok' }, dns: { servers: ['127.0.0.53', '2001:4860:4860::8888'], upstream_servers: ['192.168.1.1', '2001:4860:4860::8888'], stub_servers: ['127.0.0.53'], search: ['home.arpa', 'fixture.local'], domains: ['home.arpa'], status: 'partial', reason: '部分解析器状态文件不可读取' } }, storage: { devices: [{ name: 'sda', model: 'Test disk', serial: 'FIXTURE-ONLY', vendor: 'Fixture', state: 'running' }], raid: [] }, capabilities: {} },
     interfaces: [{ name: 'eth0', ipv4: ['192.168.1.10'], mac: '00:11:22:33:44:55', operstate: 'up', rx_bytes: 3e9, tx_bytes: 1e9, rx_bytes_per_sec: 4096, tx_bytes_per_sec: 1024 }],
-    disks: { available: true, reason: '', items: [{ id: 'sda', device: '/dev/sda', model: 'Test disk', size_bytes: 4e12, temp_c: 38, health: { passed: true }, standby: false }] },
+    disks: { available: true, reason: '', items: [{ id: 'sda', device: '/dev/sda', model: 'Test disk', size_bytes: 4e12, temp_c: 38, health: { passed: true }, standby: false, smart_available: true }, { id: 'sdb', device: '/dev/sdb', model: 'No SMART disk', size_bytes: 1e12, temp_c: null, health: { passed: null }, standby: false, smart_available: false }] },
     containers: { available: true, reason: '', items: [{ id: 'abcdef123456', name: 'test-db', image: 'postgres:17', state: 'running', status: 'Up 2 hours', cpu_percent: 125, memory_bytes: 125829120, ports: '0.0.0.0:5432->5432/tcp', protected: false, available_actions: ['stop', 'restart'] }, { id: '123456abcdef', name: 'r1-toolbox', image: 'ghcr.io/shinku-chen/r1-toolbox:preview', state: 'exited', protected: true, available_actions: [] }] },
     vms: { available: false, reason: '宿主未提供 libvirt 服务', items: [] }, gpu: { available: false, reason: '没有可用 GPU 采样', devices: [] },
     ports: [{ protocol: 'tcp', address: '127.0.0.1', port: 18731 }], processes: [{ pid: 900, name: 'hiksemi-sub', cpu_percent: 120, memory_bytes: 2e8 }],
@@ -83,6 +93,23 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
         if (body.action === 'container.action') { assert.equal(body.confirmed, true); insights.containers.items[0].state = body.operation === 'stop' ? 'exited' : 'running'; insights.containers.items[0].available_actions = body.operation === 'stop' ? ['start'] : ['stop', 'restart']; }
         if (body.action === 'vm.action') { assert.equal(body.confirmed, true); insights.vms.items[0].state = body.operation === 'shutdown' ? 'shut off' : 'running'; }
         if (body.action === 'web.pairing') { assert.equal(body.rotate, true); webConfig.pairing = { active: true, expires_in: pairingExpires }; data = { ok: true, web: { code: '12345', expires_in: pairingExpires, port: webConfig.port, addresses: webConfig.addresses, http: true } }; }
+        else if (body.action === 'fan.policy.quick') {
+          assert.ok(['cpu', 'system'].includes(body.channel));
+          const channel = fanConfig.channels[body.channel];
+          if (body.mode === 'auto') channel.mode = 'vendor';
+          else if (body.mode === 'manual') { assert.ok(channel.sources.length); channel.mode = 'temperature'; }
+          else { channel.mode = 'manual'; channel.manual_percent = { low: 50, medium: 75, high: 100 }[body.mode]; }
+          independentPolicy = { ...independentPolicy, active: body.mode !== 'auto', config: fanConfig, channels: {
+            ...independentPolicy.channels, [body.channel]: { active: body.mode !== 'auto', target_percent: channel.manual_percent || null, reference_c: null },
+          } };
+          data = { ok: true, fan_policy: independentPolicy };
+        } else if (body.action === 'light.policy.quick') {
+          assert.ok(Number.isInteger(body.hue) && Number.isInteger(body.brightness) && Number.isInteger(body.effect));
+          lightConfig.enabled = true; lightConfig.mode = 'manual'; lightConfig.brightness = body.brightness;
+          lightConfig.manual = { mode: body.effect, color: '#00FF00', brightness: body.brightness };
+          lightPolicy = { ...lightPolicy, active: true, config: lightConfig, target: lightConfig.manual };
+          data = { ok: true, light_policy: lightPolicy };
+        }
         else data = { ok: true, state, insights };
       } else if (endpoint.endsWith('/history') && historyFail) return route.fulfill({ status: 503, headers, body: JSON.stringify({ error: '历史服务不可用' }) });
       else data = endpoint.endsWith('/history') ? historyFixture : endpoint.endsWith('/status') ? status : endpoint.endsWith('/toolbox') ? state : endpoint.endsWith('/web-config') ? webConfig : endpoint.endsWith('/fan-policy') ? independentPolicy : endpoint.endsWith('/light-policy') ? lightPolicy : endpoint.endsWith('/monitoring') ? monitoring : insights;
@@ -161,15 +188,17 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.match(await page.locator('.screen-body').textContent(), /Package/);
     await back();
     await root('storage');
-    assert.equal(await page.locator('.drive-row').count(), 1);
-    assert.match(await page.locator('.screen-body').textContent(), /\/drives\/data/);
+    assert.equal(await page.locator('.drive-row').count(), 1, 'only physical disks with SMART are listed');
+    const storageText = await page.locator('.screen-body').textContent();
+    assert.match(storageText, /SMART/);
+    assert.doesNotMatch(storageText, /\/drives\/data/, 'filesystem mounts are not shown as physical disks');
     await root('network');
     assert.match(await page.locator('.screen-body').textContent(), /192\.168\.1\.10/);
     assert.match(await page.locator('.screen-body').textContent(), /2500 Mbps/);
     await open('ports');
     assert.match(await page.locator('.screen-body').textContent(), /18731/);
     await back();
-    checks.push('metrics, processor, real history charts, thermal sensors, storage mounts and network/ports details');
+    checks.push('metrics, processor, history charts, thermal sensors, SMART physical disks and network/ports details');
 
     await root('apps');
     assert.equal(await page.locator('.app-summary .total').textContent(), '2');
@@ -201,6 +230,23 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     checks.push('container list/detail, confirmed stop, protected container, VM start/shutdown from real insights');
 
     await root('controls');
+    assert.equal(await page.locator('.fan-quick-row').count(), 2);
+    await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]')?.getAttribute('aria-pressed') === 'true');
+    assert.equal(fanConfig.channels.cpu.mode, 'manual');
+    assert.equal(fanConfig.channels.cpu.manual_percent, 50);
+    await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]')?.getAttribute('aria-pressed') === 'true');
+    assert.equal(fanConfig.channels.cpu.mode, 'vendor');
+    await page.locator('#light-hue').evaluate(node => { node.value = '120'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); });
+    await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光已调整');
+    assert.deepEqual(lightConfig.manual, { mode: 1, color: '#00FF00', brightness: 70 });
+    await page.locator('#light-effect').selectOption('2');
+    await page.waitForTimeout(250);
+    assert.ok(posts.some(item => item.action === 'light.policy.quick' && item.effect === 2));
+    await page.locator('#sleep-timeout').selectOption('300');
+    await page.waitForTimeout(250);
+    assert.equal(settings.sleep_timeout, 300);
     await page.locator('#brightness').evaluate(node => { node.value = '66'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); });
     await page.waitForFunction(() => document.getElementById('toast').textContent === '亮度已调整');
     assert.equal(state.screen.brightness, 66);
@@ -218,7 +264,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await page.waitForFunction(() => !document.getElementById('sleep').hidden);
     state.screen.asleep = false;
     await page.waitForFunction(() => document.getElementById('sleep').hidden);
-    checks.push('brightness writes real value, failure keeps server value, sleep/wake with first-touch wake and external state');
+    checks.push('fan quick modes, light hue/brightness/effect, sleep timeout, brightness failure, sleep/wake with external state');
 
     await page.locator('[data-action="reboot"]').click();
     assert.equal(posts.filter(item => item.action === 'power.request').length, 0);

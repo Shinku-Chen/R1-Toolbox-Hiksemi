@@ -142,6 +142,18 @@ class LightTests(unittest.TestCase):
         restored.stop()
         self.assertEqual([], self.writes())
 
+    def test_small_screen_hue_quick_action_builds_valid_manual_config(self):
+        with mock.patch.object(self.light, "_save"):
+            self.light.capability = {"available": True, "reason": None}
+            result = self.light.action("light.policy.quick", {"hue": 120, "brightness": 40, "effect": 2})
+            self.assertTrue(result["ok"], result)
+            self.light.worker.join(timeout=2)
+            config = self.light.config
+            self.assertTrue(config["enabled"])
+            self.assertEqual(config["mode"], "manual")
+            self.assertEqual(config["manual"], {"mode": 2, "color": "#00FF00", "brightness": 40})
+            self.assertEqual(config["brightness"], 40)
+
     def test_manual_apply_readback_conflict_and_exact_raw_restore(self):
         state = self.apply()
         self.assertTrue(state['active'] and state['applied'] and state['active_on_boot'])

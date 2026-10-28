@@ -1,4 +1,5 @@
 """Persistent opt-in lighting rules over the verified, non-force I2C adapter."""
+import colorsys
 import copy
 import datetime
 import json
@@ -33,6 +34,12 @@ def integer(value, low, high):
 def color(value):
     require(isinstance(value, str) and re.fullmatch(r'#[0-9a-fA-F]{6}', value), '灯光颜色需为 #RRGGBB')
     return value.upper()
+
+
+def hue_color(hue):
+    """Convert a 0–359° hue into the full-brightness sRGB value stored in config."""
+    red, green, blue = colorsys.hsv_to_rgb((hue % 360) / 360.0, 1.0, 1.0)
+    return '#%02X%02X%02X' % (round(red * 255), round(green * 255), round(blue * 255))
 
 
 def validate_config(value):
@@ -309,10 +316,25 @@ class LightPolicyController:
     def action(self, name, payload):
         saved = False
         try:
-            require(name == 'light.policy.update' and isinstance(payload, dict)
-                    and not set(payload) - {'config', 'apply'} and 'config' in payload
-                    and type(payload.get('apply', False)) is bool, '灯光配置请求无效')
-            config, apply = validate_config(payload['config']), payload.get('apply', False)
+            if name == 'light.policy.quick':
+                require(isinstance(payload, dict) and set(payload) == {'hue', 'brightness', 'effect'},
+                        '灯光快速调节参数无效')
+                hue = integer(payload['hue'], 0, 359)
+                brightness = integer(payload['brightness'], 0, 100)
+                effect = integer(payload['effect'], 0, 3)
+                require(self.capability.get('available') is True, '尚未验证唯一灯控设备')
+                config = copy.deepcopy(self.config)
+                config.update(enabled=True, mode='manual', brightness=brightness)
+                config['manual'] = {'mode': effect, 'color': hue_color(hue), 'brightness': brightness}
+                apply = True
+            elif name == 'light.policy.update':
+                require(isinstance(payload, dict)
+                        and not set(payload) - {'config', 'apply'} and 'config' in payload
+                        and type(payload.get('apply', False)) is bool, '灯光配置请求无效')
+                config, apply = validate_config(payload['config']), payload.get('apply', False)
+            else:
+                raise ValueError('不支持的灯光配置操作')
+            config = validate_config(config)
             with self.lock:
                 require(not self.busy and not self.stopped.is_set(), '灯光正在切换或停止，请稍后重试')
                 resume = self.resume_on_boot if not apply or config['enabled'] else False
