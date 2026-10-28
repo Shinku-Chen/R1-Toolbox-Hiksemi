@@ -71,6 +71,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 
 ## 提交规范
 
+- 仓库只保留 `dev` 和 `main` 两个分支。日常修改与提交使用 `dev`，通过完整检查后将 `main` 快进到已验证提交；不为每项任务新建长期分支。清理旧分支前必须核对独有提交，并通过合并历史保留全部提交，不用强制推送或重置丢弃历史。
 - commit 标题：`type(scope): 简述`，`type` ∈ `feat/fix/docs/refactor/perf/test/chore/build/ci`；祈使句、≤50 字符、结尾不加句号，默认中文，技术术语保留英文。
 - 一个 commit 只做一件事；不把无关修复、格式化或临时探针混进来。
 - 改完当轮 push；协作/公开动作（开 PR、发版）按仓库规则另行确认。

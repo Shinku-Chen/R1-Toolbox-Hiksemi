@@ -2,7 +2,7 @@ name: 检查与发布 Toolbox 镜像
 
 on:
   push:
-    branches: [main, 'feat/toolbox-image', 'feat/readonly-ui-mount', 'feat/image-ui', 'fix/electron-process-detection', 'fix/histor-window-handshake', 'feat/interactive-toolbox', 'feat/device-controls', 'feat/readable-network', 'feat/independent-fan-policy', 'feat/integrated-dashboard', 'feat/reference-panel-ui', 'fix/fan-preflight', 'fix/docker-availability', 'fix/fan-reapply', 'fix/device-identity', 'feat/fnmonitor-web', 'feat/fan-diagnostics', 'fix/fan-proc-read', 'feat/fan-native-modes', 'feat/fan-screen-polish']
+    branches: [main, dev]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -66,6 +66,9 @@ jobs:
     needs: checks
     if: github.event_name != 'pull_request' && github.repository == 'Shinku-Chen/R1-Toolbox'
     runs-on: ubuntu-latest
+    concurrency:
+      group: r1-image-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write

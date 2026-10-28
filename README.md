@@ -6,7 +6,9 @@
 
 ## 下载与部署
 
-镜像：`ghcr.io/shinku-chen/r1-toolbox`，平台 `linux/amd64`。开发分支发布 `preview`，主分支发布 `latest`；每次构建另有固定的 `sha-<完整提交>` 标签。
+镜像：`ghcr.io/shinku-chen/r1-toolbox`，平台 `linux/amd64`。仓库只保留 `dev` 开发分支和 `main` 主分支；`dev` 发布 `preview`，`main` 发布 `latest`，每次构建另有固定的 `sha-<完整提交>` 标签。日常开发在 `dev` 完成，检查通过后将 `main` 快进到已验证的提交。
+
+同一提交从 `dev` 推进到 `main` 时，发布流程复用已有的 SHA 镜像并重新校验、执行隔离检查，再更新 `latest`；不会重新构建并覆盖不可变的 SHA 标签。同一 SHA 的发布任务串行执行。
 
 1. 在 [Actions](https://github.com/Shinku-Chen/R1-Toolbox/actions) 下载成功构建的产物。
 2. 在线：在 NAS Docker 市场用产物中的 `composer.yml` 更新或创建项目并启动。

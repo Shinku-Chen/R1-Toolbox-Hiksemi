@@ -28,11 +28,43 @@ else
 fi
 
 mkdir -p dist
-# Docker's Bookworm builder compiles and packages the native fan adapter.
-docker build --platform linux/amd64 --build-arg "TOOLBOX_VERSION=$version" \
-  --label "org.opencontainers.image.revision=$commit" -t "$image" .
+# A failed registry request is not evidence that an immutable tag is absent.
+registry_has_image() {
+  if docker manifest inspect "$image" > dist/registry-manifest.json \
+      2> dist/registry-manifest-error.log; then
+    return 0
+  fi
+  if LC_ALL=C grep -Eqi '(^|[[:space:]:])(manifest unknown|no such manifest)([[:space:]:]|$)' \
+      dist/registry-manifest-error.log; then
+    return 1
+  fi
+  echo '无法确认不可变镜像标签是否存在，已停止发布。' >&2
+  cat dist/registry-manifest-error.log >&2
+  exit 1
+}
+
+if [ "${PUBLISH_IMAGE:-0}" = 1 ]; then
+  if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+    echo 'PR 检查禁止发布镜像。' >&2
+    exit 1
+  fi
+  : "${GHCR_TOKEN:?missing GHCR_TOKEN}"
+  : "${GITHUB_ACTOR:?missing GITHUB_ACTOR}"
+  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+  trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+fi
+
+# Fast-forwarding dev to main promotes the verified image for the same commit.
+# Rebuilding it would change timestamps and conflict with the immutable sha tag.
+if [ "${PUBLISH_IMAGE:-0}" = 1 ] && registry_has_image; then
+  docker pull --platform linux/amd64 "$image"
+else
+  # Docker's Bookworm builder compiles and packages the native fan adapter.
+  docker build --platform linux/amd64 --build-arg "TOOLBOX_VERSION=$version" \
+    --label "org.opencontainers.image.revision=$commit" -t "$image" .
+fi
 docker image inspect "$image" > dist/build-image-inspect.json
-python - dist/build-image-inspect.json "$version" <<'PY'
+python - dist/build-image-inspect.json "$version" "$commit" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -42,12 +74,15 @@ if len(images) != 1:
     raise SystemExit("镜像检查没有返回唯一结果")
 image = images[0]
 config = image.get("Config", {})
+labels = config.get("Labels") or {}
 expected = {
     "architecture": image.get("Architecture") == "amd64",
     "os": image.get("Os") == "linux",
     "entrypoint": config.get("Entrypoint") == ["/usr/local/bin/r1-toolbox"],
     "command": config.get("Cmd") == ["run"],
     "version": "TOOLBOX_VERSION=" + sys.argv[2] in config.get("Env", []),
+    "version_label": labels.get("org.opencontainers.image.version") == sys.argv[2],
+    "revision": labels.get("org.opencontainers.image.revision") == sys.argv[3],
 }
 failed = [name for name, valid in expected.items() if not valid]
 if failed:
@@ -68,17 +103,9 @@ fi
 sudo python3 tests/check_image_ui_linux.py --image "$image"
 
 if [ "${PUBLISH_IMAGE:-0}" = 1 ]; then
-  if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-    echo 'PR 检查禁止发布镜像。' >&2
-    exit 1
-  fi
-  : "${GHCR_TOKEN:?missing GHCR_TOKEN}"
-  : "${GITHUB_ACTOR:?missing GITHUB_ACTOR}"
-  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-  trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
-
-  # Never replace a previously published sha tag with a different image.
-  if docker manifest inspect "$image" >/dev/null 2>&1; then
+  # Recheck after smoke tests: another publisher may have filled a missing tag.
+  # The workflow also serializes publishers of the same commit across branches.
+  if registry_has_image; then
     docker pull --platform linux/amd64 "$image"
     if [ "$(docker image inspect --format '{{.Id}}' "$image")" != "$image_id" ]; then
       echo '相同源码 SHA 已发布不同镜像，已停止以保护不可变标签。' >&2
@@ -86,6 +113,13 @@ if [ "${PUBLISH_IMAGE:-0}" = 1 ]; then
     fi
   else
     docker push "$image"
+  fi
+
+  # Read back the sha tag before advancing a channel or saving offline delivery.
+  docker pull --platform linux/amd64 "$image"
+  if [ "$(docker image inspect --format '{{.Id}}' "$image")" != "$image_id" ]; then
+    echo '已发布镜像 ID 与本次验证不一致，已停止。' >&2
+    exit 1
   fi
   docker tag "$image" "$repository:$channel"
   docker push "$repository:$channel"
@@ -100,13 +134,6 @@ if [ "${PUBLISH_IMAGE:-0}" = 1 ]; then
       docker push "$repository:$release_tag"
       ;;
   esac
-
-  # Read back the actual registry tag before saving the matching offline image.
-  docker pull --platform linux/amd64 "$image"
-  if [ "$(docker image inspect --format '{{.Id}}' "$image")" != "$image_id" ]; then
-    echo '已发布镜像 ID 与本次构建不一致，已停止。' >&2
-    exit 1
-  fi
 fi
 
 # docker save (not export) preserves RepoTags, image configuration, and layers.
