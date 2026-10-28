@@ -72,6 +72,7 @@ npm ci --ignore-scripts
 python tools/boot-once/build-compose.py
 python scripts/build-panel.py
 python scripts/build-ui.py
+python tools/demo/run.py --screen-port 28731 --web-port 28732  # 本地假 NAS 演示
 node tests/check_histor_bridge.cjs
 node tests/check_interactions.cjs
 node tests/check_web_config.cjs
@@ -81,7 +82,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 docker run --rm --network none r1-toolbox:local --help
 ```
 
-网页面板源码在 `ui/panel-src/`（fnMonitor，MIT），`python scripts/build-panel.py` 生成 `ui/web/index.html` 与 `login.html`；小屏界面源码在 `ui/index.html` 与 `ui/assets/`，`python scripts/build-ui.py` 再打包成镜像内的 UI 包。`runtime/ui_service.py` 提供 API 并管理小屏进程，`runtime/web_config.py` 提供网页面板、只读 `/api/v1/*`、配对与可选口令登录，`runtime/fnm_compat.py` 将现有快照映射为面板接口，`runtime/fnm_auth.py` 处理口令哈希与会话，`runtime/toolbox.py` 负责设置和硬件控制，`runtime/histor.py` 负责有明确协议的原厂接口适配，`runtime/insights.py` 负责系统、磁盘和应用采集，`runtime/device_info.py` 负责有界、只读设备库存；`runtime/temperature_sources.py` 提供带时效的温度来源，`runtime/fan_policy.py` 执行独立规则，`runtime/fan_native.py` 与 `runtime/fan_watchdog.py` 协调白名单适配层及独立恢复服务。修改后重新构建面板、打包和构建镜像，无需将源码或页面复制到 NAS。
+网页面板源码在 `ui/panel-src/`（fnMonitor，MIT），`python scripts/build-panel.py` 生成 `ui/web/index.html` 与 `login.html`；`tools/demo/` 可在普通电脑上启动假 NAS，同时打开网页面板和小屏触摸界面做联动调试（详见 [本地演示](tools/demo/README.md)）；小屏界面源码在 `ui/index.html` 与 `ui/assets/`，`python scripts/build-ui.py` 再打包成镜像内的 UI 包。`runtime/ui_service.py` 提供 API 并管理小屏进程，`runtime/web_config.py` 提供网页面板、只读 `/api/v1/*`、配对与可选口令登录，`runtime/fnm_compat.py` 将现有快照映射为面板接口，`runtime/fnm_auth.py` 处理口令哈希与会话，`runtime/toolbox.py` 负责设置和硬件控制，`runtime/histor.py` 负责有明确协议的原厂接口适配，`runtime/insights.py` 负责系统、磁盘和应用采集，`runtime/device_info.py` 负责有界、只读设备库存；`runtime/temperature_sources.py` 提供带时效的温度来源，`runtime/fan_policy.py` 执行独立规则，`runtime/fan_native.py` 与 `runtime/fan_watchdog.py` 协调白名单适配层及独立恢复服务。修改后重新构建面板、打包和构建镜像，无需将源码或页面复制到 NAS。
 
 前端交互检查需要本机 Chrome/Chromium，可通过 `CHROME_BIN` 指定可执行文件；`playwright-core` 仅为开发依赖。小屏检查使用拦截数据，网页端到端检查使用真实本地 HTTP 服务、临时 sys/dev/data 和内存适配器；均不连接 NAS 或执行真实硬件操作。
 

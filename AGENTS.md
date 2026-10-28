@@ -23,6 +23,7 @@ ui/web/            网页面板构建产物 index.html / login.html（不要手�
 scripts/build-panel.py  构建网页面板
 scripts/build-ui.py     打包镜像内 UI bundle
 tools/boot-once/   宿主一次性部署、挂载、服务生命周期
+tools/demo/        本地假 NAS：真实网页面板 + 真实小屏 UI 的联动演示
 native/            fan_guard.c 窄范围风扇适配层
 tests/             单元、HTTP、Linux 生命周期与无头浏览器检查
 docs/              功能、接口、温控、灯光、监控、面板说明
@@ -39,6 +40,7 @@ node tests/check_web_config.cjs        # 网页面板 + 真实 HTTP fixture
 python tests/check_fan_guard_linux.py
 python tests/check_fan_startup_linux.py
 python tools/boot-once/test_runner.py
+python tools/demo/run.py --screen-port 28731 --web-port 28732  # 本地联调
 docker build --platform linux/amd64 -t r1-toolbox:local .
 ```
 

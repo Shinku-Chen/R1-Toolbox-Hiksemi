@@ -47,7 +47,7 @@ jobs:
           node tests/check_interactions.cjs
           node tests/check_web_config.cjs
       - name: Check Python syntax
-        run: python -m compileall -q scripts tools/boot-once runtime tests
+        run: python -m compileall -q scripts tools runtime tests
       - name: Check native fan adapter without NAS devices
         run: python tests/check_fan_guard_linux.py
       - name: Validate Compose configuration

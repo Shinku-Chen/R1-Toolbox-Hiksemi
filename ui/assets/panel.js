@@ -1,7 +1,9 @@
 "use strict";
 
 (() => {
-  const API = "http://127.0.0.1:18731/api";
+  // Production loads this file from file:// with the local service on 18731.
+  // The demo server serves the same UI over HTTP so a remote browser can use it.
+  const API = /^https?:$/.test(location.protocol) ? location.origin + "/api" : "http://127.0.0.1:18731/api";
   const POLL_INTERVAL = 2000;
   const REQUEST_TIMEOUT = 3500;
   const pages = ["overview", "storage", "network", "controls", "apps", "system", "settings"];
