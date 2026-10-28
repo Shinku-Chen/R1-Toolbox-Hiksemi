@@ -433,7 +433,8 @@ class FnmonitorPanel:
 
     def __init__(self, controller, insights, monitoring, fan_policy, light_policy, monitor, *,
                  state_dir, version='dev', web=None, clock=time.monotonic, wall_clock=time.time,
-                 proc_root='/proc', sys_root='/sys', dev_root='/dev', weather_fetcher=None):
+                 proc_root='/proc', sys_root='/sys', dev_root='/dev', udev_root='/run/udev',
+                 weather_fetcher=None):
         self.controller = controller
         self.insights = insights
         self.monitoring = monitoring
@@ -449,6 +450,7 @@ class FnmonitorPanel:
         self.proc_root = Path(proc_root)
         self.sys_root = Path(sys_root)
         self.dev_root = Path(dev_root)
+        self.udev_root = Path(udev_root)
         self._mount_cache = (0.0, {})
         self._label_cache = (0.0, {})
         self._weather_fetcher = weather_fetcher or fetch_weather
@@ -522,6 +524,34 @@ class FnmonitorPanel:
                 disk = match.group(1)
                 if label and (disk not in labels or priority > labels[disk][0]):
                     labels[disk] = (priority, label)
+        # The by-label links may be absent for a sleeping disk because udev
+        # has not scanned it since boot.  The udev database is metadata only;
+        # reading it does not open the block device or wake the disk.
+        for folder in sorted((self.sys_root / 'block').glob('*'))[:128]:
+            name = folder.name
+            if name in labels or not re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|vd[a-z]+|xvd[a-z]+|mmcblk\d+)', name):
+                continue
+            # A filesystem label normally lives on a partition, not on the
+            # whole-disk device.  Check the disk and its child partitions in
+            # the udev database; these are metadata reads only.
+            blocks = [folder] + sorted(folder.glob(name + '*'))[:64]
+            for block in blocks:
+                try:
+                    dev_id = (block / 'dev').read_text(encoding='ascii').strip()
+                    lines = (self.udev_root / 'data' / ('b' + dev_id)).read_text(
+                        encoding='utf-8', errors='replace').splitlines()[:512]
+                except OSError:
+                    continue
+                value = None
+                for line in lines:
+                    if line.startswith('E:ID_FS_LABEL=') or line.startswith('E:ID_PART_ENTRY_NAME='):
+                        value = line.split('=', 1)[1].strip()
+                        if value:
+                            break
+                label = _text(value, 120)
+                if label:
+                    labels[name] = (0, label)
+                    break
         result = {name: value[1] for name, value in labels.items()}
         self._label_cache = (now, result)
         return result

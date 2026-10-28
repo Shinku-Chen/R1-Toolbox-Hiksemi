@@ -198,13 +198,14 @@ class Monitor:
                            'used_bytes': 10 ** 12, 'usage_percent': 25.0}]}
 
 
-def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None, proc_root=None, dev_root=None):
+def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None, proc_root=None, dev_root=None, sys_root=None, udev_root=None):
     return compat.FnmonitorPanel(Controller(), insights or Insights(), Monitoring(), fan or FanPolicy(),
                                  light or LightPolicy(), Monitor(), state_dir=state_dir,
                                  version='test', web=web_ref,
                                  proc_root=Path(proc_root or tempfile.mkdtemp(prefix='r1-panel-proc-')),
-                                 sys_root=Path(tempfile.mkdtemp(prefix='r1-panel-sys-')),
+                                 sys_root=Path(sys_root or tempfile.mkdtemp(prefix='r1-panel-sys-')),
                                  dev_root=Path(dev_root or tempfile.mkdtemp(prefix='r1-panel-dev-')),
+                                 udev_root=Path(udev_root or tempfile.mkdtemp(prefix='r1-panel-udev-')),
                                  weather_fetcher=weather_fetcher or (lambda city: {'ok': False, 'error': 'fixture: no weather'}))
 
 
@@ -328,6 +329,17 @@ class MappingTests(unittest.TestCase):
         row = panel.overview()['disks_detail'][0]
         self.assertEqual(row['volume'], 'VOL1')
         self.assertIsNone(row['volume_label'])
+
+    def test_volume_label_falls_back_to_udev_database(self):
+        sys_root = Path(tempfile.mkdtemp(prefix='r1-panel-sys-'))
+        dev = sys_root / 'block' / 'sda'
+        dev.mkdir(parents=True)
+        (dev / 'dev').write_text('8:0', encoding='ascii')
+        udev = Path(tempfile.mkdtemp(prefix='r1-panel-udev-'))
+        (udev / 'data').mkdir()
+        (udev / 'data' / 'b8:0').write_text('E:ID_FS_LABEL=NAS-DISK4\n', encoding='utf-8')
+        panel = panel_for(tempfile.mkdtemp(prefix='r1-panel-udev-test-'), sys_root=sys_root, udev_root=udev)
+        self.assertEqual(panel._volume_labels().get('sda'), 'NAS-DISK4')
 
     def test_sleeping_disk_stays_visible_without_smart_or_wakeup(self):
         class SleepingInsights(Insights):

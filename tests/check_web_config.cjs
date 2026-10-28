@@ -155,8 +155,8 @@ for light in lights:light.start()
 monitoring=MonitoringService(fixture/'data',insights,monitor,Sources(),proc_root=fixture/'proc',sys_root=fixture/'sys').start()
 fnm_compat.fetch_weather = lambda city: {'ok': True, 'city': 'Fixture City', 'temp': 21.5, 'feels': 20.0,
     'humidity': 55.0, 'wind': 2.5, 'code': 0, 'desc': '晴', 'is_day': 1}
-primary = WebConfigServer(controller(fixture), insights=insights, fan_policy=policy(fixture, True), light_policy=lights[0],monitoring=monitoring,monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web', dev_root=fixture / 'dev').start()
-unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False),light_policy=lights[1],monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web', dev_root=fixture / 'unsupported/dev').start()
+primary = WebConfigServer(controller(fixture), insights=insights, fan_policy=policy(fixture, True), light_policy=lights[0],monitoring=monitoring,monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web', dev_root=fixture / 'dev', udev_root=fixture / 'udev').start()
+unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False),light_policy=lights[1],monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web', dev_root=fixture / 'unsupported/dev', udev_root=fixture / 'unsupported/udev').start()
 
 try:
     print(json.dumps({'ready': True, 'primary': {'origin': 'http://127.0.0.1:' + str(primary.port), 'code': primary.pairing_info(rotate=True)['code']},

@@ -134,7 +134,7 @@ class _Server(http.server.ThreadingHTTPServer):
 class WebConfigServer:
     def __init__(self, controller, insights=None, *, fan_policy=None, light_policy=None, monitoring=None,
                  monitor=None, host='0.0.0.0', port=18732,
-                 asset_dir=None, clock=None, state_dir=None, version='dev', dev_root=None):
+                 asset_dir=None, clock=None, state_dir=None, version='dev', dev_root=None, udev_root=None):
         if host not in ('127.0.0.1', '0.0.0.0') or type(port) is not int or not (port == 0 or 1024 <= port <= 65535):
             raise ValueError('网页监听只允许 127.0.0.1/0.0.0.0 和 1024–65535 端口')
         self.controller, self.insights = controller, insights
@@ -163,7 +163,7 @@ class WebConfigServer:
         self.auth = AuthStore(self.state_dir)
         self.panel = FnmonitorPanel(controller, insights, monitoring, fan_policy, light_policy, monitor,
                                     state_dir=self.state_dir, version=version, web=self,
-                                    dev_root=dev_root or '/dev')
+                                    dev_root=dev_root or '/dev', udev_root=udev_root or '/run/udev')
 
     def _expire(self):
         now = self.clock()

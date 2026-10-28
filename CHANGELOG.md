@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- fix(web): 磁盘卷标在 `/dev/disk/by-label` 缺失时读取分区对应的 `/run/udev/data` `ID_FS_LABEL`，不打开磁盘、不唤醒休眠盘。
+- fix(web): 卷标读取在 `/dev/disk/by-label` 缺失时回退 `/run/udev/data` 的 `ID_FS_LABEL`，休眠盘无需唤醒也能显示系统磁盘名。
 - fix(web): 修正磁盘 I/O 适配器读取嵌套的 `monitoring.current.disk_io`，网页与硬盘详情恢复每块物理盘的实时读写速度。
 - feat(storage): 硬盘详情新增缓存中的完整 ATA／NVMe SMART 属性表，并在 `/api/smart` 返回原始 smartctl JSON；休眠盘仍不探测、不唤醒。
 - fix(web): 存储盘位优先显示文件系统卷标，其次显示 `/drives` 挂载目录名；有挂载的磁盘不再误显示“未挂载”。
