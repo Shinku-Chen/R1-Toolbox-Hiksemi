@@ -455,7 +455,7 @@ class FanWatchdog:
         self.sequence = lease["sequence"]
         self.status("active")
 
-    def restore(self, reason):
+    def restore(self, reason, detail=None):
         if self._restored:
             return True
         try:
@@ -502,7 +502,8 @@ class FanWatchdog:
         try:
             self.status(final_phase,
                         "原厂恢复未能全部确认" if errors else "已恢复原厂温控" if reason != "vendor_policy_changed" else "原厂应用已改变系统风扇策略，自定义控制已释放",
-                        restore_ok=not errors, recovery_errors=errors, release_cause=reason)
+                        restore_ok=not errors, recovery_errors=errors, release_cause=reason,
+                        error_detail=(str(detail)[:160] if detail else None))
         except (OSError, ValueError):
             self.phase = final_phase
         # Redact the saved environment after recovery. Keep only safe status.
@@ -516,15 +517,17 @@ class FanWatchdog:
 
     def run(self, sleep=time.sleep):
         reason = "release_requested"
+        detail = None
         try:
             self.begin()
             while True:
                 sleep(0.2)
                 self.tick()
         except (OSError, ValueError, RuntimeError) as error:
-            reason = str(error) if str(error) in ("vendor_policy_changed", "release_requested", "owner_stopped") else "lease_or_identity_failed"
+            detail = str(error)[:160]
+            reason = detail if detail in ("vendor_policy_changed", "release_requested", "owner_stopped") else "lease_or_identity_failed"
         finally:
-            self.restore(reason)
+            self.restore(reason, detail)
 
 
 def main():
