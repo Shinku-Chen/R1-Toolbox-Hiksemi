@@ -102,7 +102,7 @@ echo '[START] 开始执行宿主任务。'
 set -eu
 command -v python3 >/dev/null || { echo '宿主缺少 python3，未修改小屏'; exit 1; }
 exec python3 - <<'PY'
-import collections, hashlib, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, unicodedata
+import collections, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, unicodedata
 
 app = pathlib.Path('/screen/squashfs-root')
 target = app / 'resources/app/dist'
@@ -627,6 +627,27 @@ def main():
                     'R1_WEB_PORT 需要为 1024–65535，或 0 禁用网页')
             environment['R1_WEB_BIND'] = web_bind
             environment['R1_WEB_PORT'] = web_port
+            dev_no_pairing = os.environ.get('R1_DEV_NO_PAIRING', '')
+            if dev_no_pairing not in ('', '0', '1'):
+                raise SystemExit('R1_DEV_NO_PAIRING 只能是 0 或 1')
+            if dev_no_pairing == '1':
+                dev_ips = [item.strip() for item in os.environ.get('R1_DEV_ALLOW_IPS', '').split(',') if item.strip()]
+                if not dev_ips:
+                    raise SystemExit('开发者免配对模式需要设置 R1_DEV_ALLOW_IPS（仅允许指定客户端 IP）')
+                for item in dev_ips:
+                    try:
+                        ipaddress.ip_address(item)
+                    except ValueError:
+                        raise SystemExit('R1_DEV_ALLOW_IPS 包含无效 IP') from None
+                try:
+                    dev_minutes = int(os.environ.get('R1_DEV_MINUTES', '60'))
+                except ValueError:
+                    raise SystemExit('R1_DEV_MINUTES 必须是整数') from None
+                if not 1 <= dev_minutes <= 1440:
+                    raise SystemExit('R1_DEV_MINUTES 需要在 1–1440 分钟')
+                environment['R1_DEV_NO_PAIRING'] = '1'
+                environment['R1_DEV_ALLOW_IPS'] = ','.join(dev_ips)
+                environment['R1_DEV_MINUTES'] = str(dev_minutes)
         old_root = str(pathlib.Path(main_process.exe).parent)
         if 'LD_LIBRARY_PATH' in environment:
             environment['LD_LIBRARY_PATH'] = ':'.join(str(app) + p[len(old_root):] if p == old_root or p.startswith(old_root + '/') else p

@@ -6,6 +6,7 @@ import http.client
 import http.server
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -164,6 +165,24 @@ class WebConfigServer:
         self.panel = FnmonitorPanel(controller, insights, monitoring, fan_policy, light_policy, monitor,
                                     state_dir=self.state_dir, version=version, web=self,
                                     dev_root=dev_root or '/dev', udev_root=udev_root or '/run/udev')
+        # Opt-in development bypass.  It is off unless both an explicit flag
+        # and a client allowlist are supplied, and it expires automatically.
+        # Never enable this on a production LAN without understanding the risk.
+        self.dev_no_pairing = os.environ.get('R1_DEV_NO_PAIRING') == '1'
+        self.dev_allow_ips = set()
+        for item in os.environ.get('R1_DEV_ALLOW_IPS', '').split(','):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                self.dev_allow_ips.add(ipaddress.ip_address(item))
+            except ValueError:
+                continue
+        try:
+            minutes = int(os.environ.get('R1_DEV_MINUTES', '60'))
+        except ValueError:
+            minutes = 60
+        self.dev_until = time.time() + max(1, min(1440, minutes)) if self.dev_no_pairing and self.dev_allow_ips else 0
 
     def _expire(self):
         now = self.clock()
@@ -443,7 +462,20 @@ class WebConfigServer:
         """``None`` when no valid password session cookie was sent."""
         return self.auth.session(headers.get('Cookie') or '')
 
-    def panel_authorized(self, headers, *, network_csrf=True):
+    def _dev_authorized(self, peer):
+        if not self.dev_no_pairing or not self.dev_allow_ips or time.time() >= self.dev_until:
+            return False
+        if not peer:
+            return False
+        try:
+            address = ipaddress.ip_address(str(peer))
+        except ValueError:
+            return False
+        if address.version == 6 and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        return address in self.dev_allow_ips
+
+    def panel_authorized(self, headers, *, network_csrf=True, peer=None):
         """Password session, or the small-screen pairing session, may write.
 
         The pairing session normally proves itself with ``X-R1-CSRF`` on
@@ -454,20 +486,23 @@ class WebConfigServer:
         """
         if self.password_session(headers) is not None:
             return 'password'
+        if self._dev_authorized(peer) and not self.auth.required():
+            return 'dev'
         _, session = self._session(headers.get('Cookie') or '')
         if session is not None and network_csrf:
             return 'pair'
         return None
 
-    def panel_readable(self, headers):
-        if not self.auth.required():
-            return True
-        return self.password_session(headers) is not None
+    def panel_readable(self, headers, peer=None):
+        if self.auth.required():
+            return self.password_session(headers) is not None
+        return True
 
-    def auth_status(self, headers):
+    def auth_status(self, headers, peer=None):
         session = self.password_session(headers)
+        dev = self._dev_authorized(peer) and not self.auth.required()
         return {'logged_in': session is not None, 'auth_required': self.auth.required(),
-                'authorized': session is not None,
+                'authorized': session is not None or dev, 'dev_mode': dev,
                 'session': {'label': session.get('label'),
                             'expires_in': max(0, int(session['expires_wall'] - time.time()))} if session else None,
                 'config': self.auth.auth_config()}
@@ -482,15 +517,15 @@ class WebConfigServer:
             raise ValueError('查询参数无效')
         return {key: values[0] for key, values in parsed.items()}
 
-    def panel_get(self, route, query, headers):
+    def panel_get(self, route, query, headers, peer=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
         if route == '/api/auth/session':
-            return 200, self.auth_status(headers), 'application/json; charset=utf-8'
+            return 200, self.auth_status(headers, peer=peer), 'application/json; charset=utf-8'
         if route == '/api/r1':
-            authorized = self.panel_authorized(headers) is not None
+            authorized = self.panel_authorized(headers, peer=peer) is not None
             return 200, panel.r1_state(authorized=authorized), 'application/json; charset=utf-8'
         params = self._panel_query(query, {
             '/api/history': ('metric', 'range'), '/api/smart': ('dev',),
@@ -589,7 +624,7 @@ class WebConfigServer:
             # client claim the panel and lock the owner out.
             if self.auth.password_set():
                 return 400, {'ok': False, 'error': '已设置口令，请使用登录修改'}, None
-            if self.panel_authorized(headers) is None:
+            if self.panel_authorized(headers, peer=ip) is None:
                 return 403, {'ok': False, 'error': 'need_pairing',
                              'message': '设置登录口令需要先在小屏生成五位配对码'}, None
             result = self.auth.setup(str(body.get('password') or ''), ip)
@@ -601,7 +636,7 @@ class WebConfigServer:
             if sid:
                 self.auth.revoke(sid)
             return 200, {'ok': True}, self._auth_cookie('', clear=True)
-        authorized = self.panel_authorized(headers) is not None
+        authorized = self.panel_authorized(headers, peer=ip) is not None
         if not authorized and not (route == '/api/ui' and not self.auth.required()):
             # With a login password the panel is already gated, so a 401 sends the
             # browser to the login page.  Without one, keep public monitoring and
@@ -928,11 +963,11 @@ class WebConfigServer:
                             self.send(503, {'error': '网页资源不可用'})
                         return
                     if panel:
-                        if route not in ('/api/auth/config', '/api/auth/session') and not outer.panel_readable(self.headers):
+                        if route not in ('/api/auth/config', '/api/auth/session') and not outer.panel_readable(self.headers, peer=self.client_address[0]):
                             self.send(401, {'ok': False, 'error': '未登录', 'auth_required': True})
                             return
                         try:
-                            status, value, mime = outer.panel_get(route, parsed.query, self.headers)
+                            status, value, mime = outer.panel_get(route, parsed.query, self.headers, peer=self.client_address[0])
                         except ValueError:
                             status, value, mime = 400, {'ok': False, 'error': '查询参数无效'}, 'application/json; charset=utf-8'
                         except Exception:

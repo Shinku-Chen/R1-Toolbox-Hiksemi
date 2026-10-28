@@ -7,12 +7,14 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -455,6 +457,34 @@ class MappingTests(unittest.TestCase):
         self.assertTrue(state['auth']['authorized'])
         self.assertIn('pairing', state['auth'])
         self.assertEqual(state['device']['model'], 'HikSemi R1')
+
+
+class DeveloperModeTests(unittest.TestCase):
+    def test_developer_bypass_is_allowlisted_and_expiring(self):
+        directory = Path(tempfile.mkdtemp(prefix='r1-panel-dev-'))
+        with mock.patch.dict(os.environ, {
+                'R1_DEV_NO_PAIRING': '1',
+                'R1_DEV_ALLOW_IPS': '192.168.1.50',
+                'R1_DEV_MINUTES': '5',
+        }):
+            server = web.WebConfigServer(Controller(), Insights(), host='127.0.0.1', port=0,
+                                         asset_dir=ROOT / 'ui/web', state_dir=directory)
+            try:
+                self.assertEqual(server.panel_authorized({}, peer='192.168.1.50'), 'dev')
+                self.assertIsNone(server.panel_authorized({}, peer='192.168.1.51'))
+                self.assertFalse(server._dev_authorized(None))
+            finally:
+                server.stop()
+
+    def test_developer_bypass_is_off_without_the_flag(self):
+        directory = Path(tempfile.mkdtemp(prefix='r1-panel-dev-'))
+        with mock.patch.dict(os.environ, {'R1_DEV_NO_PAIRING': '0', 'R1_DEV_ALLOW_IPS': '192.168.1.50'}, clear=False):
+            server = web.WebConfigServer(Controller(), Insights(), host='127.0.0.1', port=0,
+                                         asset_dir=ROOT / 'ui/web', state_dir=directory)
+            try:
+                self.assertIsNone(server.panel_authorized({}, peer='192.168.1.50'))
+            finally:
+                server.stop()
 
 
 class HttpTests(unittest.TestCase):
