@@ -453,7 +453,8 @@
     if (power.available === true && num(power.cpu_package_w, 0) !== null) {
       cards.push(['CPU 封装功率', String(Math.round(power.cpu_package_w * 10) / 10), 'W', 'RAPL 实测 · 非整机功耗', 'power', '', 'trends']);
     }
-    return `<div class="detail-lead"><p class="kicker">AT A GLANCE</p><h2>${cards.length} 项核心读数</h2><p>${state.online ? '真实快照 · ' + esc(new Date().toLocaleTimeString('zh-CN', { hour12: false })) : '等待连接本机服务'}</p></div>${cards.map(([label, value, unit, sub, chart, color, target]) => `<button type="button" class="card card-button" data-view="${target}"><div class="card-top"><h2>${esc(label)}</h2><span class="chevron" aria-hidden="true">›</span></div><div class="big-value ${color}">${dotNumber(value)}<small>${esc(unit)}</small></div><p class="caption" style="margin:12px 0">${esc(sub)}</p>${spark(state.live[chart] || [], color)}</button>`).join('')}`;
+    const stamp = status.timestamp ? new Date(status.timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '--';
+    return `<div class="detail-lead"><p class="kicker">AT A GLANCE</p><h2>${cards.length} 项核心读数</h2><p>${state.online ? '真实快照 · ' + esc(stamp) : '等待连接本机服务'}</p></div>${cards.map(([label, value, unit, sub, chart, color, target]) => `<button type="button" class="card card-button" data-view="${target}"><div class="card-top"><h2>${esc(label)}</h2><span class="chevron" aria-hidden="true">›</span></div><div class="big-value ${color}">${dotNumber(value)}<small>${esc(unit)}</small></div><p class="caption" style="margin:12px 0">${esc(sub)}</p>${spark(state.live[chart] || [], color)}</button>`).join('')}`;
   }
 
   function processor() {
@@ -514,7 +515,7 @@
   }
 
   function containerView() {
-    const item = containers().find(row => row.id === state.containerId) || containers()[0];
+    const item = containers().find(row => row.id === state.containerId);
     if (!item) return '<p class="info-note">容器不存在或列表已刷新，请返回应用页重新选择。</p>';
     const actions = list(item.available_actions);
     const label = { start: '启动', stop: '停止', restart: '重启' };
@@ -568,8 +569,10 @@
     return `<div class="detail-lead"><p class="kicker">TRENDS / 历史趋势</p><p style="margin-top:8px">${esc(rangeLabel)} · ${unavailable ? '历史数据暂不可用' : '采样缺失时保留断点'}</p></div><div class="tabs" aria-label="趋势时间范围">${['1h', '6h', '24h'].map(range => `<button type="button" data-range="${range}" aria-pressed="${state.trendRange === range}">${range}</button>`).join('')}</div>${unavailable ? `<p class="info-note">${esc(cache.reason || '宿主历史接口不可用，未补算或伪造采样。')}</p>` : ''}${chartCard('CPU', '%', seriesOf('cpu_usage_percent'), 'lime', at)}${chartCard('内存', '%', seriesOf('memory_usage_percent'), 'purple', at)}${chartCard('网络下载', 'B/s', seriesOf('rx_bytes_per_sec'), 'green', at)}${chartCard('磁盘读取', 'B/s', seriesOf('disk_read_bytes_per_sec'), 'purple', at)}${chartCard('CPU 温度', '°C', seriesOf('cpu_temperature_c'), 'orange', at)}${chartCard('CPU 封装功率', 'W', seriesOf('cpu_package_w'), 'green', at)}`;
   }
 
-  async function loadHistory(range) {
-    if (state.trendCache[range] || state.trendPending[range]) return;
+  async function loadHistory(range, force = false) {
+    if (state.trendPending[range]) return;
+    if (!force && state.trendCache[range]) return;
+    if (force) delete state.trendCache[range];
     state.trendPending[range] = true;
     try {
       const value = await request('/history?range=' + encodeURIComponent(range));
@@ -607,10 +610,11 @@
   function web() {
     const web = obj(state.data.web);
     const addresses = list(web.addresses);
-    const address = addresses[0] || `http://${obj(obj(state.data.status).network).ipv4 || 'NAS_IP'}:18732`;
+    const ipv4 = obj(obj(state.data.status).network).ipv4;
+    const address = addresses[0] || (ipv4 ? `http://${ipv4}:18732` : '');
     const pairing = state.pairing;
     const remaining = pairing ? Math.max(0, Math.ceil((state.pairingDeadline - Date.now()) / 1000)) : 0;
-    return `<div class="detail-lead"><p class="kicker">CONTINUE ON THE WEB</p><h2>大一点的屏幕，<br>更完整的设置。</h2></div><article class="card"><div class="card-top"><h2>网页访问地址</h2><span class="badge neutral">${web.enabled ? '已启用' : '未启用'}</span></div><p class="web-address">${esc(address)}</p><p class="body-copy">在同一局域网的手机或电脑上打开。</p><div class="divider"></div><p class="caption">网页默认公开只读；修改设置需要一次性配对码或登录口令。</p></article><article class="card"><p class="kicker">PAIRING CODE</p>${pairing ? `<p class="pairing-code">${esc(pairing.code)}</p><p class="caption" style="text-align:center">${remaining} 秒内有效 · 仅可使用一次</p>` : '<p class="body-copy" style="margin:16px 0">需要修改网页设置时，生成五位配对码并在网页输入。</p>'}<button type="button" class="action-button primary" data-action="pairing" ${canWrite() && web.enabled ? '' : 'disabled'}>${pairing ? '重新生成配对码' : '生成一次性配对码'}</button><p class="caption" style="margin-top:12px">代码只显示在本机小屏，不会发送到网络。</p></article><article class="card"><p class="kicker">AVAILABLE ON THE WEB</p><div class="stat-row"><span>风扇温控</span><span class="caption">曲线与来源</span></div><div class="stat-row"><span>机身灯光</span><span class="caption">颜色与联动</span></div><div class="stat-row"><span>登录与配对</span><span class="caption">保护写操作</span></div></article><p class="info-note">局域网 HTTP 未加密，请只在可信网络使用；公开监控与配对共用同一端口。</p>`;
+    return `<div class="detail-lead"><p class="kicker">CONTINUE ON THE WEB</p><h2>大一点的屏幕，<br>更完整的设置。</h2></div><article class="card"><div class="card-top"><h2>网页访问地址</h2><span class="badge neutral">${web.enabled ? '已启用' : '未启用'}</span></div><p class="web-address">${esc(address || '--')}</p><p class="body-copy">${address ? '在同一局域网的手机或电脑上打开。' : '网页服务暂未返回可访问地址。'}</p><div class="divider"></div><p class="caption">网页默认公开只读；修改设置需要一次性配对码或登录口令。</p></article><article class="card"><p class="kicker">PAIRING CODE</p>${pairing ? `<p class="pairing-code">${esc(pairing.code)}</p><p class="caption" style="text-align:center">${remaining} 秒内有效 · 仅可使用一次</p>` : '<p class="body-copy" style="margin:16px 0">需要修改网页设置时，生成五位配对码并在网页输入。</p>'}<button type="button" class="action-button primary" data-action="pairing" ${canWrite() && web.enabled ? '' : 'disabled'}>${pairing ? '重新生成配对码' : '生成一次性配对码'}</button><p class="caption" style="margin-top:12px">代码只显示在本机小屏，不会发送到网络。</p></article><article class="card"><p class="kicker">AVAILABLE ON THE WEB</p><div class="stat-row"><span>风扇温控</span><span class="caption">曲线与来源</span></div><div class="stat-row"><span>机身灯光</span><span class="caption">颜色与联动</span></div><div class="stat-row"><span>登录与配对</span><span class="caption">保护写操作</span></div></article><p class="info-note">局域网 HTTP 未加密，请只在可信网络使用；公开监控与配对共用同一端口。</p>`;
   }
 
   const views = { overview, metrics, processor, storage, network, apps, containers: containersView, container: containerView, vms: vmsView, thermal, trends, ports, controls, web };
@@ -772,7 +776,7 @@
       const body = $('screen-body');
       state.trendRange = button.dataset.range;
       render(body ? body.scrollTop : 0);
-      loadHistory(state.trendRange).catch(() => {});
+      loadHistory(state.trendRange, true).catch(() => {});
       return;
     }
     const act = button.dataset.action;
