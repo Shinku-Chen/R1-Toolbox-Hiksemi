@@ -35,7 +35,7 @@ const viewTitles = {
   apps: '应用', container: '容器详情', thermal: '温度与风扇',
   trends: '历史趋势', ports: '监听端口', controls: '设置', web: '网页设置', power: '电源管理',
 };
-const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'apps', 'ports', 'controls', 'web'];
+const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'apps', 'ports', 'controls', 'web', 'saver'];
 
 (async () => {
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
@@ -102,7 +102,9 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
         'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])',
       )).filter(el => !el.closest('[inert]') && el.checkVisibility({ checkVisibilityCSS: true, checkOpacity: true }))
         .map(el => {
-          const rect = el.getBoundingClientRect();
+          // A native checkbox uses its full 64 px label as the touch target, as on the device.
+          const target = el.matches('input[type="checkbox"]') ? el.closest('label') || el : el;
+          const rect = target.getBoundingClientRect();
           return { element: el.tagName.toLowerCase(), id: el.id, text: (el.getAttribute('aria-label') || el.textContent || el.getAttribute('type') || '').trim(), width: rect.width, height: rect.height };
         }).filter(rect => rect.width < 55.99 || rect.height < 55.99));
       assert.deepEqual(smallTargets, [], `${label} touch targets must be at least 56 × 56 px, including range inputs`);
@@ -226,7 +228,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('.fan-quick-row').count(), 2);
       await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').tap();
       assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true');
-      assert.match(await inside('.fan-quick-row').first().locator('.fan-quick-head span').textContent(), /低/);
+      assert.equal(await inside('.fan-quick-row').first().locator('.fan-quick-head span').textContent(), '目标 50%');
       assert.equal(await inside('.fan-quick-row').first().locator('.fan-mode').count(), 5);
       const fanBoxes = await inside('.fan-quick-row').first().locator('.fan-mode').evaluateAll(nodes => nodes.map(node => {
         const rect = node.getBoundingClientRect();
@@ -238,8 +240,14 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       await tab('thermal');
       assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true',
         'fan shortcut state survives main-tab navigation');
+      await inside('[data-fan-channel="cpu"][data-fan-mode="auto"]').tap();
+      await inside('[data-fan-channel="system"][data-fan-mode="high"]').tap();
+      assert.equal(await inside('.fan-quick-row').last().locator('.fan-quick-head span').textContent(), '原厂管理',
+        'a native system preset must not fabricate a target percentage');
+      assert.equal(await inside('.fan-control .badge').textContent(), '原厂管理');
       await inside('[data-fan-channel="system"][data-fan-mode="manual"]').tap();
       assert.equal(await inside('[data-fan-channel="system"][data-fan-mode="manual"]').getAttribute('aria-pressed'), 'true');
+      assert.equal(await inside('.fan-control .badge').textContent(), '独立温控');
       await open('controls');
       assert.equal(await inside('[data-view="power"]').count(), 1, 'settings exposes power through a second-level entry');
       assert.equal(await inside('[data-action="reboot"]').count(), 0, 'settings must not expose shutdown actions directly');
@@ -293,9 +301,13 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       const sleepingDisk = inside('.temperature-row').last();
       assert.equal(await sleepingDisk.locator('b').textContent(), '--');
       assert.equal(await sleepingDisk.locator('b').evaluate(el => el.classList.contains('muted')), true);
-      const fanValues = await inside('.fan-value').allTextContents();
+      const fanValues = await inside('.fan-value').filter({ has: page.locator('small') }).allTextContents();
       assert.equal(fanValues.length, 2);
       assert.ok(fanValues.every(value => /^--\s*RPM$/.test(value)), JSON.stringify(fanValues));
+      assert.match(await inside('.screen-body').textContent(), /系统风扇/);
+      assert.match(await inside('.screen-body').textContent(), /CPU温控/);
+      assert.match(await inside('.screen-body').textContent(), /系统温控/);
+      assert.doesNotMatch(await inside('.screen-body').textContent(), /机箱风扇|自动温控/);
     });
 
     await check('power dialog confirms first, defaults to Cancel, traps focus, and supports Escape', async () => {
@@ -359,22 +371,152 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.deepEqual(externalRequests, []);
     });
 
+    await check('screen saver settings match production labels, save selection order, and enforce one to twelve items', async () => {
+      await open('controls');
+      assert.deepEqual(await inside('#saver-timeout option').allTextContents(), ['关闭', '1 分钟', '5 分钟', '10 分钟', '30 分钟', '1 小时']);
+      assert.equal(await inside('label[for="saver-timeout"]').textContent(), '屏幕保护');
+      assert.equal(await inside('label[for="saver-brightness"]').textContent(), '保护亮度');
+      assert.equal(await inside('label[for="sleep-timeout"]').textContent(), '关闭屏幕');
+      assert.equal(await inside('#saver-brightness').inputValue(), '30');
+      await inside('#saver-brightness').selectOption('20');
+      const item = key => inside(`[data-saver-item="${key}"]`);
+      const choose = key => item(key).locator('..').tap();
+      const selected = () => inside('[data-saver-item]').evaluateAll(nodes => nodes.filter(node => node.checked).map(node => node.dataset.saverItem));
+      await choose('memory_usage');
+      assert.deepEqual(await selected(), ['cpu_usage']);
+      assert.equal(await item('cpu_usage').isDisabled(), true, 'the last selected item cannot be removed');
+      await choose('board_temperature');
+      await choose('cpu_temperature');
+      await choose('memory_usage');
+      assert.deepEqual(await selected(), ['cpu_usage', 'board_temperature', 'cpu_temperature', 'memory_usage']);
+      assert.deepEqual(await inside('.saver-choice b').allTextContents(), ['1', '2', '3', '4']);
+      for (const key of await inside('[data-saver-item]:not(:checked)').evaluateAll(nodes => nodes.slice(0, 8).map(node => node.dataset.saverItem))) await choose(key);
+      assert.equal((await selected()).length, 12);
+      assert.equal(await inside('[data-saver-item]:not(:checked):disabled').count(), 2);
+      assert.equal(await inside('.saver-picker legend').textContent(), '屏保展示内容 · 12 / 12');
+      await inside('#saver-timeout').selectOption('0');
+      assert.equal(await inside('.saver-picker').count(), 0);
+      assert.equal(await inside('#saver-brightness').count(), 0);
+      await inside('#saver-timeout').selectOption('300');
+      assert.equal((await selected()).length, 12, 'disabling protection preserves chosen content');
+      assert.equal(await inside('#saver-brightness').inputValue(), '20');
+      await tab('thermal');
+      await tab('controls');
+      assert.equal((await selected()).length, 12);
+      assert.equal(await inside('#saver-timeout').inputValue(), '300');
+      assert.equal(await inside('#saver-brightness').inputValue(), '20');
+    });
+
+    await check('mixed screen saver matches production layout, rotates every ten seconds, and preserves unknown and standby values', async () => {
+      await page.clock.install();
+      await page.clock.resume();
+      for (const width of [376, 320]) {
+        await page.setViewportSize({ width, height: 960 });
+        await page.goto(`${prototypeURL}?view=saver`, { waitUntil: 'load' });
+        assert.equal(await inside('#saver').isVisible(), true);
+        assert.equal(await inside('#saver .saver-metric').count(), 4);
+        assert.deepEqual(await inside('#saver [data-saver-key]').evaluateAll(nodes => nodes.map(node => node.dataset.saverKey)), ['cpu_usage', 'memory_usage', 'cpu_temperature', 'board_temperature']);
+        assert.deepEqual(await inside('#saver .value small').allTextContents(), ['%', '%', '℃', '℃']);
+        assert.equal(await inside('#saver .saver-page').textContent(), '1 / 2');
+        await measure(`${width}/saver`);
+        if (screenshotDir) await device.screenshot({ path: path.join(screenshotDir, `saver-mixed-${width}.png`) });
+        await page.clock.fastForward(10000);
+        assert.equal(await inside('#saver .saver-page').textContent(), '2 / 2');
+        const standby = inside('#saver [data-saver-key="temperature:disk:hdd_2"]');
+        assert.equal(await standby.locator('[data-saver-value]').textContent(), '--');
+        assert.equal(await standby.locator('.saver-metric-note').textContent(), '休眠中');
+        await inside('#saver').tap();
+        assert.equal(await inside('#saver').isHidden(), true);
+        assert.equal(await inside('.screen-title').textContent(), '设置', 'wake does not activate underlying controls');
+        await page.clock.fastForward(700);
+        const unknown = inside('[data-saver-item="temperature:sysfs:core_3"]');
+        await unknown.locator('..').tap();
+        await page.clock.fastForward(60000);
+        assert.equal(await inside('#saver').isVisible(), true);
+        await page.clock.fastForward(10000);
+        const unknownMetric = inside('#saver [data-saver-key="temperature:sysfs:core_3"]');
+        assert.equal(await unknownMetric.locator('[data-saver-value]').textContent(), '--');
+        assert.equal(await unknownMetric.locator('.saver-metric-note').textContent(), '读数暂不可用');
+        if (screenshotDir) await device.screenshot({ path: path.join(screenshotDir, `saver-standby-${width}.png`) });
+      }
+      await page.clock.resume();
+    });
+
+    await check('short screen saver uses two items and screen-off takes priority over protection', async () => {
+      await page.setViewportSize({ width: 320, height: 600 });
+      await page.goto(`${prototypeURL}?view=saver`, { waitUntil: 'load' });
+      assert.equal(await inside('#saver .saver-metric').count(), 2);
+      assert.equal(await inside('#saver .saver-page').textContent(), '1 / 3');
+      await measure('320/short saver');
+      if (screenshotDir) await device.screenshot({ path: path.join(screenshotDir, 'saver-short-320.png') });
+      await inside('#saver').tap();
+      await page.clock.fastForward(700);
+      await inside('#sleep-timeout').selectOption('60');
+      await page.clock.fastForward(60000);
+      assert.equal(await inside('#sleep').isVisible(), true);
+      assert.equal(await inside('#saver').isHidden(), true);
+      await inside('#sleep').tap();
+      assert.equal(await inside('#sleep').isHidden(), true);
+      assert.equal(await inside('#saver').isHidden(), true);
+      assert.equal(await inside('#sleep-timeout').inputValue(), '60');
+      await page.clock.resume();
+      await page.setViewportSize({ width: 376, height: 960 });
+    });
+
+    await check('saved missing temperature devices stay selected and measured zero is not treated as unknown', async () => {
+      await open('controls');
+      // Simulate a previously saved stable ID whose device has disappeared; no network fixture is involved.
+      await page.evaluate(() => {
+        state.saverItems = ['temperature:disk:retired'];
+        demoSaverSources.find(source => source.id === 'disk:nvme_0').value = 0;
+        render();
+      });
+      const missing = inside('[data-saver-item="temperature:disk:retired"]');
+      assert.equal(await missing.isChecked(), true);
+      assert.equal(await missing.isDisabled(), true);
+      assert.match(await missing.locator('..').textContent(), /设备离线，保留原选择/);
+      await inside('[data-saver-item="temperature:disk:nvme_0"]').locator('..').tap();
+      await page.clock.fastForward(61000);
+      assert.equal(await inside('#saver').isVisible(), true);
+      assert.equal(await inside('#saver [data-saver-key="temperature:disk:nvme_0"] [data-saver-value]').textContent(), '0');
+      assert.equal(await inside('#saver [data-saver-key="temperature:disk:retired"] [data-saver-value]').textContent(), '--');
+      assert.equal(await inside('#saver [data-saver-key="temperature:disk:retired"] .saver-metric-note').textContent(), '设备离线');
+      await page.clock.resume();
+    });
+
+    await check('web-access prototype reflects the default password mode and preserves sample-address semantics', async () => {
+      await open('web');
+      const text = await inside('.screen-body').textContent();
+      assert.match(text, /示例地址/);
+      assert.match(text, /WEB ACCESS/);
+      assert.match(text, /网页写操作不要求配对码/);
+      assert.match(text, /登录口令默认关闭/);
+      assert.match(text, /登录口令可选保护/);
+      assert.doesNotMatch(text, /登录与配对|生成一次性配对码/);
+    });
+
     if (screenshotDir) {
       await check('optional 376 × 960 screenshots', async () => {
-        for (const view of ['overview', 'storage', 'network', 'apps', 'controls']) {
+        for (const view of ['overview', 'storage', 'network', 'apps', 'thermal', 'controls', 'web']) {
           await open(view);
           await device.screenshot({ path: path.join(screenshotDir, `${view}.png`) });
         }
       });
     }
 
-    await check('desktop gallery lays out eleven pages in a grid and each entry opens an interactive page', async () => {
+    await check('desktop gallery lays out twelve pages including screen protection and each entry opens an interactive page', async () => {
       await page.setViewportSize({ width: 1600, height: 1200 });
       await open('overview', 'gallery');
       assert.equal(await page.locator('#gallery-container').isVisible(), true);
       assert.equal(await page.locator('#stage').isHidden(), true);
-      assert.equal(await page.locator('#gallery .gallery-item').count(), 11);
-      assert.equal(await page.locator('#gallery .device[data-preview-device]').count(), 11);
+      assert.equal(await page.locator('#gallery .gallery-item').count(), 12);
+      assert.equal(await page.locator('#gallery .device[data-preview-device]').count(), 12);
+      assert.equal(await page.locator('#gallery [aria-label="屏幕保护页面展示"] .saver-layer').isVisible(), true);
+      assert.equal(await page.locator('#gallery [aria-label="屏幕保护页面展示"] .saver-metric').count(), 4);
+      assert.equal(await page.evaluate(() => {
+        const ids = [...document.querySelectorAll('[id]')].map(node => node.id);
+        return ids.length === new Set(ids).size;
+      }), true, 'gallery controls keep unique IDs and matching labels');
       assert.equal(await page.locator('#gallery .device[inert]').count(), 0, 'inert would prevent scrolling long previews');
       const gallery = await page.locator('#gallery .device').evaluateAll(devices => devices.map(el => {
         const rect = el.getBoundingClientRect();
@@ -403,7 +545,12 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
         await page.locator(`#gallery [data-preview="${view}"]`).tap();
         assert.equal(await page.locator('#stage').isVisible(), true);
         assert.equal(await page.locator('#gallery-container').isHidden(), true);
-        assert.equal(await inside('.screen-title').textContent(), viewTitles[view]);
+        assert.equal(await inside('.screen-title').textContent(), view === 'saver' ? viewTitles.controls : viewTitles[view]);
+        if (view === 'saver') {
+          assert.equal(await inside('#saver').isVisible(), true);
+          await inside('#saver').tap();
+          await page.clock.fastForward(700);
+        }
         await tab('network');
         assert.equal(await inside('.screen-title').textContent(), viewTitles.network);
         await page.locator('[data-mode="gallery"]').tap();

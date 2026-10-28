@@ -35,6 +35,7 @@ jobs:
         run: |
           python scripts/build-panel.py
           git diff --exit-code -- ui/web/index.html ui/web/login.html
+          python scripts/build-prototype.py --check
           python scripts/build-ui.py
           for script in ui/assets/*.js ui/panel-src/*.js; do node --check "$script"; done
       - name: Check the official hidden-window handshake

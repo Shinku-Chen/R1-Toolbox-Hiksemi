@@ -179,8 +179,20 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
 
     for (const width of [376, 320]) {
       await page.setViewportSize({ width, height: 960 });
-      for (const name of ['overview', 'storage', 'network', 'apps', 'thermal', 'controls']) { await root(name); await measure(name); }
+      for (const name of ['overview', 'storage', 'network', 'apps', 'thermal', 'controls']) {
+        await root(name); await measure(name);
+        if (width === 320 && name === 'thermal') {
+          for (const channel of ['cpu', 'system']) {
+            const buttons = await page.locator(`[data-action="fan-quick"][data-channel="${channel}"]`).evaluateAll(nodes =>
+              nodes.map(node => ({ mode: node.dataset.mode, width: node.getBoundingClientRect().width })));
+            assert.equal(buttons.length, 5, `${channel} must expose all five quick modes at 320px`);
+            assert.ok(buttons.every(button => button.width >= 56),
+              `${channel} fan buttons must be at least 56px wide at 320px: ${JSON.stringify(buttons)}`);
+          }
+        }
+      }
     }
+    checks.push('CPU and system fan five-mode buttons are each at least 56px wide at 320px, without rounding tolerance');
     await page.setViewportSize({ width: 376, height: 960 });
     const style = await page.evaluate(() => {
       const nav = Array.from(document.querySelectorAll('.nav-button')).map(node => ({ width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height, font: parseFloat(getComputedStyle(node).fontSize) }));

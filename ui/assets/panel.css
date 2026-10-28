@@ -130,6 +130,7 @@ body{font-size:22px}
 .nav-button svg{width:24px;height:24px}
 .fan-control .fan-quick-row{margin-left:-18px;margin-right:-18px}
 .fan-quick-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:2px}
+@media(max-width:360px){.fan-quick-grid{gap:1px}}
 .fan-quick-head{padding:0 18px 9px}
 .fan-mode{border-radius:10px;border:1px solid var(--line);background:var(--raised);color:var(--text)}
 .fan-mode[aria-pressed=true]{background:var(--text);color:var(--bg);border-color:var(--text)}

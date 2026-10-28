@@ -33,6 +33,7 @@ docs/              功能、接口、温控、灯光、监控、面板说明
 
 ```bash
 python scripts/build-panel.py          # 修改 ui/panel-src/ 后必须执行
+python scripts/build-prototype.py      # 修改小屏样式或图标后同步离线原型
 python scripts/build-ui.py             # 打包 UI bundle（镜像构建也会执行）
 python -m unittest discover -s tests -v
 node tests/check_interactions.cjs      # 小屏真实 API、触摸/导航/详情与写操作，需要 Chrome/Chromium
@@ -62,6 +63,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 ## 代码约定
 
 - 小屏是触摸优先：最小点击目标 56px、正文 22px、导航 18px、单列布局、底部六标签导航；不引入 hover 依赖、PC 双栏或需要精确指针的交互。风扇/灯光策略、登录口令等复杂设置只放在网页。
+- 小屏实际展示与 `docs/prototypes/r1-small-screen.html` 必须保持一致。图标、样式通过 `scripts/build-prototype.py` 从实际小屏同步，原型专有 CSS 只用于外部画板；可见交互改动同步更新离线演示及检查，不能只改正式界面。CI 用 `--check` 拒绝未同步的图标与样式。
 - 网页面板优先复用 fnMonitor 的 `defineModule`、设置分组、抽屉与控件；R1 专有内容放 `50-r1.js` / `12-style-r1.css`，不改上游渲染逻辑。构建时只做品牌与功耗文案替换。
 - 对不自解释的函数、接口、结构字段、请求参数和关键返回值补简洁注释，说明职责、语义和使用边界；不要写变量赋值式废话。
 - 改代码必须同步新增或修改受影响的测试；没有自动化落点的改动要在汇报里说明缺口与手工验证路径。
