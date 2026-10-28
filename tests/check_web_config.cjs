@@ -253,12 +253,30 @@ finally:
       const caption = page.locator(dialogOpen ? '#app-detail-kind' : '.topbar .eyebrow');
       const original = await caption.textContent();
       await caption.evaluate(node => { node.textContent += ' · 模拟设备数据'; });
-      await page.screenshot({ path: path.join(screenshotDir, name + '.png'), fullPage: !dialogOpen });
+      await page.screenshot({ path: path.join(screenshotDir, name + '.png'), fullPage: !dialogOpen, animations:'disabled' });
       await caption.evaluate((node, value) => { node.textContent = value; }, original);
     };
     const measure = async name => {
       const value = await page.evaluate(() => ({ width: innerWidth, body: document.body.scrollWidth, root: document.documentElement.scrollWidth }));
       sizes.push({ name, ...value }); assert.ok(value.body <= value.width && value.root <= value.width, '网页横向溢出：' + JSON.stringify(value));
+    };
+    const webTheme = async theme => {
+      if (await page.locator('html').getAttribute('data-web-theme') !== theme) await page.locator('#web-theme').click();
+      assert.equal(await page.locator('html').getAttribute('data-web-theme'),theme);
+      await page.waitForFunction(theme => {
+        const style=getComputedStyle(document.body), expected=theme==='dark' ? ['rgb(0, 0, 0)','rgb(242, 242, 240)'] : ['rgb(236, 236, 234)','rgb(14, 14, 14)'];
+        return style.backgroundColor===expected[0] && style.color===expected[1];
+      },theme);
+      return page.locator('.web-page:not([hidden]) .card:visible').first().evaluate(node => ({background:getComputedStyle(node).backgroundColor,color:getComputedStyle(node).color}));
+    };
+    const dotGlyphs = async selector => {
+      const values = await page.locator(selector+' .fn-dot-number').evaluateAll(nodes => nodes.map(node => {
+        const svg=node.querySelector('svg'), bounds=svg.getBoundingClientRect();
+        return {text:node.querySelector('.fn-dot-label').textContent,decorative:svg.getAttribute('aria-hidden'),width:bounds.width,height:bounds.height,dots:svg.querySelectorAll('circle.on').length};
+      }));
+      assert.ok(values.length,selector+' must contain dot glyphs');
+      for(const value of values) assert.ok(value.decorative==='true' && value.width>0 && value.height>0 && value.dots>0,selector+' requires visible decorative glyphs: '+JSON.stringify(value));
+      return values;
     };
     const login = async pair => {
       const initialSession = page.waitForResponse(response => response.url() === pair.origin + '/api/session');
@@ -298,14 +316,39 @@ finally:
     const publicPosts=actionBodies.length;
     for(const width of [1440,1120,760,376,320]) {
       await page.setViewportSize({width,height:1000});
-      for(const view of ['overview','trends','storage','network','apps','device','controls']) {
+      for(const view of ['overview','trends','storage','network','apps','device','controls','settings']) {
         await page.locator('[data-web-page="'+view+'"]').click();
+        assert.equal(await page.locator('[data-web-page="'+view+'"]').getAttribute('aria-current'),'page');
+        assert.equal(await page.locator('[data-web-view="'+view+'"]').isVisible(),true,'navigation must reach '+view+' at '+width);
+        const icon=await page.locator('[data-web-page="'+view+'"] .nav-icon').boundingBox();
+        assert.ok(icon && icon.width>0 && icon.height>0,'navigation icon must be visible at '+width);
         if(view==='trends') await page.waitForFunction(()=>!document.getElementById('history-note').textContent.includes('正在读取'));
         await measure('public-'+width+'-'+view);
         if(['overview','network','apps','controls'].includes(view)&&[1440,376,320].includes(width)) await screenshot('preview-web-'+width+'-'+view+'-fixture');
       }
     }
     assert.equal(actionBodies.length,publicPosts,'public navigation must never emit device writes');
+    await page.locator('[data-web-page="overview"]').click();
+    assert.deepEqual((await dotGlyphs('#overview-metrics')).map(value=>value.text),['24.5','37.5','1.2','62.0']);
+    assert.match((await dotGlyphs('#web-clock'))[0].text,/^\d{2}:\d{2}$/);
+    const publicPalettes={};
+    for(const theme of ['dark','light']) {
+      publicPalettes[theme]=await webTheme(theme);
+      for(const width of [1440,376,320]) {
+        await page.setViewportSize({width,height:1000}); await dotGlyphs('#overview-metrics');
+        await measure('theme-'+theme+'-overview-'+width); await screenshot('preview-web-'+width+'-'+theme+'-overview-fixture');
+      }
+    }
+    assert.notDeepEqual(publicPalettes.dark,publicPalettes.light,'theme toggle must change visible card colors');
+    await webTheme('dark');
+    assert.equal(actionBodies.length,publicPosts,'theme changes and public dot rendering must never emit device writes');
+    const unknownRoute=fixture.primary.origin+'/api/v1/status';
+    await page.route(unknownRoute,route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({...baselineStatus,status:{...baselineStatus.status,cpu:{...baselineStatus.status.cpu,usage_percent:null}},insights:{...baselineStatus.insights,system:{...baselineStatus.insights.system,cpu_usage_percent:null}}})}));
+    await page.reload(); await page.waitForFunction(()=>document.querySelector('#overview-metrics .fn-dot-label')?.textContent==='--');
+    assert.equal((await dotGlyphs('#overview-metrics'))[0].text,'--','unknown CPU usage must remain unknown, never become zero');
+    await page.unroute(unknownRoute); await page.reload();
+    await page.waitForFunction(()=>document.querySelector('#overview-metrics .fn-dot-label')?.textContent==='24.5');
+    checks.push('all eight icon navigation targets remain reachable at five widths; real API metric values and clock use visible decorative dot glyphs without losing text or unknown --; public dark/light overview fits 1440/376/320 and theme switching emits no device writes');
     assert.equal(await page.locator('#web-power-card').isVisible(),false);
     await page.locator('[data-web-page="network"]').click();
     assert.match(await page.locator('#network-interfaces').textContent(),/2001:db8:1234:5678:90ab:cdef:1234:5678\/64/);
@@ -313,6 +356,7 @@ finally:
     assert.match(await page.locator('#network-dns').textContent(),/默认域名/);
     await page.locator('[data-web-page="apps"]').click();assert.equal(await page.locator('#web-containers [data-device-action]').count(),0);
     assert.match(await page.locator('#docker-running').textContent(),/1\s*\/\s*2/);
+    assert.equal((await dotGlyphs('#docker-running'))[0].text,'1','Docker dot count must use the sampled running count');
     assert.equal(await page.locator('#web-containers .port-badge').count(),2);
     await page.locator('[data-container-filter="running"]').click();assert.equal(await page.locator('#web-containers .application-row').count(),1);
     await page.locator('[data-container-filter="all"]').click();await page.locator('#container-search').fill('r1-toolbox');assert.equal(await page.locator('#web-containers .application-row').count(),1);
@@ -402,6 +446,34 @@ finally:
     await setting('lighting');assert.equal(await page.locator('#light-brightness').inputValue(),'17');
     await setting('monitoring');assert.equal(await page.locator('#history-retention').inputValue(),'11');
     for(const width of [1440,760,376,320]){await page.setViewportSize({width,height:1000});for(const tab of ['panel','fans','lighting','monitoring','connection']){await setting(tab);await measure('settings-'+tab+'-'+width);if([1440,320].includes(width)&&['fans','lighting','connection'].includes(tab))await screenshot('preview-web-'+width+'-settings-'+tab+'-fixture');}}
+    await setting('fans');
+    const beforeFanThemes=actionBodies.length, fanPalettes={};
+    const fanModes={},fanSourceDrafts={};
+    for(const channel of ['cpu','system']) {
+      fanModes[channel]=await page.locator('#fan-'+channel+'-mode').inputValue();
+      fanSourceDrafts[channel]=await page.locator('#fan-'+channel+'-sources input').evaluateAll(nodes=>nodes.map(node=>({value:node.value,checked:node.checked})));
+      await page.locator('#fan-'+channel+'-mode').selectOption('temperature');
+      for(const source of await page.locator('#fan-'+channel+'-sources input').all()) await source.setChecked((channel==='cpu'?['cpu','board']:['disk','disk2']).includes(await source.inputValue()));
+    }
+    for(const theme of ['dark','light']) {
+      fanPalettes[theme]=await webTheme(theme);
+      for(const width of [1440,376,320]) {
+        await page.setViewportSize({width,height:1000});
+        assert.equal(await page.locator('.fan-policy-channel').count(),2);
+        assert.equal(await page.locator('#fan-policy-save').isEnabled(),true);
+        assert.equal(await page.locator('#fan-cpu-manual_percent').inputValue(),'83');
+        await measure('theme-'+theme+'-fans-'+width); await screenshot('preview-web-'+width+'-'+theme+'-settings-fans-fixture');
+        await screenshot('preview-web-'+width+'-'+theme+'-settings-fans-temperature-fixture');
+      }
+    }
+    assert.notDeepEqual(fanPalettes.dark,fanPalettes.light,'paired settings must honor the selected visible theme');
+    for(const channel of ['cpu','system']) {
+      for(const source of fanSourceDrafts[channel]) await page.locator('#fan-'+channel+'-sources input[value="'+source.value+'"]').setChecked(source.checked);
+      await page.locator('#fan-'+channel+'-mode').selectOption(fanModes[channel]);
+    }
+    assert.equal(actionBodies.length,beforeFanThemes,'paired theme changes must not save or apply fan settings');
+    await webTheme('dark');
+    checks.push('paired CPU/system fan settings stay independently editable in dark/light at 1440/376/320; theme changes retain drafts and all save/apply semantics without emitting device writes');
     await setting('panel');
     checks.push('all five settings subpages are truly separate and readable at four widths; fan save plus forced state poll preserves independent light/history drafts without hiding any existing controls');
 

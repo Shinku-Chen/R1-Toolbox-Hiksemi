@@ -4,6 +4,48 @@
   const finite = v => typeof v === "number" && Number.isFinite(v);
   let current = null, online = false, authorized = false, actionBusy = false, page = "overview", pollPromise = null, historyEpoch = 0, containerFilter = "all", selectedApp = null, detailActionSignature = "";
   const titles = {overview:"运行总览",trends:"历史与提醒",storage:"存储空间",network:"网络连接",apps:"应用与服务",device:"设备详情",controls:"控制中心",settings:"设置"};
+  // Numeric glyphs adapted from fnmonitor (MIT, d002d1d2). Full license is
+  // shipped in config.css. Keep real text for selection and screen readers;
+  // the SVG is decorative and never changes samples or device actions.
+  const fnGlyphs = {
+    '0': ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+    '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+    '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
+    '3': ['#####', '...#.', '..#..', '...#.', '....#', '#...#', '.###.'],
+    '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '...#.', '...#.'],
+    '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
+    '6': ['..##.', '.#...', '#....', '####.', '#...#', '#...#', '.###.'],
+    '7': ['#####', '....#', '...#.', '..#..', '.#...', '.#...', '.#...'],
+    '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
+    '9': ['.###.', '#...#', '#...#', '.####', '....#', '...#.', '.##..'],
+    '.': ['.', '.', '.', '.', '.', '.', '#'],
+    ':': ['.', '#', '.', '.', '.', '#', '.'],
+    '-': ['....', '....', '....', '####', '....', '....', '....'],
+  };
+  function dotNumber(value) {
+    const raw = String(value), match = /^(-?\d+(?:\.\d+)?(?::\d+)*|--)(.*)$/.exec(raw);
+    if (!match) return el("span", "", raw);
+    const text = match[1], glyphs = Array.from(text, char => fnGlyphs[char]);
+    const width = glyphs.reduce((sum, glyph) => sum + glyph[0].length, 0) + glyphs.length - 1;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 " + width + " 7");
+    svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
+    svg.style.setProperty("--fn-dot-units", width);
+    let x = 0;
+    for (const glyph of glyphs) {
+      for (let row = 0; row < 7; row++) for (let col = 0; col < glyph[0].length; col++) {
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", x + col + 0.5); circle.setAttribute("cy", row + 0.5); circle.setAttribute("r", "0.39");
+        if (glyph[row][col] === "#") circle.setAttribute("class", "on");
+        svg.append(circle);
+      }
+      x += glyph[0].length + 1;
+    }
+    const wrap = el("span", "fn-dot-number");
+    wrap.append(svg, el("span", "fn-dot-label", text));
+    if (match[2]) wrap.append(el("span", "fn-dot-tail", match[2]));
+    return wrap;
+  }
   function el(tag, cls, value) { const n = document.createElement(tag); if (cls) n.className = cls; if (value !== undefined) n.textContent = String(value); return n; }
   function put(id, value) { $(id).textContent = value; }
   function empty(node, text = "尚未取得采样") { node.replaceChildren(el("p", "small", text)); }
@@ -33,7 +75,7 @@
     const builtAt = [metadataText(value.build_date), metadataText(value.build_time)].filter(Boolean).join(" ");
     return [version, model && "型号 " + model, build && "构建 " + build, builtAt && "构建时间 " + builtAt].filter(Boolean).join("\n");
   }
-  function metric(label, value, unit, note, ratio) { const c = el("article","metric-card"); c.append(el("div","metric-label",label)); const n = el("div","metric-value",value); if (unit) n.append(el("span","metric-unit",unit)); c.append(n,el("p","metric-note",note || "实时采样")); if (finite(ratio)) { const bar = el("div","meter"), fill = el("span"); fill.style.width = Math.max(0,Math.min(100,ratio)) + "%"; bar.append(fill); c.append(bar); } return c; }
+  function metric(label, value, unit, note, ratio) { const c = el("article","metric-card"); c.append(el("div","metric-label",label)); const n = el("div","metric-value"); n.append(dotNumber(value)); if (unit) n.append(el("span","metric-unit",unit)); c.append(n,el("p","metric-note",note || "实时采样")); if (finite(ratio)) { const bar = el("div","meter"), fill = el("span"); fill.style.width = Math.max(0,Math.min(100,ratio)) + "%"; bar.append(fill); c.append(bar); } return c; }
   async function read(path) { const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 5000); try { const response = await fetch(path,{credentials:"omit",cache:"no-store",signal:abort.signal}); if (!response.ok) throw new Error("HTTP " + response.status); return await response.json(); } finally { clearTimeout(timer); } }
   function switchPage(name) { if (!titles[name]) return; page = name; document.querySelectorAll("[data-web-view]").forEach(n => n.hidden = n.dataset.webView !== name); document.querySelectorAll("[data-web-page]").forEach(n => n.setAttribute("aria-current",n.dataset.webPage === name ? "page" : "false")); put("page-title",titles[name]); if (location.hash !== "#" + name) history.replaceState(null,"","#"+name); window.scrollTo({top:0,behavior:"auto"}); document.dispatchEvent(new CustomEvent("r1:web-page",{detail:name})); if (name === "trends") loadTrends(); }
   document.querySelectorAll("[data-web-page]").forEach(n => n.addEventListener("click",() => switchPage(n.dataset.webPage)));
@@ -47,7 +89,7 @@
   document.querySelectorAll("[data-open-settings]").forEach(node => node.addEventListener("click", () => openSettings(node.dataset.openSettings)));
   window.addEventListener("hashchange",() => switchPage(location.hash.slice(1)));
   $("web-theme").addEventListener("click",() => { const root = document.documentElement; root.dataset.webTheme = root.dataset.webTheme === "light" ? "dark" : "light"; });
-  function clock() { const d = new Date(); put("web-clock",d.toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",hour12:false})); put("web-date",d.toLocaleDateString("zh-CN",{month:"long",day:"numeric",weekday:"short"})); } clock(); setInterval(clock,30000);
+  function clock() { const d = new Date(); $("web-clock").replaceChildren(dotNumber(d.toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",hour12:false}))); put("web-date",d.toLocaleDateString("zh-CN",{month:"long",day:"numeric",weekday:"short"})); } clock(); setInterval(clock,30000);
   function svgChart(target, series, max = 100) {
     target.replaceChildren(); const all = series.flatMap(s => s.points).filter(p => finite(p[1])); if (!all.length) { target.append(el("div","chart-empty","暂无有效历史采样")); return; }
     const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns,"svg"); svg.setAttribute("viewBox","0 0 600 150"); svg.setAttribute("preserveAspectRatio","none"); svg.setAttribute("role","img"); svg.setAttribute("aria-label",series.map(s => s.label).join("、") + "历史曲线");
@@ -243,7 +285,7 @@
   function renderApps(data) {
     const insight = data.insights || {}, group = insight.containers || {}, items = list(group.items), available = group.available === true;
     const running = items.filter(item => item.state === "running"), count = available ? items.length : null;
-    const countNode = $("docker-running"); countNode.replaceChildren(document.createTextNode(available ? String(running.length) : "--"),el("small",""," / " + (count === null ? "--" : count)));
+    const countNode = $("docker-running"); countNode.replaceChildren(dotNumber(available ? String(running.length) : "--"),el("small",""," / " + (count === null ? "--" : count)));
     put("docker-count", available ? items.length + " 项" : "采集未确认");
     put("docker-summary-note", available ? running.length + " 项运行中 · " + (items.length - running.length) + " 项未运行" : group.reason || "Docker 采样暂不可读取");
     put("overview-docker-count", available ? running.length + " / " + items.length : "-- / --");
