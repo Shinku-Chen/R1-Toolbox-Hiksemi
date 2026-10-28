@@ -794,6 +794,11 @@ class WebConfigServer:
                 protocol_version = 'HTTP/1.0'
                 server_version = 'R1Web'
                 sys_version = ''
+                # _Reader sets a 2 s socket timeout while parsing a request.
+                # That timeout also governs writes; a large panel response over
+                # a slow link would otherwise be truncated while Content-Length
+                # still advertises the full body (Chrome: ERR_CONTENT_LENGTH_MISMATCH).
+                RESPONSE_TIMEOUT = 60
 
                 def setup(self):
                     super().setup()
@@ -811,6 +816,10 @@ class WebConfigServer:
 
                 def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False):
                     data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+                    try:
+                        self.connection.settimeout(self.RESPONSE_TIMEOUT)
+                    except OSError:
+                        pass
                     self.send_response(code)
                     csp = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
                            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")

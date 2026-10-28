@@ -5,6 +5,7 @@ access, and no browser.
 """
 import copy
 import importlib.util
+import io
 import json
 from pathlib import Path
 import socket
@@ -419,6 +420,28 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.cookie = headers['set-cookie'].split(';', 1)[0]
         return code
+
+    def test_response_write_does_not_reuse_the_request_reader_timeout(self):
+        # A request is parsed with a 2 s socket timeout.  That timeout must not
+        # govern the response write: a large panel page on a slow link was being
+        # truncated while Content-Length still advertised the full body.
+        class Connection:
+            timeout = 2
+
+            def settimeout(self, value):
+                self.timeout = value
+
+        handler = object.__new__(self.web.server.RequestHandlerClass)
+        handler.connection = Connection()
+        handler.wfile = io.BytesIO()
+        handler.path = '/'
+        handler.close_connection = False
+        handler.send_response = lambda code: None
+        handler.send_header = lambda key, value: None
+        handler.end_headers = lambda: None
+        handler.send(200, b'x' * 4096, mime='text/html; charset=utf-8')
+        self.assertGreaterEqual(handler.connection.timeout, 30)
+        self.assertEqual(len(handler.wfile.getvalue()), 4096)
 
     def test_read_routes_and_unknown_query_rejection(self):
         self.assertEqual(self.request('GET', '/api/overview')[0], 200)
