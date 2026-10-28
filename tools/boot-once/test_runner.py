@@ -194,7 +194,7 @@ time.sleep(0.01)
     def fingerprint(self, mode="diagnostic", ui_dir="", bind="0.0.0.0", port="18732",
                     dev_no_pairing="0", dev_allow_ips="", dev_minutes="60", dev_commands="0"):
         values = ("r1-boot-once-test", mode, ui_dir, bind, port,
-                  "pair", dev_no_pairing, dev_allow_ips, dev_minutes, dev_commands)
+                  "password", dev_no_pairing, dev_allow_ips, dev_minutes, dev_commands)
         end = chr(10)
         return hashlib.sha256((end.join(values) + end).encode()).hexdigest()
 

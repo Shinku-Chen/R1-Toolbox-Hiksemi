@@ -5563,7 +5563,11 @@ return;
 post({ action: 'change', old_password: oldValue, new_password: newValue });
 };
 if (pw._r.clear) pw._r.clear.onclick = async () => {
-if (!(await R1.ask('取消登录口令？', '取消后面板恢复公开监控，设备写操作仍需要小屏配对码。', true))) return;
+const mode = (R1.st && R1.st.web && R1.st.web.auth_mode) || (a.auth_mode) || 'pair';
+const message = mode === 'password'
+? '取消后面板恢复公开监控，设备写操作将不再需要登录。'
+: '取消后面板恢复公开监控，设备写操作仍需要小屏配对码。';
+if (!(await R1.ask('取消登录口令？', message, true))) return;
 post({ action: 'change', old_password: pw._r.old.value, new_password: '' });
 };
 rows.append(r1Field('修改口令', pw, '只保存 PBKDF2 哈希；忘记口令可在 NAS 上删除数据卷中的 panel-auth.json 后重启服务。'));
@@ -5573,7 +5577,8 @@ out.onclick = async () => { try { await API.post('/api/auth/logout', {}); } catc
 rows.append(r1Field('当前会话', out, ''));
 }
 x.rows.replaceChildren(rows);
-setHTML(x.status, a.password_required ? '当前已启用登录口令；面板读取与写入都需要登录。' : '当前未启用登录口令；只读监控公开，设备写操作需要小屏五位配对码。');
+const passwordMode = (R1.st && R1.st.web && R1.st.web.auth_mode) === 'password' || a.auth_mode === 'password';
+setHTML(x.status, a.password_required ? '当前已启用登录口令；面板读取与写入都需要登录。' : passwordMode ? '当前未启用登录口令；只读监控公开，设备写操作默认开放。' : '当前未启用登录口令；只读监控公开，设备写操作需要小屏五位配对码。');
 x.pairing = a.pairing;
 };
 card._sync();
@@ -5588,13 +5593,16 @@ const key = JSON.stringify([web.addresses, web.port, pairing, st.version]);
 if (key === sig) return;
 sig = key;
 const rows = mount(`<div></div>`);
+const passwordMode = web.auth_mode === 'password';
 rows.append(r1Field('网页地址', mount(`<span class="mono">${esc((web.addresses && web.addresses[0]) || ('http://NAS_IP:' + (web.port || 18732)))}</span>`),
-'配对码在小屏「设置 → 网页配置」生成，180 秒有效、只能使用一次。'));
+passwordMode ? '登录口令模式：写操作只使用可选登录口令，不再生成配对码。' : '配对码在小屏「设置 → 网页配置」生成，180 秒有效、只能使用一次。'));
+if (!passwordMode) {
 rows.append(r1Field('配对状态', mount(`<span>${pairing.active ? '已生成，剩余 ' + Math.max(0, pairing.expires_in || 0) + ' 秒' : '当前没有有效配对码'}</span>`),
 '配对码只在本机小屏显示，不经网页或第三方接口。'));
 const b = mount(`<button class="btn" type="button">输入配对码解锁</button>`);
 b.onclick = () => R1.openPair('修改设备设置需要授权');
 rows.append(r1Field('解锁设置', b, '登录口令开启后可直接登录，无需配对码。'));
+}
 rows.append(r1Field('数据卷', mount(`<span class="mono">r1-toolbox-data</span>`),
 '升级或重建 Compose 时必须复用原数据卷，否则配对会话与服务设置会丢失。'));
 rows.append(r1Field('版本', mount(`<span class="mono">${esc(st.version || '--')}</span>`), '镜像按提交标签发布；更新请复用原项目与数据卷。'));

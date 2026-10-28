@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat(web): 宿主默认改为仅登录口令模式，配对码不再参与正常写操作；口令默认关闭，旧配对流程需显式设置 `R1_WEB_AUTH_MODE=pair`。
 - feat(screen): 增加屏幕保护时间、保护亮度、CPU/内存使用率或 CPU/主板温度内容和独立的关闭屏幕时间；休眠盘不参与。
 - feat(web): 新增 `R1_WEB_AUTH_MODE=password` 登录口令模式；该模式不再要求配对码，口令默认关闭，启用后写操作需登录。
 - fix(fan): 监督进程提前退出时保留其 `status.json` 原因；开发者命令增加只读 `fan_status` 用于查看监督状态。

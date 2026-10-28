@@ -81,7 +81,7 @@ fi
 case "$image_hash" in
   *[!0123456789abcdef]*) echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1 ;;
 esac
-config_fingerprint=$(printf '%s\n' "$TASK_CONTAINER" "$ui_mode" "${UI_DIR:-}" "${R1_WEB_BIND:-0.0.0.0}" "${R1_WEB_PORT:-18732}" "${R1_WEB_AUTH_MODE:-pair}" "${R1_DEV_NO_PAIRING:-0}" "${R1_DEV_ALLOW_IPS:-}" "${R1_DEV_MINUTES:-60}" "${R1_DEV_ALLOW_COMMANDS:-0}" | sha256sum)
+config_fingerprint=$(printf '%s\n' "$TASK_CONTAINER" "$ui_mode" "${UI_DIR:-}" "${R1_WEB_BIND:-0.0.0.0}" "${R1_WEB_PORT:-18732}" "${R1_WEB_AUTH_MODE:-password}" "${R1_DEV_NO_PAIRING:-0}" "${R1_DEV_ALLOW_IPS:-}" "${R1_DEV_MINUTES:-60}" "${R1_DEV_ALLOW_COMMANDS:-0}" | sha256sum)
 config_fingerprint=${config_fingerprint%% *}
 run_key="$boot_id:$config_fingerprint:$image_id:$ui_mode:${UI_DIR:-}:${R1_WEB_BIND:-0.0.0.0}:${R1_WEB_PORT:-18732}"
 last_key=$(cat "$state_dir/last-success" 2>/dev/null || true)
@@ -627,7 +627,7 @@ def main():
                     'R1_WEB_PORT 需要为 1024–65535，或 0 禁用网页')
             environment['R1_WEB_BIND'] = web_bind
             environment['R1_WEB_PORT'] = web_port
-            auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'pair')
+            auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'password')
             if auth_mode not in ('pair', 'password'):
                 raise SystemExit('R1_WEB_AUTH_MODE 只能是 pair 或 password')
             environment['R1_WEB_AUTH_MODE'] = auth_mode
