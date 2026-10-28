@@ -33,7 +33,7 @@ const mainTabs = ['overview', 'storage', 'network', 'apps', 'thermal', 'controls
 const viewTitles = {
   overview: '概览', metrics: '核心指标', processor: '处理器与内存', storage: '存储', network: '网络',
   apps: '应用', containers: 'Docker 容器', container: '容器详情', thermal: '温度与风扇',
-  trends: '历史趋势', ports: '监听端口', controls: '设置', web: '网页设置',
+  trends: '历史趋势', ports: '监听端口', controls: '设置', web: '网页设置', power: '电源管理',
 };
 const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'containers', 'ports', 'controls', 'web'];
 
@@ -78,6 +78,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
     const back = () => inside('[data-action="back"]').tap();
     const choosePower = async operation => {
       await tab('controls');
+      await inside('[data-view="power"]').tap();
       await inside(`[data-action="${operation === 'reboot' ? 'reboot' : 'shutdown'}"]`).tap();
     };
 
@@ -168,7 +169,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
     });
 
     await check('direct detail query back returns to its parent tab', async () => {
-      for (const [view, parent] of [['processor', 'overview'], ['containers', 'apps'], ['ports', 'network'], ['web', 'controls']]) {
+      for (const [view, parent] of [['processor', 'overview'], ['containers', 'apps'], ['ports', 'network'], ['web', 'controls'], ['power', 'controls']]) {
         await open(view);
         await back();
         assert.equal(await inside('.screen-title').textContent(), viewTitles[parent]);
@@ -232,9 +233,9 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       await inside('[data-fan-channel="system"][data-fan-mode="manual"]').tap();
       assert.equal(await inside('[data-fan-channel="system"][data-fan-mode="manual"]').getAttribute('aria-pressed'), 'true');
       await open('controls');
-      assert.match(await inside('.screen-body').textContent(), /电源管理/);
-      assert.equal(await inside('[data-action="reboot"]').count(), 1);
-      assert.equal(await inside('[data-action="shutdown"]').count(), 1);
+      assert.equal(await inside('[data-view="power"]').count(), 1, 'settings exposes power through a second-level entry');
+      assert.equal(await inside('[data-action="reboot"]').count(), 0, 'settings must not expose shutdown actions directly');
+      assert.equal(await inside('[data-action="shutdown"]').count(), 0);
       const hue = inside('#light-hue');
       assert.equal(await hue.evaluate(el => getComputedStyle(el).webkitAppearance), 'none',
         'custom hue thumb owns the track geometry');
@@ -293,6 +294,9 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       await open('processor');
       assert.equal(await inside('.screen-header').count(), 1, 'detail pages keep a back header');
       await open('controls');
+      assert.equal(await inside('[data-action="reboot"]').count(), 0);
+      await inside('[data-view="power"]').tap();
+      assert.equal(await inside('.screen-title').textContent(), viewTitles.power);
       await inside('[data-action="reboot"]').tap();
       assert.equal(await inside('[role="dialog"]').isVisible(), true);
       assert.match(await inside('[role="dialog"]').textContent(), /请确认/);
