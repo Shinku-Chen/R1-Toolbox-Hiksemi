@@ -786,32 +786,45 @@ class NativeFanTests(unittest.TestCase):
                     self.assertIsNone(failure["sigcgt"])
                     self.assertEqual(failure["remaining"], 20)
 
-    def test_readiness_journal_exposes_single_read_maps_without_claiming_eof(self):
+    def test_real_ready_reads_guard_after_multiple_short_maps_reads(self):
         with self.real_proc_backend() as backend:
             identity = self.write_proc_identity(backend, 30, 300)
             base = backend.proc / "30"
-            prefix = b"0000-1000 r-xp 0000 00:01 123 /fixture/unrelated.so\n"
+            prefix = b"0000-1000 r-xp 0000 00:01 123 /fixture/unrelated.so\n" * 120
+            self.assertGreater(len(prefix), 4096)
             complete = prefix + f"1000-2000 r-xp 0000 00:01 124 {backend.guard_path.resolve()}\n".encode()
-            (base / "maps").write_bytes(complete)
-            path = self.folder / "readiness.json"
-            backend.set_readiness_path(path)
-            self.fake_startup_clock(backend)
-            actual_read = watchdog.read_bytes
+            maps = base / "maps"
+            maps.write_bytes(complete)
+            journal = self.folder / "readiness.json"
+            backend.set_readiness_path(journal)
+            now = self.fake_startup_clock(backend)
+            actual_read = os.read
 
-            def short_read(path, limit):
-                return prefix if Path(path) == base / "maps" else actual_read(path, limit)
-
-            with patch.object(watchdog, "read_bytes", side_effect=short_read):
+            # Model seq_file short reads below the first page, while retaining
+            # the real identity, uniqueness, signal and guard readiness gates.
+            with patch.object(native.os, "read", side_effect=lambda fd, size: actual_read(fd, min(size, 2048))):
+                self.assertTrue(backend._ready(identity, require_guard=True))
+                self.assertEqual(backend._last_readiness["maps_bytes_read"], len(complete))
+                self.assertTrue(backend._last_readiness["guard_ok"])
+                self.assertEqual(backend.wait_ready(identity, require_guard=True, deadline=0.5), identity)
+                success = native.read_json(journal)["last"]
+                self.assertEqual(success["event"], "success")
+                self.assertEqual(success["maps_bytes_read"], len(complete))
+                maps.write_bytes(prefix)
+                self.assertFalse(backend._ready(identity, require_guard=True))
+                self.assertTrue(backend._last_readiness["identity_ok"])
+                self.assertTrue(backend._last_readiness["single_process"])
+                self.assertTrue(backend._last_readiness["handlers_ready"])
+                self.assertFalse(backend._last_readiness["guard_ok"])
+                self.assertEqual(backend._last_readiness["maps_bytes_read"], len(prefix))
                 with self.assertRaises(RuntimeError):
-                    backend.wait_ready(identity, require_guard=True, deadline=0.1)
-            failure = native.read_json(path)["failure"]
+                    backend.wait_ready(identity, require_guard=True, deadline=now[0] + 0.1)
+            failure = native.read_json(journal)["failure"]
             self.assertTrue(failure["handlers_ready"])
             self.assertFalse(failure["guard_ok"])
             self.assertEqual(failure["maps_bytes_read"], len(prefix))
             self.assertTrue(failure["maps_read_ok"])
             self.assertEqual(failure["guard_paths"], [])
-            self.assertNotIn("maps_complete", failure)
-            self.assertIn(str(backend.guard_path.resolve()).encode(), (base / "maps").read_bytes())
 
     def test_readiness_journal_io_failure_never_changes_ready_or_restore_gates(self):
         with self.real_proc_backend() as backend:

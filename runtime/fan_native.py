@@ -35,14 +35,24 @@ PREFLIGHT_REASONS = frozenset((
 
 
 def read_bytes(path, limit):
+    """Read a bounded regular file through EOF, including proc seq_file chunks.
+
+    A short read is not EOF. Never return partial identity, maps, configuration
+    or lease data after a later read fails or the byte limit is exceeded.
+    """
     descriptor = None
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             return None
-        value = os.read(descriptor, limit + 1)
-        return value if len(value) <= limit else None
+        value = bytearray()
+        while len(value) <= limit:
+            chunk = os.read(descriptor, min(65536, limit + 1 - len(value)))
+            if not chunk:
+                return bytes(value)
+            value.extend(chunk)
+        return None
     except (OSError, ValueError):
         return None
     finally:

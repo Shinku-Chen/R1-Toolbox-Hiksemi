@@ -482,8 +482,8 @@ class SystemBackend:
                 self._last_ready = {'sigcgt': hex(caught), 'required': hex(required), 'exe': identity.get('exe'), 'alive': self.alive(identity),
                                     'guard_expected': os.fsdecode(expected),
                                     'guard_paths': [os.fsdecode(path) for path in paths if b'fan_guard.so' in path]}
-                # Observe exactly the existing predicate/input. A successful
-                # read_bytes is one bounded read, not proof of seq_file EOF.
+                # Use the bounded EOF-complete maps input also used for owner
+                # recovery. A partial/oversized read remains a failed gate.
                 guard_ok = any(path == expected or path == expected + b" (deleted)"
                                or path.rsplit(b"/", 1)[-1].removesuffix(b" (deleted)") == guard_name
                                for path in paths)
