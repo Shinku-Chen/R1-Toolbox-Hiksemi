@@ -364,8 +364,21 @@ finally:
       check('设置分组 ' + id, await page.locator('#set-' + id).count() === 1);
     }
     const fanCard = page.locator('#set-r1-fan');
-    await fanCard.locator('.r1-editor select').first().selectOption('temperature');
-    await fanCard.locator('.r1-sources .chip-t').first().click();
+    const modeOptions = await fanCard.locator('.r1-editor select').first().locator('option').allTextContents();
+    check('风扇转速五档', ['自动', '低档', '中档', '高档', '手动'].every(label => modeOptions.includes(label)), modeOptions.join(','));
+    await fanCard.locator('.r1-editor select').first().selectOption('manual');
+    check('手动模式才显示设备多选', await fanCard.locator('.r1-ms').count() === 1 && await fanCard.locator('.r1-sources').count() === 0);
+    check('手动模式显示温控曲线', await fanCard.locator('.r1-curve').count() === 1);
+    check('设备多选默认收起', await fanCard.locator('.r1-ms-menu').isHidden());
+    await fanCard.locator('.r1-ms-toggle').first().click();
+    check('设备下拉可展开', await fanCard.locator('.r1-ms-menu').first().isVisible() && await fanCard.locator('.r1-ms-row').count() >= 1);
+    await fanCard.locator('.r1-ms-row input').first().check();
+    await shot('fan-manual');
+    await page.keyboard.press('Escape');
+    await fanCard.locator('.r1-editor select').first().selectOption('low');
+    check('低/中/高档不显示设备与曲线', await fanCard.locator('.r1-ms').count() === 0 && await fanCard.locator('.r1-curve').count() === 0);
+    await fanCard.locator('.r1-editor select').first().selectOption('manual');
+    check('切回手动保留设备多选', await fanCard.locator('.r1-ms').count() === 1);
     check('风扇保存并应用按钮', await fanCard.locator('[data-ref="apply"]').count() === 1);
     await fanCard.locator('[data-ref="apply"]').click();
     await page.locator('.fullmask [data-yes]').click();
@@ -384,7 +397,7 @@ finally:
     check('风扇写入由真实温控服务处理', !!fanRecord && !!fanRecord.body && !!fanRecord.body.fan_policy,
       JSON.stringify(fanRecord && fanRecord.body && fanRecord.body.error));
     if (fanRecord && fanRecord.status === 200) {
-      check('风扇配置已写入', fanRecord.body.fan_policy.config.channels.cpu.mode === 'temperature');
+      check('风扇配置已写入', fanRecord.body.fan_policy.config.channels.cpu.mode === 'temperature' && fanRecord.body.fan_policy.config.channels.cpu.sources.length === 1);
     }
     const fanState = await api('/api/r1');
     check('温控状态接口可读', !!fanState.body && !!fanState.body.fan && !!fanState.body.fan.capability);

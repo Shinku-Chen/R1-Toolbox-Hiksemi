@@ -64,3 +64,55 @@
   .r1-light-main { flex-direction: column; align-items: stretch; }
   .r1-stop { flex-direction: row; }
 }
+
+/* 风扇/灯光设备多选：下拉 + 复选，不再把全部设备平铺 */
+.r1-ms { width: 100%; max-width: 340px; }
+.r1-ms-toggle {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; min-height: 46px; padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: 14px;
+  background: var(--card); color: var(--ink-1); font-size: 14px; text-align: left;
+  list-style: none; cursor: pointer;
+}
+.r1-ms-toggle::-webkit-details-marker { display: none; }
+.r1-ms[open] .r1-ms-toggle { border-color: var(--line-strong); }
+.r1-ms-toggle.has-value { border-color: var(--line-strong); }
+.r1-ms-toggle:disabled { opacity: .5; }
+.r1-ms-menu {
+  margin-top: 6px; max-height: 260px; overflow-y: auto; padding: 6px;
+  background: var(--card); border: 1px solid var(--line-strong); border-radius: 16px;
+  box-shadow: var(--shadow-pop);
+}
+.r1-ms-row {
+  display: flex; align-items: center; gap: 10px;
+  min-height: 48px; padding: 8px 10px; border-radius: 10px;
+  font-size: 14px; cursor: pointer;
+}
+.r1-ms-row:active { background: var(--card-sunk); }
+.r1-ms-row input { width: 20px; height: 20px; flex: none; accent-color: var(--ink-1); }
+.r1-ms-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r1-ms-temp { color: var(--ink-3); font-size: 12px; flex: none; }
+.r1-ms-empty { padding: 14px 10px; color: var(--ink-3); font-size: 13px; }
+
+/* 三段温控曲线 */
+.r1-curve { width: 100%; max-width: 340px; }
+.r1-curve-chart { display: block; width: 100%; height: 92px; margin-bottom: 10px; }
+.r1-curve-track { fill: none; stroke: var(--line-strong); stroke-width: 1; }
+.r1-curve-line { fill: none; stroke: var(--ink-1); stroke-width: 2; stroke-linejoin: round; }
+.r1-curve-dots circle { fill: var(--card); stroke: var(--ink-1); stroke-width: 2; }
+.r1-curve-rows { display: grid; gap: 8px; }
+.r1-curve-rows + .r1-curve-rows { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.r1-curve-row { display: grid; grid-template-columns: 62px 88px auto; align-items: center; gap: 10px; font-size: 14px; }
+.r1-curve-name { color: var(--ink-2); }
+.r1-curve-input {
+  min-height: 44px; width: 88px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); color: var(--ink-1); font: inherit;
+}
+.r1-curve-unit { color: var(--ink-3); font-size: 12px; }
+.r1-fixed { font-size: 20px; font-weight: 600; color: var(--ink-1); }
+
+@media (max-width: 560px) {
+  .r1-ms, .r1-curve { max-width: 100%; }
+  .r1-curve-row { grid-template-columns: 56px 84px auto; }
+}

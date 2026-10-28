@@ -1367,6 +1367,34 @@ dd .diag-link{margin:0;height:24px}
 .r1-light-main{flex-direction:column;align-items:stretch}
 .r1-stop{flex-direction:row}
 }
+.r1-ms{width:100%;max-width:340px}
+.r1-ms-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:46px;padding:10px 14px;border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--ink-1);font-size:14px;text-align:left;list-style:none;cursor:pointer}
+.r1-ms-toggle::-webkit-details-marker{display:none}
+.r1-ms[open] .r1-ms-toggle{border-color:var(--line-strong)}
+.r1-ms-toggle.has-value{border-color:var(--line-strong)}
+.r1-ms-toggle:disabled{opacity:.5}
+.r1-ms-menu{margin-top:6px;max-height:260px;overflow-y:auto;padding:6px;background:var(--card);border:1px solid var(--line-strong);border-radius:16px;box-shadow:var(--shadow-pop)}
+.r1-ms-row{display:flex;align-items:center;gap:10px;min-height:48px;padding:8px 10px;border-radius:10px;font-size:14px;cursor:pointer}
+.r1-ms-row:active{background:var(--card-sunk)}
+.r1-ms-row input{width:20px;height:20px;flex:none;accent-color:var(--ink-1)}
+.r1-ms-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r1-ms-temp{color:var(--ink-3);font-size:12px;flex:none}
+.r1-ms-empty{padding:14px 10px;color:var(--ink-3);font-size:13px}
+.r1-curve{width:100%;max-width:340px}
+.r1-curve-chart{display:block;width:100%;height:92px;margin-bottom:10px}
+.r1-curve-track{fill:none;stroke:var(--line-strong);stroke-width:1}
+.r1-curve-line{fill:none;stroke:var(--ink-1);stroke-width:2;stroke-linejoin:round}
+.r1-curve-dots circle{fill:var(--card);stroke:var(--ink-1);stroke-width:2}
+.r1-curve-rows{display:grid;gap:8px}
+.r1-curve-rows + .r1-curve-rows{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.r1-curve-row{display:grid;grid-template-columns:62px 88px auto;align-items:center;gap:10px;font-size:14px}
+.r1-curve-name{color:var(--ink-2)}
+.r1-curve-input{min-height:44px;width:88px;padding:8px 10px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink-1);font:inherit}
+.r1-curve-unit{color:var(--ink-3);font-size:12px}
+.r1-fixed{font-size:20px;font-weight:600;color:var(--ink-1)}
+@media (max-width: 560px){.r1-ms,.r1-curve{max-width:100%}
+.r1-curve-row{grid-template-columns:56px 84px auto}
+}
 </style>
 </head>
 <body>
@@ -5279,7 +5307,9 @@ const c = channels[name] || {};
 const lv = c.level && c.level !== 'off' ? (R1_LEVEL_TXT[c.level] || '') : '';
 setText(m.x['t-' + name], ok(c.reference_c) ? F.int(c.reference_c) : '--');
 setText(m.x['p-' + name], ok(c.target_percent) ? F.int(c.target_percent) : '--');
-setText(m.x['m-' + name], R1_MODE_TXT[c.mode] || '未读取');
+const configured = (((R1.fan().config || {}).channels || {})[name] || {});
+const fixedLabel = c.mode === 'manual' ? (Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === configured.manual_percent) ? { low: '低档', medium: '中档', high: '高档' }[Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === configured.manual_percent)] : '固定输出') : null;
+setText(m.x['m-' + name], fixedLabel || R1_MODE_TXT[c.mode] || '未读取');
 setText(m.x['s-' + name], c.source_label ? '来源 · ' + c.source_label : (c.active ? '等待温度来源' : '由原厂固件管理'));
 setText(m.x['l-' + name], [lv, c.reason].filter(Boolean).join(' · '));
 setW(m.x['b-' + name], ok(c.target_percent) ? c.target_percent : 0);
@@ -5424,24 +5454,39 @@ input.checked = !!checked;
 input.addEventListener('change', () => onchange(input.checked));
 return el;
 }
-function r1SourcePicker(sources, selected, onchange) {
-const el = mount(`<div class="chips r1-sources"></div>`);
-el._picked = new Set(selected || []);
-const draw = () => {
-el.innerHTML = sources.length ? sources.map(s => {
-const id = String(s.id), on = el._picked.has(id);
-const temp = ok(s.temperature_c) ? F.int(s.temperature_c) + '℃' : '';
-const note = s.fresh === false ? ' · 已过期' : s.status === 'standby' ? ' · 休眠' : '';
-return `<button class="chip-t ${on ? 'on' : ''}" type="button" data-id="${esc(id)}" aria-pressed="${on}">${esc(s.label || id)}${temp ? ' · ' + temp : ''}${note}</button>`;
-}).join('') : '<span class="faint">尚未发现可用温度来源</span>';
+function r1MultiSelect(options, selected, onchange, aria) {
+const el = mount(`<details class="r1-ms"><summary class="r1-ms-toggle" aria-label="${esc(aria || '选择设备')}"><span data-ref="label"></span>${ic('chev', 'i-sm')}</summary><div class="r1-ms-menu" role="listbox" aria-multiselectable="true" data-ref="menu"></div></details>`);
+const picked = new Set((selected || []).map(String));
+const label = el.querySelector('[data-ref="label"]'), menu = el.querySelector('[data-ref="menu"]'), toggle = el.querySelector('summary');
+const rows = (options || []).map(o => ({
+id: String(o.id), label: String(o.label || o.id),
+temp: ok(o.temperature_c) ? F.int(o.temperature_c) + '℃' : '',
+note: o.fresh === false ? '已过期' : o.status === 'standby' ? '休眠' : '',
+}));
+const refresh = () => {
+const chosen = rows.filter(r => picked.has(r.id));
+label.textContent = chosen.length ? (chosen.length <= 2 ? chosen.map(r => r.label).join('、') : '已选 ' + chosen.length + ' 个设备') : '选择设备';
+toggle.classList.toggle('has-value', chosen.length > 0);
 };
-el.addEventListener('click', e => {
-const b = e.target.closest('[data-id]'); if (!b) return;
-const id = b.dataset.id;
-if (el._picked.has(id)) el._picked.delete(id); else el._picked.add(id);
-draw(); onchange([...el._picked]);
+if (!rows.length) {
+menu.innerHTML = '<p class="r1-ms-empty">尚未发现可用设备</p>';
+label.textContent = '暂无设备';
+toggle.setAttribute('aria-disabled', 'true');
+} else {
+menu.innerHTML = rows.map(r => `<label class="r1-ms-row" role="option" aria-selected="${picked.has(r.id)}"><input type="checkbox" value="${esc(r.id)}" ${picked.has(r.id) ? 'checked' : ''}><span class="r1-ms-name">${esc(r.label)}</span><span class="r1-ms-temp">${esc(r.temp)}${r.note ? ' · ' + esc(r.note) : ''}</span></label>`).join('');
+menu.addEventListener('change', event => {
+const input = event.target.closest('input[type=checkbox]');
+if (!input) return;
+if (input.checked) picked.add(input.value); else picked.delete(input.value);
+const row = input.closest('.r1-ms-row');
+if (row) row.setAttribute('aria-selected', String(input.checked));
+refresh();
+onchange([...picked]);
 });
-draw();
+}
+el.addEventListener('keydown', event => { if (event.key === 'Escape') { el.open = false; toggle.focus(); } });
+el.addEventListener('toggle', () => toggle.setAttribute('aria-expanded', String(el.open)));
+refresh();
 return el;
 }
 function r1Time(value, onchange) {
@@ -5453,6 +5498,71 @@ function r1Color(value, onchange) {
 const el = mount(`<input type="color" value="${esc(value || '#00C832')}">`);
 el.addEventListener('change', () => onchange(el.value.toUpperCase()));
 return el;
+}
+const FAN_UI_MODES = [['auto', '自动'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['manual', '手动']];
+const FAN_FIXED = { low: 50, medium: 75, high: 100 };
+function fanUiMode(item) {
+if (!item || item.mode === 'vendor' || !item.mode) return 'auto';
+if (item.mode === 'manual') {
+const hit = Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === item.manual_percent);
+return hit || 'low';
+}
+return 'manual';
+}
+function setFanUiMode(item, mode) {
+if (mode === 'auto') { item.mode = 'vendor'; return; }
+if (FAN_FIXED[mode]) { item.mode = 'manual'; item.manual_percent = FAN_FIXED[mode]; return; }
+item.mode = 'temperature';
+if (!Array.isArray(item.sources)) item.sources = [];
+}
+function fanCurveEditor(item, touch) {
+const box = mount(`<div class="r1-curve">
+<svg class="r1-curve-chart" viewBox="0 0 240 92" aria-hidden="true">
+<path class="r1-curve-track" d="M8 82H232M8 8V82"></path>
+<path class="r1-curve-line" data-ref="line"></path>
+<g class="r1-curve-dots" data-ref="dots"></g>
+</svg>
+<div class="r1-curve-rows" data-ref="rows"></div>
+</div>`);
+const line = box.querySelector('[data-ref="line"]'), dots = box.querySelector('[data-ref="dots"]'), rows = box.querySelector('[data-ref="rows"]');
+const x = t => 8 + (clamp(t, 15, 85) - 15) / 70 * 224;
+const y = p => 82 - (clamp(p, 50, 100) - 50) / 50 * 74;
+const paint = () => {
+const qb = clamp(item.quiet_below, 15, 85), na = clamp(item.normal_at, 15, 85), fa = clamp(item.full_at, 15, 85);
+const q = clamp(item.quiet_percent, 50, 100), n = Math.max(q, clamp(item.normal_percent, 50, 100));
+line.setAttribute('d', `M8 ${y(q).toFixed(1)}H${x(qb).toFixed(1)}V${y(n).toFixed(1)}H${x(na).toFixed(1)}V${y(100).toFixed(1)}H232`);
+dots.innerHTML = [[qb, q], [na, n], [fa, 100]].map(([t, p]) => `<circle cx="${x(t).toFixed(1)}" cy="${y(p).toFixed(1)}" r="3.4"></circle>`).join('');
+};
+const addRow = (label, key, low, high, unit) => {
+const row = mount(`<div class="r1-curve-row"><span class="r1-curve-name">${esc(label)}</span><input class="r1-curve-input" type="number" inputmode="numeric" min="${low}" max="${high}" step="1" value="${item[key]}" aria-label="${esc(label + unit)}"><span class="r1-curve-unit">${esc(unit)}</span></div>`);
+row.querySelector('input').addEventListener('change', event => {
+const value = clamp(Math.round(Number(event.target.value) || item[key]), low, high);
+event.target.value = value;
+item[key] = value;
+touch(); paint();
+});
+rows.append(row);
+};
+addRow('静音', 'quiet_below', 15, 85, '℃');
+addRow('普通', 'normal_at', 15, 85, '℃');
+addRow('全速', 'full_at', 15, 85, '℃');
+const duty = mount(`<div class="r1-curve-rows" data-ref="duty"></div>`);
+const addDuty = (label, key, fixed) => {
+const row = mount(`<div class="r1-curve-row"><span class="r1-curve-name">${esc(label)}</span><input class="r1-curve-input" type="number" inputmode="numeric" min="50" max="100" step="1" value="${fixed == null ? item[key] : 100}" aria-label="${esc(label + '输出')}" ${fixed == null ? '' : 'disabled'}><span class="r1-curve-unit">%</span></div>`);
+if (fixed == null) row.querySelector('input').addEventListener('change', event => {
+const value = clamp(Math.round(Number(event.target.value) || item[key]), 50, 100);
+event.target.value = value;
+item[key] = value;
+touch(); paint();
+});
+duty.append(row);
+};
+addDuty('静音输出', 'quiet_percent');
+addDuty('普通输出', 'normal_percent');
+addDuty('全速输出', null, 100);
+rows.after(duty);
+paint();
+return box;
 }
 function r1FanSettings(card) {
 const shell = () => JSON.parse(JSON.stringify(R1.fan().config || {}));
@@ -5474,19 +5584,18 @@ const ch = mount(`<div class="card set-card r1-editor">
 <div class="r1-chan-head"><b>${R1.chanName(name)}</b><span class="pill" data-ref="state"></span></div>
 <div class="r1-form" data-ref="form"></div></div>`);
 const form = ch._r.form;
-form.append(r1Field('模式', r1Select([['vendor', '原厂管理'], ['temperature', '自定义温控'], ['manual', '固定输出']], item.mode, v => { item.mode = v; touch(); render(); }, name + ' 模式'),
-'原厂管理：不接管该路。自定义温控：按温度来源与阈值输出。固定输出：始终输出设定百分比。'));
+form.append(r1Field('转速模式', r1Select(FAN_UI_MODES, fanUiMode(item), value => {
+setFanUiMode(item, value); touch(); render();
+}, name + '转速模式'), '自动：交给原厂固件。低/中/高档：固定输出 50/75/100%。手动：按所选设备温度的曲线调速。'));
 if (item.mode === 'temperature') {
-form.append(r1Field('温度来源 · 多选取最高', r1SourcePicker(sources, item.sources, v => { item.sources = v; touch(); }),
-'只使用新鲜读数；缺测或过期时按保护规则处理。CPU 与硬盘都是 °C，但正常范围不同。'));
-form.append(r1Field('静音阈值', r1Number(item.quiet_below, 15, 85, '℃', v => { item.quiet_below = v; touch(); }), '低于此温度保持静音输出'));
-form.append(r1Field('普通阈值', r1Number(item.normal_at, 15, 85, '℃', v => { item.normal_at = v; touch(); }), '升温到达后进入普通输出'));
-form.append(r1Field('全速阈值', r1Number(item.full_at, 15, 85, '℃', v => { item.full_at = v; touch(); }), '到达后请求 100%；降温 3°C 才降档'));
-form.append(r1Field('静音输出', r1Number(item.quiet_percent, 50, 100, '%', v => { item.quiet_percent = v; touch(); }), '50–100%，不会停转'));
-form.append(r1Field('普通输出', r1Number(item.normal_percent, 50, 100, '%', v => { item.normal_percent = v; touch(); }), '不能低于静音输出'));
+form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, item.sources, value => { item.sources = value; touch(); }), '点开下拉多选；只使用新鲜读数，取所选设备的最高温度。'));
+form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '升温到节点后下一轮升档；降温 3°C 才降档；全速固定 100%，不会停转。'));
 }
 if (item.mode === 'manual') {
-form.append(r1Field('固定输出', r1Number(item.manual_percent, 50, 100, '%', v => { item.manual_percent = v; touch(); }), '50–100%，不会停转'));
+form.append(r1Field('固定输出', mount(`<span class="r1-fixed">${item.manual_percent}%</span>`), '低/中/高档对应 50 / 75 / 100%，不会停转。'));
+}
+if (item.mode === 'vendor') {
+form.append(r1Field('当前策略', mount(`<span class="sub">由原厂固件管理，保存并应用后会释放或接管该路。</span>`), ''));
 }
 const live = (R1.fan().channels || {})[name] || {};
 setText(ch._r.state, live.active ? '接管中' : '原厂管理');
@@ -5539,8 +5648,8 @@ form.append(r1Field('灯效', r1Select([[0, '关闭'], [1, '常亮'], [2, '彩�
 form.append(r1Field('颜色', r1Color(manual.color, v => { manual.color = v; touch(); })));
 form.append(r1Field('亮度', r1Number(manual.brightness, 0, 100, '%', v => { manual.brightness = v; touch(); })));
 } else {
-form.append(r1Field('温度来源 · 多选取最高', r1SourcePicker(sources, config.sources, v => { config.sources = v; touch(); }),
-'来源缺失、过期或均休眠时使用低亮警示色。'));
+form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, config.sources, v => { config.sources = v; touch(); }),
+'点开下拉多选；来源缺失、过期或均休眠时使用低亮警示色。'));
 const stops = config.stops || (config.stops = [{ temperature: 35, color: '#00C832' }, { temperature: 60, color: '#FFAA00' }, { temperature: 80, color: '#FF3030' }]);
 const stopHost = mount(`<div class="r1-stops"></div>`);
 const drawStops = () => {
