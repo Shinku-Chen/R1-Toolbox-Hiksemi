@@ -32,6 +32,7 @@ class SystemBackend:
         self.program = self.program_link.resolve()
         self.guard_path = Path(guard_path) if guard_path else Path(__file__).with_name("fan_guard.so")
         self._signature = self._device = None
+        self._last_ready = {}
         self.children = []
         self.clock, self.sleep = clock or time.monotonic, sleep or time.sleep
 
@@ -310,6 +311,9 @@ class SystemBackend:
             paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
             expected = os.fsencode(self.guard_path.resolve())
             guard_name = os.fsencode(self.guard_path.name)
+            self._last_ready = {'sigcgt': hex(caught), 'required': hex(required),
+                                'guard_expected': os.fsdecode(expected),
+                                'guard_paths': [os.fsdecode(path) for path in paths if b'fan_guard.so' in path]}
             # A mapped file may show ``(deleted)`` after a RAM bundle refresh, or
             # resolve through a different absolute path.  The process identity
             # and the fixed guard filename still prove this is our shim.
@@ -317,6 +321,9 @@ class SystemBackend:
                            or path.rsplit(b"/", 1)[-1].removesuffix(b" (deleted)") == guard_name
                            for path in paths)
             ready = ready and guard_ok
+            self._last_ready['guard_ok'] = guard_ok
+        else:
+            self._last_ready = {'sigcgt': hex(caught), 'required': hex(required)}
         if not self.alive(identity):
             raise RuntimeError("原厂温控启动身份无法确认")
         return ready
@@ -324,7 +331,7 @@ class SystemBackend:
     def assert_ready(self, identity, *, require_guard=False):
         """Immediate identity/uniqueness/USR-handler gate before a signaling GET."""
         if not self._ready(identity, require_guard):
-            raise RuntimeError("原厂温控信号处理器就绪未确认")
+            raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
         return identity
 
     def wait_ready(self, identity, *, require_guard=False, deadline=None, stable_seconds=0.15):
@@ -341,7 +348,7 @@ class SystemBackend:
             elif stable_since is not None:
                 raise RuntimeError("原厂温控信号处理器就绪未确认")
             self.sleep(min(0.025, max(0, deadline - now)))
-        raise RuntimeError("原厂温控信号处理器就绪未确认")
+        raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
 
     def _owner_kind(self, identity, lease):
         """Recognize an orphan from this exact lease, not any injected daemon."""

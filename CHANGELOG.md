@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- fix(fan): 就绪失败时记录 SigCgt、guard 映射路径和期望路径，继续定位原厂温控冷启动检查。
 - fix(fan): 就绪检查兼容 RAM 包刷新后的 `(deleted)` 保护模块映射路径，避免已加载 guard 仍被误判未就绪。
 - fix(fan): 放宽原厂温控冷启动就绪等待到 20 秒，避免先前的 5 秒窗口把仍在校验信号处理器的接管误判为失败。
 - feat(dev): 增加只读 `fan_process` 诊断，返回原厂温控的 SigCgt、guard 注入和 R1 信号环境字段。

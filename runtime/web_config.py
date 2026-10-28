@@ -172,6 +172,9 @@ def _dev_fan_process():
             if sep:
                 fields[key.decode('ascii', 'replace')] = value.strip().decode('ascii', 'replace')
         maps = read('maps')
+        guard_paths = [line.split(None, 5)[-1].decode('utf-8', 'replace')
+                       for line in maps.splitlines() if len(line.split(None, 5)) == 6
+                       and b'fan_guard.so' in line.split(None, 5)[-1]]
         environ = read('environ', 65536)
         env_names = sorted({item.split(b'=', 1)[0].decode('ascii', 'replace') for item in environ.split(b'\0') if b'=' in item})
         rows.append({
@@ -179,7 +182,8 @@ def _dev_fan_process():
             'state': fields.get('State', ''),
             'sigcgt': fields.get('SigCgt', ''),
             'sigblk': fields.get('SigBlk', ''),
-            'guard_loaded': b'fan_guard.so' in maps,
+            'guard_loaded': bool(guard_paths),
+            'guard_paths': guard_paths,
             'ld_preload': 'LD_PRELOAD' in env_names,
             'r1_fan_env': [name for name in env_names if name.startswith('R1_FAN_')],
             'cmdline': [item.decode('utf-8', 'replace')[:200] for item in raw.split(b'\0') if item][:8],
