@@ -235,6 +235,36 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual(code, 403)
                 self.assertNotIn("Access-Control-Allow-Origin", headers)
 
+    def test_history_endpoint_reads_only_bounded_ranges(self):
+        spans = []
+        monitor = types.SimpleNamespace(snapshot=lambda: self.sampler.sample())
+        monitoring = types.SimpleNamespace(
+            snapshot=lambda: {"available": True},
+            history=lambda span: spans.append(span) or {"range": span, "series": [
+                {"id": "cpu_usage_percent", "points": [[1, 2]]}]},
+        )
+        server = service.make_http_server(monitor, port=0, monitoring=monitoring)
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+        thread.start()
+
+        def close():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.addCleanup(close)
+        code, headers, body = self.request(server.server_port, path="/api/history?range=6h")
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+        self.assertEqual(json.loads(body)["range"], "6h")
+        self.assertEqual(spans, ["6h"])
+        for query in ("?range=2h", "?range=1h&range=6h", "?span=1h", "?range=", "?range=1h&x=1",
+                      "?range=1h&a=1&b=2&c=3&d=4"):
+            with self.subTest(query=query):
+                code, _, _ = self.request(server.server_port, path="/api/history" + query)
+                self.assertEqual(code, 400)
+        self.assertEqual(spans, ["6h"])
+
     def test_api_supports_read_only_preflight_and_rejects_control_requests(self):
         port = self.start_api()
         headers = {"Origin": "null", "Access-Control-Request-Method": "GET",

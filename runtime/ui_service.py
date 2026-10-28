@@ -348,6 +348,20 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 value = light_policy.snapshot()
             elif route == "/api/monitoring" and monitoring is not None:
                 value = monitoring.snapshot()
+            elif route == "/api/history" and monitoring is not None:
+                try:
+                    query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True, max_num_fields=4)
+                except ValueError:
+                    self.send_json(400, {"error": "查询参数无效"}, origin)
+                    return
+                if set(query) - {"range"} or any(len(values) != 1 for values in query.values()):
+                    self.send_json(400, {"error": "查询参数无效"}, origin)
+                    return
+                span = query.get("range", ["1h"])[0]
+                if span not in ("10m", "1h", "6h", "24h", "7d", "30d"):
+                    self.send_json(400, {"error": "时间范围无效"}, origin)
+                    return
+                value = monitoring.history(span)
             else:
                 self.send_json(404, {"error": "接口不存在"}, origin)
                 return
@@ -476,7 +490,7 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             method = self.headers.get("Access-Control-Request-Method")
             headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",") if part.strip()}
             can_read = route in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config", "/api/fan-policy",
-                                 "/api/light-policy", "/api/monitoring") and method == "GET" and not headers
+                                 "/api/light-policy", "/api/monitoring", "/api/history") and method == "GET" and not headers
             can_control = (route == "/api/action" and controller is not None and control_token
                            and method == "POST" and headers <= {"content-type", "x-r1-token"})
             if (

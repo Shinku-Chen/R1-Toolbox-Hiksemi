@@ -6,7 +6,7 @@
 
 R1 Toolbox 是海康 HikSemi R1 NAS 的本地工具箱：通过 Docker Compose 部署一次镜像，把宿主小屏界面、网页监控/设置和硬件控制装进官方固件，不改写原厂 AppImage、启动脚本和厂商服务。
 
-- 小屏：`ui/index.html` + `ui/assets/`，面向 376×960 触摸屏，复杂设置引导到网页。
+- 小屏：`ui/index.html` + `ui/assets/`，采用已评审原型的五标签、点阵读数与详情页，面向 376×960 触摸屏，复杂设置引导到网页。
 - 网页：`http://NAS_IP:18732`，直接使用 fnMonitor 2.19.0 的面板框架（MIT，源码固定在 `ui/panel-src/`），由 `runtime/fnm_compat.py` 用本机快照填充数据；R1 专有模块与设置在 `ui/panel-src/50-r1.js`。
 - 宿主服务：`runtime/ui_service.py` 起步，提供本机只读 API（18731）、网页入口（18732）和原厂窗口。
 
@@ -35,7 +35,7 @@ docs/              功能、接口、温控、灯光、监控、面板说明
 python scripts/build-panel.py          # 修改 ui/panel-src/ 后必须执行
 python scripts/build-ui.py             # 打包 UI bundle（镜像构建也会执行）
 python -m unittest discover -s tests -v
-node tests/check_interactions.cjs      # 小屏触摸/导航/设置，需要 Chrome/Chromium
+node tests/check_interactions.cjs      # 小屏真实 API、触摸/导航/详情与写操作，需要 Chrome/Chromium
 node tests/check_web_config.cjs        # 网页面板 + 真实 HTTP fixture
 node tests/check_small_screen_prototype.cjs  # 独立小屏原型（离线 HTML）
 python tests/check_fan_guard_linux.py

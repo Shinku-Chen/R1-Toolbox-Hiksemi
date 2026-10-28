@@ -115,6 +115,14 @@ class _ScreenHandler(BaseHTTPRequestHandler):
         if path == '/api/monitoring':
             self._json(200, nas.monitoring())
             return
+        if path == '/api/history':
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
+            span = (query.get('range') or ['1h'])[0]
+            if span not in ('10m', '1h', '6h', '24h', '7d', '30d'):
+                self._json(400, {'error': '时间范围无效'})
+                return
+            self._json(200, nas.monitoring_history(span))
+            return
         if path == '/api/web-config':
             self._json(200, self.demo.web.snapshot())
             return

@@ -71,12 +71,14 @@ class DemoTests(unittest.TestCase):
         status, html = request(self.screen + '/')
         self.assertEqual(status, 200)
         self.assertIn('R1_TOOLBOX_CONTROL_TOKEN', html.decode('utf-8'))
+        self.assertIn("script-src 'self' 'unsafe-inline'", html.decode('utf-8'))
         self.assertEqual(request(self.screen + '/assets/panel.js')[0], 200)
         for path in ('/api/status', '/api/toolbox', '/api/insights', '/api/fan-policy',
-                     '/api/light-policy', '/api/monitoring', '/api/web-config'):
+                     '/api/light-policy', '/api/monitoring', '/api/web-config', '/api/history?range=1h'):
             code, value = request(self.screen + path)
             self.assertEqual(code, 200, path)
             self.assertIsInstance(value, dict)
+        self.assertEqual(request(self.screen + '/api/history?range=2h')[0], 400)
         self.assertNotEqual(request(self.screen + '/../runtime/web_config.py')[0], 200)
 
     def test_action_requires_token_and_updates_both_panels(self):
