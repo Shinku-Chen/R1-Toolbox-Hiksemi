@@ -266,14 +266,18 @@ finally:
     await page.goto(origin + '/#/overview');
     await page.waitForFunction(() => document.getElementById('hostName') && document.getElementById('hostName').textContent === 'R1-Fixture', null, { timeout: 15000 });
     check('面板标题', (await page.title()).includes('R1 Toolbox'), await page.title());
+    const navLabels = await page.locator('#pageSeg button').allTextContents();
+    check('网页六标签', JSON.stringify(navLabels) === JSON.stringify(['概览', '存储', '网络', '应用', '温度', '设置']), navLabels.join(','));
     check('总览模块已渲染', await page.locator('#layout-overview section[data-mod="metrics"]').count() === 1);
     check('指标卡有真实读数', (await page.locator('[data-m="cpu"] .m-val .dm').first().getAttribute('aria-label')) !== '--');
-    check('R1 双路风扇模块', await page.locator('#layout-overview section[data-mod="r1cool"]').count() === 1);
-    check('R1 灯光模块', await page.locator('#layout-overview section[data-mod="r1light"]').count() === 1);
-    check('R1 小屏与电源模块', await page.locator('#layout-overview section[data-mod="r1screen"]').count() === 1);
-    await page.locator('section[data-mod="r1cool"]').scrollIntoViewIfNeeded();
-    await page.waitForSelector('section[data-mod="r1cool"] [data-ch="cpu"]', { timeout: 10000 });
-    check('双路风扇名称', /CPU 风扇/.test(await page.locator('section[data-mod="r1cool"]').textContent()));
+    check('R1 双路风扇模块在温度页', await page.locator('#layout-thermal section[data-mod="r1cool"]').count() === 1);
+    check('概览页不再夹带风扇/灯光磁贴', await page.locator('#layout-overview section[data-mod="r1cool"], #layout-overview section[data-mod="r1light"]').count() === 0);
+    check('R1 灯光模块在温度页', await page.locator('#layout-thermal section[data-mod="r1light"]').count() === 1);
+    check('R1 小屏与电源模块在概览页', await page.locator('#layout-overview section[data-mod="r1screen"]').count() === 1);
+    await page.locator('#pageSeg button[data-page="thermal"]').click();
+    await page.waitForSelector('#layout-thermal section[data-mod="r1cool"] [data-ch="cpu"]', { timeout: 10000 });
+    check('双路风扇名称', /CPU 风扇/.test(await page.locator('#layout-thermal section[data-mod="r1cool"]').textContent()));
+    await page.locator('#pageSeg button[data-page="overview"]').click();
     await page.locator('section[data-mod="trends"]').scrollIntoViewIfNeeded();
     await page.waitForTimeout(800);
     check('趋势模块已渲染', await page.locator('section[data-mod="trends"] .chart-card').count() >= 5);
@@ -308,11 +312,12 @@ finally:
     await page.locator('.ring-wrap').click();
     await page.waitForTimeout(150);
     await page.locator('#sheetClose').click();
-    await page.locator('section[data-mod="storage"]').scrollIntoViewIfNeeded();
-    await page.waitForSelector('section[data-mod="storage"] .bay', { timeout: 8000 });
-    await page.locator('section[data-mod="storage"] .bay').first().click();
+    await page.locator('#pageSeg button[data-page="storage"]').click();
+    await page.waitForSelector('#layout-storage section[data-mod="storage"] .bay', { timeout: 8000 });
+    await page.locator('#layout-storage section[data-mod="storage"] .bay').first().click();
     await page.waitForTimeout(200);
     await page.locator('#sheetClose').click();
+    await page.locator('#pageSeg button[data-page="overview"]').click();
     await page.locator('#btnSearch').click();
     await page.locator('#palInput').fill('cpu');
     await page.waitForTimeout(150);
@@ -345,16 +350,33 @@ finally:
       await noOverflow('总览 ' + width);
     }
     await page.setViewportSize({ width: 1120, height: 1000 });
-    await page.locator('#pageSeg button[data-page="docker"]').click();
-    await page.waitForSelector('#page-docker .ctr[data-name="fixture-db"]', { timeout: 15000 });
-    check('容器页显示 fixture 容器', /fixture-db/.test(await page.locator('#page-docker').textContent()));
-    await page.locator('#page-docker .ctr[data-name="fixture-db"]').click();
+    await page.locator('#pageSeg button[data-page="apps"]').click();
+    await page.waitForSelector('#page-apps .ctr[data-name="fixture-db"]', { timeout: 15000 });
+    check('应用页显示 fixture 容器', /fixture-db/.test(await page.locator('#page-apps').textContent()));
+    await page.locator('#page-apps .ctr[data-name="fixture-db"]').click();
     await page.waitForTimeout(200);
     check('容器详情显示资源与端口', /fixture:local/.test(await page.locator('#sheetBody').textContent()));
     await page.locator('#sheetClose').click();
-    await noOverflow('容器');
+    await noOverflow('应用');
     await page.setViewportSize({ width: 390, height: 844 });
-    await noOverflow('容器 390');
+    await noOverflow('应用 390');
+
+    /* 5b. 六个页面均可独立渲染，且不横向溢出 */
+    await page.setViewportSize({ width: 1120, height: 1000 });
+    for (const [pageName, moduleId] of [['storage', 'storage'], ['network', 'network'], ['thermal', 'thermal']]) {
+      await page.locator(`#pageSeg button[data-page="${pageName}"]`).click();
+      await page.waitForSelector(`#layout-${pageName} section[data-mod="${moduleId}"]`, { timeout: 10000 });
+      check(pageName + ' 页版块已渲染', await page.locator(`#layout-${pageName} section[data-mod="${moduleId}"]`).count() === 1);
+      await noOverflow(pageName);
+      await shot(pageName);
+    }
+    await page.locator('#pageSeg button[data-page="storage"]').click();
+    await page.setViewportSize({ width: 320, height: 844 });
+    await noOverflow('存储 320');
+    await shot('storage-320');
+    await page.locator('#bottomNav button[data-page="thermal"]').click();
+    await noOverflow('温度 320');
+    await shot('thermal-320');
 
     /* 6. 设置页与配对解锁 */
     await page.setViewportSize({ width: 1120, height: 1000 });

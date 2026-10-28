@@ -10,9 +10,11 @@
     </div>
     <nav class="seg nav" id="pageSeg" role="tablist" aria-label="页面">
       <span class="thumb"></span>
-      <button role="tab" type="button" data-page="overview" aria-selected="true">总览</button>
-      <button role="tab" type="button" data-page="docker" aria-selected="false">容器</button>
-      <button role="tab" type="button" data-page="vms" aria-selected="false" hidden>虚拟机</button>
+      <button role="tab" type="button" data-page="overview" aria-selected="true">概览</button>
+      <button role="tab" type="button" data-page="storage" aria-selected="false">存储</button>
+      <button role="tab" type="button" data-page="network" aria-selected="false">网络</button>
+      <button role="tab" type="button" data-page="apps" aria-selected="false">应用</button>
+      <button role="tab" type="button" data-page="thermal" aria-selected="false">温度</button>
       <button role="tab" type="button" data-page="settings" aria-selected="false">设置</button>
     </nav>
     <div class="tools">
@@ -29,15 +31,21 @@
 </header>
 
 <main>
-  <section class="page" id="page-overview" data-page="overview" aria-label="总览">
+  <section class="page" id="page-overview" data-page="overview" aria-label="概览">
     <div class="hero" id="hero"></div>
     <div class="layout" data-layout="overview" id="layout-overview"></div>
   </section>
-  <section class="page" id="page-docker" data-page="docker" aria-label="容器与端口" hidden>
-    <div class="layout" data-layout="docker" id="layout-docker"></div>
+  <section class="page" id="page-storage" data-page="storage" aria-label="存储" hidden>
+    <div class="layout" data-layout="storage" id="layout-storage"></div>
   </section>
-  <section class="page" id="page-vms" data-page="vms" aria-label="虚拟机" hidden>
-    <div class="layout" data-layout="vms" id="layout-vms"></div>
+  <section class="page" id="page-network" data-page="network" aria-label="网络" hidden>
+    <div class="layout" data-layout="network" id="layout-network"></div>
+  </section>
+  <section class="page" id="page-apps" data-page="apps" aria-label="应用" hidden>
+    <div class="layout" data-layout="apps" id="layout-apps"></div>
+  </section>
+  <section class="page" id="page-thermal" data-page="thermal" aria-label="温度" hidden>
+    <div class="layout" data-layout="thermal" id="layout-thermal"></div>
   </section>
   <section class="page" id="page-settings" data-page="settings" aria-label="设置" hidden>
     <div class="page-head">
@@ -54,9 +62,11 @@
 </main>
 
 <nav class="bottom-nav" id="bottomNav" aria-label="页面">
-  <button type="button" data-page="overview" aria-selected="true"><svg class="i"><use href="#i-home"/></svg>总览</button>
-  <button type="button" data-page="docker" aria-selected="false"><svg class="i"><use href="#i-box"/></svg>容器</button>
-  <button type="button" data-page="vms" aria-selected="false" hidden><svg class="i"><use href="#i-vm"/></svg>虚拟机</button>
+  <button type="button" data-page="overview" aria-selected="true"><svg class="i"><use href="#i-home"/></svg>概览</button>
+  <button type="button" data-page="storage" aria-selected="false"><svg class="i"><use href="#i-storage"/></svg>存储</button>
+  <button type="button" data-page="network" aria-selected="false"><svg class="i"><use href="#i-net"/></svg>网络</button>
+  <button type="button" data-page="apps" aria-selected="false"><svg class="i"><use href="#i-box"/></svg>应用</button>
+  <button type="button" data-page="thermal" aria-selected="false"><svg class="i"><use href="#i-temp"/></svg>温度</button>
   <button type="button" data-page="settings" aria-selected="false"><svg class="i"><use href="#i-gear"/></svg>设置</button>
 </nav>
 
@@ -77,7 +87,7 @@
 </div>
 <div class="palette-wrap" id="palette" role="dialog" aria-modal="true" aria-label="搜索">
   <div class="palette">
-    <div class="palette-in"><svg class="i i-lg"><use href="#i-search"/></svg><input id="palInput" placeholder="搜索硬盘、容器、虚拟机、设置或页面…" autocomplete="off" spellcheck="false" aria-label="搜索"><span class="kbd">Esc</span></div>
+    <div class="palette-in"><svg class="i i-lg"><use href="#i-search"/></svg><input id="palInput" placeholder="搜索硬盘、容器、设置或页面…" autocomplete="off" spellcheck="false" aria-label="搜索"><span class="kbd">Esc</span></div>
     <div class="palette-list" id="palList"></div>
     <div class="palette-foot"><span><span class="kbd">↑</span><span class="kbd">↓</span> 选择</span><span><span class="kbd">↵</span> 打开</span><span><span class="kbd">/</span> 随时唤起</span></div>
   </div>

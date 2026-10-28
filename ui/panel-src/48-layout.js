@@ -81,12 +81,11 @@ const Pal = {
   items: [], sel: 0, shown: [],
   build() {
     const it = [], add = (g, label, icon, run, hint = '', kw = '') => it.push({ g, label: String(label), icon, run, hint: String(hint), kw: String(kw) });
-    const PI = { overview: ['总览', 'home'], docker: ['容器 · 端口', 'box'], vms: ['虚拟机', 'vm'], settings: ['设置', 'gear'] };
+    const PI = { overview: ['概览', 'home'], storage: ['存储', 'storage'], network: ['网络', 'net'], apps: ['应用', 'box'], thermal: ['温度', 'temp'], settings: ['设置', 'gear'] };
     navPages().forEach((p, k) => add('页面', PI[p][0], PI[p][1], () => go(p), String(k + 1), p));
-    [['health', '健康检查', 'shield'], ['cpu', '处理器', 'cpu'], ['mem', '内存', 'mem'], ['storage', '存储', 'storage'], ['net', '网络', 'net'], ['temp', '温度与散热', 'temp'], ['power', '能耗', 'bolt']].forEach(([k, l, i]) => add('详情', l, i, () => { if (S.page !== 'overview') go('overview'); openSheet(k); }, '', k));
-    disksOf(S.o).forEach(d => add('硬盘', `${d.name} · ${vendorModel(d)}`, diskIcon(d), () => { if (S.page !== 'overview') go('overview'); openSheet('disk/' + encodeURIComponent(d.name)); }, isSleep(d) ? '休眠中' : smartState(d).lv === 'warn' ? '需留意' : '', (d.serial || '') + ' ' + KIND_TXT[diskKind(d)]));
-    Docker.list().forEach(c => add('容器', c.name, 'box', () => { if (S.page !== 'docker') go('docker'); openSheet('ctr/' + encodeURIComponent(c.name)); }, ctrRun(c) ? '运行中' : '未运行', c.image + ' ' + c.ports));
-    VMs.list().forEach(v => add('虚拟机', vmName(v), 'vm', () => { if (S.page !== 'vms') go('vms'); openSheet('vm/' + v.uuid); }, v.state_zh || '', v.name + ' ' + (v.ips || []).join(' ')));
+    [['health', '健康检查', 'shield', 'overview'], ['cpu', '处理器', 'cpu', 'overview'], ['mem', '内存', 'mem', 'overview'], ['storage', '存储', 'storage', 'storage'], ['net', '网络', 'net', 'network'], ['temp', '温度与散热', 'temp', 'thermal'], ['power', '能耗', 'bolt', 'thermal']].forEach(([k, l, i, page]) => add('详情', l, i, () => { if (S.page !== page) go(page); openSheet(k); }, '', k));
+    disksOf(S.o).forEach(d => add('硬盘', `${d.name} · ${vendorModel(d)}`, diskIcon(d), () => { if (S.page !== 'storage') go('storage'); openSheet('disk/' + encodeURIComponent(d.name)); }, isSleep(d) ? '休眠中' : smartState(d).lv === 'warn' ? '需留意' : '', (d.serial || '') + ' ' + KIND_TXT[diskKind(d)]));
+    Docker.list().forEach(c => add('容器', c.name, 'box', () => { if (S.page !== 'apps') go('apps'); openSheet('ctr/' + encodeURIComponent(c.name)); }, ctrRun(c) ? '运行中' : '未运行', c.image + ' ' + c.ports));
     SET_SCHEMA.forEach(g => (g.items || []).forEach(x => add('设置', x.label, g.icon, () => focusSetting(x.k), g.title, (x.help || '') + ' ' + (typeof x.hint === 'string' ? x.hint : ''))));
     SET_SCHEMA.filter(g => g.custom).forEach(g => add('设置', g.title, g.icon, () => focusGroup(g.id), '分组', { auth: '密码 登录 口令 安全', update: '升级 版本 更新', thresholds: '阈值 告警 提醒 温度 cpu 内存 容量', data: '导出 csv 报告 目录', about: '关于 作者 github' }[g.id] || ''));
     add('操作', '切换浅色 / 深色', 'moon', toggleTheme, 'T'); add('操作', '编辑布局', 'layout', () => setEditing(true), 'E'); add('操作', '刷新全部数据', 'refresh', globalRefresh); add('操作', '全屏 / 退出全屏', 'expand', () => S.fsToggle && S.fsToggle(), 'F11'); add('操作', '生成健康报告', 'shield', () => doDownload('/api/report?format=html'), 'HTML'); add('操作', '键盘快捷键', 'key', () => openSheet('keys'), '?');
@@ -122,17 +121,9 @@ $('#btnSearch').onclick = () => Pal.open();
 /* =====================================================================
    ROUTING  #/page[/sheet]
    ===================================================================== */
-const PAGES = ['overview', 'docker', 'vms', 'settings'];
-const PAGE_TITLE = { overview: '总览', docker: '容器', vms: '虚拟机', settings: '设置' };
-/** 导航里实际显示的页面（本机没有 virsh 时不显示「虚拟机」），数字快捷键按此顺序 */
-const navPages = () => PAGES.filter(p => p !== 'vms' || S.vmTab);
-/** 显示 / 隐藏「虚拟机」导航；结果记在本地，下次打开不闪烁 */
-function setVmTab(on) {
-  on = !!on; if (S.vmTab === on && $('#pageSeg [data-page="vms"]').hidden === !on) return;
-  S.vmTab = on; store.set('vmTab', on);
-  $$('#pageSeg [data-page="vms"], #bottomNav [data-page="vms"]').forEach(b => { b.hidden = !on; });
-  placeThumb($('#pageSeg'));
-}
+const PAGES = ['overview', 'storage', 'network', 'apps', 'thermal', 'settings'];
+const PAGE_TITLE = { overview: '概览', storage: '存储', network: '网络', apps: '应用', thermal: '温度', settings: '设置' };
+const navPages = () => PAGES;
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, ''), [p, ...rest] = h.split('/');
   return { page: PAGES.includes(p) ? p : 'overview', sheet: rest.join('/') || null };

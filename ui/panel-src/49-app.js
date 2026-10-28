@@ -123,26 +123,22 @@ Poll.add('overview', async () => {
    总线别接口不受影响，失败时保留上一次结果，不把分级清空成「未巡检」。 */
 Poll.add('diskhealth', async () => {
   try { S.diskHealth = await API.get('/api/disk_health'); renderNow(); } catch (e) { /* 保留旧值 */ }
-}, 60000, () => S.page === 'overview' || sheetIs('disk'));
-Poll.add('docker', async () => { S.docker = await API.get('/api/docker'); dockerAt = Date.now(); feedDocker(S.docker); renderNow(); }, 10000, () => S.page === 'docker' || sheetIs('ctr'));
-Poll.add('vms', async () => {
-  S.vms = await API.get('/api/vms'); feedVms(S.vms); if (S.vms.installed) setVmTab(true);
-  if (sheetCtx && sheetCtx.retry) { const k = sheetCtx.key; sheetCtx.key = ''; openSheet(k, true); }
-  renderNow();
-}, 5000, () => S.page === 'vms' || sheetIs('vm'));
-Poll.add('ports', async () => { const j = await API.get('/api/ports'); S.ports = j.ports || {}; renderNow(); }, 30000, () => S.page === 'docker');
-Poll.add('apps', async () => { S.apps = await API.get('/api/apps'); renderNow(); }, 60000, () => S.page === 'docker');
+}, 60000, () => ['overview', 'storage'].includes(S.page) || sheetIs('disk'));
+Poll.add('docker', async () => { S.docker = await API.get('/api/docker'); dockerAt = Date.now(); feedDocker(S.docker); renderNow(); }, 10000, () => S.page === 'apps' || sheetIs('ctr'));
+Poll.add('ports', async () => { const j = await API.get('/api/ports'); S.ports = j.ports || {}; renderNow(); }, 30000, () => S.page === 'apps');
+Poll.add('apps', async () => { S.apps = await API.get('/api/apps'); renderNow(); }, 60000, () => S.page === 'apps');
 Poll.add('procs', async () => { S.procs = await API.get('/api/processes'); renderNow(); }, 15000, () => (S.page === 'overview' && modVis('procs')) || sheetIs('cpu', 'mem'));
-Poll.add('traffic', async () => { S.traffic = await API.get('/api/traffic'); renderNow(); }, 15000, () => S.page === 'overview' || sheetIs('net'));
-Poll.add('pstats', async () => { S.pstats = await API.get('/api/power_stats'); renderNow(); }, 15000, () => S.page === 'overview');
+Poll.add('traffic', async () => { S.traffic = await API.get('/api/traffic'); renderNow(); }, 15000, () => ['overview', 'network'].includes(S.page) || sheetIs('net'));
+Poll.add('pstats', async () => { S.pstats = await API.get('/api/power_stats'); renderNow(); }, 15000, () => ['overview', 'thermal'].includes(S.page));
 Poll.add('monthly', async () => { S.monthly = await API.get('/api/monthly_summary'); renderNow(); }, 300000, () => S.page === 'overview' && !!(S.cfg && +S.cfg.monthly_summary_enabled));
 Poll.add('weather', async () => { try { S.weather = await API.get('/api/weather'); } catch (e) { S.weather = { ok: false, error: e.message }; } Hero.weather(S.weather); }, 600000, () => S.page === 'overview');
 Poll.add('hist', async () => { if (S.page === 'overview' && modVis('trends') && MODS.trends.res) await MODS.trends.load(); if (sheetCtx && sheetCtx.chartReload) await sheetCtx.chartReload(); }, 60000, () => (S.page === 'overview' && modVis('trends')) || !!(sheetCtx && sheetCtx.chartReload));
 Poll.add('config', async () => { await loadConfig(); syncSettings(); }, 1800000);
 function onPageChange(p) {
-  if (p === 'docker') Poll.runAll(['docker', 'ports', 'apps']);
-  if (p === 'vms') Poll.run('vms');
+  if (p === 'apps') Poll.runAll(['docker', 'ports', 'apps']);
   if (p === 'overview') Poll.runAll(['overview', 'diskhealth']);
+  if (p === 'storage') Poll.run('diskhealth');
+  if (p === 'thermal') Poll.run('pstats');
 }
 function globalRefresh() {
   const b = $('#btnRefresh'); b.classList.add('spinning'); setTimeout(() => b.classList.remove('spinning'), 800);
@@ -235,8 +231,6 @@ applyUIAll();
 dmScan(document);
 Hero.build();
 Object.keys(LAYOUT_DEFAULT).forEach(applyLayout);
-setVmTab(S.vmTab);
-API.get('/api/vms?probe=1').then(j => setVmTab(j && j.installed)).catch(() => {});
 if (MODS.monthly) MODS.monthly.el.hidden = true;
 setStatus();
 route();
@@ -259,11 +253,11 @@ function autoHideEmpty() {
   if (document.hidden) { document.addEventListener('visibilitychange', function f() { if (!document.hidden) { document.removeEventListener('visibilitychange', f); setTimeout(autoHideEmpty, 3000); } }); return; }
   if (store.get('autohide', false) || !S.o || S.online === false) return;
   store.set('autohide', true);
-  const hid = [['overview', 'thermal'], ['overview', 'energy'], ['docker', 'containers']].filter(([pg, id]) => !seen[id] && !(UI.hidden[pg] || []).includes(id));
+  const hid = [['thermal', 'thermal'], ['thermal', 'energy'], ['apps', 'containers']].filter(([pg, id]) => !seen[id] && !(UI.hidden[pg] || []).includes(id));
   if (!hid.length) return;
   hid.forEach(([pg, id]) => { UI.hidden[pg] = (UI.hidden[pg] || []).concat(id); });
-  applyLayout('overview'); applyLayout('docker'); saveUI(); syncSettings();
-  toast(`已自动隐藏没有数据的版块：${hid.map(([, id]) => MODS[id].title).join('、')}`, { icon: 'info', ms: 8000, action: '撤销', onAction: () => { hid.forEach(([pg, id]) => { UI.hidden[pg] = UI.hidden[pg].filter(x => x !== id); }); applyLayout('overview'); applyLayout('docker'); saveUI(); syncSettings(); } });
+  applyLayout('thermal'); applyLayout('apps'); saveUI(); syncSettings();
+  toast(`已自动隐藏没有数据的版块：${hid.map(([, id]) => MODS[id].title).join('、')}`, { icon: 'info', ms: 8000, action: '撤销', onAction: () => { hid.forEach(([pg, id]) => { UI.hidden[pg] = UI.hidden[pg].filter(x => x !== id); }); applyLayout('thermal'); applyLayout('apps'); saveUI(); syncSettings(); } });
 }
 setTimeout(autoHideEmpty, 5 * 60 * 1000);
 

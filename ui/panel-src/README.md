@@ -22,10 +22,10 @@ python scripts/build-panel.py
 
 ## 与上游的差异
 
-上游文件只做最小改动，全部集中在 `scripts/build-panel.py` 的 `BRANDING` 表：
-产品名、窗口说明等“飞牛 / fnOS”字样改为 R1 Toolbox；功耗相关文案改为“CPU 封装（RAPL）
-实测，不估算整机功耗”，与 R1 的真实数据口径一致。**没有修改任何上游渲染逻辑或样式
-规则**，以后同步上游只需替换本目录的上游文件并重跑构建。
+上游文件只做最小改动：`scripts/build-panel.py` 的 `BRANDING` 表替换产品名和窗口说明，
+功耗文案改为“CPU 封装（RAPL）实测，不估算整机功耗”；`21-body.html`、`33-state.js`
+与 `48-layout.js` 把导航重组为与小屏一致的概览／存储／网络／应用／温度／设置六页，
+并按页分配模块；`46-vms.js` 不参与构建。以后同步上游时需保留这些 R1 差异并重跑构建。
 
 R1 专有内容全部在 `50-r1.js` 与 `12-style-r1.css`：
 

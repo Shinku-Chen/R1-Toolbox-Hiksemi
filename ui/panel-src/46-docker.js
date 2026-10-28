@@ -76,7 +76,7 @@ function feedDocker(d) {
 }
 
 defineModule({
-  id: 'containers', page: 'docker', kicker: 'CONTAINERS', title: '容器', big: true,
+  id: 'containers', page: 'apps', kicker: 'CONTAINERS', title: '容器', big: true,
   actions: m => {
     const f = mount(`<label class="field">${ic('search')}<input type="search" placeholder="搜索名称、镜像或端口" aria-label="搜索容器"></label>`);
     f.querySelector('input').addEventListener('input', e => { Docker.q = e.target.value; Docker.apply(); });
@@ -146,7 +146,7 @@ defineModule({
 
 const portsOf = v => String(v == null ? '' : v).split(/[^\d]+/).filter(Boolean);
 defineModule({
-  id: 'ports', page: 'docker', kicker: 'PORTS', title: '端口占用', dek: '飞牛应用、Docker 映射与系统监听端口',
+  id: 'ports', page: 'apps', kicker: 'PORTS', title: '端口占用', dek: '飞牛应用、Docker 映射与系统监听端口',
   actions: m => {
     const f = mount(`<label class="field">${ic('plug')}<input inputmode="numeric" placeholder="查询端口，如 8080" aria-label="查询端口"></label>`);
     f.querySelector('input').addEventListener('input', e => { m.q = e.target.value.trim(); m.apply(); });
@@ -189,7 +189,7 @@ defineModule({
 
 const APP_ICO = { photos: 'photo', media: 'film', music: 'music' };
 defineModule({
-  id: 'apps', page: 'docker', kicker: 'APPS', title: '内置应用', dek: '相册、影视与音乐的数据统计',
+  id: 'apps', page: 'apps', kicker: 'APPS', title: '内置应用', dek: '相册、影视与音乐的数据统计',
   actions: m => { const b = mount(`<button class="link-btn" type="button" title="重新扫描应用数据">${ic('refresh', 'i-sm')}立即更新</button>`); b.onclick = async () => { b.disabled = true; b.classList.add('spinning'); try { S.apps = await API.get('/api/apps?refresh=1'); runUpdate(m); toast('应用统计已更新'); } catch (e) { toast('更新失败：' + e.message, { icon: 'alert' }); } b.disabled = false; b.classList.remove('spinning'); }; return b; },
   build(body, m) { m.x = { body }; body.innerHTML = `<div class="card pad">${emptyHTML('正在读取内置应用…')}</div>`; },
   update(o, m) {

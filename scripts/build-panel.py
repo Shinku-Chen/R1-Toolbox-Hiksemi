@@ -33,7 +33,7 @@ OUTPUT = ROOT / 'ui' / 'web'
 JS_FILES = (
     '30-core.js', '31-line.js', '32-bars.js', '33-state.js', '44-toast.js',
     '40-hero.js', '41-modules.js', '42-modules.js', '43-modules.js',
-    '45-sheets.js', '46-docker.js', '46-vms.js', '47-settings.js',
+    '45-sheets.js', '46-docker.js', '47-settings.js',
     '48-layout.js', '50-r1.js', '49-app.js',
 )
 CSS_FILES = ('10-style.css', '11-style-add.css', '12-style-r1.css')

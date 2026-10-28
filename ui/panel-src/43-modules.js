@@ -62,7 +62,7 @@ const monthProj = (mk, o) => { const a = avgW(o); if (!ok(mk) || !a) return null
 /** 全年估算：平均功率 × 8760 小时（只是估算，口径写在副标题里） */
 const yearProj = o => { const a = avgW(o); return a ? { kwh: a.w * 8.76, w: a.w, basis: a.basis } : null; };
 defineModule({
-  id: 'energy', page: 'overview', dc: 'pwr', kicker: 'ENERGY', title: '能耗', dek: '实时功耗、用电量与电费',
+  id: 'energy', page: 'thermal', dc: 'pwr', kicker: 'ENERGY', title: '能耗', dek: '实时功耗、用电量与电费',
   actions: () => detailBtn('power'),
   build(body, m) {
     body.innerHTML = `<div class="energy">
@@ -145,7 +145,7 @@ function rankHTML(cs, lim) {
   return top.map(c => `<div class="rank-row"><span class="n" title="${esc(c.name)}">${esc(c.name)}</span><div class="stack" style="width:${Math.max(2, (+c.total_bytes || 0) / max * 100).toFixed(1)}%"><i style="flex-grow:${+c.in_bytes || 0};background:var(--e-blue)"></i><i style="flex-grow:${+c.out_bytes || 0};background:var(--e-coral)"></i></div><span class="v">${F.bytesStr(c.total_bytes)}</span></div>`).join('');
 }
 defineModule({
-  id: 'network', page: 'overview', dc: 'io', kicker: 'NETWORK', title: '网络与流量', dek: '网口速率、流量统计与容器流量',
+  id: 'network', page: 'network', dc: 'io', kicker: 'NETWORK', title: '网络与流量', dek: '网口速率、流量统计与容器流量',
   actions: () => detailBtn('net'),
   build(body, m) {
     body.innerHTML = `<div class="grid g-2">

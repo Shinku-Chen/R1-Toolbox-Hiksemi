@@ -1,7 +1,7 @@
 /* =====================================================================
    STATE — 界面配置（/api/ui）+ 提醒阈值 + 运行时数据
    ===================================================================== */
-const LAYOUT_VERSION = 200;
+const LAYOUT_VERSION = 201;
 const TH_SPEC = {
   cpuWarn: [85, 30, 100], cpuCrit: [95, 30, 100], memWarn: [85, 30, 100], memCrit: [95, 30, 100],
   capWarn: [85, 30, 100], capCrit: [95, 30, 100], tempWarn: [80, 40, 110], tempCrit: [90, 40, 115],
@@ -20,11 +20,11 @@ const THEMES = ['light', 'dark', 'auto'], ACCENT_IDS = ['black', 'blue', 'green'
 const RANGES = [['10m', '10分钟'], ['1h', '1小时'], ['6h', '6小时'], ['24h', '24小时'], ['7d', '7天'], ['all', '全部']];
 const RANGE_SEC = { '10m': 600, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, all: 0 };
 const RANGE_TXT = { '10m': '过去 10 分钟', '1h': '过去 1 小时', '6h': '过去 6 小时', '24h': '过去 24 小时', '7d': '过去 7 天', all: '保留期内' };
-const LAYOUT_DEFAULT = { overview: ['metrics', 'storage', 'trends', 'compute', 'thermal', 'energy', 'network', 'procs', 'monthly', 'host'], docker: ['containers', 'ports', 'apps'], vms: ['vms'] };
+const LAYOUT_DEFAULT = { overview: ['metrics', 'trends', 'compute', 'procs', 'host', 'r1screen'], storage: ['storage'], network: ['network'], apps: ['containers', 'ports', 'apps'], thermal: ['thermal', 'energy', 'r1cool', 'r1light'] };
 /** 旧版 7 套主题 → 新版 外观模式 + 主色 */
 const LEGACY_THEME = { dark: ['dark', 'black'], light: ['light', 'black'], blue: ['light', 'blue'], fresh: ['light', 'green'], green: ['light', 'green'], yellow: ['light', 'yellow'], cyan: ['light', 'cyan'] };
 function uiDefaults() {
-  return { theme: 'light', accent: 'black', dotMatrix: true, motion: true, fontScale: 1, range: '24h', layoutVersion: LAYOUT_VERSION, layout: { overview: [], docker: [], vms: [] }, hidden: { overview: [], docker: [], vms: [] }, thresholds: sanitizeTH({}), ignored: [] };
+  return { theme: 'light', accent: 'black', dotMatrix: true, motion: true, fontScale: 1, range: '24h', layoutVersion: LAYOUT_VERSION, layout: { overview: [], storage: [], network: [], apps: [], thermal: [] }, hidden: { overview: [], storage: [], network: [], apps: [], thermal: [] }, thresholds: sanitizeTH({}), ignored: [] };
 }
 /** 已忽略的健康提醒：[{key, fp, label, level, at}]；key 标识问题，fp 是状态指纹（变化即重新提醒） */
 const cleanIgnored = a => Array.isArray(a) ? a.filter(x => x && typeof x.key === 'string' && x.key.length <= 120 && typeof x.fp === 'string' && x.fp.length <= 400)
@@ -72,7 +72,7 @@ const LV_TXT = { warn: '偏高', crit: '严重' };
 const GiB = 1024 ** 3;
 const S = {
   page: 'overview', sheet: null, editing: false, ticks: 0,
-  o: null, cfg: null, docker: null, vms: null, vmTab: store.get('vmTab', false), procs: null, apps: null, ports: null, traffic: null, pstats: null, monthly: null, weather: null,
+  o: null, cfg: null, docker: null, procs: null, apps: null, ports: null, traffic: null, pstats: null, monthly: null, weather: null,
   online: null, fails: 0, lastOk: 0, cpuHigh: 0,
   live: { cpu: [], mem: [], temp: [], tempMb: [], power: [], rx: [], tx: [], dr: [], dw: [], fan: [], disk: [], load: [] },
   ctrBuf: {}, vmBuf: {}, diskBuf: {}, visible: new Set(),

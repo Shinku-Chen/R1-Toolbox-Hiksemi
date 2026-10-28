@@ -146,7 +146,7 @@ defineModule({
    02 STORAGE — 存储池 + NAS 前面板（每块物理硬盘一个盘位）
    --------------------------------------------------------------------- */
 defineModule({
-  id: 'storage', page: 'overview', dc: 'util', kicker: 'STORAGE', title: '存储', dek: '存储池用量与每块物理硬盘的状态',
+  id: 'storage', page: 'storage', dc: 'util', kicker: 'STORAGE', title: '存储', dek: '存储池用量与每块物理硬盘的状态',
   actions: () => [detailBtn('scanlog', '巡检历史'), detailBtn('storage', '全部硬盘')],
   build(body, m) {
     body.innerHTML = `<div class="card pool">

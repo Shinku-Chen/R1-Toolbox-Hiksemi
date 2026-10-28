@@ -126,15 +126,15 @@ const R1 = {
   chanName: name => (name === 'cpu' ? 'CPU 风扇' : '系统风扇'),
 };
 
-/* 状态轮询：10 秒；总览与设置页可见时更新 */
+/* 状态轮询：10 秒；概览、温度与设置页可见时更新 */
 Poll.add('r1', async () => { await R1.load(); renderNow(); syncSettings(); }, 10000,
-  () => S.page === 'overview' || S.page === 'settings');
+  () => ['overview', 'thermal', 'settings'].includes(S.page));
 
 /* ---------------------------------------------------------------------
    模块 01 · 双路温控
    --------------------------------------------------------------------- */
 defineModule({
-  id: 'r1cool', page: 'overview', kicker: 'R1 COOLING', title: '双路风扇',
+  id: 'r1cool', page: 'thermal', kicker: 'R1 COOLING', title: '双路风扇',
   dek: 'CPU 与系统风扇各自选择模式、温度来源与输出',
   actions: () => {
     const b = mount(`<button class="link-btn" type="button">配置温控${ic('chev', 'i-sm')}</button>`);
@@ -198,7 +198,7 @@ defineModule({
    模块 02 · 机身灯光
    --------------------------------------------------------------------- */
 defineModule({
-  id: 'r1light', page: 'overview', kicker: 'R1 LIGHT', title: '机身灯光',
+  id: 'r1light', page: 'thermal', kicker: 'R1 LIGHT', title: '机身灯光',
   dek: '四种原生灯效：关闭、常亮、彩虹、呼吸',
   actions: () => {
     const b = mount(`<button class="link-btn" type="button">灯光设置${ic('chev', 'i-sm')}</button>`);
@@ -768,11 +768,8 @@ SET_SCHEMA.push(
   { id: 'about', title: '关于', icon: 'info', custom: r1About },
 );
 
-/* 默认布局：R1 模块插在「主机」之前，保持 fnmonitor 的原有顺序 */
-if (!LAYOUT_DEFAULT.overview.includes('r1cool')) {
-  const at = LAYOUT_DEFAULT.overview.indexOf('host');
-  LAYOUT_DEFAULT.overview.splice(at < 0 ? LAYOUT_DEFAULT.overview.length : at, 0, 'r1cool', 'r1light', 'r1screen');
-}
+/* R1 模块的默认归属已在 33-state.js 的 LAYOUT_DEFAULT 中定义：
+   r1cool / r1light 在温度页，r1screen 在概览页；这里不再修改默认顺序。 */
 
 /* R1 不访问外网天气：保留时钟卡，但不再提示“设置位置”这种不存在的入口 */
 (function localWeatherCard() {

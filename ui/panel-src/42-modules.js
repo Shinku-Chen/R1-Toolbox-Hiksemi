@@ -245,7 +245,7 @@ const scaleHTML = `<div class="thermo-scale"><span></span><div>${[20, 40, 60, 80
 const fanName = f => String(f.name || '风扇');
 const NO_FAN = '已适配标准 hwmon、IPMI/BMC、ThinkPad ACPI 与 0xA20 硬件监控邮箱（只读）；仍无数值通常表示该机型固件未向系统开放风扇数据。带 BMC 的主机可安装 ipmitool 后自动识别。';
 defineModule({
-  id: 'thermal', page: 'overview', dc: 'temp', kicker: 'THERMAL', title: '温度与散热', dek: '温度测点、风扇与电压',
+  id: 'thermal', page: 'thermal', dc: 'temp', kicker: 'THERMAL', title: '温度与散热', dek: '温度测点、风扇与电压',
   actions: () => detailBtn('temp'),
   build(body, m) {
     body.innerHTML = `<div class="grid g-thermal">
