@@ -250,6 +250,17 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('#sleep-timeout').inputValue(), '300');
     });
 
+    await check('screen brightness, light brightness and hue sliders share geometry', async () => {
+      await open('controls');
+      const sliders = await inside('input.brightness').evaluateAll(nodes => nodes.map(node => {
+        const rect = node.getBoundingClientRect();
+        return { id: node.id, width: rect.width, height: rect.height, appearance: getComputedStyle(node).appearance };
+      }));
+      assert.equal(sliders.length, 3);
+      assert.ok(sliders.every(slider => Math.abs(slider.width - sliders[0].width) <= 1 && Math.abs(slider.height - sliders[0].height) <= 1), JSON.stringify(sliders));
+      assert.ok(sliders.every(slider => slider.height === 56 && slider.appearance === 'none'), JSON.stringify(sliders));
+    });
+
     await check('trend selectors switch 1h / 6h / 24h curves and time labels', async () => {
       await open('trends');
       let firstCurve;

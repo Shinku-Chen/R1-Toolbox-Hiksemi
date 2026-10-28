@@ -127,6 +127,14 @@
       .screen-nav{height:auto;padding-top:6px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
     }
   </style>
+  <style>
+    /* All three sliders share the same box, 16px track and 28px thumb. */
+    .brightness{width:100%;height:56px;min-height:56px;margin:0;padding:0;-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+    .brightness::-webkit-slider-runnable-track{height:16px;border-radius:12px;background:var(--raised)}
+    .brightness::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;margin-top:-6px;border:0;border-radius:50%;background:var(--text);box-sizing:border-box}
+    .light-hue::-webkit-slider-runnable-track{background:linear-gradient(90deg,#ff3b30,#ffd60a,#34c759,#32ade6,#5856d6,#ff2d95,#ff3b30)}
+    .light-hue::-webkit-slider-thumb{background:#fff;box-shadow:0 0 0 3px #0006}
+  </style>
 </head>
 <body>
   <main class="studio">
