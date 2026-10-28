@@ -4,6 +4,37 @@
 
 分析对象：用户已有 R1_X01_GML_STD_V6.3.3_Build_260907.zip。本地仅静态分析，不运行固件二进制、脚本，不加载模块、不做硬件写操作。分析完整 histor.img、rootfs/sq.img，以及 initrd/rootfs 中两份不同的内核模块；另记录用户在 NAS 上明确执行的诊断结果。
 
+## 固件入口复核（2026-10-28）
+
+本次从用户提供的 ZIP 重新解包，唯一成员为 `new_update.bin`，大小 1213071616 字节，SHA256 为 `c0c9904178e88bc606283b1556dada0c589495106f57eff834ab174476025bf0`。跳过 65536 字节的 HK 封装头后是 Zstd 数据，解压得到 tar；其中 `histor.img` 和 `rootfs/sq.img` 均为 SquashFS 4.0／XZ。没有额外加密变换。只把脚本和二进制作为静态数据读取。
+
+重新提取的 `emhistor`、`temp_control`、`product_test` 和两份 `hikio.ko` 身份均与下文已记录样本匹配，因此既有静态协议、函数偏移和 ABI 证据适用于这个包；这次没有发现不同版本的温控实现。
+
+| 入口 | 可用范围与证据 |
+|---|---|
+| `/var/tmp/emhistor` Unix socket | 原厂 `get_fan_status`／`set_fan_status` RPC；模式 2／3／4／5 对应系统风扇低／中／高／自动，不提供 CPU 独立控制。getter 会同步信号，不能当成后台无副作用查询。 |
+| `/rest/1.1/config` | 原厂 `get_hardware`／`set_hardware` 等 action；需要正常原厂认证。固件内路由存在不等于已确认监听端口，不将字符串中的 7000 写死为 API 地址。 |
+| `/dev/hikio` | 已验证 initrd 驱动支持 CPU `ioctl 0x5798`、系统 `0x5799`；`temp_control` 动态导入 `ioctl`，是现有 RAM guard 的窄范围接入位置。仍须全部身份预检、租约与恢复保护。 |
+| `/etc/init.d/starthistor` | 加载驱动、挂载厂商镜像并启动 `/histor` 程序的入口。用于理解生命周期，不作为改写原厂脚本的理由。 |
+
+### 启动与驱动加载链
+
+- initrd 的 `/scripts/local:136–175` 根据主／备启动标记选择 `/dev/mmcblk0p3` 或 `/dev/mmcblk0p8` 的 `sq.img`，只读挂载 SquashFS，以 tmpfs upper 构成 RAM overlay 根目录；`/init:333` 切换到真实 `/sbin/init`。
+- `/scripts/local:181–182` 在切根前把 initrd 的 `/lib/modules/` 和 `/lib/firmware/` 复制到 RAM 根目录。这解释了磁盘 rootfs 和实际可加载模块可能不同，实际加载身份仍以 `/sys/module/hikio/notes/.note.gnu.build-id` 为准。
+- rootfs 的 `/etc/init.d/starthistor:60` 执行 `modprobe hikio`；`:66–84` 创建 tmpfs upper，把主启动分区内的只读 `histor.img` 组成 overlay 挂到 `/histor`，然后执行 `/histor/init.sh`。备启动使用同脚本另一分支。
+- `/histor/init.sh` 遍历 `/histor/bin/fs`、`/histor/bin` 的初始化脚本；`/histor/bin/init.sh:156–164` 无附加参数地后台启动 `temp_control`。本次启动脚本中没有独立 CPU 温控关闭开关，也没有独立的 `temp_control` systemd unit。
+- `emhistor` 由 `/histor/bin/restart_emhistor.sh:36–56` 的循环守护。停止原厂进程并不等于解除它的启动或恢复链。
+
+根目录与 `/histor` 的临时改动通常随重启消失。Toolbox 继续通过 Docker 启动自身服务与 RAM 适配层，保持原厂镜像、启动脚本和服务定义边界。
+
+### 调试服务与升级入口的限制
+
+固件同时包含 OpenSSH、Dropbear、SysV 启动链接和 `ssh.socket`，但 manifest 中 `/etc/systemd/system/ssh.service` 指向 `/dev/null`，服务被 mask。`emhistor` 文件偏移 `0xc879c8` 附近另有绑定 loopback `127.0.0.1:31234` 的 Dropbear 命令字符串；尚未追踪触发条件，不能把它当作已经开放的登录入口。本次通过现有只读监控 API 取到的监听列表中，22、31234 和 7000 均未出现；该列表没有进程归属，不凭端口猜测厂商服务。
+
+`init=`、`break=` 是 initrd 中存在的引导调试参数，需要引导链配合；不是运行中风扇控制接口。`kernel/upkernel.sh`、`rootfs/uprootfs.sh` 属主／备分区升级链，会写入内核或系统镜像，不能当作无副作用的应用扩展 hook。本次均未执行。
+
+本次复核支持继续使用已验证的 RAM `ioctl` 接管方案；实际能否完成接管，通过修复后的 `/api/dev/fan` 时间线核对完整 maps、就绪稳定门、`phase=active` 与持续写入回执，不能由静态固件分析代替实机结果。
+
 ## 结论与实机证据
 
 - 原厂存在风扇模式 RPC 和 REST action；接口存在不等于当前驱动可执行物理调速。
