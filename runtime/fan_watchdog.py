@@ -352,7 +352,11 @@ class SystemBackend:
                 if now - stable_since >= stable_seconds:
                     return identity
             elif stable_since is not None:
-                raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
+                # Startup probes can flicker while the vendor process replaces
+                # its signal table.  Do not abort on the first regression; keep
+                # checking until the bounded deadline so a transient sample
+                # cannot make a healthy guarded process look unready.
+                stable_since = None
             self.sleep(min(0.025, max(0, deadline - now)))
         raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
 
