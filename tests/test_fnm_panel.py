@@ -198,8 +198,8 @@ class Monitor:
                            'used_bytes': 10 ** 12, 'usage_percent': 25.0}]}
 
 
-def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None):
-    return compat.FnmonitorPanel(Controller(), Insights(), Monitoring(), fan or FanPolicy(),
+def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None):
+    return compat.FnmonitorPanel(Controller(), insights or Insights(), Monitoring(), fan or FanPolicy(),
                                  light or LightPolicy(), Monitor(), state_dir=state_dir,
                                  version='test', web=web_ref,
                                  proc_root=Path(tempfile.mkdtemp(prefix='r1-panel-proc-')),
@@ -316,6 +316,30 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(overview['disks_detail'], [])
         self.assertFalse(overview['docker']['available'])
         self.assertIsNone(overview['power']['total'])
+
+    def test_sleeping_disk_stays_visible_without_smart_or_wakeup(self):
+        class SleepingInsights(Insights):
+            def snapshot(self):
+                data = super().snapshot()
+                data['disks']['items'].append({
+                    'id': 'sdz', 'device': '/dev/sdz', 'model': 'Sleeping fixture',
+                    'size_bytes': 3 * 10 ** 12, 'temp_c': 31, 'standby': True,
+                    'smart_available': False,
+                    'health': {'passed': None, 'reason': '磁盘处于休眠，已跳过 SMART 读取'},
+                })
+                return data
+
+        panel = panel_for(tempfile.mkdtemp(prefix='r1-panel-sleep-'), insights=SleepingInsights())
+        disks = panel.overview()['disks_detail']
+        row = next(item for item in disks if item['name'] == 'sdz')
+        self.assertTrue(row['standby'])
+        self.assertFalse(row['smart_available'])
+        self.assertIsNone(row['health'])
+        self.assertEqual(row['size'], 3 * 10 ** 12)
+        self.assertEqual(row['temp'], 31)
+        health = panel.disk_health()['items']['sdz']
+        self.assertEqual(health['grade'], 'ok')
+        self.assertIn('休眠', health['detail'])
 
     def test_history_maps_two_series_metrics_and_rejects_bad_ranges(self):
         cpu = self.panel.history('cpu', '1h')
