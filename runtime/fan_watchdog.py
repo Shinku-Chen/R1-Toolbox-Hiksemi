@@ -271,6 +271,7 @@ class SystemBackend:
         self.children.append(child)
         deadline = self.clock() + 20
         expected = None
+        last_error = None
         try:
             while self.clock() < deadline:
                 identity = process_identity(child.pid, self.proc)
@@ -280,10 +281,14 @@ class SystemBackend:
                     expected = identity
                     return self.wait_ready(identity, require_guard=lease is not None, deadline=deadline)
                 self.sleep(0.05)
-        except (OSError, ValueError, RuntimeError):
-            pass
+        except (OSError, ValueError, RuntimeError) as error:
+            # Preserve the readiness detail instead of replacing it with the
+            # generic spawn message; the watchdog will surface it in status.json.
+            last_error = error
         if expected is not None and self.alive(expected):
             self.stop_process(expected)
+        if last_error is not None:
+            raise RuntimeError(str(last_error)) from None
         raise RuntimeError("原厂温控信号处理器就绪未确认")
 
     def assert_single(self, identity):
