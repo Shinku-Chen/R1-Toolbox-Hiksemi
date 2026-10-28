@@ -688,7 +688,9 @@
   }
 
   function cancelPower() {
-    action('power.cancel', {}, '已取消电源操作').then(() => { state.powerDeadline = null; state.powerOperation = null; softRender(); });
+    action('power.cancel', {}, '已取消电源操作').then(result => {
+      if (result) { state.powerDeadline = null; state.powerOperation = null; softRender(); }
+    });
   }
 
   function containerAction(id, operation) {

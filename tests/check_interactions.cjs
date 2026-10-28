@@ -17,7 +17,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
 (async () => {
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
   const checks = [], sizes = [], pageErrors = [], posts = [], external = [];
-  let offline = false, failNextAction = false, delayAction = false, historyFail = false, pairingExpires = 180;
+  let offline = false, failNextAction = false, failNextCancel = false, delayAction = false, historyFail = false, pairingExpires = 180;
   let independentPolicy = null, lightPolicy = null;
   const monitoring = { available: true, settings: { thresholds: { cpu_temp_warn: 70, cpu_temp_critical: 80 } }, power: { available: true, cpu_package_w: 12.5 }, disk_io: [{ name: 'sda', read_bytes_per_sec: 1048576, write_bytes_per_sec: 0 }], summary: { status: 'ok', label: '已采集指标未见告警', known_metrics: 12, unknown_metrics: 2 } };
   const historyFixture = { available: true, range: '1h', series: [
@@ -73,6 +73,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
         assert.equal(req.headers()['x-r1-token'], 'fixture-only-not-real');
         const body = req.postDataJSON(); posts.push(body);
         if (failNextAction && body.action === 'screen.brightness') { failNextAction = false; return route.fulfill({ status: 409, headers, body: JSON.stringify({ ok: false, reason: '模拟亮度调整被拒绝' }) }); }
+        if (failNextCancel && body.action === 'power.cancel') { failNextCancel = false; return route.fulfill({ status: 409, headers, body: JSON.stringify({ ok: false, reason: '模拟取消失败' }) }); }
         if (body.action === 'screen.brightness') { if (delayAction) { delayAction = false; await new Promise(r => setTimeout(r, 600)); } state.screen.brightness = body.value; }
         if (body.action === 'screen.sleep') state.screen.asleep = true;
         if (body.action === 'screen.wake') state.screen.asleep = false;
@@ -228,6 +229,10 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.equal(state.power.pending.operation, 'reboot');
     await root('overview');
     assert.equal(await page.locator('#power-status').isVisible(), true);
+    failNextCancel = true;
+    await page.locator('#power-status [data-action="cancel-power"]').click();
+    await page.waitForFunction(() => document.getElementById('toast').textContent === '模拟取消失败');
+    assert.equal(await page.locator('#power-status').isVisible(), true, 'failed cancellation keeps the countdown cancellable');
     await page.locator('#power-status [data-action="cancel-power"]').click();
     await page.waitForFunction(() => document.getElementById('power-status').hidden);
     assert.equal(state.power.pending, null);
