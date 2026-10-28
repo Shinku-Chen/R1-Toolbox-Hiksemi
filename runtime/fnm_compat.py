@@ -397,6 +397,11 @@ class FnmonitorPanel:
         for item in _list(_dict(insight.get('disks')).get('items'), 128):
             if not isinstance(item, dict) or not isinstance(item.get('id'), str):
                 continue
+            # The R1 storage view is deliberately limited to physical disks
+            # whose SMART cache was actually read.  A missing probe is not a
+            # zero-capacity disk and must not appear as one.
+            if item.get('smart_available') is not True:
+                continue
             name = item['id']
             physical = _dict(inventory.get(name))
             health = _dict(item.get('health'))
@@ -740,11 +745,13 @@ class FnmonitorPanel:
         return {
             'cpu': self._cpu(),
             'mem': self._mem(),
-            'disks': [{'mount': mount, 'name': disk['name']} for disk in disks for mount in disk.get('mounts', [])],
+            # R1 exposes physical SMART disks and aggregate usage only; do
+            # not feed fnMonitor's partition table with mount rows.
+            'disks': [],
             'disk_total': percent,
             'disk_used': used,
             'disk_size': total_size,
-            'disk_pools': len({mount for disk in disks for mount in disk.get('mounts', [])}),
+            'disk_pools': 0,
             'disks_detail': disks,
             'idrac_slot_state': 'off',
             'net': self._net(),

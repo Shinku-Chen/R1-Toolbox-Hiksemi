@@ -151,7 +151,9 @@ class Insights:
                 {'id': 'sda', 'device': '/dev/sda', 'model': 'Fixture Drive',
                  'size_bytes': 4 * 10 ** 12, 'temp_c': 39, 'standby': False,
                  'smart_available': True, 'health': {'passed': True, 'reason': None},
-                 'temperature_critical_c': 65}]},
+                 'temperature_critical_c': 65}, {'id': 'sdb', 'device': '/dev/sdb',
+                 'size_bytes': 1 * 10 ** 12, 'standby': False, 'smart_available': False,
+                 'health': {'passed': None, 'reason': 'SMART 未读取'}}]},
             'containers': {'available': True, 'sampled_at': '2026-10-28T00:00:00+00:00', 'items': [
                 {'id': 'a' * 64, 'name': 'fixture-db', 'image': 'fixture:local', 'state': 'running',
                  'status': 'Up 1 hour', 'ports': '0.0.0.0:8080->8080/tcp', 'protected': False,
@@ -289,8 +291,10 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(data['cpu']['per_core'], [10.0, 15.0])
         self.assertEqual(data['mem']['percent'], 37.5)
         self.assertEqual(data['disk_total'], 25.0)
+        self.assertEqual([row['name'] for row in data['disks_detail']], ['sda'])
         self.assertEqual(data['disks_detail'][0]['temp'], 39)
         self.assertEqual(data['disks_detail'][0]['health'], 'PASS')
+        self.assertEqual(data['disks'], [])
         self.assertEqual(data['temp']['cpu'], 62.0)
         self.assertEqual(data['power']['total'], 12.5)
         self.assertEqual(data['power']['source'], 'rapl')
