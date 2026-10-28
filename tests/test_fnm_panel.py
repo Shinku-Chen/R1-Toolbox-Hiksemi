@@ -198,12 +198,13 @@ class Monitor:
                            'used_bytes': 10 ** 12, 'usage_percent': 25.0}]}
 
 
-def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None, proc_root=None):
+def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None, proc_root=None, dev_root=None):
     return compat.FnmonitorPanel(Controller(), insights or Insights(), Monitoring(), fan or FanPolicy(),
                                  light or LightPolicy(), Monitor(), state_dir=state_dir,
                                  version='test', web=web_ref,
                                  proc_root=Path(proc_root or tempfile.mkdtemp(prefix='r1-panel-proc-')),
                                  sys_root=Path(tempfile.mkdtemp(prefix='r1-panel-sys-')),
+                                 dev_root=Path(dev_root or tempfile.mkdtemp(prefix='r1-panel-dev-')),
                                  weather_fetcher=weather_fetcher or (lambda city: {'ok': False, 'error': 'fixture: no weather'}))
 
 
