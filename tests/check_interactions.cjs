@@ -162,7 +162,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await root('overview');
     await open('metrics');
     assert.equal(await title(), '核心指标');
-    assert.equal(await page.locator('.screen-body .card-button').count(), 6, 'CPU, memory, storage, network, temperature and RAPL power');
+    assert.equal(await page.locator('.screen-body .card-button').count(), 5, 'CPU, memory, storage, network and temperature');
     await open('processor');
     assert.equal(await title(), '处理器与内存');
     assert.ok(await page.locator('.core-row').count() >= 4);
@@ -170,8 +170,8 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await back();
     await root('overview');
     await open('trends');
-    await page.waitForFunction(() => document.querySelectorAll('.chart-card').length === 6, null, { timeout: 8000 });
-    assert.equal(await page.locator('.chart-card').count(), 6);
+    await page.waitForFunction(() => document.querySelectorAll('.chart-card').length === 5, null, { timeout: 8000 });
+    assert.equal(await page.locator('.chart-card').count(), 5);
     assert.equal(await page.locator('[data-range="6h"]').getAttribute('aria-pressed'), 'false');
     await page.locator('[data-range="6h"]').click();
     await page.waitForTimeout(300);
@@ -187,7 +187,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.match(await page.locator('.screen-body').textContent(), /Package/);
     assert.equal(await page.locator('.fan-quick-row').count(), 2);
     await root('storage');
-    assert.equal(await page.locator('.drive-row').count(), 1, 'only physical disks with SMART are listed');
+    assert.equal(await page.locator('.drive-row').count(), 2, 'all physical disks are listed, including SMART-less ones');
     const storageText = await page.locator('.screen-body').textContent();
     assert.match(storageText, /SMART/);
     assert.doesNotMatch(storageText, /\/drives\/data/, 'filesystem mounts are not shown as physical disks');

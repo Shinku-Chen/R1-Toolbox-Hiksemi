@@ -1,7 +1,7 @@
 /* =====================================================================
    STATE — 界面配置（/api/ui）+ 提醒阈值 + 运行时数据
    ===================================================================== */
-const LAYOUT_VERSION = 201;
+const LAYOUT_VERSION = 202;
 const TH_SPEC = {
   cpuWarn: [85, 30, 100], cpuCrit: [95, 30, 100], memWarn: [85, 30, 100], memCrit: [95, 30, 100],
   capWarn: [85, 30, 100], capCrit: [95, 30, 100], tempWarn: [80, 40, 110], tempCrit: [90, 40, 115],
@@ -20,7 +20,7 @@ const THEMES = ['light', 'dark', 'auto'], ACCENT_IDS = ['black', 'blue', 'green'
 const RANGES = [['10m', '10分钟'], ['1h', '1小时'], ['6h', '6小时'], ['24h', '24小时'], ['7d', '7天'], ['all', '全部']];
 const RANGE_SEC = { '10m': 600, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, all: 0 };
 const RANGE_TXT = { '10m': '过去 10 分钟', '1h': '过去 1 小时', '6h': '过去 6 小时', '24h': '过去 24 小时', '7d': '过去 7 天', all: '保留期内' };
-const LAYOUT_DEFAULT = { overview: ['metrics', 'trends', 'compute', 'procs', 'host', 'r1screen'], storage: ['storage'], network: ['network'], apps: ['containers', 'ports', 'apps'], thermal: ['thermal', 'energy', 'r1cool', 'r1light'] };
+const LAYOUT_DEFAULT = { overview: ['metrics', 'trends', 'compute', 'procs', 'host', 'r1screen'], storage: ['storage'], network: ['network'], apps: ['containers', 'ports', 'apps'], thermal: ['thermal', 'r1cool', 'r1light'] };
 /** 旧版 7 套主题 → 新版 外观模式 + 主色 */
 const LEGACY_THEME = { dark: ['dark', 'black'], light: ['light', 'black'], blue: ['light', 'blue'], fresh: ['light', 'green'], green: ['light', 'green'], yellow: ['light', 'yellow'], cyan: ['light', 'cyan'] };
 function uiDefaults() {
@@ -139,6 +139,9 @@ function bayState(d) {
     const sm = smartState(d);
     if (sm.lv === 'crit' || sm.lv === 'warn') return { lv: sm.lv, text: sm.text, detail: '' };
     return { lv: 'unknown', text: '未巡检', detail: '' };
+  }
+  if (h.grade === 'unknown' && d.smart_available === false) {
+    return { lv: 'unknown', text: 'SMART 未读取', detail: h.detail || '' };
   }
   return { lv: h.grade || 'unknown', text: DISK_GRADE_TXT[h.grade] || '未巡检', detail: h.detail || '' };
 }

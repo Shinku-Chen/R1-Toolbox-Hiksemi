@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- feat(web): 移除网页与小屏的 CPU 封装功耗、显卡和能耗展示；保留后端原始读数，不伪造不可用数据。
+- feat(web): 接入 Open-Meteo 当前天气；支持公网 IP 自动定位、城市或经纬度设置，并增加天气设置分组。
+- feat(web): 存储页改为展示全部物理 HDD／SSD／NVMe；SMART 暂不可用的磁盘不再被隐藏，容量保留、健康与温度显示未知。
 - fix(web): 分离请求读取超时与响应写入超时；慢速连接下大页面不再被 2 秒 socket 超时截断，修复浏览器 `ERR_CONTENT_LENGTH_MISMATCH 200 (OK)`。
 - feat(web): 网页面板导航同步小屏六标签（概览／存储／网络／应用／温度／设置），存储、网络、温度独立成页；R1 风扇与灯光磁贴移入温度页，移除虚拟机页面入口。
 - refactor(deploy): 删除手写 `TASK_REVISION`，改为按任务环境自动生成配置指纹；默认 Compose 仅保留必需的 `UI_MODE: image`，其余参数使用默认值。

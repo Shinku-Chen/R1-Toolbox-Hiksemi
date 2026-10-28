@@ -444,7 +444,6 @@
     const net = obj(status.network);
     const down = speed(net.rx_bytes_per_sec);
     const temp = cpuTemp();
-    const power = obj(monitoring().power);
     const load = num(list(obj(obj(state.data.insights).system).load_average)[0], 0);
     const cards = [
       ['CPU', percentText(obj(status.cpu).usage_percent), '%', `${cpuCores() || '--'} 核 · 负载 ${load === null ? '--' : load.toFixed(2)}`, 'cpu', 'lime', 'processor'],
@@ -453,9 +452,6 @@
       ['下载', down[0], down[1], `${esc(net.interface || '--')}`, 'rx', 'green', 'network'],
       ['CPU 温度', tempText(temp), '', 'CPU 封装温度', 'temp', 'orange', 'thermal'],
     ];
-    if (power.available === true && num(power.cpu_package_w, 0) !== null) {
-      cards.push(['CPU 封装功率', String(Math.round(power.cpu_package_w * 10) / 10), 'W', 'RAPL 实测 · 非整机功耗', 'power', '', 'trends']);
-    }
     const stamp = status.timestamp ? new Date(status.timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '--';
     return `<div class="detail-lead"><p class="kicker">AT A GLANCE</p><h2>${cards.length} 项核心读数</h2><p>${state.online ? '真实快照 · ' + esc(stamp) : '等待连接本机服务'}</p></div>${cards.map(([label, value, unit, sub, chart, color, target]) => `<button type="button" class="card card-button" data-view="${target}"><div class="card-top"><h2>${esc(label)}</h2><span class="chevron" aria-hidden="true">›</span></div><div class="big-value ${color}">${dotNumber(value)}<small>${esc(unit)}</small></div><p class="caption" style="margin:12px 0">${esc(sub)}</p>${spark(state.live[chart] || [], color)}</button>`).join('')}`;
   }
@@ -481,9 +477,8 @@
   function storage() {
     const disk = pool();
     const allDrives = list(obj(obj(state.data.insights).disks).items);
-    const drives = allDrives.filter(row => row && row.smart_available === true);
-    const hidden = allDrives.length - drives.length;
-    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到带 SMART 信息的物理磁盘。</p>'}`;
+    const drives = allDrives.filter(row => row && row.id);
+    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到物理磁盘。</p>'}`;
   }
 
   function network() {
@@ -560,7 +555,7 @@
     if (!cache) return `<div class="detail-lead"><p class="kicker">TRENDS / 历史趋势</p><p style="margin-top:8px">${esc(rangeLabel)} · 正在读取历史</p></div><div class="tabs" aria-label="趋势时间范围">${['1h', '6h', '24h'].map(range => `<button type="button" data-range="${range}" aria-pressed="${state.trendRange === range}">${range}</button>`).join('')}</div><p class="info-note">历史不足时保留断点，不补算未监控时段。</p>`;
     const seriesOf = id => list(cache.series).find(row => row.id === id)?.points?.map(point => point[1]).filter(value => num(value) !== null) || [];
     const unavailable = cache.available === false;
-    return `<div class="detail-lead"><p class="kicker">TRENDS / 历史趋势</p><p style="margin-top:8px">${esc(rangeLabel)} · ${unavailable ? '历史数据暂不可用' : '采样缺失时保留断点'}</p></div><div class="tabs" aria-label="趋势时间范围">${['1h', '6h', '24h'].map(range => `<button type="button" data-range="${range}" aria-pressed="${state.trendRange === range}">${range}</button>`).join('')}</div>${unavailable ? `<p class="info-note">${esc(cache.reason || '宿主历史接口不可用，未补算或伪造采样。')}</p>` : ''}${chartCard('CPU', '%', seriesOf('cpu_usage_percent'), 'lime', at)}${chartCard('内存', '%', seriesOf('memory_usage_percent'), 'purple', at)}${chartCard('网络下载', 'B/s', seriesOf('rx_bytes_per_sec'), 'green', at)}${chartCard('磁盘读取', 'B/s', seriesOf('disk_read_bytes_per_sec'), 'purple', at)}${chartCard('CPU 温度', '°C', seriesOf('cpu_temperature_c'), 'orange', at)}${chartCard('CPU 封装功率', 'W', seriesOf('cpu_package_w'), 'green', at)}`;
+    return `<div class="detail-lead"><p class="kicker">TRENDS / 历史趋势</p><p style="margin-top:8px">${esc(rangeLabel)} · ${unavailable ? '历史数据暂不可用' : '采样缺失时保留断点'}</p></div><div class="tabs" aria-label="趋势时间范围">${['1h', '6h', '24h'].map(range => `<button type="button" data-range="${range}" aria-pressed="${state.trendRange === range}">${range}</button>`).join('')}</div>${unavailable ? `<p class="info-note">${esc(cache.reason || '宿主历史接口不可用，未补算或伪造采样。')}</p>` : ''}${chartCard('CPU', '%', seriesOf('cpu_usage_percent'), 'lime', at)}${chartCard('内存', '%', seriesOf('memory_usage_percent'), 'purple', at)}${chartCard('网络下载', 'B/s', seriesOf('rx_bytes_per_sec'), 'green', at)}${chartCard('磁盘读取', 'B/s', seriesOf('disk_read_bytes_per_sec'), 'purple', at)}${chartCard('CPU 温度', '°C', seriesOf('cpu_temperature_c'), 'orange', at)}`;
   }
 
   async function loadHistory(range, force = false) {

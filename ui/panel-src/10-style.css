@@ -856,7 +856,7 @@ body:not(.editing) .module.off { display: none; }
 #layout-docker > .module:first-child { margin-top: 0; }
 .layout { position: relative; }
 .metric .m-main { grid-row: 2; grid-column: 1; align-self: end; min-width: 0; }
-.g-compute { grid-template-columns: 1.3fr 1fr 1fr; }
+.g-compute { grid-template-columns: 1.3fr 1fr; }
 .g-thermal { grid-template-columns: 1.5fr 1fr; }
 .g-monthly { grid-template-columns: 1fr 1.2fr; }
 .link-like { font: inherit; font-weight: 600; color: inherit; text-align: left; border-radius: 6px; }

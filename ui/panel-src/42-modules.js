@@ -27,7 +27,6 @@ const TREND_DEFS = [
   { id: 'net', title: '网络', sheet: 'net', yMin: 0, yTick: shortBytes, series: [{ m: 'net.rx', label: '下行', color: M.io, fmt: F.rate }, { m: 'net.tx', label: '上行', color: M.io2, fmt: F.rate }] },
   { id: 'io', title: '磁盘读写', sheet: 'storage', yMin: 0, yTick: v => v + 'M', series: [{ m: 'diskio.r', label: '读取', color: M.io, fmt: fMBs }, { m: 'diskio.w', label: '写入', color: M.io2, fmt: fMBs }] },
   { id: 'temp', title: '温度', sheet: 'temp', yTick: v => v + '°', thresholds: () => [{ v: TH.tempWarn, lv: 'warn' }, { v: TH.tempCrit, lv: 'crit' }], series: [{ m: 'temp', label: 'CPU', color: M.temp, fmt: fDeg }, { m: 'temp_mb', label: '主板', color: M.temp2, fmt: fDeg }] },
-  { id: 'power', title: '整机功耗', sheet: 'power', yMin: 0, yTick: v => v + 'W', peak: true, series: [{ m: 'power', label: '功耗', color: M.pwr, fmt: fW }] },
   { id: 'fan', title: '风扇转速', sheet: 'temp', yMin: 0, yTick: v => String(v), series: [{ m: 'fan_avg', label: '平均转速', color: M.fan, fmt: fRpm }] },
 ];
 const chartOpt = (d, extra) => Object.assign({ series: d.series, yMin: d.yMin, yMax: d.yMax, yTick: d.yTick, peak: d.peak, thresholds: d.thresholds, empty: emptyFor(d.series[0].m) }, extra);
@@ -113,27 +112,11 @@ function setCores(tiles, pc) {
     setText(t.v, F.int(v)); inkTo(t.v, rampInk(v, 'cpu'));
   });
 }
-const GPU_TAG = { igpu: '核显', nvidia: 'NVIDIA', amd: 'AMD' };
-/* Intel 核显引擎（i915 PMU，原理同 intel_gpu_top）：后端只下发实际存在的引擎 */
-const GPU_ENG = [['render', '渲染'], ['video', '视频'], ['video_enhance', '视频增强'], ['blitter', '复制'], ['compute', '计算']];
-const GPU_DIAG = '/api/gpu?diag=1';
-const gpuIntel = g => g && g.vendor === '8086';
-const gpuEngs = g => GPU_ENG.filter(([k]) => g.engines && ok(g.engines[k]));
-/** 核显读数状态：pmu（引擎实测）/ rc6（活跃度估算）/ warm（首轮采样）/ none（读不到） */
-const gpuMode = g => !gpuIntel(g) ? 'drv' : g.warming ? 'warm' : g.util_source === 'pmu' && gpuEngs(g).length ? 'pmu' : g.util_source === 'rc6' && ok(g.util) ? 'rc6' : 'none';
-const diagLink = () => `<a class="link-btn diag-link" href="${GPU_DIAG}" target="_blank" rel="noopener">${ic('info', 'i-sm')}诊断信息（反馈问题时附上）</a>`;
-const GPU_NOTE = {
-  pmu: 'i915 PMU 实测（与 intel_gpu_top 同源），约 10 秒均值。',
-  rc6: '按 GPU 省电态（RC6）驻留时间估算整体活跃度，不区分引擎；读取各引擎占用需要 i915 PMU。',
-  warm: '正在采样，约 10 秒后显示。',
-  none: '未能读取核显占用（i915 PMU 与 RC6 均不可用）。',
-};
-
 /* ---------------------------------------------------------------------
-   04 COMPUTE — 每核 / 内存构成 / 显卡
+   04 COMPUTE — 每核 / 内存构成
    --------------------------------------------------------------------- */
 defineModule({
-  id: 'compute', page: 'overview', kicker: 'COMPUTE', title: '处理器 · 内存 · 显卡', dek: '每核使用率、内存构成与显卡状态',
+  id: 'compute', page: 'overview', kicker: 'COMPUTE', title: '处理器 · 内存', dek: '每核使用率与内存构成',
   actions: () => detailBtn('cpu'),
   build(body, m) {
     body.innerHTML = `<div class="grid g-compute">
@@ -155,7 +138,6 @@ defineModule({
         <div class="label" style="justify-content:space-between"><span>交换分区</span><span class="tnum muted" data-ref="swap"></span></div>
         <div class="bar thin" style="margin-top:10px" data-ref="swapW"><i data-ref="swapBar"></i></div>
       </div>
-      <div class="card pad" data-dc="cpu" data-ref="gpuCard"></div>
     </div>`;
     m.x = collect(body); m.tiles = [];
     [m.sApp, m.sCache, m.sBuf] = $$('.seg', m.x.dimm);
@@ -184,30 +166,6 @@ defineModule({
     } else setHTML(x.mLeg, '<span>内存数据不可用</span>');
     if (+mem.swap_total > 0) { setText(x.swap, `${gb(mem.swap_used)} / ${gb(mem.swap_total)} GB`); x.swapW.hidden = false; rampBar(x.swapBar, mem.swap_used / mem.swap_total * 100, 'gen'); }
     else { setText(x.swap, '未启用'); x.swapW.hidden = true; }
-    // 显卡：只展示后端真实读到的字段
-    const gpus = o.gpu || [], g = gpus[0], names = ((o.hardware || {}).gpu) || [];
-    const mode = g ? gpuMode(g) : '', engs = g ? gpuEngs(g) : [];
-    const gsig = g ? [g.name, g.type, mode, engs.map(e => e[0]).join(), +g.mem_total > 0].join('|') : 'none' + names.join();
-    if (m.gsig !== gsig) {
-      m.gsig = gsig;
-      const row = (k, l, cls = '') => `<div class="engine ${cls}"><span>${l}</span><div class="bar thin"><i data-ref="gb_${k}"></i></div><span class="v" data-ref="gv_${k}">--</span></div>`;
-      const rows = !g ? '' : mode === 'pmu' ? engs.map(([k, l]) => row(k, l)).join('') : mode === 'rc6' ? row('util', '活跃度（RC6 估算）', 'wide')
-        : mode === 'drv' ? row('util', '利用率') + (+g.mem_total > 0 ? row('mem', '显存') : '') : '';
-      x.gpuCard.innerHTML = g ? `<div class="label">${GPU_TAG[g.type] || '显卡'}<span class="faint lbl-r">${esc(String(g.name || '').replace(/ \(.*\)/, ''))}</span></div>
-        <div class="big-stat dnum" style="margin-top:14px"><span class="dm" data-ref="gU"></span><span class="unit">%</span><span class="sub mono" style="margin-left:8px" data-ref="gF"></span></div>
-        <div style="margin-top:18px">${rows}</div><p class="sub" style="margin:14px 0 0" data-ref="gNote"></p>${mode === 'rc6' || mode === 'none' ? diagLink() : ''}`
-        : `<div class="label">显卡</div>${emptyHTML('未检测到可监控的显卡', names.length ? esc(names.join('、')) + ' · 无法读取实时状态' : '支持 Intel 核显 / NVIDIA（nvidia-smi）/ AMD（amdgpu）', 'gpu')}`;
-      Object.assign(x, collect(x.gpuCard));
-    }
-    if (g) {
-      const has = g.util_avail && ok(g.util);
-      dnum(x.gU, has ? g.util : null); inkTo(x.gU, has ? rampInk(g.util, 'gen') : '');
-      setText(x.gF, [ok(g.freq_mhz) ? F.int(g.freq_mhz) + ' MHz' : '', ok(g.temp) ? F.int(g.temp) + '℃' : ''].filter(Boolean).join(' · '));
-      const bar = (k, v) => { rampBar(x['gb_' + k], ok(v) ? clamp(+v, 0, 100) : 0, 'gen'); setText(x['gv_' + k], ok(v) ? F.int(v) + '%' : '--'); };
-      if (mode === 'pmu') engs.forEach(([k]) => bar(k, g.engines[k]));
-      else if (mode === 'rc6' || mode === 'drv') { bar('util', has ? g.util : null); if (+g.mem_total > 0) bar('mem', g.mem_pct); }
-      setText(x.gNote, mode !== 'drv' ? GPU_NOTE[mode] : !g.util_avail ? '该显卡驱动未开放利用率读数。' : +g.mem_total > 0 ? `显存 ${F.bytesStr(g.mem_used)} / ${F.bytesStr(g.mem_total)}` : (gpus.length > 1 ? `另有 ${gpus.length - 1} 块显卡，详见处理器详情。` : ''));
-    }
     setHTML(m.r.dek, `${pc.length ? `${pc.length} 个核心整体 <b>${F.int(cpu.percent)}%</b>，最忙的是 C${mx}（${F.int(pc[mx])}%）。` : ''}${T ? `内存实际占用 <b>${gb(mp.app)} GB</b>，另有 ${gb(mp.cache + mp.buf)} GB 缓存可随时释放。` : ''}`);
   },
 });

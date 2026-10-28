@@ -304,7 +304,7 @@ function hostRows(o) {
   const sys = [['主机名', dash(sy.hostname)], ...(sy.fnos_version ? [['系统', esc('fnOS ' + sy.fnos_version)]] : []), ['内核', `<span class="mono">${dash(sy.kernel)}</span>`], ['架构', dash(sy.arch || hc.arch)], ['已运行', `<span data-ref="up">${esc(F.dur(o.uptime))}</span>`]];
   const hwr = [['处理器', dash(hc.model || cpu.model || sy.cpu_model)], ['核心 / 线程', `${dash(hc.cores || cpu.cores)} / ${dash(hc.threads || cpu.threads)}`],
     ['主板', dash([b.sys_vendor || b.board_vendor, b.board_name || b.product_name].filter(Boolean).join(' ') || null)], ['BIOS', dash([b.bios_vendor, b.bios_version, b.bios_date].filter(Boolean).join(' ') || null)],
-    ['显卡', dash((hw.gpu || []).join('、') || null)]];
+    ];
   return { sys, hwr };
 }
 defineModule({

@@ -765,25 +765,19 @@ SET_SCHEMA.push(
   { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
   { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选）。修改设置与设备操作始终受授权保护。', custom: r1AuthSettings },
   { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
+  { id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [
+    { k: 'weatherAuto', label: '自动定位', type: 'toggle', hint: '按 NAS 公网 IP 估算城市；需要外网。关闭后可手动填写下方位置。',
+      get: () => !(S.cfg && S.cfg.weather_city) && !S.weatherManual,
+      set: (v, row) => { if (v) { S.weatherManual = false; saveCfg({ weather_city: '' }, '已切换为自动定位天气', row).then(() => { syncSettings(); setTimeout(() => Poll.run('weather'), 800); }); } else { S.weatherManual = true; syncSettings(); setTimeout(() => { const i = $('.set-row[data-k="weather_city"] input'); i && i.focus(); }, 60); } } },
+    cfgItem('weather_city', '天气位置', 'text', { placeholder: '城市名（如 徐州）或 纬度,经度', showIf: () => !!(S.cfg && S.cfg.weather_city) || !!S.weatherManual, hint: '城市名或纬度,经度（如 34.26,117.18）；留空则由上方自动定位',
+      validate: v => v && v.includes(',') && !/^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(v) ? '坐标格式应为 纬度,经度（如 34.26,117.18）' : v.length > 100 ? '位置太长了' : '',
+      set: (v, row) => saveCfg({ weather_city: v }, '天气位置', row).then(() => setTimeout(() => Poll.run('weather'), 800)) }),
+  ] },
   { id: 'about', title: '关于', icon: 'info', custom: r1About },
 );
 
 /* R1 模块的默认归属已在 33-state.js 的 LAYOUT_DEFAULT 中定义：
    r1cool / r1light 在温度页，r1screen 在概览页；这里不再修改默认顺序。 */
-
-/* R1 不访问外网天气：保留时钟卡，但不再提示“设置位置”这种不存在的入口 */
-(function localWeatherCard() {
-  const original = Hero.weather.bind(Hero);
-  Hero.weather = function () {
-    if (!Hero.r) return original({ ok: false, error: '本机监控不访问外网' });
-    const r = Hero.r;
-    dot(r.wxT).set('--');
-    setHTML(r.wxIco, '');
-    setText(r.wxText, '本地监控');
-    setText(r.wxCity, '');
-    setHTML(r.wxSub, 'R1 Toolbox 不访问外网天气服务');
-  };
-})();
 
 /* 首次进入面板时读一次 R1 状态 */
 Poll.run('r1');

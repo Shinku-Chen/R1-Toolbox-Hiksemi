@@ -13,8 +13,9 @@ Deliberate limits, matching the project's rules:
   no whole-machine estimate.
 * SMART detail is not probed per request.  The disk list uses the background
   probe (``smartctl -n standby``) and never wakes a sleeping disk.
-* fnOS-only integrations (iDRAC, RAID cards, the app centre, weather, the
-  self-updater) report themselves unavailable instead of pretending to exist.
+* fnOS-only integrations (iDRAC, RAID cards, the app centre, the self-updater)
+  report themselves unavailable instead of pretending to exist.  Weather uses
+  Open-Meteo instead of the fnOS weather provider.
 """
 
 import copy
@@ -25,6 +26,8 @@ import os
 from pathlib import Path
 import re
 import time
+import urllib.parse
+import urllib.request
 
 
 PANEL_SCHEMA = 1
@@ -175,6 +178,8 @@ class PanelStore:
             limit = CONFIG_LIMITS.get(key)
             if limit and not limit[0] <= value <= limit[1]:
                 raise ValueError('配置超出范围：' + key)
+            if key == 'weather_city':
+                value = _weather_place(value)
             current[key] = value
         _write_json(self.config_path, current)
         return current
@@ -215,6 +220,112 @@ class PanelStore:
             raise ValueError('界面配置过大')
         _write_json(self.ui_path, clean)
         return clean
+
+
+_WMO_TEXT = {
+    0: '晴', 1: '大部晴朗', 2: '局部多云', 3: '阴', 45: '雾', 48: '雾凇',
+    51: '毛毛雨', 53: '毛毛雨', 55: '毛毛雨', 56: '冻雨', 57: '冻雨',
+    61: '小雨', 63: '中雨', 65: '大雨', 66: '冻雨', 67: '冻雨',
+    71: '小雪', 73: '中雪', 75: '大雪', 77: '雪粒',
+    80: '阵雨', 81: '阵雨', 82: '强阵雨', 85: '阵雪', 86: '阵雪',
+    95: '雷暴', 96: '雷暴伴冰雹', 99: '雷暴伴冰雹',
+}
+
+
+def _weather_coords(value):
+    """Parse the user's ``lat,lon`` weather location without accepting junk."""
+    parts = [part.strip() for part in str(value or '').split(',')]
+    if len(parts) != 2:
+        return None
+    try:
+        lat, lon = float(parts[0]), float(parts[1])
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    return lat, lon
+
+
+def _weather_place(value):
+    """Return a display-safe place string; never echo markup or control bytes."""
+    text = re.sub(r'[\x00-\x1f<>\u007f]', '', str(value or ''))
+    return re.sub(r'\s+', ' ', text).strip()[:64]
+
+
+def _weather_get(url):
+    request = urllib.request.Request(url, headers={'User-Agent': 'R1-Toolbox/1.0'})
+    with urllib.request.urlopen(request, timeout=7) as response:
+        if response.status != 200:
+            raise ValueError('天气服务返回 HTTP %s' % response.status)
+        raw = response.read(262144)
+    return json.loads(raw.decode('utf-8', 'replace'))
+
+
+def fetch_weather(city_override=''):
+    """Fetch current weather from Open-Meteo; no API key or bundled secret.
+
+    An empty location uses the NAS public-IP location.  A user-supplied city is
+    geocoded by Open-Meteo; ``lat,lon`` is accepted directly.  Only fixed
+    provider URLs are contacted, and the city is never interpolated as a URL
+    path without quoting.
+    """
+    try:
+        override = _weather_place(city_override)
+        lat = lon = None
+        city = ''
+        if override:
+            coords = _weather_coords(override)
+            if coords:
+                lat, lon = coords
+                city = '%.4f,%.4f' % (lat, lon)
+            else:
+                try:
+                    geo = _weather_get('https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=zh' %
+                                       urllib.parse.quote(override))
+                    rows = geo.get('results') if isinstance(geo, dict) else None
+                    row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+                    lat, lon = _weather_coords('%s,%s' % (row.get('latitude'), row.get('longitude')))
+                    city = _weather_place(row.get('name') or override)
+                except Exception:
+                    pass
+                if lat is None:
+                    return {'ok': False, 'error': '未找到城市「%s」，可改用 纬度,经度 格式' % override}
+        else:
+            try:
+                loc = _weather_get('https://ipwho.is/?lang=zh-CN&fields=success,latitude,longitude,city,region,country')
+                if isinstance(loc, dict) and loc.get('success') is not False:
+                    lat, lon = _weather_coords('%s,%s' % (loc.get('latitude'), loc.get('longitude')))
+                    city = _weather_place(loc.get('city') or loc.get('region') or loc.get('country') or '')
+            except Exception:
+                pass
+            if lat is None:
+                try:
+                    loc = _weather_get('http://ip-api.com/json/?lang=zh-CN&fields=status,lat,lon,city,regionName,country')
+                    if isinstance(loc, dict) and loc.get('status') == 'success':
+                        lat, lon = _weather_coords('%s,%s' % (loc.get('lat'), loc.get('lon')))
+                        city = _weather_place(loc.get('city') or loc.get('regionName') or loc.get('country') or '')
+                except Exception:
+                    pass
+            if lat is None:
+                return {'ok': False, 'error': '无法定位当前网络位置，可在设置中填写城市'}
+            city = city or '未知地区'
+        data = _weather_get('https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f'
+                            '&current=temperature_2m,relative_humidity_2m,apparent_temperature,'
+                            'weather_code,wind_speed_10m,is_day&timezone=auto' % (lat, lon))
+        current = data.get('current') if isinstance(data, dict) else None
+        if not isinstance(current, dict) or _number(current.get('temperature_2m')) is None:
+            return {'ok': False, 'error': '天气接口没有返回当前温度'}
+        code = current.get('weather_code')
+        code = int(code) if type(code) is int else None
+        return {'ok': True, 'city': city,
+                'temp': round(float(current['temperature_2m']), 1),
+                'feels': round(float(_number(current.get('apparent_temperature'), -100, 100) or current['temperature_2m']), 1),
+                'humidity': round(float(_number(current.get('relative_humidity_2m'), 0, 100) or 0), 1),
+                'wind': round(float(_number(current.get('wind_speed_10m'), 0, 1000) or 0), 1),
+                'code': code, 'desc': _WMO_TEXT.get(code, '未知'),
+                'is_day': 1 if current.get('is_day') == 1 else 0}
+    except Exception as exc:
+        return {'ok': False, 'error': '天气服务暂时不可用：%s' % str(exc)[:120]}
 
 
 THRESHOLD_SPEC = {
@@ -265,7 +376,7 @@ class FnmonitorPanel:
 
     def __init__(self, controller, insights, monitoring, fan_policy, light_policy, monitor, *,
                  state_dir, version='dev', web=None, clock=time.monotonic, wall_clock=time.time,
-                 proc_root='/proc', sys_root='/sys'):
+                 proc_root='/proc', sys_root='/sys', weather_fetcher=None):
         self.controller = controller
         self.insights = insights
         self.monitoring = monitoring
@@ -281,6 +392,10 @@ class FnmonitorPanel:
         self.proc_root = Path(proc_root)
         self.sys_root = Path(sys_root)
         self._mount_cache = (0.0, {})
+        self._weather_fetcher = weather_fetcher or fetch_weather
+        self._weather_cache = None
+        self._weather_at = 0.0
+        self._weather_key = None
 
     # ------------------------------------------------------------------
     # snapshots
@@ -397,10 +512,12 @@ class FnmonitorPanel:
         for item in _list(_dict(insight.get('disks')).get('items'), 128):
             if not isinstance(item, dict) or not isinstance(item.get('id'), str):
                 continue
-            # The R1 storage view is deliberately limited to physical disks
-            # whose SMART cache was actually read.  A missing probe is not a
-            # zero-capacity disk and must not appear as one.
-            if item.get('smart_available') is not True:
+            # The R1 storage view lists physical HDD/SSD/NVMe devices, even
+            # when the background SMART probe is unavailable.  SMART-less disks
+            # are still real hardware and must not disappear from the inventory;
+            # their health/temperature fields remain unknown (never zero).
+            # eMMC is boot storage, not a user data disk.
+            if item.get('type') == 'eMMC':
                 continue
             name = item['id']
             physical = _dict(inventory.get(name))
@@ -1020,7 +1137,27 @@ class FnmonitorPanel:
                 'note': 'R1 Toolbox 不提供月度归档；历史曲线保留 1–30 天'}
 
     def weather(self):
-        return {'ok': False, 'error': 'R1 Toolbox 不访问外网天气服务'}
+        """Cached current weather; no hardware sampling and no API key.
+
+        Failures are cached briefly so a dead provider cannot stall every
+        panel refresh.  Successful responses live for 15 minutes.
+        """
+        city = _weather_place(self.store.config().get('weather_city'))
+        now = self.clock()
+        age = now - self._weather_at
+        ttl = 900 if self._weather_cache and self._weather_cache.get('ok') else 60
+        if self._weather_cache is not None and self._weather_key == city and 0 <= age < ttl:
+            return copy.deepcopy(self._weather_cache)
+        try:
+            result = self._weather_fetcher(city)
+        except Exception as exc:
+            result = {'ok': False, 'error': '天气服务暂时不可用：%s' % str(exc)[:120]}
+        if not isinstance(result, dict) or type(result.get('ok')) is not bool:
+            result = {'ok': False, 'error': '天气服务返回了无效数据'}
+        self._weather_cache = copy.deepcopy(result)
+        self._weather_at = now
+        self._weather_key = city
+        return result
 
     def report(self, fmt='json'):
         if fmt == 'html':
@@ -1093,6 +1230,9 @@ class FnmonitorPanel:
         changes = {key: value for key, value in data.items() if key in PANEL_DEFAULTS}
         notes = []
         stored = self.store.save_config(changes) if changes else self.store.config()
+        if 'weather_city' in changes:
+            self._weather_cache = None
+            self._weather_key = None
         if 'retention_days' in changes and self.monitoring is not None:
             try:
                 self.monitoring.action('monitor.settings.update',
@@ -1112,8 +1252,8 @@ class FnmonitorPanel:
             notes.append('以下项仅保存在面板：' + '、'.join(ignored))
         if auth is not None:
             notes.append('登录口令请在「登录口令」分组修改，不随此接口保存')
-        if self.web is not None and 'weather_city' in data:
-            notes.append('R1 Toolbox 不访问外网天气')
+        if 'weather_city' in changes:
+            notes.append('天气位置已保存，下一次天气刷新生效')
         config = self.config()
         return {'ok': True, 'config': config, 'note': '；'.join(notes) if notes else None}
 

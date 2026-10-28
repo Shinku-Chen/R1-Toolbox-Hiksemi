@@ -106,7 +106,7 @@ const Hero = {
       else if (it.go === 'retry') Poll.run('overview');
     });
     this.r.issues.addEventListener('click', e => { if (e.target.closest('[data-ignored]')) openSheet('health'); });
-    this.r.wx.addEventListener('click', e => { if (e.target.closest('[data-goset]')) focusSetting('weatherCity'); });
+    this.r.wx.addEventListener('click', e => { if (e.target.closest('[data-goset]')) focusSetting('weather_city'); });
     this.clock(); setInterval(() => this.clock(), 1000);
   },
   clock() {

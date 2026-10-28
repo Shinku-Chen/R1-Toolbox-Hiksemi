@@ -198,12 +198,13 @@ class Monitor:
                            'used_bytes': 10 ** 12, 'usage_percent': 25.0}]}
 
 
-def panel_for(state_dir, *, fan=None, light=None, web_ref=None):
+def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None):
     return compat.FnmonitorPanel(Controller(), Insights(), Monitoring(), fan or FanPolicy(),
                                  light or LightPolicy(), Monitor(), state_dir=state_dir,
                                  version='test', web=web_ref,
                                  proc_root=Path(tempfile.mkdtemp(prefix='r1-panel-proc-')),
-                                 sys_root=Path(tempfile.mkdtemp(prefix='r1-panel-sys-')))
+                                 sys_root=Path(tempfile.mkdtemp(prefix='r1-panel-sys-')),
+                                 weather_fetcher=weather_fetcher or (lambda city: {'ok': False, 'error': 'fixture: no weather'}))
 
 
 class AuthTests(unittest.TestCase):
@@ -292,7 +293,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(data['cpu']['per_core'], [10.0, 15.0])
         self.assertEqual(data['mem']['percent'], 37.5)
         self.assertEqual(data['disk_total'], 25.0)
-        self.assertEqual([row['name'] for row in data['disks_detail']], ['sda'])
+        self.assertEqual([row['name'] for row in data['disks_detail']], ['sda', 'sdb'])
         self.assertEqual(data['disks_detail'][0]['temp'], 39)
         self.assertEqual(data['disks_detail'][0]['health'], 'PASS')
         self.assertEqual(data['disks'], [])
@@ -346,6 +347,29 @@ class MappingTests(unittest.TestCase):
         self.assertFalse(self.panel.monthly_summary()['available'])
         self.assertEqual(self.panel.modules(), {'modules': []})
         self.assertEqual(self.panel.apps(), {'apps': []})
+
+    def test_weather_uses_saved_city_and_caches(self):
+        calls = []
+
+        def fetch(city):
+            calls.append(city)
+            return {'ok': True, 'city': '徐州', 'temp': 20.0, 'feels': 20.0,
+                    'humidity': 50.0, 'wind': 1.0, 'code': 0, 'desc': '晴', 'is_day': 1}
+
+        panel = panel_for(tempfile.mkdtemp(prefix='r1-panel-weather-'), weather_fetcher=fetch)
+        saved = panel.save_config({'weather_city': '34.26,117.18'})
+        self.assertTrue(saved['ok'])
+        first = panel.weather()
+        second = panel.weather()
+        self.assertTrue(first['ok'])
+        self.assertEqual(first['temp'], 20.0)
+        self.assertEqual(calls, ['34.26,117.18'])
+        self.assertIsNot(first, second)
+
+    def test_weather_rejects_bad_coordinates_without_network(self):
+        self.assertEqual(compat._weather_coords('34.26,117.18'), (34.26, 117.18))
+        self.assertIsNone(compat._weather_coords('91,0'))
+        self.assertIsNone(compat._weather_coords('abc'))
 
     def test_r1_state_exposes_runtime_and_authorization(self):
         state = self.panel.r1_state(authorized=True)

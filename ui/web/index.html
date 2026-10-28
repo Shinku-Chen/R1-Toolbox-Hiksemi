@@ -705,7 +705,7 @@ to{background-position:-100% 0}
 #layout-docker>.module:first-child{margin-top:0}
 .layout{position:relative}
 .metric .m-main{grid-row:2;grid-column:1;align-self:end;min-width:0}
-.g-compute{grid-template-columns:1.3fr 1fr 1fr}
+.g-compute{grid-template-columns:1.3fr 1fr}
 .g-thermal{grid-template-columns:1.5fr 1fr}
 .g-monthly{grid-template-columns:1fr 1.2fr}
 .link-like{font:inherit;font-weight:600;color:inherit;text-align:left;border-radius:6px}
@@ -2127,7 +2127,7 @@ this.tip.classList.add('show');
 const joinU = p => p[1] && /^[A-Za-z]/.test(p[1]) ? p[0] + ' ' + p[1] : p[0] + (p[1] || '');
 const M = { cpu: 'var(--e-blue)', p2: 'var(--e-teal)', mem: 'var(--e-teal)', io: 'var(--e-blue)', io2: 'var(--e-coral)', temp: 'var(--e-coral)', temp2: 'var(--e-violet)', pwr: 'var(--e-teal)', fan: 'var(--e-violet)' };
 const C = { c1: 'var(--c1)', c2: 'var(--c2)', c3: 'var(--c3)', c4: 'var(--c4)', ink: 'var(--ink-1)', ink3: 'var(--ink-3)', ok: 'var(--ok)', warn: 'var(--warn)', crit: 'var(--crit)', sleep: 'var(--sleep)' };
-const LAYOUT_VERSION = 201;
+const LAYOUT_VERSION = 202;
 const TH_SPEC = {
 cpuWarn: [85, 30, 100], cpuCrit: [95, 30, 100], memWarn: [85, 30, 100], memCrit: [95, 30, 100],
 capWarn: [85, 30, 100], capCrit: [95, 30, 100], tempWarn: [80, 40, 110], tempCrit: [90, 40, 115],
@@ -2145,7 +2145,7 @@ const THEMES = ['light', 'dark', 'auto'], ACCENT_IDS = ['black', 'blue', 'green'
 const RANGES = [['10m', '10分钟'], ['1h', '1小时'], ['6h', '6小时'], ['24h', '24小时'], ['7d', '7天'], ['all', '全部']];
 const RANGE_SEC = { '10m': 600, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, all: 0 };
 const RANGE_TXT = { '10m': '过去 10 分钟', '1h': '过去 1 小时', '6h': '过去 6 小时', '24h': '过去 24 小时', '7d': '过去 7 天', all: '保留期内' };
-const LAYOUT_DEFAULT = { overview: ['metrics', 'trends', 'compute', 'procs', 'host', 'r1screen'], storage: ['storage'], network: ['network'], apps: ['containers', 'ports', 'apps'], thermal: ['thermal', 'energy', 'r1cool', 'r1light'] };
+const LAYOUT_DEFAULT = { overview: ['metrics', 'trends', 'compute', 'procs', 'host', 'r1screen'], storage: ['storage'], network: ['network'], apps: ['containers', 'ports', 'apps'], thermal: ['thermal', 'r1cool', 'r1light'] };
 const LEGACY_THEME = { dark: ['dark', 'black'], light: ['light', 'black'], blue: ['light', 'blue'], fresh: ['light', 'green'], green: ['light', 'green'], yellow: ['light', 'yellow'], cyan: ['light', 'cyan'] };
 function uiDefaults() {
 return { theme: 'light', accent: 'black', dotMatrix: true, motion: true, fontScale: 1, range: '24h', layoutVersion: LAYOUT_VERSION, layout: { overview: [], storage: [], network: [], apps: [], thermal: [] }, hidden: { overview: [], storage: [], network: [], apps: [], thermal: [] }, thresholds: sanitizeTH({}), ignored: [] };
@@ -2242,6 +2242,9 @@ if (!h) {
 const sm = smartState(d);
 if (sm.lv === 'crit' || sm.lv === 'warn') return { lv: sm.lv, text: sm.text, detail: '' };
 return { lv: 'unknown', text: '未巡检', detail: '' };
+}
+if (h.grade === 'unknown' && d.smart_available === false) {
+return { lv: 'unknown', text: 'SMART 未读取', detail: h.detail || '' };
 }
 return { lv: h.grade || 'unknown', text: DISK_GRADE_TXT[h.grade] || '未巡检', detail: h.detail || '' };
 }
@@ -2532,7 +2535,7 @@ else if (it.go === 'docker') { Docker.setFilter('exited'); go('docker'); }
 else if (it.go === 'retry') Poll.run('overview');
 });
 this.r.issues.addEventListener('click', e => { if (e.target.closest('[data-ignored]')) openSheet('health'); });
-this.r.wx.addEventListener('click', e => { if (e.target.closest('[data-goset]')) focusSetting('weatherCity'); });
+this.r.wx.addEventListener('click', e => { if (e.target.closest('[data-goset]')) focusSetting('weather_city'); });
 this.clock(); setInterval(() => this.clock(), 1000);
 },
 clock() {
@@ -2640,7 +2643,7 @@ const fMBs = v => [F.d1(v), 'MB/s'];
 const fLoad = v => [F.d2(v), ''];
 const shortBytes = v => { const p = F.bytes(v); return p[0] + (p[1] ? p[1].charAt(0).replace('B', '') : ''); };
 defineModule({
-id: 'metrics', page: 'overview', kicker: 'AT A GLANCE', title: '核心指标', dek: '处理器、内存、存储、网络、温度与功耗', headless: true,
+id: 'metrics', page: 'overview', kicker: 'AT A GLANCE', title: '核心指标', dek: '处理器、内存、存储、网络与温度', headless: true,
 build(body, m) {
 const card = (id, label, sheet, main, gauge) => `<article class="card metric tap" data-sheet="${sheet}" data-m="${id}" tabindex="0" role="button" aria-label="${label}，查看详情">
 <div class="m-top"><span class="label">${label}</span><span class="m-state"><span data-ref="${id}St"></span>${ic('chev', 'i-sm more')}</span></div>
@@ -2654,14 +2657,13 @@ ${card('mem', '内存', 'mem', val('mem', '%'), 1)}
 ${card('disk', '存储', 'storage', val('disk', '%'), 1)}
 ${card('net', '网络', 'net', `<div class="net-vals"><div class="row">${ic('down', 'arr')}<span class="dnum"><span class="dm" data-ref="rxV"></span><span class="unit" data-ref="rxU"></span></span></div><div class="row sec"><svg class="i arr" style="color:var(--ink-3)" aria-hidden="true"><use href="#i-up"/></svg><span class="dnum"><span class="dm" data-ref="txV"></span><span class="unit" data-ref="txU"></span></span></div></div><div class="m-sub" data-ref="netSub"></div>`, 0)}
 ${card('temp', '温度', 'temp', val('temp', '℃'), 1)}
-${card('pwr', '功耗', 'power', val('pwr', 'W'), 1)}
 </div>`;
 m.x = collect(body);
 m.cards = {}; $$('[data-m]', body).forEach(c => { m.cards[c.dataset.m] = c; });
 m.g = {};
-[['cpu', 'cpu'], ['mem', 'mem'], ['disk', 'storage'], ['temp', 'temp'], ['pwr', 'bolt']].forEach(([k, icn]) => { m.g[k] = makeGauge(icn); m.cards[k].querySelector('.m-main').after(m.g[k]); });
+[['cpu', 'cpu'], ['mem', 'mem'], ['disk', 'storage'], ['temp', 'temp']].forEach(([k, icn]) => { m.g[k] = makeGauge(icn); m.cards[k].querySelector('.m-main').after(m.g[k]); });
 m.sp = {};
-['cpu', 'mem', 'net', 'temp', 'pwr'].forEach(k => { m.sp[k] = makeSpark(); m.x[k + 'Foot'].append(m.sp[k]); });
+['cpu', 'mem', 'net', 'temp'].forEach(k => { m.sp[k] = makeSpark(); m.x[k + 'Foot'].append(m.sp[k]); });
 },
 update(o, m) {
 if (!o) return;
@@ -2711,15 +2713,6 @@ if (ct != null && mt != null) tp.push(`主板 ${F.int(mt)}℃`);
 if (dmax != null && tv != null) tp.push(`硬盘最高 ${F.int(dmax)}℃`);
 setText(x.tempSub, tv == null && dmax == null ? '未读取到温度传感器' : tp.join(' · ') || 'CPU 封装温度');
 m.sp.temp.set([{ values: vals(tv != null ? (ct != null ? S.live.temp : S.live.tempMb) : []) }], {});
-const pw = o.power || {}, has3 = pwrOk(o), w = has3 ? +pw.total : null, ep = S.pstats && S.pstats.estimation_params;
-const capW = pw.capacity ? +pw.capacity : (ep ? ep.tdp_w + ep.base_w + ep.disk_typical_w * Math.max(1, dd.length) + ep.nic_fixed_w * Math.max(1, ni.length) : Math.max(60, (w || 0) * 1.5));
-dnum(x.pwrV, w, F.d1); m.g.pwr.set(w != null ? w / capW : 0, ''); m.g.pwr.tone(w != null ? rampAt(w / capW * 100, 'gen') : ''); inkTo(x.pwrV, w != null ? rampInk(w / capW * 100, 'gen') : '');
-st('pwr', '', !has3 ? '不可用' : pw.source === 'idrac' ? 'iDRAC 实测' : pw.source === 'rapl' ? 'CPU 封装实测' : '估算');
-const en = S.pstats && S.pstats.energy, co = S.pstats && S.pstats.cost;
-const pwrSrc = pw.source === 'idrac' ? `iDRAC 整机读数${pw.capacity ? ` · 电源容量 ${F.int(pw.capacity)} W` : ''}`
-: pw.source === 'rapl' ? '硬件 RAPL 读数' : '按部件模型估算';
-setText(x.pwrSub, !has3 ? '无法读取或估算功耗' : en ? `今日 ${F.kwh(en.today_kwh)} kWh · ${F.yuan(co && co.today_yuan)}` : pwrSrc);
-m.sp.pwr.set([{ values: vals(S.live.power) }], { min: 0 });
 },
 });
 defineModule({
@@ -2851,7 +2844,6 @@ const TREND_DEFS = [
 { id: 'net', title: '网络', sheet: 'net', yMin: 0, yTick: shortBytes, series: [{ m: 'net.rx', label: '下行', color: M.io, fmt: F.rate }, { m: 'net.tx', label: '上行', color: M.io2, fmt: F.rate }] },
 { id: 'io', title: '磁盘读写', sheet: 'storage', yMin: 0, yTick: v => v + 'M', series: [{ m: 'diskio.r', label: '读取', color: M.io, fmt: fMBs }, { m: 'diskio.w', label: '写入', color: M.io2, fmt: fMBs }] },
 { id: 'temp', title: '温度', sheet: 'temp', yTick: v => v + '°', thresholds: () => [{ v: TH.tempWarn, lv: 'warn' }, { v: TH.tempCrit, lv: 'crit' }], series: [{ m: 'temp', label: 'CPU', color: M.temp, fmt: fDeg }, { m: 'temp_mb', label: '主板', color: M.temp2, fmt: fDeg }] },
-{ id: 'power', title: 'CPU 功耗', sheet: 'power', yMin: 0, yTick: v => v + 'W', peak: true, series: [{ m: 'power', label: '功耗', color: M.pwr, fmt: fW }] },
 { id: 'fan', title: '风扇转速', sheet: 'temp', yMin: 0, yTick: v => String(v), series: [{ m: 'fan_avg', label: '平均转速', color: M.fan, fmt: fRpm }] },
 ];
 const chartOpt = (d, extra) => Object.assign({ series: d.series, yMin: d.yMin, yMax: d.yMax, yTick: d.yTick, peak: d.peak, thresholds: d.thresholds, empty: emptyFor(d.series[0].m) }, extra);
@@ -2934,21 +2926,8 @@ const l = LV.cpu(v); if ((t.el.dataset.l || '') !== l) t.el.dataset.l = l;
 setText(t.v, F.int(v)); inkTo(t.v, rampInk(v, 'cpu'));
 });
 }
-const GPU_TAG = { igpu: '核显', nvidia: 'NVIDIA', amd: 'AMD' };
-const GPU_ENG = [['render', '渲染'], ['video', '视频'], ['video_enhance', '视频增强'], ['blitter', '复制'], ['compute', '计算']];
-const GPU_DIAG = '/api/gpu?diag=1';
-const gpuIntel = g => g && g.vendor === '8086';
-const gpuEngs = g => GPU_ENG.filter(([k]) => g.engines && ok(g.engines[k]));
-const gpuMode = g => !gpuIntel(g) ? 'drv' : g.warming ? 'warm' : g.util_source === 'pmu' && gpuEngs(g).length ? 'pmu' : g.util_source === 'rc6' && ok(g.util) ? 'rc6' : 'none';
-const diagLink = () => `<a class="link-btn diag-link" href="${GPU_DIAG}" target="_blank" rel="noopener">${ic('info', 'i-sm')}诊断信息（反馈问题时附上）</a>`;
-const GPU_NOTE = {
-pmu: 'i915 PMU 实测（与 intel_gpu_top 同源），约 10 秒均值。',
-rc6: '按 GPU 省电态（RC6）驻留时间估算整体活跃度，不区分引擎；读取各引擎占用需要 i915 PMU。',
-warm: '正在采样，约 10 秒后显示。',
-none: '未能读取核显占用（i915 PMU 与 RC6 均不可用）。',
-};
 defineModule({
-id: 'compute', page: 'overview', kicker: 'COMPUTE', title: '处理器 · 内存 · 显卡', dek: '每核使用率、内存构成与显卡状态',
+id: 'compute', page: 'overview', kicker: 'COMPUTE', title: '处理器 · 内存', dek: '每核使用率与内存构成',
 actions: () => detailBtn('cpu'),
 build(body, m) {
 body.innerHTML = `<div class="grid g-compute">
@@ -2970,7 +2949,6 @@ body.innerHTML = `<div class="grid g-compute">
 <div class="label" style="justify-content:space-between"><span>交换分区</span><span class="tnum muted" data-ref="swap"></span></div>
 <div class="bar thin" style="margin-top:10px" data-ref="swapW"><i data-ref="swapBar"></i></div>
 </div>
-<div class="card pad" data-dc="cpu" data-ref="gpuCard"></div>
 </div>`;
 m.x = collect(body); m.tiles = [];
 [m.sApp, m.sCache, m.sBuf] = $$('.seg', m.x.dimm);
@@ -2999,29 +2977,6 @@ setHTML(x.mLeg, memLegHTML(mp, mc));
 } else setHTML(x.mLeg, '<span>内存数据不可用</span>');
 if (+mem.swap_total > 0) { setText(x.swap, `${gb(mem.swap_used)} / ${gb(mem.swap_total)} GB`); x.swapW.hidden = false; rampBar(x.swapBar, mem.swap_used / mem.swap_total * 100, 'gen'); }
 else { setText(x.swap, '未启用'); x.swapW.hidden = true; }
-const gpus = o.gpu || [], g = gpus[0], names = ((o.hardware || {}).gpu) || [];
-const mode = g ? gpuMode(g) : '', engs = g ? gpuEngs(g) : [];
-const gsig = g ? [g.name, g.type, mode, engs.map(e => e[0]).join(), +g.mem_total > 0].join('|') : 'none' + names.join();
-if (m.gsig !== gsig) {
-m.gsig = gsig;
-const row = (k, l, cls = '') => `<div class="engine ${cls}"><span>${l}</span><div class="bar thin"><i data-ref="gb_${k}"></i></div><span class="v" data-ref="gv_${k}">--</span></div>`;
-const rows = !g ? '' : mode === 'pmu' ? engs.map(([k, l]) => row(k, l)).join('') : mode === 'rc6' ? row('util', '活跃度（RC6 估算）', 'wide')
-: mode === 'drv' ? row('util', '利用率') + (+g.mem_total > 0 ? row('mem', '显存') : '') : '';
-x.gpuCard.innerHTML = g ? `<div class="label">${GPU_TAG[g.type] || '显卡'}<span class="faint lbl-r">${esc(String(g.name || '').replace(/ \(.*\)/, ''))}</span></div>
-<div class="big-stat dnum" style="margin-top:14px"><span class="dm" data-ref="gU"></span><span class="unit">%</span><span class="sub mono" style="margin-left:8px" data-ref="gF"></span></div>
-<div style="margin-top:18px">${rows}</div><p class="sub" style="margin:14px 0 0" data-ref="gNote"></p>${mode === 'rc6' || mode === 'none' ? diagLink() : ''}`
-: `<div class="label">显卡</div>${emptyHTML('未检测到可监控的显卡', names.length ? esc(names.join('、')) + ' · 无法读取实时状态' : '支持 Intel 核显 / NVIDIA（nvidia-smi）/ AMD（amdgpu）', 'gpu')}`;
-Object.assign(x, collect(x.gpuCard));
-}
-if (g) {
-const has = g.util_avail && ok(g.util);
-dnum(x.gU, has ? g.util : null); inkTo(x.gU, has ? rampInk(g.util, 'gen') : '');
-setText(x.gF, [ok(g.freq_mhz) ? F.int(g.freq_mhz) + ' MHz' : '', ok(g.temp) ? F.int(g.temp) + '℃' : ''].filter(Boolean).join(' · '));
-const bar = (k, v) => { rampBar(x['gb_' + k], ok(v) ? clamp(+v, 0, 100) : 0, 'gen'); setText(x['gv_' + k], ok(v) ? F.int(v) + '%' : '--'); };
-if (mode === 'pmu') engs.forEach(([k]) => bar(k, g.engines[k]));
-else if (mode === 'rc6' || mode === 'drv') { bar('util', has ? g.util : null); if (+g.mem_total > 0) bar('mem', g.mem_pct); }
-setText(x.gNote, mode !== 'drv' ? GPU_NOTE[mode] : !g.util_avail ? '该显卡驱动未开放利用率读数。' : +g.mem_total > 0 ? `显存 ${F.bytesStr(g.mem_used)} / ${F.bytesStr(g.mem_total)}` : (gpus.length > 1 ? `另有 ${gpus.length - 1} 块显卡，详见处理器详情。` : ''));
-}
 setHTML(m.r.dek, `${pc.length ? `${pc.length} 个核心整体 <b>${F.int(cpu.percent)}%</b>，最忙的是 C${mx}（${F.int(pc[mx])}%）。` : ''}${T ? `内存实际占用 <b>${gb(mp.app)} GB</b>，另有 ${gb(mp.cache + mp.buf)} GB 缓存可随时释放。` : ''}`);
 },
 });
@@ -3371,7 +3326,7 @@ const sy = o.system || {}, hw = o.hardware || {}, hc = hw.cpu || {}, b = hw.boar
 const sys = [['主机名', dash(sy.hostname)], ...(sy.fnos_version ? [['系统', esc('固件 ' + sy.fnos_version)]] : []), ['内核', `<span class="mono">${dash(sy.kernel)}</span>`], ['架构', dash(sy.arch || hc.arch)], ['已运行', `<span data-ref="up">${esc(F.dur(o.uptime))}</span>`]];
 const hwr = [['处理器', dash(hc.model || cpu.model || sy.cpu_model)], ['核心 / 线程', `${dash(hc.cores || cpu.cores)} / ${dash(hc.threads || cpu.threads)}`],
 ['主板', dash([b.sys_vendor || b.board_vendor, b.board_name || b.product_name].filter(Boolean).join(' ') || null)], ['BIOS', dash([b.bios_vendor, b.bios_version, b.bios_date].filter(Boolean).join(' ') || null)],
-['显卡', dash((hw.gpu || []).join('、') || null)]];
+];
 return { sys, hwr };
 }
 defineModule({
@@ -3470,7 +3425,7 @@ const o = S.o, n = ((o.cpu || {}).per_core || []).length;
 b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">CPU 使用率</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">%</span></div></div><div style="text-align:right"><div class="eyebrow">负载 1 / 5 / 15</div><b class="tnum" data-ref="load"></b></div></div>
 ${sec('每核使用率')}<div class="card pad">${n ? `<div class="dcores" style="--cols:${Math.min(8, n)}">${Array.from({ length: n }, (_, i) => `<div class="dcore" data-ref="dc${i}"><div class="dcore-f"><span>C${i}</span><b data-ref="cv${i}"></b></div></div>`).join('')}</div>` : emptyHTML('每核数据不可用')}</div>`;
 sheetCharts(ctx, b, [TREND_DEFS[0].series && { title: 'CPU 使用率', yMin: 0, yMax: 100, yTick: v => v + '%', peak: true, thresholds: TREND_DEFS[0].thresholds, series: [TREND_DEFS[0].series[0]] }, { title: '系统负载（1 分钟）', yMin: 0, yTick: v => String(v), series: [{ m: 'load1', label: '负载', color: M.cpu, fmt: fLoad }] }]);
-b.insertAdjacentHTML('beforeend', `${sec('占用最高的进程', '<span class="faint">每 15 秒刷新</span>')}${rowsCard('<div data-ref="procs"></div>')}${sec('规格')}<div data-ref="spec"></div>${sec('显卡')}<div class="sheet-stack" data-ref="gpu"></div>`);
+b.insertAdjacentHTML('beforeend', `${sec('占用最高的进程', '<span class="faint">每 15 秒刷新</span>')}${rowsCard('<div data-ref="procs"></div>')}${sec('规格')}<div data-ref="spec"></div>`);
 const x = collect(b), cg = Array.from({ length: n }, (_, i) => dotGauge(x['dc' + i], 3, n > 8 ? 8 : 14));
 return o => {
 const c = o.cpu || {}, hc = (o.hardware || {}).cpu || {};
@@ -3478,10 +3433,6 @@ dnum(x.v, c.percent); inkTo(x.v, ok(c.percent) ? rampInk(c.percent, 'cpu') : '')
 (c.per_core || []).forEach((v, i) => { if (!cg[i]) return; cg[i].set(v / 100, LV.cpu(v), 'cpu'); setText(x['cv' + i], F.int(v)); inkTo(x['cv' + i], rampInk(v, 'cpu')); });
 setHTML(x.procs, procRows(((S.procs || {}).processes || []).slice(0, 8), 'cpu'));
 setHTML(x.spec, kvHTML([['型号', dash(hc.model || c.model)], ['核心 / 线程', `${dash(c.cores)} / ${dash(c.threads)}`], ['插槽', dash(c.sockets)], ['当前频率', ok(c.frequency_mhz) && c.frequency_mhz > 0 ? (c.frequency_mhz / 1000).toFixed(2) + ' GHz' : dash(null)], ['架构', dash(hc.arch || (o.system || {}).arch)]]));
-const gs = o.gpu || [];
-setHTML(x.gpu, gs.length ? gs.map(g => { const md = gpuMode(g), iu = gpuIntel(g);
-const util = md === 'pmu' ? `${F.d1(g.util)}%<div class="sub">${gpuEngs(g).map(([k, l]) => `${l} ${F.int(g.engines[k])}%`).join(' · ')}</div>` : md === 'rc6' ? `${F.d1(g.util)}%（RC6 活跃度估算）` : md === 'warm' ? '<span class="faint">采样中…</span>' : g.util_avail && ok(g.util) ? F.d1(g.util) + '%' : iu ? `<span class="faint">未能读取</span> ${diagLink()}` : dash(null);
-return kvHTML([['型号', esc(g.name) + (GPU_TAG[g.type] ? ` <span class="pill">${GPU_TAG[g.type]}</span>` : '')], ['利用率', util], ['温度', ok(g.temp) ? F.d1(g.temp) + ' ℃' : iu ? '<span class="faint">核显无独立温度读数（见 CPU 温度）</span>' : dash(null)], ['频率', ok(g.freq_mhz) ? F.int(g.freq_mhz) + ' MHz' + (ok(g.freq_req_mhz) ? `<div class="sub">请求 ${F.int(g.freq_req_mhz)} MHz</div>` : '') : dash(null)], ['显存', +g.mem_total > 0 ? `${F.bytesStr(g.mem_used)} / ${F.bytesStr(g.mem_total)}（${F.d1(g.mem_pct)}%）` : g.shared_memory ? '<span class="faint">与系统共享内存</span>' : dash(null)]]); }).join('') : `<div class="card pad">${emptyHTML('未检测到可监控的显卡', esc(((o.hardware || {}).gpu || []).join('、')))}</div>`);
 };
 },
 },
@@ -3651,17 +3602,17 @@ temp: {
 icon: 'temp', title: () => '温度与散热', sub: o => { const s = o.sensors || {}; return `${(s.temps || []).length + diskThermo(o).length + (cpuTemp(o) != null ? 1 : 0)} 个温度测点 · ${(s.fans || []).length} 个风扇`; },
 build(b, arg, ctx) {
 b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">CPU</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">℃</span></div></div><div style="text-align:right"><div class="eyebrow">阈值</div><b class="tnum" data-ref="thr"></b></div></div>
-<div class="stat-cells temp-cells"><div class="stat-cell"><div class="eyebrow">CPU</div><b class="tnum" data-ref="c1"></b></div><div class="stat-cell"><div class="eyebrow">主板</div><b class="tnum" data-ref="c2"></b></div><div class="stat-cell"><div class="eyebrow">显卡</div><b class="tnum" data-ref="c3"></b></div><div class="stat-cell"><div class="eyebrow">全部测点最高</div><b class="tnum" data-ref="c4"></b></div></div>
+<div class="stat-cells temp-cells"><div class="stat-cell"><div class="eyebrow">CPU</div><b class="tnum" data-ref="c1"></b></div><div class="stat-cell"><div class="eyebrow">主板</div><b class="tnum" data-ref="c2"></b></div><div class="stat-cell"><div class="eyebrow">全部测点最高</div><b class="tnum" data-ref="c4"></b></div></div>
 <div class="card pad" data-ref="th"></div>`;
-sheetCharts(ctx, b, [Object.assign({}, TREND_DEFS[3], { peak: true }), TREND_DEFS[5]]);
+sheetCharts(ctx, b, [Object.assign({}, TREND_DEFS[3], { peak: true }), TREND_DEFS[4]]);
 b.insertAdjacentHTML('beforeend', `${sec('风扇')}<div data-ref="fans"></div>${sec('电压')}<div data-ref="volts"></div>${sec('全部传感器')}<div data-ref="all"></div>`);
 const x = collect(b);
 return o => {
 const ct = cpuTemp(o); dnum(x.v, ct); inkTo(x.v, ct != null ? rampInk(ct, 'temp') : '');
 setText(x.thr, `CPU ${TH.tempWarn} / ${TH.tempCrit}℃ · 硬盘 ${TH.diskTempWarn} / ${TH.diskTempCrit}℃`);
 const s = o.sensors || {}, temps = s.temps || [], tv = t => ok(t) ? F.d1(t) + ' ℃' : '—';
-const gT = (o.gpu || []).map(g => g.temp).filter(ok).concat(temps.filter(t => t.type === 'gpu').map(t => t.value)), allT = temps.map(t => t.value).concat([ct, mbTemp(o)], diskTemps(o).map(d => d.temp)).filter(ok).map(Number);
-setText(x.c1, tv(ct)); setText(x.c2, tv(mbTemp(o))); setText(x.c3, gT.length ? tv(Math.max(...gT)) : '—'); setText(x.c4, allT.length ? tv(Math.max(...allT)) : '—');
+const allT = temps.map(t => t.value).concat([ct, mbTemp(o)], diskTemps(o).map(d => d.temp)).filter(ok).map(Number);
+setText(x.c1, tv(ct)); setText(x.c2, tv(mbTemp(o))); setText(x.c4, allT.length ? tv(Math.max(...allT)) : '—');
 const list = thermoList(o, true).concat(diskThermo(o)), sig = list.map(t => t.k).join();
 if (x._sig !== sig) { x._sig = sig; x.th.innerHTML = list.length ? thermoRows(list) + scaleHTML : emptyHTML('未读取到任何温度传感器', 'fnOS 默认未安装 lm-sensors，已直读 thermal zone 与 hwmon；虚拟机或容器内通常无法访问硬件传感器。'); }
 updateThermo(x.th, list);
@@ -3677,7 +3628,7 @@ icon: 'bolt', title: () => '能耗', sub: o => pwrOk(o) ? '来源：' + (SRC_TXT
 build(b, arg, ctx) {
 b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">实时功耗</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">W</span></div></div><div style="text-align:right"><div class="eyebrow">口径</div><b class="tnum" data-ref="src"></b></div></div>
 <div class="card pad" data-dc="pwr"><div class="stack" style="height:12px" data-ref="st"></div><div class="legend" data-ref="leg"></div></div><div data-ref="parts"></div>`;
-sheetCharts(ctx, b, [TREND_DEFS[4], { title: '累计用电（所选范围）', yMin: 0, yTick: v => v >= 10 ? F.kwh(v) : v >= 0.1 ? v.toFixed(2) : v.toFixed(3), series: [{ m: 'power', label: '累计', color: M.pwr, fmt: v => [F.kwh(v), 'kWh'] }], tf: cumKwh }]);
+sheetCharts(ctx, b, [TREND_DEFS[0], { title: '累计用电（所选范围）', yMin: 0, yTick: v => v >= 10 ? F.kwh(v) : v >= 0.1 ? v.toFixed(2) : v.toFixed(3), series: [{ m: 'power', label: '累计', color: M.pwr, fmt: v => [F.kwh(v), 'kWh'] }], tf: cumKwh }]);
 b.insertAdjacentHTML('beforeend', `${sec('用电与电费', '<span class="faint" data-ref="rate"></span>')}<div data-ref="cost"></div>${sec('估算参数', '<button class="link-btn" type="button" data-goset="power">去设置</button>')}<div data-ref="est"></div>
 <div class="note info">${ic('info')}<span>R1 Toolbox 只显示 RAPL 实测的 CPU 封装功耗，不叠加主板、硬盘或网卡估算，也不把 CPU 封装当作整机功耗；没有 RAPL 时不显示功耗。休眠硬盘不参与任何计算。</span></div>`);
 const x = collect(b);
@@ -4849,7 +4800,7 @@ build() {
 const it = [], add = (g, label, icon, run, hint = '', kw = '') => it.push({ g, label: String(label), icon, run, hint: String(hint), kw: String(kw) });
 const PI = { overview: ['概览', 'home'], storage: ['存储', 'storage'], network: ['网络', 'net'], apps: ['应用', 'box'], thermal: ['温度', 'temp'], settings: ['设置', 'gear'] };
 navPages().forEach((p, k) => add('页面', PI[p][0], PI[p][1], () => go(p), String(k + 1), p));
-[['health', '健康检查', 'shield', 'overview'], ['cpu', '处理器', 'cpu', 'overview'], ['mem', '内存', 'mem', 'overview'], ['storage', '存储', 'storage', 'storage'], ['net', '网络', 'net', 'network'], ['temp', '温度与散热', 'temp', 'thermal'], ['power', '能耗', 'bolt', 'thermal']].forEach(([k, l, i, page]) => add('详情', l, i, () => { if (S.page !== page) go(page); openSheet(k); }, '', k));
+[['health', '健康检查', 'shield', 'overview'], ['cpu', '处理器', 'cpu', 'overview'], ['mem', '内存', 'mem', 'overview'], ['storage', '存储', 'storage', 'storage'], ['net', '网络', 'net', 'network'], ['temp', '温度与散热', 'temp', 'thermal']].forEach(([k, l, i, page]) => add('详情', l, i, () => { if (S.page !== page) go(page); openSheet(k); }, '', k));
 disksOf(S.o).forEach(d => add('硬盘', `${d.name} · ${vendorModel(d)}`, diskIcon(d), () => { if (S.page !== 'storage') go('storage'); openSheet('disk/' + encodeURIComponent(d.name)); }, isSleep(d) ? '休眠中' : smartState(d).lv === 'warn' ? '需留意' : '', (d.serial || '') + ' ' + KIND_TXT[diskKind(d)]));
 Docker.list().forEach(c => add('容器', c.name, 'box', () => { if (S.page !== 'apps') go('apps'); openSheet('ctr/' + encodeURIComponent(c.name)); }, ctrRun(c) ? '运行中' : '未运行', c.image + ' ' + c.ports));
 SET_SCHEMA.forEach(g => (g.items || []).forEach(x => add('设置', x.label, g.icon, () => focusSetting(x.k), g.title, (x.help || '') + ' ' + (typeof x.hint === 'string' ? x.hint : ''))));
@@ -5647,20 +5598,16 @@ SET_SCHEMA.push(
 { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
 { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选）。修改设置与设备操作始终受授权保护。', custom: r1AuthSettings },
 { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
+{ id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [
+{ k: 'weatherAuto', label: '自动定位', type: 'toggle', hint: '按 NAS 公网 IP 估算城市；需要外网。关闭后可手动填写下方位置。',
+get: () => !(S.cfg && S.cfg.weather_city) && !S.weatherManual,
+set: (v, row) => { if (v) { S.weatherManual = false; saveCfg({ weather_city: '' }, '已切换为自动定位天气', row).then(() => { syncSettings(); setTimeout(() => Poll.run('weather'), 800); }); } else { S.weatherManual = true; syncSettings(); setTimeout(() => { const i = $('.set-row[data-k="weather_city"] input'); i && i.focus(); }, 60); } } },
+cfgItem('weather_city', '天气位置', 'text', { placeholder: '城市名（如 徐州）或 纬度,经度', showIf: () => !!(S.cfg && S.cfg.weather_city) || !!S.weatherManual, hint: '城市名或纬度,经度（如 34.26,117.18）；留空则由上方自动定位',
+validate: v => v && v.includes(',') && !/^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(v) ? '坐标格式应为 纬度,经度（如 34.26,117.18）' : v.length > 100 ? '位置太长了' : '',
+set: (v, row) => saveCfg({ weather_city: v }, '天气位置', row).then(() => setTimeout(() => Poll.run('weather'), 800)) }),
+] },
 { id: 'about', title: '关于', icon: 'info', custom: r1About },
 );
-(function localWeatherCard() {
-const original = Hero.weather.bind(Hero);
-Hero.weather = function () {
-if (!Hero.r) return original({ ok: false, error: '本机监控不访问外网' });
-const r = Hero.r;
-dot(r.wxT).set('--');
-setHTML(r.wxIco, '');
-setText(r.wxText, '本地监控');
-setText(r.wxCity, '');
-setHTML(r.wxSub, 'R1 Toolbox 不访问外网天气服务');
-};
-})();
 Poll.run('r1');
 let uiBootReady = false, uiPending = false, uiTimer = 0;
 const uiPayload = () => ({ theme: UI.theme, accent: UI.accent, dotMatrix: UI.dotMatrix, motion: UI.motion, fontScale: UI.fontScale, range: UI.range, layoutVersion: LAYOUT_VERSION, layout: UI.layout, hidden: UI.hidden, thresholds: TH, ignored: UI.ignored || [] });

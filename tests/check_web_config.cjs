@@ -33,6 +33,7 @@ from web_config import WebConfigServer
 from fan_policy import FanPolicyController
 from light_policy import LightPolicyController
 from monitoring import MonitoringService
+import fnm_compat
 import copy
 
 assert fixture.name.startswith('r1-web-browser-') and fixture.is_dir()
@@ -116,7 +117,7 @@ class Insights:
                     'network':[{'name':'eth0','speed_mbps':2500,'ipv6_addresses':[{'address':'2001:db8:1234:5678:90ab:cdef:1234:5678','prefix_length':64,'scope':'global'}]}],
                     'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
                   'interfaces':[{'name':'eth0','ipv4':['192.168.1.10'],'mac':'00:11:22:33:44:55','operstate':'up','rx_bytes':400000000,'tx_bytes':100000000,'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000}],
-                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'smart_available':True,'health':{'passed':True}}]},
+                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'smart_available':True,'health':{'passed':True}},{'id':'sdb','device':'/dev/sdb','model':'Fixture No SMART','size_bytes':2e12,'temp_c':None,'standby':False,'smart_available':False,'health':{'passed':None,'reason':'SMART 未读取'}}]},
                   'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False,'cpu_percent':3.2,'memory_bytes':134217728,'memory_limit_bytes':1073741824,'ports':'0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp'},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
                   'vms':{'available':False,'reason':'fixture: no VM','items':[]},'ports':[{'protocol':'tcp','address':'127.0.0.1','port':18731}],
                   'processes':[{'pid':101,'name':'fixture-monitor','cpu_percent':1.2,'memory_bytes':40000000}],
@@ -149,6 +150,8 @@ lamps=[Lamp(fixture),Lamp(fixture/'unsupported')]
 lights=[LightPolicyController(lamp,Sources()) for lamp in lamps]
 for light in lights:light.start()
 monitoring=MonitoringService(fixture/'data',insights,monitor,Sources(),proc_root=fixture/'proc',sys_root=fixture/'sys').start()
+fnm_compat.fetch_weather = lambda city: {'ok': True, 'city': 'Fixture City', 'temp': 21.5, 'feels': 20.0,
+    'humidity': 55.0, 'wind': 2.5, 'code': 0, 'desc': '晴', 'is_day': 1}
 primary = WebConfigServer(controller(fixture), insights=insights, fan_policy=policy(fixture, True), light_policy=lights[0],monitoring=monitoring,monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
 unsupported = WebConfigServer(controller(fixture / 'unsupported'), fan_policy=policy(fixture / 'unsupported', False),light_policy=lights[1],monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web').start()
 
@@ -266,9 +269,14 @@ finally:
     await page.goto(origin + '/#/overview');
     await page.waitForFunction(() => document.getElementById('hostName') && document.getElementById('hostName').textContent === 'R1-Fixture', null, { timeout: 15000 });
     check('面板标题', (await page.title()).includes('R1 Toolbox'), await page.title());
+    await page.waitForFunction(() => /Fixture City/.test(document.querySelector('[data-ref="wxCity"]')?.textContent || ''), null, { timeout: 10000 }).catch(() => {});
+    check('天气服务已展示', /晴/.test(await page.locator('[data-ref="wxText"]').textContent()), await page.locator('[data-ref="wxText"]').textContent());
+    check('天气位置已展示', /Fixture City/.test(await page.locator('[data-ref="wxCity"]').textContent()));
     const navLabels = await page.locator('#pageSeg button').allTextContents();
     check('网页六标签', JSON.stringify(navLabels) === JSON.stringify(['概览', '存储', '网络', '应用', '温度', '设置']), navLabels.join(','));
     check('总览模块已渲染', await page.locator('#layout-overview section[data-mod="metrics"]').count() === 1);
+    check('不显示 CPU 功耗卡', await page.locator('#layout-overview [data-m="pwr"]').count() === 0);
+    check('不显示显卡内容', !/显卡|GPU/.test(await page.locator('#layout-overview section[data-mod="compute"]').textContent()));
     check('指标卡有真实读数', (await page.locator('[data-m="cpu"] .m-val .dm').first().getAttribute('aria-label')) !== '--');
     check('R1 双路风扇模块在温度页', await page.locator('#layout-thermal section[data-mod="r1cool"]').count() === 1);
     check('概览页不再夹带风扇/灯光磁贴', await page.locator('#layout-overview section[data-mod="r1cool"], #layout-overview section[data-mod="r1light"]').count() === 0);
@@ -276,6 +284,7 @@ finally:
     check('R1 小屏与电源模块在概览页', await page.locator('#layout-overview section[data-mod="r1screen"]').count() === 1);
     await page.locator('#pageSeg button[data-page="thermal"]').click();
     await page.waitForSelector('#layout-thermal section[data-mod="r1cool"] [data-ch="cpu"]', { timeout: 10000 });
+    check('温度页不显示能耗模块', await page.locator('#layout-thermal section[data-mod="energy"]').count() === 0);
     check('双路风扇名称', /CPU 风扇/.test(await page.locator('#layout-thermal section[data-mod="r1cool"]').textContent()));
     await page.locator('#pageSeg button[data-page="overview"]').click();
     await page.locator('section[data-mod="trends"]').scrollIntoViewIfNeeded();
@@ -303,8 +312,8 @@ finally:
     check('流量接口', !!traffic.body && !!traffic.body.totals && traffic.body.totals.basis === 'counter_deltas');
 
     /* 2b. 各详情抽屉与交互不产生脚本错误 */
-    for (const sheet of ['cpu', 'mem', 'storage', 'net', 'temp', 'power']) {
-      await page.locator(`[data-m="${sheet === 'storage' ? 'disk' : sheet === 'power' ? 'pwr' : sheet}"]`).click();
+    for (const sheet of ['cpu', 'mem', 'storage', 'net', 'temp']) {
+      await page.locator(`[data-m="${sheet === 'storage' ? 'disk' : sheet}"]`).click();
       await page.waitForSelector('#sheet.on', { timeout: 5000 }).catch(() => {});
       await page.waitForTimeout(150);
       await page.locator('#sheetClose').click();
@@ -314,6 +323,7 @@ finally:
     await page.locator('#sheetClose').click();
     await page.locator('#pageSeg button[data-page="storage"]').click();
     await page.waitForSelector('#layout-storage section[data-mod="storage"] .bay', { timeout: 8000 });
+    check('存储页列出无 SMART 的物理盘', await page.locator('#layout-storage .bay').count() === 2);
     await page.locator('#layout-storage section[data-mod="storage"] .bay').first().click();
     await page.waitForTimeout(200);
     await page.locator('#sheetClose').click();
@@ -382,7 +392,7 @@ finally:
     await page.setViewportSize({ width: 1120, height: 1000 });
     await page.locator('#pageSeg button[data-page="settings"]').click();
     await page.waitForFunction(() => document.getElementById('set-r1-fan'));
-    for (const id of ['r1-fan', 'r1-light', 'r1-screen', 'r1-monitor', 'look', 'r1-auth', 'r1-conn', 'about']) {
+    for (const id of ['r1-fan', 'r1-light', 'r1-screen', 'r1-monitor', 'look', 'weather', 'r1-auth', 'r1-conn', 'about']) {
       check('设置分组 ' + id, await page.locator('#set-' + id).count() === 1);
     }
     const lightCard = page.locator('#set-r1-light');

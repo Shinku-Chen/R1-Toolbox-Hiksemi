@@ -82,7 +82,7 @@ const SHEETS = {
       b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">CPU 使用率</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">%</span></div></div><div style="text-align:right"><div class="eyebrow">负载 1 / 5 / 15</div><b class="tnum" data-ref="load"></b></div></div>
         ${sec('每核使用率')}<div class="card pad">${n ? `<div class="dcores" style="--cols:${Math.min(8, n)}">${Array.from({ length: n }, (_, i) => `<div class="dcore" data-ref="dc${i}"><div class="dcore-f"><span>C${i}</span><b data-ref="cv${i}"></b></div></div>`).join('')}</div>` : emptyHTML('每核数据不可用')}</div>`;
       sheetCharts(ctx, b, [TREND_DEFS[0].series && { title: 'CPU 使用率', yMin: 0, yMax: 100, yTick: v => v + '%', peak: true, thresholds: TREND_DEFS[0].thresholds, series: [TREND_DEFS[0].series[0]] }, { title: '系统负载（1 分钟）', yMin: 0, yTick: v => String(v), series: [{ m: 'load1', label: '负载', color: M.cpu, fmt: fLoad }] }]);
-      b.insertAdjacentHTML('beforeend', `${sec('占用最高的进程', '<span class="faint">每 15 秒刷新</span>')}${rowsCard('<div data-ref="procs"></div>')}${sec('规格')}<div data-ref="spec"></div>${sec('显卡')}<div class="sheet-stack" data-ref="gpu"></div>`);
+      b.insertAdjacentHTML('beforeend', `${sec('占用最高的进程', '<span class="faint">每 15 秒刷新</span>')}${rowsCard('<div data-ref="procs"></div>')}${sec('规格')}<div data-ref="spec"></div>`);
       const x = collect(b), cg = Array.from({ length: n }, (_, i) => dotGauge(x['dc' + i], 3, n > 8 ? 8 : 14));
       return o => {
         const c = o.cpu || {}, hc = (o.hardware || {}).cpu || {};
@@ -90,10 +90,6 @@ const SHEETS = {
         (c.per_core || []).forEach((v, i) => { if (!cg[i]) return; cg[i].set(v / 100, LV.cpu(v), 'cpu'); setText(x['cv' + i], F.int(v)); inkTo(x['cv' + i], rampInk(v, 'cpu')); });
         setHTML(x.procs, procRows(((S.procs || {}).processes || []).slice(0, 8), 'cpu'));
         setHTML(x.spec, kvHTML([['型号', dash(hc.model || c.model)], ['核心 / 线程', `${dash(c.cores)} / ${dash(c.threads)}`], ['插槽', dash(c.sockets)], ['当前频率', ok(c.frequency_mhz) && c.frequency_mhz > 0 ? (c.frequency_mhz / 1000).toFixed(2) + ' GHz' : dash(null)], ['架构', dash(hc.arch || (o.system || {}).arch)]]));
-        const gs = o.gpu || [];
-        setHTML(x.gpu, gs.length ? gs.map(g => { const md = gpuMode(g), iu = gpuIntel(g);
-          const util = md === 'pmu' ? `${F.d1(g.util)}%<div class="sub">${gpuEngs(g).map(([k, l]) => `${l} ${F.int(g.engines[k])}%`).join(' · ')}</div>` : md === 'rc6' ? `${F.d1(g.util)}%（RC6 活跃度估算）` : md === 'warm' ? '<span class="faint">采样中…</span>' : g.util_avail && ok(g.util) ? F.d1(g.util) + '%' : iu ? `<span class="faint">未能读取</span> ${diagLink()}` : dash(null);
-          return kvHTML([['型号', esc(g.name) + (GPU_TAG[g.type] ? ` <span class="pill">${GPU_TAG[g.type]}</span>` : '')], ['利用率', util], ['温度', ok(g.temp) ? F.d1(g.temp) + ' ℃' : iu ? '<span class="faint">核显无独立温度读数（见 CPU 温度）</span>' : dash(null)], ['频率', ok(g.freq_mhz) ? F.int(g.freq_mhz) + ' MHz' + (ok(g.freq_req_mhz) ? `<div class="sub">请求 ${F.int(g.freq_req_mhz)} MHz</div>` : '') : dash(null)], ['显存', +g.mem_total > 0 ? `${F.bytesStr(g.mem_used)} / ${F.bytesStr(g.mem_total)}（${F.d1(g.mem_pct)}%）` : g.shared_memory ? '<span class="faint">与系统共享内存</span>' : dash(null)]]); }).join('') : `<div class="card pad">${emptyHTML('未检测到可监控的显卡', esc(((o.hardware || {}).gpu || []).join('、')))}</div>`);
       };
     },
   },
@@ -271,17 +267,17 @@ const SHEETS = {
     icon: 'temp', title: () => '温度与散热', sub: o => { const s = o.sensors || {}; return `${(s.temps || []).length + diskThermo(o).length + (cpuTemp(o) != null ? 1 : 0)} 个温度测点 · ${(s.fans || []).length} 个风扇`; },
     build(b, arg, ctx) {
       b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">CPU</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">℃</span></div></div><div style="text-align:right"><div class="eyebrow">阈值</div><b class="tnum" data-ref="thr"></b></div></div>
-        <div class="stat-cells temp-cells"><div class="stat-cell"><div class="eyebrow">CPU</div><b class="tnum" data-ref="c1"></b></div><div class="stat-cell"><div class="eyebrow">主板</div><b class="tnum" data-ref="c2"></b></div><div class="stat-cell"><div class="eyebrow">显卡</div><b class="tnum" data-ref="c3"></b></div><div class="stat-cell"><div class="eyebrow">全部测点最高</div><b class="tnum" data-ref="c4"></b></div></div>
+        <div class="stat-cells temp-cells"><div class="stat-cell"><div class="eyebrow">CPU</div><b class="tnum" data-ref="c1"></b></div><div class="stat-cell"><div class="eyebrow">主板</div><b class="tnum" data-ref="c2"></b></div><div class="stat-cell"><div class="eyebrow">全部测点最高</div><b class="tnum" data-ref="c4"></b></div></div>
         <div class="card pad" data-ref="th"></div>`;
-      sheetCharts(ctx, b, [Object.assign({}, TREND_DEFS[3], { peak: true }), TREND_DEFS[5]]);
+      sheetCharts(ctx, b, [Object.assign({}, TREND_DEFS[3], { peak: true }), TREND_DEFS[4]]);
       b.insertAdjacentHTML('beforeend', `${sec('风扇')}<div data-ref="fans"></div>${sec('电压')}<div data-ref="volts"></div>${sec('全部传感器')}<div data-ref="all"></div>`);
       const x = collect(b);
       return o => {
         const ct = cpuTemp(o); dnum(x.v, ct); inkTo(x.v, ct != null ? rampInk(ct, 'temp') : '');
         setText(x.thr, `CPU ${TH.tempWarn} / ${TH.tempCrit}℃ · 硬盘 ${TH.diskTempWarn} / ${TH.diskTempCrit}℃`);
         const s = o.sensors || {}, temps = s.temps || [], tv = t => ok(t) ? F.d1(t) + ' ℃' : '—';
-        const gT = (o.gpu || []).map(g => g.temp).filter(ok).concat(temps.filter(t => t.type === 'gpu').map(t => t.value)), allT = temps.map(t => t.value).concat([ct, mbTemp(o)], diskTemps(o).map(d => d.temp)).filter(ok).map(Number);
-        setText(x.c1, tv(ct)); setText(x.c2, tv(mbTemp(o))); setText(x.c3, gT.length ? tv(Math.max(...gT)) : '—'); setText(x.c4, allT.length ? tv(Math.max(...allT)) : '—');
+        const allT = temps.map(t => t.value).concat([ct, mbTemp(o)], diskTemps(o).map(d => d.temp)).filter(ok).map(Number);
+        setText(x.c1, tv(ct)); setText(x.c2, tv(mbTemp(o))); setText(x.c4, allT.length ? tv(Math.max(...allT)) : '—');
         const list = thermoList(o, true).concat(diskThermo(o)), sig = list.map(t => t.k).join();
         if (x._sig !== sig) { x._sig = sig; x.th.innerHTML = list.length ? thermoRows(list) + scaleHTML : emptyHTML('未读取到任何温度传感器', 'fnOS 默认未安装 lm-sensors，已直读 thermal zone 与 hwmon；虚拟机或容器内通常无法访问硬件传感器。'); }
         updateThermo(x.th, list);
@@ -297,7 +293,7 @@ const SHEETS = {
     build(b, arg, ctx) {
       b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">实时功耗</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">W</span></div></div><div style="text-align:right"><div class="eyebrow">口径</div><b class="tnum" data-ref="src"></b></div></div>
         <div class="card pad" data-dc="pwr"><div class="stack" style="height:12px" data-ref="st"></div><div class="legend" data-ref="leg"></div></div><div data-ref="parts"></div>`;
-      sheetCharts(ctx, b, [TREND_DEFS[4], { title: '累计用电（所选范围）', yMin: 0, yTick: v => v >= 10 ? F.kwh(v) : v >= 0.1 ? v.toFixed(2) : v.toFixed(3), series: [{ m: 'power', label: '累计', color: M.pwr, fmt: v => [F.kwh(v), 'kWh'] }], tf: cumKwh }]);
+      sheetCharts(ctx, b, [TREND_DEFS[0], { title: '累计用电（所选范围）', yMin: 0, yTick: v => v >= 10 ? F.kwh(v) : v >= 0.1 ? v.toFixed(2) : v.toFixed(3), series: [{ m: 'power', label: '累计', color: M.pwr, fmt: v => [F.kwh(v), 'kWh'] }], tf: cumKwh }]);
       b.insertAdjacentHTML('beforeend', `${sec('用电与电费', '<span class="faint" data-ref="rate"></span>')}<div data-ref="cost"></div>${sec('估算参数', '<button class="link-btn" type="button" data-goset="power">去设置</button>')}<div data-ref="est"></div>
         <div class="note info">${ic('info')}<span>接了 iDRAC 时直接用电源实测的整机输出，这是最准的口径（含主板、内存、网卡与全部硬盘）。没有 iDRAC 才会退回 RAPL：它只测得 CPU 封装（与内存）功耗，整机值再叠加主板底座与活动硬盘的典型功耗；无 RAPL 时按 TDP × CPU 占用估算。休眠硬盘不计入。</span></div>`);
       const x = collect(b);

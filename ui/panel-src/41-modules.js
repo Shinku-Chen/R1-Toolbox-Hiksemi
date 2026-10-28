@@ -53,7 +53,7 @@ const shortBytes = v => { const p = F.bytes(v); return p[0] + (p[1] ? p[1].charA
    01 METRICS — 六张指标卡
    --------------------------------------------------------------------- */
 defineModule({
-  id: 'metrics', page: 'overview', kicker: 'AT A GLANCE', title: '核心指标', dek: '处理器、内存、存储、网络、温度与功耗', headless: true,
+  id: 'metrics', page: 'overview', kicker: 'AT A GLANCE', title: '核心指标', dek: '处理器、内存、存储、网络与温度', headless: true,
   build(body, m) {
     const card = (id, label, sheet, main, gauge) => `<article class="card metric tap" data-sheet="${sheet}" data-m="${id}" tabindex="0" role="button" aria-label="${label}，查看详情">
         <div class="m-top"><span class="label">${label}</span><span class="m-state"><span data-ref="${id}St"></span>${ic('chev', 'i-sm more')}</span></div>
@@ -67,14 +67,13 @@ defineModule({
       ${card('disk', '存储', 'storage', val('disk', '%'), 1)}
       ${card('net', '网络', 'net', `<div class="net-vals"><div class="row">${ic('down', 'arr')}<span class="dnum"><span class="dm" data-ref="rxV"></span><span class="unit" data-ref="rxU"></span></span></div><div class="row sec"><svg class="i arr" style="color:var(--ink-3)" aria-hidden="true"><use href="#i-up"/></svg><span class="dnum"><span class="dm" data-ref="txV"></span><span class="unit" data-ref="txU"></span></span></div></div><div class="m-sub" data-ref="netSub"></div>`, 0)}
       ${card('temp', '温度', 'temp', val('temp', '℃'), 1)}
-      ${card('pwr', '功耗', 'power', val('pwr', 'W'), 1)}
     </div>`;
     m.x = collect(body);
     m.cards = {}; $$('[data-m]', body).forEach(c => { m.cards[c.dataset.m] = c; });
     m.g = {};
-    [['cpu', 'cpu'], ['mem', 'mem'], ['disk', 'storage'], ['temp', 'temp'], ['pwr', 'bolt']].forEach(([k, icn]) => { m.g[k] = makeGauge(icn); m.cards[k].querySelector('.m-main').after(m.g[k]); });
+    [['cpu', 'cpu'], ['mem', 'mem'], ['disk', 'storage'], ['temp', 'temp']].forEach(([k, icn]) => { m.g[k] = makeGauge(icn); m.cards[k].querySelector('.m-main').after(m.g[k]); });
     m.sp = {};
-    ['cpu', 'mem', 'net', 'temp', 'pwr'].forEach(k => { m.sp[k] = makeSpark(); m.x[k + 'Foot'].append(m.sp[k]); });
+    ['cpu', 'mem', 'net', 'temp'].forEach(k => { m.sp[k] = makeSpark(); m.x[k + 'Foot'].append(m.sp[k]); });
   },
   update(o, m) {
     if (!o) return;
@@ -129,16 +128,6 @@ defineModule({
     if (dmax != null && tv != null) tp.push(`硬盘最高 ${F.int(dmax)}℃`);
     setText(x.tempSub, tv == null && dmax == null ? '未读取到温度传感器' : tp.join(' · ') || 'CPU 封装温度');
     m.sp.temp.set([{ values: vals(tv != null ? (ct != null ? S.live.temp : S.live.tempMb) : []) }], {});
-    // POWER —— 数据源可能是 iDRAC（整机实测）/ RAPL（CPU 封装）/ 估算模型
-    const pw = o.power || {}, has3 = pwrOk(o), w = has3 ? +pw.total : null, ep = S.pstats && S.pstats.estimation_params;
-    const capW = pw.capacity ? +pw.capacity : (ep ? ep.tdp_w + ep.base_w + ep.disk_typical_w * Math.max(1, dd.length) + ep.nic_fixed_w * Math.max(1, ni.length) : Math.max(60, (w || 0) * 1.5));
-    dnum(x.pwrV, w, F.d1); m.g.pwr.set(w != null ? w / capW : 0, ''); m.g.pwr.tone(w != null ? rampAt(w / capW * 100, 'gen') : ''); inkTo(x.pwrV, w != null ? rampInk(w / capW * 100, 'gen') : '');
-    st('pwr', '', !has3 ? '不可用' : pw.source === 'idrac' ? 'iDRAC 实测' : pw.source === 'rapl' ? '实测 + 估算' : '估算');
-    const en = S.pstats && S.pstats.energy, co = S.pstats && S.pstats.cost;
-    const pwrSrc = pw.source === 'idrac' ? `iDRAC 整机读数${pw.capacity ? ` · 电源容量 ${F.int(pw.capacity)} W` : ''}`
-      : pw.source === 'rapl' ? '硬件 RAPL 读数' : '按部件模型估算';
-    setText(x.pwrSub, !has3 ? '无法读取或估算功耗' : en ? `今日 ${F.kwh(en.today_kwh)} kWh · ${F.yuan(co && co.today_yuan)}` : pwrSrc);
-    m.sp.pwr.set([{ values: vals(S.live.power) }], { min: 0 });
   },
 });
 
