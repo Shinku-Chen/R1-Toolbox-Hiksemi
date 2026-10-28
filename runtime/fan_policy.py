@@ -334,12 +334,13 @@ class FanPolicyController:
                     "applied_monotonic": self.clock() if name in wanted else None,
                     "reason": "等待第一轮有效温度采样" if name in wanted else "原厂自动管理"} for name in CHANNELS}
                 self.last_error = self.settings_error = None
-        except Exception:
+        except Exception as error:
             restored = True
             try:
                 self.adapter.release()
             except Exception:
                 restored = False
+            detail = str(error).strip().replace(chr(10), " ")[:160] if type(error) in (ValueError, RuntimeError) else ""
             with self.lock:
                 self.channels = {name: self._vendor_state() for name in CHANNELS}
                 if not restored:
@@ -347,7 +348,7 @@ class FanPolicyController:
                         state["reason"] = "接管失败，原厂恢复未确认；请检查监督服务"
                 self.active_config = copy.deepcopy(DEFAULT_CONFIG)
                 self.active_on_boot = False
-                self.last_error = "配置已保存，但接管未完成；已请求恢复原厂管理，需检查适配状态后重新应用"
+                self.last_error = ("配置已保存，但接管未完成：" + detail + "；已请求恢复原厂管理，需检查适配状态后重新应用") if detail else "配置已保存，但接管未完成；已请求恢复原厂管理，需检查适配状态后重新应用"
                 try:
                     self._save(self.config, DEFAULT_CONFIG, False)
                 except (OSError, ValueError):
