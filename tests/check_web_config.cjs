@@ -379,8 +379,8 @@ finally:
     check('低/中/高档不显示设备与曲线', await fanCard.locator('.r1-ms').count() === 0 && await fanCard.locator('.r1-curve').count() === 0);
     await fanCard.locator('.r1-editor select').first().selectOption('manual');
     check('切回手动保留设备多选', await fanCard.locator('.r1-ms').count() === 1);
-    check('风扇保存并应用按钮', await fanCard.locator('[data-ref="apply"]').count() === 1);
-    await fanCard.locator('[data-ref="apply"]').click();
+    check('配置只保留保存按钮', await fanCard.locator('[data-ref="save"]').count() === 1 && await fanCard.locator('[data-ref="apply"]').count() === 0);
+    await fanCard.locator('[data-ref="save"]').click();
     await page.locator('.fullmask [data-yes]').click();
     await page.waitForSelector('#r1Pair', { timeout: 8000 });
     check('未配对时写入要求五位配对码', true);
@@ -389,8 +389,7 @@ finally:
     await page.waitForFunction(() => !document.getElementById('r1Pair'), null, { timeout: 8000 });
     await page.waitForTimeout(400);
     check('配对后会话可用', (await page.request.get(origin + '/api/session')).status() === 200);
-    await fanCard.locator('[data-ref="apply"]').click();
-    await page.locator('.fullmask [data-yes]').click();
+    // 保存按钮在配对成功后自动重试一次，不再有第二个“保存并应用”。
     await page.waitForTimeout(1500);
     const fanRecord = fanResponses[fanResponses.length - 1];
     check('配对后风扇写入被授权', !!fanRecord && ![401, 403].includes(fanRecord.status), JSON.stringify(fanRecord && fanRecord.status));

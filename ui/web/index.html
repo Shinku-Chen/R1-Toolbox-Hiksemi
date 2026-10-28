@@ -5324,7 +5324,7 @@ setHTML(m.x.note, f.last_error
 : `未接管：${esc(cap.reason || '设备尚未满足独立调速条件')}。规则仍可保存为待用配置。`);
 const active = Object.values(channels).some(c => c.active);
 setHTML(m.r.dek, active
-? `两路独立执行中${f.busy ? ' · 正在切换' : ''}；<b>保存</b>只更新待用规则，<b>保存并应用</b>才会接管设备。`
+? `两路独立执行中${f.busy ? ' · 正在切换' : ''}；<b>保存</b>会立即应用并接管所选通道。`
 : '当前由原厂固件管理；配置温控规则后可选择接管。');
 },
 });
@@ -5361,7 +5361,7 @@ if (runtime.fallback) rows.push(['低亮保护', '温度来源失效，已降到
 if (runtime.schedule_active) rows.push(['夜间计划', '生效中']);
 setHTML(m.x.rows, rows.map(([k, v]) => `<div class="row-i" style="grid-template-columns:auto 1fr"><span class="faint">${esc(k)}</span><span style="text-align:right">${esc(String(v))}</span></div>`).join(''));
 setHTML(m.x.note, l.last_error ? `<span class="st-crit">${esc(l.last_error)}</span>`
-: (l.capability && l.capability.available === false ? esc(l.capability.reason || '尚未验证唯一灯控设备') : '保存仅更新规则；成功应用后才启用开机恢复。'));
+: (l.capability && l.capability.available === false ? esc(l.capability.reason || '尚未验证唯一灯控设备') : '保存会立即应用；成功接管后才启用开机恢复。'));
 },
 });
 defineModule({
@@ -5574,8 +5574,7 @@ function r1FanSettings(card) {
 const shell = () => JSON.parse(JSON.stringify(R1.fan().config || {}));
 let draft = shell(), dirty = false;
 card.innerHTML = `<div class="r1-edit" data-ref="wrap"></div>
-<div class="set-actions"><button class="btn" type="button" data-ref="save">保存规则</button>
-<button class="btn primary" type="button" data-ref="apply">保存并应用</button>
+<div class="set-actions"><button class="btn primary" type="button" data-ref="save">保存</button>
 <button class="btn ghost" type="button" data-ref="release">两路恢复原厂管理</button></div>
 <p class="sub" data-ref="status"></p>`;
 const x = collect(card);
@@ -5605,21 +5604,18 @@ if (item.mode === 'manual') {
 form.append(r1Field('固定输出', mount(`<span class="r1-fixed">${item.manual_percent}%</span>`), '低/中/高档对应 50 / 75 / 100%，不会停转。'));
 }
 if (item.mode === 'vendor') {
-form.append(r1Field('当前策略', mount(`<span class="sub">由原厂固件管理，保存并应用后会释放或接管该路。</span>`), ''));
+form.append(r1Field('当前策略', mount(`<span class="sub">由原厂固件管理，保存后会释放或接管该路。</span>`), ''));
 }
 const live = (R1.fan().channels || {})[name] || {};
 setText(ch._r.state, live.active ? '接管中' : '原厂管理');
 ch._r.state.className = 'pill' + (live.active ? ' ok' : '');
 wrap.append(ch);
 });
-wrap.append(mount(`<p class="sub">${cap.available === true ? '硬件预检通过，可保存并应用。' : esc('暂不可应用：' + (cap.reason || '设备尚未满足独立调速条件'))}。保存规则不会接管设备。</p>`));
+wrap.append(mount(`<p class="sub">${cap.available === true ? '硬件预检通过，保存后会立即应用。' : esc('暂不可应用：' + (cap.reason || '设备尚未满足独立调速条件'))}。</p>`));
 x.wrap.replaceChildren(wrap);
 };
 x.save.onclick = async () => {
-if (await R1.save('/api/r1/fan', { config: draft, apply: false }, '风扇规则')) { dirty = false; draft = shell(); render(); }
-};
-x.apply.onclick = async () => {
-if (!(await R1.ask('应用风扇温控？', '应用后由 Toolbox 接管所选通道。未选的通道与原厂休眠请求会保留；退出或故障时恢复原厂管理。'))) return;
+if (!(await R1.ask('保存并应用风扇温控？', '保存后会立即接管所选通道。未选的通道与原厂休眠请求会保留；退出或故障时恢复原厂管理。'))) return;
 if (await R1.save('/api/r1/fan', { config: draft, apply: true, confirmed: true }, '风扇温控')) { dirty = false; draft = shell(); render(); }
 };
 x.release.onclick = async () => {
@@ -5638,8 +5634,7 @@ function r1LightSettings(card) {
 const shell = () => JSON.parse(JSON.stringify(R1.light().config || {}));
 let draft = shell(), dirty = false;
 card.innerHTML = `<div class="r1-edit" data-ref="wrap"></div>
-<div class="set-actions"><button class="btn" type="button" data-ref="save">保存规则</button>
-<button class="btn primary" type="button" data-ref="apply">保存并应用</button></div>
+<div class="set-actions"><button class="btn primary" type="button" data-ref="save">保存</button></div>
 <p class="sub" data-ref="status"></p>
 <h4 class="r1-sub">即时灯效（不写入规则）</h4>
 <div class="r1-inline" data-ref="rgb"></div>`;
@@ -5691,12 +5686,11 @@ form.append(r1Field('夜间开始', r1Time(schedule.start, v => { schedule.start
 form.append(r1Field('夜间结束', r1Time(schedule.end, v => { schedule.end = v; touch(); })));
 form.append(r1Field('夜间亮度', r1Number(schedule.brightness, 0, 100, '%', v => { schedule.brightness = v; touch(); })));
 }
-wrap.append(mount(`<p class="sub">${l.capability && l.capability.available === false ? esc('暂不可应用：' + (l.capability.reason || '尚未验证唯一灯控设备')) : '保存仅更新草稿；成功应用后才启用开机恢复。'}</p>`));
+wrap.append(mount(`<p class="sub">${l.capability && l.capability.available === false ? esc('暂不可应用：' + (l.capability.reason || '尚未验证唯一灯控设备')) : '保存会立即应用；成功接管后才启用开机恢复。'}</p>`));
 x.wrap.replaceChildren(wrap);
 };
-x.save.onclick = async () => { if (await R1.save('/api/r1/light', { config: draft, apply: false }, '灯光规则')) { dirty = false; draft = shell(); render(); } };
-x.apply.onclick = async () => {
-if (!(await R1.ask('应用灯光规则？', '成功后由 Toolbox 接管灯光，并按配置持续运行。'))) return;
+x.save.onclick = async () => {
+if (!(await R1.ask('保存并应用灯光规则？', '保存后会立即应用；成功接管后按配置持续运行。'))) return;
 if (await R1.save('/api/r1/light', { config: draft, apply: true }, '灯光规则')) { dirty = false; draft = shell(); render(); }
 };
 const rgb = mount(`<div class="r1-form" data-ref="form"></div>`);
@@ -5890,8 +5884,8 @@ card._sync();
 }
 SET_SCHEMA.length = 0;
 SET_SCHEMA.push(
-{ id: 'r1-fan', title: '双路风扇', icon: 'fan', desc: 'CPU 与系统风扇分别选择原厂管理、自定义温控或固定输出。保存规则不会接管设备；应用后等待运行状态确认。', custom: r1FanSettings },
-{ id: 'r1-light', title: '机身灯光', icon: 'palette', desc: '手动灯效或按温度连续混色，可设置夜间亮度上限。默认只读探测，显式应用后才接管。', custom: r1LightSettings },
+{ id: 'r1-fan', title: '双路风扇', icon: 'fan', desc: 'CPU 与系统风扇分别选择原厂管理、自定义温控或固定输出。保存会立即应用并等待运行状态确认。', custom: r1FanSettings },
+{ id: 'r1-light', title: '机身灯光', icon: 'palette', desc: '手动灯效或按温度连续混色，可设置夜间亮度上限。默认只读探测；保存并确认后接管。', custom: r1LightSettings },
 { id: 'r1-screen', title: '小屏与显示', icon: 'layout', desc: '亮度、息屏与夜间调暗；屏幕能力未验证时不提供操作。', custom: r1ScreenSettings },
 { id: 'r1-monitor', title: '历史与告警', icon: 'pulse', desc: '历史采样、保留天数、流量统计范围与本地告警阈值。', custom: r1MonitorSettings },
 ...(R1_THRESHOLDS ? [R1_THRESHOLDS] : []),
