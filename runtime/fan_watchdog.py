@@ -282,9 +282,10 @@ class SystemBackend:
                     return self.wait_ready(identity, require_guard=lease is not None, deadline=deadline)
                 self.sleep(0.05)
         except (OSError, ValueError, RuntimeError) as error:
-            # Preserve the readiness detail instead of replacing it with the
-            # generic spawn message; the watchdog will surface it in status.json.
-            last_error = error
+            # Preserve only a readiness detail; identity/exit failures keep the
+            # established generic spawn error and its safety semantics.
+            if "信号处理器就绪未确认" in str(error):
+                last_error = error
         if expected is not None and self.alive(expected):
             self.stop_process(expected)
         if last_error is not None:
