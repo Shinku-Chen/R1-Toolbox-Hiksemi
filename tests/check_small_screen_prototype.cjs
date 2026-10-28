@@ -245,6 +245,8 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('[data-action="reboot"]').count(), 1);
       assert.equal(await inside('[data-action="shutdown"]').count(), 1);
       const hue = inside('#light-hue');
+      assert.equal(await hue.evaluate(el => getComputedStyle(el).webkitAppearance), 'none',
+        'custom hue thumb owns the track geometry');
       await hue.evaluate(el => { el.value = '120'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); });
       assert.equal(await inside('[data-light-hue-label]').textContent(), '色相 120°');
       assert.match(await inside('.light-swatch').getAttribute('style'), /hsl\(120/);
