@@ -163,11 +163,25 @@ class ControllerTests(unittest.TestCase):
             cpu = self.controller.config["channels"]["cpu"]
             self.assertEqual((cpu["mode"], cpu["manual_percent"]), ("manual", 50))
             self.assertEqual(self.controller.config["channels"]["system"]["mode"], "vendor")
+            self.assertFalse(self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "manual"})["ok"])
+            pending = config()
+            pending["channels"]["system"].update(mode="manual", manual_percent=100)
+            self.controller.config = pending
+            result = self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "low"})
+            self.assertTrue(result["ok"], result)
+            self.controller.worker.join(timeout=3)
+            self.assertEqual(result["fan_policy"]["config"]["channels"]["system"]["mode"], "manual")
+            self.assertEqual(self.controller.active_config["channels"]["system"]["mode"], "vendor")
+            self.assertIn(("start", {"cpu"}), self.adapter.calls)
             result = self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "auto"})
             self.assertTrue(result["ok"], result)
             self.controller.worker.join(timeout=3)
             self.assertEqual(self.controller.config["channels"]["cpu"]["mode"], "vendor")
-            self.assertFalse(self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "manual"})["ok"])
+            result = self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "manual"})
+            self.assertTrue(result["ok"], result)
+            self.controller.worker.join(timeout=3)
+            self.assertEqual(self.controller.config["channels"]["cpu"]["mode"], "temperature")
+            self.assertEqual(result["fan_policy"]["config"]["channels"]["system"]["mode"], "manual")
 
     def test_save_without_apply_survives_reconstruction_without_hardware(self):
         self.adapter.available = False

@@ -17,7 +17,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
 (async () => {
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
   const checks = [], sizes = [], pageErrors = [], posts = [], external = [];
-  let offline = false, failNextAction = false, failNextCancel = false, delayAction = false, historyFail = false, pairingExpires = 180;
+  let offline = false, failNextAction = false, failNextCancel = false, delayAction = false, lightDelay = false, historyFail = false, pairingExpires = 180;
   const fanConfig = { schema_version: 1, channels: {
     cpu: { mode: 'vendor', sources: [], quiet_below: 40, normal_at: 55, full_at: 70, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
     system: { mode: 'vendor', sources: [], quiet_below: 35, normal_at: 45, full_at: 55, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
@@ -105,6 +105,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
           data = { ok: true, fan_policy: independentPolicy };
         } else if (body.action === 'light.policy.quick') {
           assert.ok(Number.isInteger(body.hue) && Number.isInteger(body.brightness) && Number.isInteger(body.effect));
+          if (lightDelay) { lightDelay = false; await new Promise(resolve => setTimeout(resolve, 500)); }
           lightConfig.enabled = true; lightConfig.mode = 'manual'; lightConfig.brightness = body.brightness;
           lightConfig.manual = { mode: body.effect, color: '#00FF00', brightness: body.brightness };
           lightPolicy = { ...lightPolicy, active: true, config: lightConfig, target: lightConfig.manual };
@@ -192,6 +193,14 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     const storageText = await page.locator('.screen-body').textContent();
     assert.match(storageText, /SMART/);
     assert.doesNotMatch(storageText, /\/drives\/data/, 'filesystem mounts are not shown as physical disks');
+    const measuredDisks = status.disks;
+    status.disks = [{ mount: '/drives/data', total_bytes: null, used_bytes: null, usage_percent: null }];
+    await page.waitForTimeout(2200);
+    await root('storage');
+    const unknownCapacity = await page.locator('.screen-body').textContent();
+    assert.match(unknownCapacity, /-- \/ --/);
+    assert.doesNotMatch(unknownCapacity, /0 B \/ 0 B/);
+    status.disks = measuredDisks;
     await root('network');
     assert.match(await page.locator('.screen-body').textContent(), /192\.168\.1\.10/);
     assert.match(await page.locator('.screen-body').textContent(), /2500 Mbps/);
@@ -235,12 +244,36 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]')?.getAttribute('aria-pressed') === 'true');
     assert.equal(fanConfig.channels.cpu.mode, 'manual');
     assert.equal(fanConfig.channels.cpu.manual_percent, 50);
+    assert.equal(fanConfig.channels.system.mode, 'vendor', 'CPU shortcut must not apply the system draft');
     await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]').click();
     await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]')?.getAttribute('aria-pressed') === 'true');
     assert.equal(fanConfig.channels.cpu.mode, 'vendor');
+    independentPolicy = { ...independentPolicy, busy: true, last_error: null };
+    await page.waitForTimeout(2100);
+    assert.match(await page.locator('.fan-control').textContent(), /正在应用/);
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]').isDisabled(), true);
+    independentPolicy = { ...independentPolicy, busy: false, last_error: '模拟风扇应用失败' };
+    await page.waitForTimeout(2100);
+    assert.match(await page.locator('.fan-control').textContent(), /应用失败/);
+    assert.match(await page.locator('.fan-control').textContent(), /模拟风扇应用失败/);
+    independentPolicy = { ...independentPolicy, last_error: null };
     await page.locator('#light-hue').evaluate(node => { node.value = '120'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); });
-    await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光已调整');
+    await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光已提交，等待设备确认');
     assert.deepEqual(lightConfig.manual, { mode: 1, color: '#00FF00', brightness: 70 });
+    lightDelay = true;
+    await page.locator('#light-hue').evaluate(node => { node.value = '130'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); });
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('#light-hue').isDisabled(), true, 'controls disable while a light request is pending');
+    await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光已提交，等待设备确认');
+    lightPolicy = { ...lightPolicy, busy: true, active: false, last_error: null };
+    await page.waitForTimeout(2100);
+    assert.match(await page.locator('.light-control').textContent(), /正在应用/);
+    assert.equal(await page.locator('#light-hue').isDisabled(), true);
+    lightPolicy = { ...lightPolicy, busy: false, active: false, last_error: '模拟应用失败' };
+    await page.waitForTimeout(2100);
+    assert.match(await page.locator('.light-control').textContent(), /应用失败/);
+    assert.match(await page.locator('.light-control').textContent(), /模拟应用失败/);
+    lightPolicy = { ...lightPolicy, active: true, last_error: null };
     await page.locator('#light-effect').selectOption('2');
     await page.waitForTimeout(250);
     assert.ok(posts.some(item => item.action === 'light.policy.quick' && item.effect === 2));

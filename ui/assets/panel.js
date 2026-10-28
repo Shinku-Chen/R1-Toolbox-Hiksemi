@@ -205,13 +205,15 @@
     const disks = list(obj(state.data.status).disks);
     let total = 0;
     let used = 0;
+    let measured = 0;
     for (const disk of disks) {
       if (num(disk.total_bytes, 1) !== null && num(disk.used_bytes, 0) !== null) {
         total += disk.total_bytes;
         used += disk.used_bytes;
+        measured += 1;
       }
     }
-    return { total, used, percent: total > 0 ? used / total * 100 : null, count: disks.length };
+    return { total, used, percent: measured > 0 && total > 0 ? used / total * 100 : null, count: disks.length, measured };
   }
 
   const containers = () => list(obj(obj(state.data.insights).containers).items);
@@ -435,7 +437,7 @@
     const badge = !state.online ? '本机服务离线' : status.available === false ? '数据不可用' : level === 'crit' ? '温度过高' : level === 'warn' ? '一项需要关注' : temp === null ? '部分指标未知' : '运行正常';
     const headline = !state.online ? '暂时无法连接 NAS' : temp === null ? '温度暂不可读' : level === 'crit' ? 'CPU 温度过高' : level === 'warn' ? 'CPU 温度稍高' : '各项指标正常';
     const copy = !state.online ? '每几秒自动重试；保留上次可用读数。' : temp === null ? 'CPU 温度传感器暂未返回读数。' : '其余已采集指标正常';
-    return `${clockBlock()}<article class="card status-card"><div class="thermal-ring"><svg viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="35" fill="none" stroke="#ffffff0d" stroke-width="5"/><circle cx="42" cy="42" r="35" fill="none" stroke="${level === 'crit' ? 'var(--red)' : level === 'warn' ? 'var(--orange)' : 'var(--green)'}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${temp === null ? 0 : Math.min(220, Math.max(0, temp / 100 * 220)).toFixed(0)} 220"/></svg><span class="ring-value ${level === 'crit' ? 'orange' : ''}">${tempText(temp)}</span></div><div><span class="badge ${level === 'warn' || level === 'crit' || !state.online ? 'warn' : ''}">${esc(badge)}</span><h2 class="status-title">${esc(headline)}</h2><p class="status-copy">${esc(copy)}</p></div></article><div class="section-label tight"><h2>AT A GLANCE / 核心指标</h2><button type="button" data-view="metrics" aria-label="查看全部核心指标">全部 ›</button></div><article class="card metric-stack"><button type="button" class="metric-row" data-view="processor" aria-label="CPU ${percentText(cpu.usage_percent)}%，查看处理器详情"><div class="metric-info"><div class="metric-name">CPU</div><div class="metric-meta">${esc(cpuModel())}${cpuCores() ? ' · ' + cpuCores() + ' 核' : ''}</div></div>${spark(state.live.cpu, 'small', false)}<span class="metric-number lime">${dotNumber(percentText(cpu.usage_percent))}<small>%</small></span></button><button type="button" class="metric-row" data-view="processor" aria-label="内存 ${percentText(mem.percent)}%，查看内存详情"><div class="metric-info"><div class="metric-name">内存</div><div class="metric-meta">${bytes(mem.used)} / ${bytes(mem.total)}</div></div>${spark(state.live.mem, 'small purple', false)}<span class="metric-number purple">${dotNumber(percentText(mem.percent))}<small>%</small></span></button></article><button type="button" class="card card-button inline-summary" data-view="storage"><div><div class="metric-name">存储空间</div><span class="caption">${disk.count ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span></div><div><span class="summary-number orange">${percentText(disk.percent)}<small>%</small></span>${bar(disk.percent, statusLevel(disk.percent) === 'warn' ? 'var(--orange)' : 'var(--green)', 'mini-bar')}</div><span class="chevron" aria-hidden="true">›</span></button><button type="button" class="card card-button flow-summary" data-view="network"><div class="flow-cell"><p class="flow-label">↓ 下载</p><p class="flow-value green">${esc(down[0])} <small>${esc(down[1])}</small></p></div><div class="flow-separator"></div><div class="flow-cell"><p class="flow-label">↑ 上传</p><p class="flow-value">${esc(up[0])} <small>${esc(up[1])}</small></p></div><span class="chevron" aria-hidden="true">›</span></button><div class="quick-links"><button type="button" data-view="trends">历史趋势</button><button type="button" data-view="thermal">温度与风扇</button></div>`;
+    return `${clockBlock()}<article class="card status-card"><div class="thermal-ring"><svg viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="35" fill="none" stroke="#ffffff0d" stroke-width="5"/><circle cx="42" cy="42" r="35" fill="none" stroke="${level === 'crit' ? 'var(--red)' : level === 'warn' ? 'var(--orange)' : 'var(--green)'}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${temp === null ? 0 : Math.min(220, Math.max(0, temp / 100 * 220)).toFixed(0)} 220"/></svg><span class="ring-value ${level === 'crit' ? 'orange' : ''}">${tempText(temp)}</span></div><div><span class="badge ${level === 'warn' || level === 'crit' || !state.online ? 'warn' : ''}">${esc(badge)}</span><h2 class="status-title">${esc(headline)}</h2><p class="status-copy">${esc(copy)}</p></div></article><div class="section-label tight"><h2>AT A GLANCE / 核心指标</h2><button type="button" data-view="metrics" aria-label="查看全部核心指标">全部 ›</button></div><article class="card metric-stack"><button type="button" class="metric-row" data-view="processor" aria-label="CPU ${percentText(cpu.usage_percent)}%，查看处理器详情"><div class="metric-info"><div class="metric-name">CPU</div><div class="metric-meta">${esc(cpuModel())}${cpuCores() ? ' · ' + cpuCores() + ' 核' : ''}</div></div>${spark(state.live.cpu, 'small', false)}<span class="metric-number lime">${dotNumber(percentText(cpu.usage_percent))}<small>%</small></span></button><button type="button" class="metric-row" data-view="processor" aria-label="内存 ${percentText(mem.percent)}%，查看内存详情"><div class="metric-info"><div class="metric-name">内存</div><div class="metric-meta">${bytes(mem.used)} / ${bytes(mem.total)}</div></div>${spark(state.live.mem, 'small purple', false)}<span class="metric-number purple">${dotNumber(percentText(mem.percent))}<small>%</small></span></button></article><button type="button" class="card card-button inline-summary" data-view="storage"><div><div class="metric-name">存储空间</div><span class="caption">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span></div><div><span class="summary-number orange">${percentText(disk.percent)}<small>%</small></span>${bar(disk.percent, statusLevel(disk.percent) === 'warn' ? 'var(--orange)' : 'var(--green)', 'mini-bar')}</div><span class="chevron" aria-hidden="true">›</span></button><button type="button" class="card card-button flow-summary" data-view="network"><div class="flow-cell"><p class="flow-label">↓ 下载</p><p class="flow-value green">${esc(down[0])} <small>${esc(down[1])}</small></p></div><div class="flow-separator"></div><div class="flow-cell"><p class="flow-label">↑ 上传</p><p class="flow-value">${esc(up[0])} <small>${esc(up[1])}</small></p></div><span class="chevron" aria-hidden="true">›</span></button><div class="quick-links"><button type="button" data-view="trends">历史趋势</button><button type="button" data-view="thermal">温度与风扇</button></div>`;
   }
 
   function metrics() {
@@ -449,7 +451,7 @@
     const cards = [
       ['CPU', percentText(obj(status.cpu).usage_percent), '%', `${cpuCores() || '--'} 核 · 负载 ${load === null ? '--' : load.toFixed(2)}`, 'cpu', 'lime', 'processor'],
       ['内存', percentText(memory().percent), '%', `${bytes(memory().used)} / ${bytes(memory().total)}`, 'mem', 'purple', 'processor'],
-      ['存储', percentText(disk.percent), '%', disk.count ? `已用 ${bytes(disk.used)}` : '未发现数据盘', 'disk', 'orange', 'storage'],
+      ['存储', percentText(disk.percent), '%', disk.measured ? `已用 ${bytes(disk.used)}` : '容量暂不可读', 'disk', 'orange', 'storage'],
       ['下载', down[0], down[1], `${esc(net.interface || '--')}`, 'rx', 'green', 'network'],
       ['CPU 温度', tempText(temp), '', 'CPU 封装温度', 'temp', 'orange', 'thermal'],
     ];
@@ -483,7 +485,7 @@
     const allDrives = list(obj(obj(state.data.insights).disks).items);
     const drives = allDrives.filter(row => row && row.smart_available === true);
     const hidden = allDrives.length - drives.length;
-    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.count ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到带 SMART 信息的物理磁盘。</p>'}${hidden ? `<p class="info-note">${hidden} 块磁盘未提供 SMART 信息，已隐藏。</p>` : ''}<p class="info-note">仅显示有 SMART 缓存的物理磁盘；休眠盘温度未知，不因查看页面唤醒。</p>`;
+    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到带 SMART 信息的物理磁盘。</p>'}${hidden ? `<p class="info-note">${hidden} 块磁盘未提供 SMART 信息，已隐藏。</p>` : ''}<p class="info-note">仅显示有 SMART 缓存的物理磁盘；休眠盘温度未知，不因查看页面唤醒。</p>`;
   }
 
   function network() {
@@ -609,9 +611,9 @@
     return 'manual';
   }
 
-  function fanQuickRow(name, item, live, available) {
+  function fanQuickRow(name, item, live, available, busy) {
     const mode = fanQuickMode(item);
-    const disabled = !canWrite() || !available;
+    const disabled = !canWrite() || !available || busy === true;
     const manualDisabled = disabled || !list(item.sources).length;
     const state = live.active && num(live.target_percent, 0, 100) !== null ? `目标 ${percentText(live.target_percent)}%` : '原厂管理';
     const label = name === 'cpu' ? 'CPU 风扇' : '系统风扇';
@@ -624,7 +626,9 @@
     const live = obj(policy.channels);
     const capability = obj(policy.capability);
     const available = capability.available === true;
-    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${policy.active ? '' : 'neutral'}">${policy.active ? '独立温控' : '原厂管理'}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), available)).join('')}<p class="caption">低／中／高档固定为 50／75／100%；手动档使用网页保存的曲线。首次使用前请先在网页选择温度来源与阈值。</p>${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置风扇</button></article>`;
+    const failed = Boolean(policy.last_error);
+    const status = policy.busy ? '正在应用' : failed ? '应用失败' : policy.pending_changes ? '待应用' : policy.active ? '独立温控' : '原厂管理';
+    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${failed ? 'warn' : policy.active ? '' : 'neutral'}">${esc(status)}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), available, policy.busy)).join('')}<p class="caption">低／中／高档固定为 50／75／100%；手动档使用网页保存的曲线。首次使用前请先在网页选择温度来源与阈值。</p>${failed ? `<p class="caption">${esc(policy.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置风扇</button></article>`;
   }
 
   function hexToHue(value) {
@@ -656,12 +660,15 @@
     const manual = obj(config.manual);
     const capability = obj(light.capability);
     const available = capability.available === true;
-    const disabled = !available || !canWrite();
+    const busy = light.busy === true;
+    const disabled = !available || !canWrite() || busy;
     const hue = state.lightHue ?? hexToHue(manual.color || config.manual?.color || '#00C832');
     const brightness = state.lightBrightness ?? pct(manual.brightness) ?? pct(config.brightness) ?? 0;
     const effect = state.lightEffect ?? num(manual.mode, 0, 3) ?? 1;
-    const mode = config.mode === 'temperature' ? '温度联动' : light.active ? '手动已接管' : '手动待应用';
-    return `<article class="card light-control"><div class="card-top"><h2>机身灯光</h2><span class="badge ${light.active ? '' : 'neutral'}">${esc(mode)}</span></div><div class="light-preview"><span class="light-swatch" style="background:${lightHueColor(hue)}"></span><div><strong>色相 ${Math.round(hue)}°</strong><p class="caption">${config.mode === 'temperature' ? '调整后切换为手动灯效' : '拖动色相、亮度后自动应用'}</p></div></div><label class="control-label" for="light-hue">色相</label><input class="brightness light-hue" id="light-hue" type="range" min="0" max="359" step="1" value="${hue}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-brightness">亮度 <output data-light-brightness>${Math.round(brightness)}%</output></label><input class="brightness" id="light-brightness" type="range" min="0" max="100" step="1" value="${brightness}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-effect">灯光模式</label><select class="control-select" id="light-effect" ${disabled ? 'disabled' : ''}>${[[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']].map(([value, text]) => `<option value="${value}" ${effect === value ? 'selected' : ''}>${text}</option>`).join('')}</select>${available ? '' : `<p class="caption">${esc(capability.reason || '尚未验证唯一灯控设备')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置灯光联动</button></article>`;
+    const mode = config.mode === 'temperature' ? (light.active ? '温度联动' : '温度联动待应用') : light.active ? '手动已接管' : '手动待应用';
+    const failed = Boolean(light.last_error);
+    const status = busy ? '正在应用' : failed ? '应用失败' : mode;
+    return `<article class="card light-control"><div class="card-top"><h2>机身灯光</h2><span class="badge ${failed ? 'warn' : light.active ? '' : 'neutral'}">${esc(status)}</span></div><div class="light-preview"><span class="light-swatch" style="background:${lightHueColor(hue)}"></span><div><strong>色相 ${Math.round(hue)}°</strong><p class="caption">${config.mode === 'temperature' ? '调整后切换为手动灯效' : '拖动色相、亮度后自动应用'}</p></div></div><label class="control-label" for="light-hue">色相</label><input class="brightness light-hue" id="light-hue" type="range" min="0" max="359" step="1" value="${hue}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-brightness">亮度 <output data-light-brightness>${Math.round(brightness)}%</output></label><input class="brightness" id="light-brightness" type="range" min="0" max="100" step="1" value="${brightness}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-effect">灯光模式</label><select class="control-select" id="light-effect" ${disabled ? 'disabled' : ''}>${[[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']].map(([value, text]) => `<option value="${value}" ${effect === value ? 'selected' : ''}>${text}</option>`).join('')}</select>${failed ? `<p class="caption">${esc(light.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '尚未验证唯一灯控设备')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置灯光联动</button></article>`;
   }
 
   function screenControl(toolbox, available) {
@@ -720,6 +727,7 @@
     if (!canWrite()) { toast('当前为只读或离线状态，无法执行操作', true); return false; }
     if (state.actionBusy) return false;
     state.actionBusy = true;
+    softRender(true);
     try {
       const result = await request('/action', Object.assign({ action: name }, payload));
       if (result.state) state.data.toolbox = result.state;
@@ -754,7 +762,7 @@
   async function setFanQuick(channel, mode) {
     const name = channel === 'system' ? '系统风扇' : 'CPU 风扇';
     const label = { auto: '自动', low: '低档', medium: '中档', high: '高档', manual: '手动' }[mode] || mode;
-    await action('fan.policy.quick', { channel, mode }, `${name}已切换${label}`);
+    await action('fan.policy.quick', { channel, mode }, `${name}已提交${label}，等待应用确认`);
   }
 
   async function setLight() {
@@ -762,7 +770,10 @@
     const brightness = Number($('light-brightness')?.value);
     const effect = Number($('light-effect')?.value);
     if (![hue, brightness, effect].every(Number.isFinite)) return;
-    await action('light.policy.quick', { hue, brightness, effect }, '灯光已调整');
+    state.lightHue = hue;
+    state.lightBrightness = brightness;
+    state.lightEffect = effect;
+    await action('light.policy.quick', { hue, brightness, effect }, '灯光已提交，等待设备确认');
     state.lightHue = state.lightBrightness = state.lightEffect = null;
     softRender(true);
   }

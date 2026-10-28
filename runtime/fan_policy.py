@@ -361,6 +361,7 @@ class FanPolicyController:
         try:
             _require(isinstance(payload, dict), "需要配置对象")
             confirmed = False
+            apply_config = None
             if name == "fan.policy.release":
                 _require(set(payload) == {"confirmed"} and payload["confirmed"] is True, "恢复原厂管理需要明确确认")
                 config = copy.deepcopy(self.config)
@@ -381,6 +382,13 @@ class FanPolicyController:
                     item["manual_percent"] = QUICK_PERCENT[mode]
                 else:
                     item["mode"] = "temperature"
+                # Keep another channel's saved draft in config, but apply only
+                # that channel's already active rule.  A quick single-channel
+                # action must not silently apply the other channel's draft.
+                apply_config = copy.deepcopy(config)
+                for other in CHANNELS:
+                    if other != channel:
+                        apply_config["channels"][other] = copy.deepcopy(self.active_config["channels"][other])
                 apply, confirmed = True, True
             elif name == "fan.policy.update":
                 _require(not set(payload) - {"config", "apply", "confirmed"} and "config" in payload
@@ -390,11 +398,14 @@ class FanPolicyController:
             else:
                 raise ValueError("不支持的风扇配置操作")
             config = validate_config(config)
+            if apply_config is not None:
+                apply_config = validate_config(apply_config)
             _require(not apply or confirmed, "应用风扇温控需要明确确认")
             with self.lock:
                 _require(not self.busy and not self.stop_event.is_set(), "风扇控制正在切换或停止，请稍后重试")
                 resume = self.active_on_boot
-                if apply and all(item["mode"] == "vendor" for item in config["channels"].values()):
+                apply_target = apply_config if apply_config is not None else config
+                if apply and all(item["mode"] == "vendor" for item in apply_target["channels"].values()):
                     resume = False
                 self._save(config, self.active_config, resume)
                 saved = True
@@ -403,10 +414,10 @@ class FanPolicyController:
                 self.settings_error = None
                 if apply:
                     capability = self.capability
-                    _require(not any(item["mode"] != "vendor" for item in config["channels"].values())
+                    _require(not any(item["mode"] != "vendor" for item in apply_target["channels"].values())
                              or capability.get("available") is True, "当前设备尚不满足独立调速条件；配置已保存，未接管")
                     self.busy = True
-                    self.worker = threading.Thread(target=self._apply_worker, args=(copy.deepcopy(config),),
+                    self.worker = threading.Thread(target=self._apply_worker, args=(copy.deepcopy(apply_target),),
                                                    daemon=True, name="r1-fan-policy-apply")
                     try:
                         self.worker.start()
