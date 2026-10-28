@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat(dev): `/api/auth/session` 返回服务端实际看到的 `client_ip`，便于核对开发者白名单。
 - feat(dev): 开发者模式新增固定白名单的只读诊断命令接口 `/api/dev/exec`；不接受任意 shell/cmd，仍需开发者 IP、限时、同源和 CSRF。
 - feat(dev): 增加默认关闭的开发者免配对模式，需显式开关、精确客户端 IP 白名单和限时，且不绕过登录口令、同源/CSRF 与确认流程。
 - fix(fan): 接管失败时保留适配层返回的具体原因，区分预检、交接、写入确认和原厂恢复问题。

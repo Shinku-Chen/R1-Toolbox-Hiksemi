@@ -536,6 +536,7 @@ class WebConfigServer:
         dev = self._dev_authorized(peer) and not self.auth.required()
         return {'logged_in': session is not None, 'auth_required': self.auth.required(),
                 'authorized': session is not None or dev, 'dev_mode': dev,
+                'client_ip': str(peer) if peer else None,
                 'session': {'label': session.get('label'),
                             'expires_in': max(0, int(session['expires_wall'] - time.time()))} if session else None,
                 'config': self.auth.auth_config()}

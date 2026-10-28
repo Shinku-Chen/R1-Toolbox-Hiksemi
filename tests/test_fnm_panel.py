@@ -471,6 +471,7 @@ class DeveloperModeTests(unittest.TestCase):
                                          asset_dir=ROOT / 'ui/web', state_dir=directory)
             try:
                 self.assertEqual(server.panel_authorized({}, peer='192.168.1.50'), 'dev')
+                self.assertEqual(server.auth_status({}, peer='192.168.1.50')['client_ip'], '192.168.1.50')
                 self.assertIsNone(server.panel_authorized({}, peer='192.168.1.51'))
                 self.assertFalse(server._dev_authorized(None))
             finally:
