@@ -352,6 +352,10 @@ input[type="color"] { width: 82px; height: 56px; padding: 3px; border: 1px solid
 .fan-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; color: var(--ink-1); font-size: calc(19px * var(--ui-scale)); }
 .fan-rpm, .fan-reference { color: var(--ink-1); font-variant-numeric: tabular-nums; }
 .fan-error { color: var(--crit); }
+.pending-operation { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; padding: 16px; border-radius: 18px; background: var(--danger-surface); color: var(--danger); font-size: calc(19px * var(--ui-scale)); text-align: center; }
+.control-center-close { min-height: 56px; padding: 12px 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--ink-1); font-size: calc(18px * var(--ui-scale)); }
+.control-center-open #page-controls { padding-top: 4px; }
+.control-center-open #page-controls::before { content: ""; width: 44px; height: 4px; border-radius: 4px; background: var(--ink-3); align-self: center; flex: none; margin-bottom: 2px; }
 .fan-policy-summary small { white-space: pre-line; }
 .fan-policy-summary { min-height: 0; }
 .fan-policy-summary .fan-reference { font-size: calc(28px * var(--ui-scale)); }
