@@ -46,6 +46,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node tests/check_interactions.cjs
           node tests/check_web_config.cjs
+          node tests/check_small_screen_prototype.cjs
       - name: Check Python syntax
         run: python -m compileall -q scripts tools runtime tests
       - name: Check native fan adapter without NAS devices

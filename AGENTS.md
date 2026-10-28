@@ -37,6 +37,7 @@ python scripts/build-ui.py             # 打包 UI bundle（镜像构建也会�
 python -m unittest discover -s tests -v
 node tests/check_interactions.cjs      # 小屏触摸/导航/设置，需要 Chrome/Chromium
 node tests/check_web_config.cjs        # 网页面板 + 真实 HTTP fixture
+node tests/check_small_screen_prototype.cjs  # 独立小屏原型（离线 HTML）
 python tests/check_fan_guard_linux.py
 python tests/check_fan_startup_linux.py
 python tools/boot-once/test_runner.py
