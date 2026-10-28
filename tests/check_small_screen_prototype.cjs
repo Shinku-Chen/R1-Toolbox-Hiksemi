@@ -29,11 +29,11 @@ const chromeBin = chromeCandidates.find(candidate => candidate && fs.existsSync(
 assert.ok(chromeBin, '未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可执行文件。');
 if (screenshotDir) fs.mkdirSync(screenshotDir, { recursive: true });
 
-const mainTabs = ['overview', 'storage', 'network', 'apps', 'controls'];
+const mainTabs = ['overview', 'storage', 'network', 'apps', 'thermal', 'controls'];
 const viewTitles = {
   overview: '概览', metrics: '核心指标', processor: '处理器与内存', storage: '存储', network: '网络',
   apps: '应用', containers: 'Docker 容器', container: '容器详情', vms: '虚拟机', thermal: '温度与风扇',
-  trends: '历史趋势', ports: '监听端口', controls: '控制中心', web: '网页设置',
+  trends: '历史趋势', ports: '监听端口', controls: '调节', web: '网页设置',
 };
 const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'containers', 'vms', 'ports', 'controls', 'web'];
 
@@ -76,6 +76,10 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
     const tab = async view => inside(`[data-tab="${view}"]`).tap();
     const scrollTop = () => inside('#screen-body').evaluate(el => el.scrollTop);
     const back = () => inside('[data-action="back"]').tap();
+    const choosePower = async operation => {
+      await inside('[data-action="power-menu"]').tap();
+      await inside(`[data-action="power-${operation}"]`).tap();
+    };
 
     const measure = async label => {
       const dimensions = await page.evaluate(() => {
@@ -115,14 +119,16 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       for (const view of Object.keys(viewTitles)) {
         await check(`${width} × 960 / ${view}: query view, overflow and touch targets`, async () => {
           await open(view);
-          assert.equal(await inside('.screen-nav [data-tab]').count(), 5);
+          assert.equal(await inside('.screen-nav [data-tab]').count(), 6);
+          assert.equal(await inside('[data-tab="thermal"] span').textContent(), '温度');
+          assert.equal(await inside('[data-tab="controls"] span').textContent(), '调节');
           await measure(`${width}/${view}`);
         });
       }
     }
 
     await page.setViewportSize({ width: 376, height: 960 });
-    await check('five bottom tabs navigate and mark the current page', async () => {
+    await check('six bottom tabs navigate and mark the current page', async () => {
       await open();
       for (const view of mainTabs) {
         await tab(view);
@@ -215,18 +221,21 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.match(text, /仅显示有 SMART 缓存的物理磁盘/);
     });
 
-    await check('fan quick modes are per channel and light/sleep controls update state', async () => {
-      await open('controls');
+    await check('temperature is an independent tab with per-channel fan modes', async () => {
+      await open('thermal');
       assert.equal(await inside('.fan-quick-row').count(), 2);
       await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').tap();
       assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true');
       assert.match(await inside('.fan-quick-row').first().locator('.fan-quick-head span').textContent(), /低档/);
       await tab('overview');
-      await tab('controls');
+      await tab('thermal');
       assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true',
         'fan shortcut state survives main-tab navigation');
       await inside('[data-fan-channel="system"][data-fan-mode="manual"]').tap();
       assert.equal(await inside('[data-fan-channel="system"][data-fan-mode="manual"]').getAttribute('aria-pressed'), 'true');
+      await open('controls');
+      assert.equal(await inside('[data-action="reboot"]').count(), 0, 'the adjust page no longer owns power actions');
+      assert.equal(await inside('[data-action="shutdown"]').count(), 0);
       const hue = inside('#light-hue');
       await hue.evaluate(el => { el.value = '120'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); });
       assert.equal(await inside('[data-light-hue-label]').textContent(), '色相 120°');
@@ -268,10 +277,14 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
     });
 
     await check('power dialog confirms first, defaults to Cancel, traps focus, and supports Escape', async () => {
-      await open('controls');
-      await inside('[data-action="reboot"]').tap();
+      await open('overview');
+      await inside('[data-action="power-menu"]').tap();
       assert.equal(await inside('[role="dialog"]').isVisible(), true);
-      assert.equal(await inside('#power-status').isHidden(), true, 'opening the dialog cannot start the countdown');
+      assert.match(await inside('[role="dialog"]').textContent(), /电源管理/);
+      assert.equal(await inside('#power-status').isHidden(), true, 'opening the menu cannot start the countdown');
+      assert.equal(await inside('[data-action="cancel-modal"]').evaluate(el => document.activeElement === el), true);
+      await inside('[data-action="power-reboot"]').tap();
+      assert.match(await inside('[role="dialog"]').textContent(), /重新启动 NAS/);
       assert.equal(await inside('[data-action="cancel-modal"]').evaluate(el => document.activeElement === el), true);
       await measure('power confirmation');
       await page.keyboard.press('Tab');
@@ -280,8 +293,9 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('[data-action="cancel-modal"]').evaluate(el => document.activeElement === el), true);
       await page.keyboard.press('Escape');
       assert.equal(await inside('#modal').isHidden(), true);
-      assert.equal(await inside('[data-action="reboot"]').evaluate(el => document.activeElement === el), true);
-      await inside('[data-action="shutdown"]').tap();
+      assert.equal(await inside('[data-action="power-menu"]').evaluate(el => document.activeElement === el), true);
+      await inside('[data-action="power-menu"]').tap();
+      await inside('[data-action="power-shutdown"]').tap();
       await inside('[data-action="cancel-modal"]').tap();
       assert.equal(await inside('#modal').isHidden(), true);
       assert.equal(await inside('#power-status').isHidden(), true);
@@ -289,7 +303,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
 
     await check('five-second power countdown remains cancellable after switching tabs', async () => {
       await open('controls');
-      await inside('[data-action="reboot"]').tap();
+      await choosePower('reboot');
       await inside('[data-action="confirm-power"]').tap();
       assert.match(await inside('#power-status').textContent(), /5 秒/);
       await page.waitForFunction(() => document.querySelector('#device #power-status').textContent.includes('4 秒'));
@@ -311,7 +325,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
     await check('power countdown expires as a local simulation without navigating or contacting a device', async () => {
       await open('controls');
       const startingURL = page.url();
-      await inside('[data-action="shutdown"]').tap();
+      await choosePower('shutdown');
       await inside('[data-action="confirm-power"]').tap();
       assert.match(await inside('#power-status').textContent(), /5 秒/);
       await inside('#power-status').waitFor({ state: 'hidden', timeout: 7500 });
@@ -373,8 +387,8 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
     });
 
     await check('desktop gallery cannot conceal a power confirmation or pending cancellation', async () => {
-      await open('controls');
-      await inside('[data-action="reboot"]').tap();
+      await open('overview');
+      await choosePower('reboot');
       await page.locator('[data-mode="gallery"]').tap();
       assert.equal(await inside('[role="dialog"]').isVisible(), true);
       assert.equal(await page.locator('#stage').isVisible(), true);
@@ -383,7 +397,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('[role="dialog"]').evaluate(el => el.contains(document.activeElement)), true,
         'an attempted gallery switch must keep keyboard navigation in the confirmation');
       await page.keyboard.press('Escape');
-      await inside('[data-action="reboot"]').tap();
+      await choosePower('reboot');
       await inside('[data-action="confirm-power"]').tap();
       await page.locator('[data-mode="gallery"]').tap();
       assert.equal(await page.locator('#stage').isVisible(), true);
