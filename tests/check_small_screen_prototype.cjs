@@ -205,6 +205,41 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(Number(await inside('#brightness').inputValue()), touchValue);
     });
 
+    await check('storage lists only SMART physical disks with usage', async () => {
+      await open('storage');
+      assert.equal(await inside('.drive-row').count(), 3);
+      assert.equal(await inside('.drive-row .caption').first().textContent(), 'SMART 正常 · 缓存读数');
+      const text = await inside('.screen-body').textContent();
+      assert.match(text, /已用 73%/);
+      assert.doesNotMatch(text, /HDD 2/);
+      assert.match(text, /仅显示有 SMART 缓存的物理磁盘/);
+    });
+
+    await check('fan quick modes are per channel and light/sleep controls update state', async () => {
+      await open('controls');
+      assert.equal(await inside('.fan-quick-row').count(), 2);
+      await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').tap();
+      assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true');
+      assert.match(await inside('.fan-quick-row').first().locator('.fan-quick-head span').textContent(), /低档/);
+      await tab('overview');
+      await tab('controls');
+      assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true',
+        'fan shortcut state survives main-tab navigation');
+      await inside('[data-fan-channel="system"][data-fan-mode="manual"]').tap();
+      assert.equal(await inside('[data-fan-channel="system"][data-fan-mode="manual"]').getAttribute('aria-pressed'), 'true');
+      const hue = inside('#light-hue');
+      await hue.evaluate(el => { el.value = '120'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); });
+      assert.equal(await inside('[data-light-hue-label]').textContent(), '色相 120°');
+      assert.match(await inside('.light-swatch').getAttribute('style'), /hsl\(120/);
+      const brightness = inside('#light-brightness');
+      await brightness.evaluate(el => { el.value = '55'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); });
+      assert.equal(await inside('[data-light-brightness]').textContent(), '55%');
+      await inside('#light-effect').selectOption('2');
+      assert.equal(await inside('#light-effect').inputValue(), '2');
+      await inside('#sleep-timeout').selectOption('300');
+      assert.equal(await inside('#sleep-timeout').inputValue(), '300');
+    });
+
     await check('trend selectors switch 1h / 6h / 24h curves and time labels', async () => {
       await open('trends');
       let firstCurve;
