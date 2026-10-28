@@ -310,15 +310,7 @@ class FanPolicyController:
                 return
             settings = copy.deepcopy(self.active_config)
             previous = {name: self.channels[name]["level"] for name in CHANNELS}
-        states, targets = {}, {}
-        for name in CHANNELS:
-            policy = settings["channels"][name]
-            decision = decide(policy, catalog, previous[name])
-            enabled = policy["mode"] != "vendor"
-            raw = max(128, min(255, round(decision["target_percent"] * 255 / 100))) if enabled else None
-            states[name] = {**decision, "mode": policy["mode"], "active": enabled, "target_raw": raw, "rpm": None}
-            if enabled:
-                targets[name] = raw
+        states, targets = self._decisions(settings, catalog, previous)
         try:
             self.adapter.write(targets)
         except Exception:
@@ -329,6 +321,20 @@ class FanPolicyController:
                 state["applied_monotonic"] = self.clock()
             self.channels = states
             self.last_error = None
+
+    @staticmethod
+    def _decisions(settings, catalog, previous):
+        """Use the same CPU guard, freshness and hysteresis on ticks and edits."""
+        states, targets = {}, {}
+        for name in CHANNELS:
+            policy = settings["channels"][name]
+            decision = decide(policy, catalog, previous[name])
+            enabled = policy["mode"] != "vendor"
+            raw = max(128, min(255, round(decision["target_percent"] * 255 / 100))) if enabled else None
+            states[name] = {**decision, "mode": policy["mode"], "active": enabled, "target_raw": raw, "rpm": None}
+            if enabled:
+                targets[name] = raw
+        return states, targets
 
     def _apply_worker(self, config, apply_official=True):
         with self.control_lock:
@@ -345,11 +351,43 @@ class FanPolicyController:
         _require(isinstance(result, dict) and result.get("mode") == mode,
                  "原厂风扇设置结果未能确认")
 
+    def _official_needs_change(self, system):
+        # A cached dashboard mode may lag an external official-app selection.
+        # Only the adapter's fresh, gated passive read can omit a signaling RPC.
+        reader = getattr(self.histor, "verified_mode", None)
+        try:
+            actual = reader() if callable(reader) else None
+        except Exception:
+            actual = None
+        return actual != system["vendor_mode"]
+
+    def _same_active_channels(self, wanted):
+        if not wanted:
+            return False
+        with self.lock:
+            recorded = {name for name, state in self.channels.items() if state["active"]}
+            if recorded != wanted:
+                return False
+            now = self.clock()
+            if any(not _finite(self.channels[name].get("applied_monotonic"))
+                   or not 0 <= now - self.channels[name]["applied_monotonic"] <= 5
+                   for name in wanted):
+                return False
+        try:
+            status = self.adapter.snapshot()
+            return (isinstance(status, dict) and status.get("phase") == "active"
+                    and set(status.get("active_channels", [])) == wanted)
+        except Exception:
+            return False
+
     def _apply_locked(self, config, *, apply_official=True):
         wanted = {name for name in CHANNELS if config["channels"][name]["mode"] != "vendor"}
         try:
             system = config["channels"]["system"]
-            set_official = apply_official and system["mode"] == "vendor" and "vendor_mode" in system
+            set_official = (apply_official and system["mode"] == "vendor" and "vendor_mode" in system
+                            and self._official_needs_change(system))
+            in_place = not set_official and self._same_active_channels(wanted)
+            states = catalog = None
             if set_official:
                 # Vendor get/set/get can exceed a native lease and signals the
                 # current temp_control process. Release every guarded channel
@@ -358,26 +396,47 @@ class FanPolicyController:
                 # rule is restarted only after the entire RPC is confirmed.
                 self.adapter.release()
                 self._set_official(system["vendor_mode"])
-            if wanted:
+            if wanted and not in_place:
                 self.adapter.start(wanted)
-            elif not set_official:
+            elif not wanted and not set_official:
                 self.adapter.release()
             if self.stop_event.is_set():
                 self.adapter.release()
                 return
             if wanted:
-                # Never enter a quiet/manual state before the first fresh
-                # temperature cycle and a successful acknowledgement.
-                self.adapter.write({name: 255 for name in wanted})
+                if in_place:
+                    # Same live ownership: edit the lease target directly.
+                    # Fetch sources anew rather than reusing the last panel
+                    # catalog; unreadable or stale CPU data still means 100%.
+                    try:
+                        rows = self.sources.snapshot()
+                    except Exception:
+                        rows = []
+                    catalog = observed_sources(rows, self.clock())
+                    with self.lock:
+                        previous = {name: self.channels[name]["level"] for name in CHANNELS}
+                    states, targets = self._decisions(config, catalog, previous)
+                    _require(not self.stop_event.is_set(), "风扇服务正在停止")
+                    self.adapter.write(targets)
+                else:
+                    # Initial or changed ownership starts safe-full until its
+                    # first fresh decision. write still checks live identity
+                    # and a real supervisor acknowledgement on both paths.
+                    self.adapter.write({name: 255 for name in wanted})
             with self.lock:
                 self._save(self.config, config, bool(wanted))
                 self.active_config = copy.deepcopy(config)
                 self.active_on_boot = bool(wanted)
-                self.channels = {name: {**self._vendor_state(), "mode": config["channels"][name]["mode"],
-                    "active": name in wanted, "level": "failsafe" if name in wanted else "vendor",
-                    "target_percent": 100 if name in wanted else None, "target_raw": 255 if name in wanted else None,
-                    "applied_monotonic": self.clock() if name in wanted else None,
-                    "reason": "等待第一轮有效温度采样" if name in wanted else "原厂策略管理"} for name in CHANNELS}
+                if states is not None:
+                    for state in states.values():
+                        state["applied_monotonic"] = self.clock()
+                    self.catalog, self.channels = catalog, states
+                else:
+                    self.channels = {name: {**self._vendor_state(), "mode": config["channels"][name]["mode"],
+                        "active": name in wanted, "level": "failsafe" if name in wanted else "vendor",
+                        "target_percent": 100 if name in wanted else None, "target_raw": 255 if name in wanted else None,
+                        "applied_monotonic": self.clock() if name in wanted else None,
+                        "reason": "等待第一轮有效温度采样" if name in wanted else "原厂策略管理"} for name in CHANNELS}
                 self.last_error = self.settings_error = None
         except Exception as error:
             restored = True

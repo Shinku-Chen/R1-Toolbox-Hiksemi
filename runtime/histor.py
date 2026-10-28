@@ -7,6 +7,7 @@ Official mode changes affect the system-fan policy and persist in the vendor's
 configuration. The separate CPU-fan thread continues vendor automatic control.
 """
 import copy
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -89,6 +90,8 @@ class HistorAdapter:
         self.poll_interval = max(1.0, float(poll_interval))
         self.lock = threading.RLock()
         self.operation_lock = threading.RLock()
+        self._mode_generation = 0
+        self._mode_mutating = False
         self.stopped = threading.Event()
         self.thread = None
         self._control_disabled = False
@@ -186,6 +189,57 @@ class HistorAdapter:
             if self.stopped.is_set():
                 result["control_available"] = False
             return result
+
+    def verified_mode(self):
+        """Read the current native selection through the existing control gates.
+
+        This is passive evidence for avoiding an unnecessary mode RPC, never a
+        vendor GET or RPM query. RPM polling and this fixed-path read are
+        independent. A generation change across the read, or an actual mode
+        RPC in progress, leaves the mode unconfirmed rather than trusting a
+        partial update. Neither path waits behind a slow factory command.
+        """
+        with self.lock:
+            if self._mode_mutating:
+                return None
+            generation = self._mode_generation
+        try:
+            command = self._path("/histor/bin/product_test")
+            if (self.stopped.is_set() or not self.allow_writes or self._control_disabled
+                    or not self._refresh_driver() or not self._inside(command) or not command.is_file()
+                    or not self._has_device() or not self._has_socket()):
+                return None
+            mode = self._config_mode()
+            # A replacement during the read must not turn stale driver proof
+            # into permission to omit the normal verified set_mode path.
+            if not self._refresh_driver() or self.stopped.is_set() or self._control_disabled:
+                return None
+            selected = _CODES.get(mode)
+            with self.lock:
+                if (self._mode_mutating or self._mode_generation != generation
+                        or self.stopped.is_set() or self._control_disabled):
+                    return None
+                if selected is not None:
+                    # Keep the policy label current without refreshing RPM or
+                    # granting a stale cached control_available capability.
+                    self._state.update(mode=selected, mode_code=mode)
+                return selected
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    @contextmanager
+    def _mode_change(self):
+        """Fence passive readers around a real set, separately from RPM polls."""
+        with self.operation_lock:
+            with self.lock:
+                self._mode_generation += 1
+                self._mode_mutating = True
+            try:
+                yield
+            finally:
+                with self.lock:
+                    self._mode_generation += 1
+                    self._mode_mutating = False
 
     def poll_once(self):
         with self.operation_lock:
@@ -310,7 +364,7 @@ class HistorAdapter:
             raise ValueError("更改原厂风扇设置需要确认")
         if not isinstance(mode, str) or mode not in MODES:
             raise ValueError("仅支持原厂低、中、高、自动四种模式")
-        with self.operation_lock:
+        with self._mode_change():
             if self.stopped.is_set():
                 raise ValueError("原厂风扇服务已停止")
             if not self._refresh_driver() or not self.allow_writes or not self.snapshot()["control_available"]:

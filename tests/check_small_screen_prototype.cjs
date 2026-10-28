@@ -32,10 +32,10 @@ if (screenshotDir) fs.mkdirSync(screenshotDir, { recursive: true });
 const mainTabs = ['overview', 'storage', 'network', 'apps', 'thermal', 'controls'];
 const viewTitles = {
   overview: '概览', metrics: '核心指标', processor: '处理器与内存', storage: '存储', network: '网络',
-  apps: '应用', containers: 'Docker 容器', container: '容器详情', thermal: '温度与风扇',
+  apps: '应用', container: '容器详情', thermal: '温度与风扇',
   trends: '历史趋势', ports: '监听端口', controls: '设置', web: '网页设置', power: '电源管理',
 };
-const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'containers', 'ports', 'controls', 'web'];
+const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'apps', 'ports', 'controls', 'web'];
 
 (async () => {
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
@@ -139,26 +139,21 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       }
     });
 
-    await check('nested application details restore their parent page and scroll offset', async () => {
+    await check('complete application list and container details restore their parent scroll offset', async () => {
       // A shorter viewport makes these sample lists scroll without injecting extra fixture cards.
       await page.setViewportSize({ width: 376, height: 720 });
       try {
         await open('apps');
-        const allContainers = inside('#screen-body [data-view="containers"]');
-        await allContainers.scrollIntoViewIfNeeded();
-        const appsOffset = await scrollTop();
-        await allContainers.tap();
+        assert.equal(await inside('#screen-body [data-view="containers"]').count(), 0);
+        assert.equal(await inside('.app-card').count(), 4);
         const container = inside('[data-view="container"]').last();
         await container.scrollIntoViewIfNeeded();
-        const containersOffset = await scrollTop();
-        assert.ok(containersOffset > 0, 'the container list must actually scroll before testing restoration');
+        const appsOffset = await scrollTop();
+        assert.ok(appsOffset > 0, 'the application list must actually scroll before testing restoration');
         const appName = await container.getAttribute('data-app');
         await container.tap();
         assert.equal(await inside('.screen-title').textContent(), viewTitles.container);
         assert.equal(await inside('.app-heading h3').textContent(), appName);
-        await back();
-        assert.equal(await inside('.screen-title').textContent(), viewTitles.containers);
-        assert.ok(Math.abs(await scrollTop() - containersOffset) <= 1, 'container list scroll is restored');
         await back();
         assert.equal(await inside('.screen-title').textContent(), viewTitles.apps);
         assert.ok(Math.abs(await scrollTop() - appsOffset) <= 1, 'applications scroll is restored');
@@ -168,8 +163,21 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       }
     });
 
+    await check('all navigation icons match the web panel and temperature includes cached disk rows', async () => {
+      await open('thermal');
+      const symbols = fs.readFileSync(path.resolve(__dirname, '../ui/panel-src/20-icons.svg'), 'utf8');
+      const canonical = html => html.replace(/\s*\/?>/g, '>').replace(/<\/(path|circle|ellipse)>/g, '');
+      for (const [tabName, iconName] of Object.entries({ overview: 'home', storage: 'storage', network: 'net', apps: 'box', thermal: 'temp', controls: 'gear' })) {
+        const expected = symbols.match(new RegExp('<symbol id="i-' + iconName + '"[^>]*>(.*?)</symbol>'))[1];
+        const actual = await inside(`[data-tab="${tabName}"] svg`).evaluate(svg => svg.innerHTML);
+        assert.equal(canonical(actual), canonical(expected), tabName);
+      }
+      assert.equal(await inside('.disk-temperature-row').count(), 4);
+      assert.match(await inside('.disk-temperature-row').last().textContent(), /HDD 2.*--.*休眠中/);
+    });
+
     await check('direct detail query back returns to its parent tab', async () => {
-      for (const [view, parent] of [['processor', 'overview'], ['containers', 'apps'], ['ports', 'network'], ['web', 'controls'], ['power', 'controls']]) {
+      for (const [view, parent] of [['processor', 'overview'], ['container', 'apps'], ['ports', 'network'], ['web', 'controls'], ['power', 'controls']]) {
         await open(view);
         await back();
         assert.equal(await inside('.screen-title').textContent(), viewTitles[parent]);

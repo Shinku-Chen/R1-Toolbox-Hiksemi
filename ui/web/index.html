@@ -1316,6 +1316,8 @@ dd .diag-link{margin:0;height:24px}
 @media (max-width: 720px){.idrac-disks .hr,.idrac-disks .dr{grid-template-columns:32px minmax(0,1fr) 58px}
 .idrac-disks .hr>span:nth-child(3),.idrac-disks .hr>span:nth-child(4),.idrac-disks .dr>span:nth-child(3),.idrac-disks .dr>span:nth-child(4){display:none}
 }
+.bay-top>span:first-child{min-width:0;white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+.sheet-title{overflow-wrap:anywhere}
 .r1-chans{display:grid;gap:14px}
 .r1-chan{background:var(--card-sunk);border-radius:18px;padding:16px 18px}
 .r1-chan-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
@@ -2224,7 +2226,7 @@ if (m) return m[1];
 }
 return volOf(d) ? `vol${volOf(d)}` : '';
 }
-const volLabel = d => (d && d.volume_label) || volumeName(d) || '未挂载';
+const volLabel = d => (d && (d.user_name || d.volume_label)) || volumeName(d) || '未挂载';
 const byVol = (a, b) => {
 const va = volumeName(a), vb = volumeName(b);
 if (!va !== !vb) return va ? -1 : 1;
@@ -2751,9 +2753,9 @@ if (!dd.length) { m.x.bays.innerHTML = `<div class="bays-empty">${ic('hdd')}<spa
 dd.forEach(d => {
 const k = diskKind(d);
 const volume = volumeName(d);
-const volTxt = d.volume_label ? `卷 ${d.volume_label}` : volume ? `存储空间 ${volume}` : '未挂载';
+const volTxt = d.user_name ? `硬盘 ${d.user_name}` : d.volume_label ? `卷 ${d.volume_label}` : volume ? `存储空间 ${volume}` : '未挂载';
 const el = mount(`<button class="bay" type="button" data-sheet="disk/${esc(encodeURIComponent(d.name))}" data-type="${k === 'nvme' ? 'nvme' : 'hdd'}" aria-label="硬盘 ${esc(d.name)}，${esc(vendorModel(d))}，${esc(volTxt)}，查看详情">
-<span class="bay-top"><span title="${esc(volTxt)}">${volLabel(d)}</span><span class="bay-warn">${ic('alert')}</span><i class="bay-led" data-ref="led"></i></span>
+<span class="bay-top"><span title="${esc(volTxt)}">${esc(volLabel(d))}</span><span class="bay-warn">${ic('alert')}</span><i class="bay-led" data-ref="led"></i></span>
 <span class="bay-body">
 <span class="bay-gauge" data-ref="g"></span>
 <span class="bay-zz" aria-hidden="true"><span class="dm" data-dm="Zz"></span>休眠</span>
@@ -2779,7 +2781,7 @@ dnumU(x.poolFree, x.poolFreeU, has ? o.disk_size - o.disk_used : null, F.dsize);
 setHTML(x.poolLeg, has ? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>${o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : ''}` : '<span>未读取到存储池用量（fnOS 存储池挂载在 /vol*）</span>');
 const sy = o.system || {}, hw = (o.hardware || {}).board || {};
 setText(x.chName, sy.hostname || ''); setText(x.chModel, String(hw.product_name || hw.board_name || 'NAS').slice(0, 24) + ` · ${dd.length} 盘`);
-const sig = dd.map(d => d.name + diskKind(d) + volumeName(d)).join(',');
+const sig = JSON.stringify(dd.map(d => [d.name, diskKind(d), volumeName(d), volLabel(d)]));
 if (m.sig !== sig) { m.sig = sig; this.buildBays(dd, m); }
 m.io = {}; (o.diskio || []).forEach(z => { m.io[z.name] = (+z.read_rate || 0) + (+z.write_rate || 0); });
 dd.forEach(d => {
@@ -3512,7 +3514,11 @@ setHTML(x.sb, sb.length ? kvHTML(sb.map(z => [esc(z.name), z.state === 'standby'
 },
 disk: {
 icon: a => { const d = disksOf(S.o).find(z => z.name === a); return d ? diskIcon(d) : 'hdd'; },
-title: a => '硬盘 ' + a, sub: (o, a) => { const d = disksOf(o).find(z => z.name === a); return d ? vendorModel(d) : ''; },
+title: a => {
+const d = disksOf(S.o).find(z => z.name === a);
+const name = d && (d.user_name || d.volume_label || volumeName(d));
+return name ? name + ' · ' + a : '硬盘 ' + a;
+}, sub: (o, a) => { const d = disksOf(o).find(z => z.name === a); return d ? vendorModel(d) : ''; },
 build(b, a) {
 const d0 = disksOf(S.o).find(z => z.name === a);
 if (!d0) { b.innerHTML = `<div class="empty"><b>未找到硬盘 ${esc(a)}</b><span>它可能已被移除，或尚未被识别。</span></div>`; return; }
@@ -3582,7 +3588,7 @@ const slot = dd.slot != null
 : slotState === 'ready'
 ? '<span class="faint" title="iDRAC 明细里没有这块盘：可能不在阵列卡下，或序列号对不上">—</span>'
 : '<span class="faint" title="iDRAC 未启用，读不到机箱槽位（设置 → iDRAC 里填地址和账号即可）">—</span>';
-setHTML(x.info, kvHTML([['型号', dash(vendorModel(dd))], ['序列号', `<span class="mono">${dash(dd.serial)}</span>`],
+setHTML(x.info, kvHTML([['名称', esc(volLabel(dd))], ['型号', dash(vendorModel(dd))], ['序列号', `<span class="mono">${dash(dd.serial)}</span>`],
 ['类型', KIND_TXT[diskKind(dd)]], ['硬盘容量', F.dsizeStr(dd.size)],
 ['挂载点', `<span class="mono">${dash((dd.mounts || []).join(', '))}</span>`],
 ['实际硬盘位', slot]].concat(extra)));
@@ -4919,7 +4925,7 @@ else if (k === 't' || k === 'T') toggleTheme();
 else if (k === '?') openSheet('keys');
 else if ((k === 'r' || k === 'R') && S.page === 'overview' && MODS.trends) { const i = RANGES.findIndex(o => o[0] === UI.range), n = RANGES[(i + 1) % RANGES.length][0]; MODS.trends.seg.set(n); UI.range = n; saveUI(); MODS.trends.load(); toast('趋势范围 · ' + RANGES.find(o => o[0] === n)[1], { key: 'range', icon: 'trend' }); }
 });
-const R1_MODE_TXT = { manual: '手动 · 固定输出', temperature: '手动 · 温控曲线' };
+const R1_MODE_TXT = { manual: '固定输出', temperature: '手动 · 温控曲线' };
 const R1_NATIVE_FAN_TXT = { auto: '自动', low: '低档', medium: '中档', high: '高档' };
 const R1_LEVEL_TXT = { quiet: '静音', normal: '普通', full: '全速' };
 const R1_EFFECT_TXT = { 0: '关闭', 1: '常亮', 2: '彩虹', 3: '呼吸' };
@@ -5045,8 +5051,8 @@ const configured = ((fan.config || {}).channels || {})[name] || {};
 if (fan.busy) return '切换中';
 if (fan.recovery_confirmed === false) return '恢复待确认';
 if (!live.mode) return '运行状态未读取';
-if (live.active) return '手动接管中';
-if (configured.mode && configured.mode !== 'vendor') return '手动未生效 · ' + fanNativeLabel(name);
+if (live.active) return live.mode === 'manual' ? '固定输出接管中' : '手动接管中';
+if (configured.mode && configured.mode !== 'vendor') return (configured.mode === 'manual' ? '固定输出未生效 · ' : '手动未生效 · ') + fanNativeLabel(name);
 if (name === 'system' && configured.vendor_mode && configured.vendor_mode !== fanOfficial().mode) return '档位未生效 · ' + fanNativeLabel(name);
 return fanNativeLabel(name);
 }
@@ -5106,7 +5112,7 @@ setHTML(m.x.note, f.last_error
 : `手动接管暂不可用：${esc(cap.reason || '设备尚未满足独立调速条件')}。系统原厂档位可用性单独检查。`);
 const active = Object.values(channels).some(c => c.active);
 setHTML(m.r.dek, f.recovery_confirmed === false ? '原厂管理恢复尚未确认，请检查风扇运行状态。' : active
-? `手动通道接管中${f.busy ? ' · 正在切换' : ''}；系统原厂档位与手动控制分别生效。`
+? `独立调速运行中${f.busy ? ' · 正在切换' : ''}；系统原厂档位与独立控制分别生效。`
 : 'CPU 由原厂自动管理；系统风扇可切换原厂档位，手动模式独立接管。');
 },
 });
@@ -5280,10 +5286,18 @@ const el = mount(`<input type="color" value="${esc(value || '#00C832')}">`);
 el.addEventListener('change', () => onchange(el.value.toUpperCase()));
 return el;
 }
-const FAN_SYSTEM_MODES = [['auto', '自动'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['manual', '手动']];
-const FAN_CPU_MODES = [['auto', '自动'], ['manual', '手动']];
+const FAN_SYSTEM_MODES = [['auto', '自动'], ['high', '高档'], ['medium', '中档'], ['low', '低档'], ['manual', '手动']];
+const FAN_CPU_MODES = [['auto', '自动'], ['high', '高档'], ['medium', '中档'], ['low', '低档'], ['manual', '手动']];
+const FAN_CPU_FIXED = { high: 100, medium: 75, low: 50 };
 function fanUiMode(item, name) {
-if (item && item.mode && item.mode !== 'vendor') return 'manual';
+if (item && item.mode === 'manual') {
+if (name === 'cpu') {
+const fixed = Object.keys(FAN_CPU_FIXED).find(key => FAN_CPU_FIXED[key] === item.manual_percent);
+if (fixed) return fixed;
+}
+return 'legacy:' + item.manual_percent;
+}
+if (item && item.mode === 'temperature') return 'manual';
 return name === 'cpu' ? 'auto' : (R1_NATIVE_FAN_TXT[item && item.vendor_mode] ? item.vendor_mode : '');
 }
 function fanCurveEditor(item, touch) {
@@ -5343,16 +5357,17 @@ if (system && system.mode === 'vendor' && !system.vendor_mode && R1_NATIVE_FAN_T
 return config;
 };
 let draft = shell(), dirty = false;
-const manualModes = {};
 let renderedCapability = '';
 card.innerHTML = `<div class="r1-edit" data-ref="wrap"></div>
-<div class="set-actions"><button class="btn primary" type="button" data-ref="save">保存</button>
-<button class="btn ghost" type="button" data-ref="release">两路恢复原厂管理</button></div>
+<div class="set-actions"><button class="btn primary" type="button" data-ref="save">保存</button></div>
 <p class="sub" data-ref="status"></p>`;
 const x = collect(card);
 const touch = () => { dirty = true; };
 const render = () => {
 const f = R1.fan(), config = draft.channels || {};
+const loaded = !!(config.cpu && config.system);
+x.wrap.setAttribute('aria-busy', String(!loaded));
+x.save.disabled = !!f.busy || !loaded;
 const sources = f.sources || [], cap = f.capability || {};
 renderedCapability = JSON.stringify([cap, fanOfficial()]);
 const wrap = mount(`<div></div>`);
@@ -5362,40 +5377,42 @@ const ch = mount(`<div class="card set-card r1-editor" data-channel="${name}">
 <div class="r1-chan-head"><b>${R1.chanName(name)}</b><span class="pill" data-ref="state"></span></div>
 <div class="r1-form" data-ref="form"></div></div>`);
 const form = ch._r.form;
-if (item.mode !== 'vendor') manualModes[name] = item.mode;
 const modeOptions = (name === 'cpu' ? FAN_CPU_MODES : FAN_SYSTEM_MODES).slice();
 const mode = fanUiMode(item, name);
 if (!mode) modeOptions.unshift(['', '原厂档位未读取']);
+if (mode.startsWith('legacy:')) modeOptions.push([mode, '独立固定 ' + item.manual_percent + '%（旧配置）']);
 const selector = r1Select(modeOptions, mode, value => {
 if (value === 'manual') {
-item.mode = manualModes[name] || 'temperature';
+item.mode = 'temperature';
 delete item.vendor_mode;
 if (!Array.isArray(item.sources)) item.sources = [];
+} else if (name === 'cpu' && FAN_CPU_FIXED[value]) {
+item.mode = 'manual';
+item.manual_percent = FAN_CPU_FIXED[value];
+} else if (value.startsWith('legacy:')) {
+return;
 } else {
 item.mode = 'vendor';
 if (name === 'system') item.vendor_mode = value;
 }
 touch(); render();
 }, name + '转速模式');
+selector.disabled = !config[name];
 for (const option of selector.options) {
-option.disabled = !option.value || (name === 'system' && option.value !== 'manual' && fanOfficial().control_available !== true);
+option.disabled = !option.value || option.value.startsWith('legacy:') || (name === 'system' && option.value !== 'manual' && fanOfficial().control_available !== true);
 }
 form.append(r1Field('转速模式', selector, name === 'cpu'
-? '自动：原厂温控。手动：选择固定输出或温控曲线并独立接管。'
-: '自动／低／中／高：原厂系统档位。手动：选择固定输出或温控曲线并独立接管。'));
-if (item.mode !== 'vendor') {
-form.append(r1Field('手动控制', r1Select([['manual', '固定输出'], ['temperature', '温控曲线']], item.mode, value => {
-item.mode = value; manualModes[name] = value; touch(); render();
-}, name + '手动控制'), '仅接管该通道，保护规则优先于用户设置。'));
-}
+? '自动：原厂温控。高／中／低：固定输出 100／75／50%。手动：按温度曲线调速。'
+: '自动／高／中／低：原厂系统档位。手动：按温度曲线独立调速。'));
 if (item.mode === 'temperature') {
 form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, item.sources, value => { item.sources = value; touch(); }), '点开下拉多选；只使用新鲜读数，取所选设备的最高温度。'));
 form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '升温到节点后下一轮升档；降温 3°C 才降档；全速固定 100%，不会停转。'));
 }
 if (item.mode === 'manual') {
-const output = r1Number(item.manual_percent, 50, 100, '%', value => { item.manual_percent = value; touch(); });
-output.querySelector('input').setAttribute('aria-label', name + '固定输出');
-form.append(r1Field('固定输出', output, '可请求 50–100% 输出；不是实测转速，不会停转。'));
+const legacy = mode.startsWith('legacy:');
+form.append(r1Field(legacy ? '兼容配置' : '固定输出', mount(`<span class="r1-fixed">${item.manual_percent}%</span>`), legacy
+? '保留原有固定输出；选择新档位后才会替换此配置。'
+: '请求输出不是实测转速，温度保护优先，不会停转。'));
 }
 if (item.mode === 'vendor') {
 form.append(r1Field('当前运行', mount(`<span class="sub r1-native-current">${esc(fanRunningMode(name))}</span>`), name === 'system'
@@ -5411,26 +5428,14 @@ wrap.append(mount(`<p class="sub">${cap.available === true ? '手动接管预检
 x.wrap.replaceChildren(wrap);
 };
 x.save.onclick = async () => {
-const summary = ['cpu', 'system'].map(name => {
-const item = (draft.channels || {})[name] || {};
-const target = item.mode !== 'vendor' ? '手动接管（' + (item.mode === 'manual' ? '固定输出 ' + item.manual_percent + '%' : '温控曲线') + '）'
-: name === 'cpu' ? '原厂自动' : R1_NATIVE_FAN_TXT[item.vendor_mode] ? '原厂' + R1_NATIVE_FAN_TXT[item.vendor_mode] : '保留当前原厂档位';
-return R1.chanName(name) + '：' + target;
-}).join('；');
-if (!(await R1.ask('保存并应用风扇设置？', esc(summary) + '。切换期间可能短暂恢复原厂温控，完成后应用手动规则；手动通道在退出或故障时恢复原厂管理。'))) return;
 if (await R1.save('/api/r1/fan', { config: draft, apply: true, confirmed: true }, '风扇设置')) { dirty = false; draft = shell(); render(); }
-};
-x.release.onclick = async () => {
-if (!(await R1.ask('两路都恢复原厂管理？', '将释放接管并请求原厂执行者恢复温控。恢复结果以运行状态确认为准。', true))) return;
-if (await R1.save('/api/r1/fan/release', { confirmed: true }, '恢复原厂管理')) { dirty = false; draft = shell(); render(); }
 };
 card._sync = () => {
 const f = R1.fan();
 setHTML(x.status, f.last_error ? `<span class="st-crit">${esc(f.last_error)}</span>`
 : `保存：${f.pending_changes ? '有未应用的更改' : '与当前运行一致'} · 恢复确认：${f.recovery_confirmed === false ? '待确认' : '正常'}`);
 if (!dirty) { const fresh = shell(); if (JSON.stringify(fresh) !== JSON.stringify(draft) || renderedCapability !== JSON.stringify([f.capability || {}, fanOfficial()])) { draft = fresh; render(); } }
-x.save.disabled = !!f.busy;
-x.release.disabled = !!f.busy;
+x.save.disabled = !!f.busy || !draft.channels || !draft.channels.cpu || !draft.channels.system;
 for (const name of ['cpu', 'system']) {
 const state = x.wrap.querySelector(`[data-channel="${name}"] [data-ref="state"]`);
 if (state) { setText(state, fanLiveState(name)); state.className = 'pill' + (((f.channels || {})[name] || {}).active ? ' ok' : ''); }
@@ -5438,7 +5443,7 @@ const current = x.wrap.querySelector(`[data-channel="${name}"] .r1-native-curren
 if (current) setText(current, fanRunningMode(name));
 if (name === 'system') {
 const selector = x.wrap.querySelector('[data-channel="system"] select');
-if (selector) for (const option of selector.options) option.disabled = !option.value || (option.value !== 'manual' && fanOfficial().control_available !== true);
+if (selector) for (const option of selector.options) option.disabled = !option.value || option.value.startsWith('legacy:') || (option.value !== 'manual' && fanOfficial().control_available !== true);
 }
 }
 };
@@ -5682,7 +5687,7 @@ card._sync();
 }
 SET_SCHEMA.length = 0;
 SET_SCHEMA.push(
-{ id: 'r1-fan', title: '双路风扇', icon: 'fan', desc: 'CPU 选择自动或手动；系统风扇可切换四种原厂档位，或手动独立接管。保存后等待当前运行状态确认。', custom: r1FanSettings },
+{ id: 'r1-fan', title: '双路风扇', icon: 'fan', desc: 'CPU 高／中／低为独立固定输出，系统高／中／低为原厂档位；手动直接编辑温控曲线。点击保存立即应用，选择自动恢复原厂管理。', custom: r1FanSettings },
 { id: 'r1-light', title: '机身灯光', icon: 'palette', desc: '手动灯效或按温度连续混色，可设置夜间亮度上限。默认只读探测；保存并确认后接管。', custom: r1LightSettings },
 { id: 'r1-screen', title: '小屏与显示', icon: 'layout', desc: '亮度、息屏与夜间调暗；屏幕能力未验证时不提供操作。', custom: r1ScreenSettings },
 { id: 'r1-monitor', title: '历史与告警', icon: 'pulse', desc: '历史采样、保留天数、流量统计范围与本地告警阈值。', custom: r1MonitorSettings },

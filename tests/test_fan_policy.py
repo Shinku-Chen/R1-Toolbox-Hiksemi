@@ -42,6 +42,9 @@ class Adapter:
     def capabilities(self):
         return {"available": self.available, "channels": ["cpu", "system"], "rpm_available": False}
 
+    def snapshot(self):
+        return {"phase": "active" if self.channels else "idle", "active_channels": sorted(self.channels)}
+
     def start(self, channels):
         self.calls.append(("start", set(channels)))
         self.channels = set(channels)
@@ -363,6 +366,7 @@ class NativeModeTests(unittest.TestCase):
         self.mode = "low"
         self.histor.snapshot.side_effect = lambda: {
             "available": True, "control_available": True, "mode": self.mode, "scope": "system_fan"}
+        self.histor.verified_mode.side_effect = lambda: self.mode
         self.histor.set_mode.side_effect = self.set_mode
         sources = mock.Mock()
         sources.snapshot.return_value = [source("cpu", 40)]
@@ -431,6 +435,235 @@ class NativeModeTests(unittest.TestCase):
         self.assertEqual(state["official"]["mode"], "high")
         self.assertFalse(state["channels"]["system"]["active"])
         self.assertNotIn("自动", state["channels"]["system"]["reason"])
+
+    def test_same_live_cpu_mask_changes_fixed_output_without_release_start_or_intermediate_full(self):
+        value = self.native_config("manual", "low")
+        value["channels"]["cpu"]["manual_percent"] = 75
+        self.apply(value)
+        self.controller.tick()
+        self.adapter.calls.clear()
+        self.histor.set_mode.reset_mock()
+        for percent, raw in ((100, 255), (75, 191), (60, 153)):
+            value["channels"]["cpu"]["manual_percent"] = percent
+            state = self.apply(value)
+            self.assertEqual(self.adapter.calls, [("write", {"cpu": raw})])
+            self.assertEqual(state["channels"]["cpu"]["target_percent"], percent)
+            self.assertEqual(self.controller.active_config, value)
+            self.assertTrue(state["active_on_boot"])
+            self.assertIsNone(state["last_error"])
+            self.adapter.calls.clear()
+        self.histor.set_mode.assert_not_called()
+        self.assertGreaterEqual(self.histor.verified_mode.call_count, 4)
+
+    def test_same_mask_curve_edits_apply_fresh_decision_without_full_spike(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.calls.clear()
+        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], quiet_below=45,
+                                          normal_at=55, full_at=70, quiet_percent=55, normal_percent=75)
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 140})])
+        self.assertEqual(state["channels"]["cpu"]["level"], "quiet")
+        self.adapter.calls.clear()
+        value["channels"]["cpu"].update(quiet_percent=60, normal_at=53)
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 153})])
+        self.assertEqual(state["channels"]["cpu"]["reference_c"], 40)
+        self.assertEqual(self.controller.active_config, value)
+
+    def test_dual_curve_hysteresis_is_preserved_during_live_rule_edit(self):
+        value = self.native_config("manual", "low")
+        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], quiet_below=40,
+                                          normal_at=55, full_at=70, quiet_percent=55, normal_percent=75)
+        self.apply(value)
+        self.controller.sources.snapshot.return_value = [source("cpu", 60)]
+        self.controller.tick()
+        self.assertEqual(self.controller.channels["cpu"]["level"], "normal")
+        self.controller.sources.snapshot.return_value = [source("cpu", 48)]
+        value["channels"]["cpu"]["normal_percent"] = 80
+        self.adapter.calls.clear()
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 204})])
+        self.assertEqual(state["channels"]["cpu"]["level"], "normal")
+
+    def test_same_mask_dual_edit_updates_both_targets_without_restarting_either(self):
+        value = self.native_config("manual", "low")
+        value["channels"]["system"]["mode"] = "manual"
+        self.apply(value)
+        self.adapter.calls.clear()
+        value["channels"]["cpu"]["manual_percent"] = 60
+        value["channels"]["system"]["manual_percent"] = 80
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 153, "system": 204})])
+
+    def test_edit_uses_new_cpu_sample_and_keeps_overheat_missing_and_stale_protection(self):
+        value = self.native_config("manual", "low")
+        value["channels"]["cpu"]["manual_percent"] = 75
+        self.apply(value)
+        for rows in ([source("cpu", 80)], [], [source("cpu", 40, stamp=0)], [source("cpu", 40)]):
+            with self.subTest(rows=rows):
+                # The old catalog deliberately disagrees with the source read.
+                self.controller.catalog = [source("cpu", 40 if rows != [source("cpu", 40)] else 90)]
+                self.controller.sources.snapshot.return_value = rows
+                self.adapter.calls.clear()
+                state = self.apply(value)
+                percent = 75 if rows == [source("cpu", 40)] else 100
+                self.assertEqual(self.adapter.calls, [("write", {"cpu": round(percent * 255 / 100)})])
+                self.assertEqual(state["channels"]["cpu"]["target_percent"], percent)
+
+    def test_unreadable_sources_use_safe_full_without_restarting_active_mask(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.calls.clear()
+        self.controller.sources.snapshot.side_effect = OSError("fixture sensor unavailable")
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 255})])
+        self.assertEqual(state["channels"]["cpu"]["level"], "failsafe")
+        self.assertTrue(state["channels"]["cpu"]["active"])
+
+    def test_stopped_supervisor_and_changed_mask_keep_initial_full_handoff(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.calls.clear()
+        with mock.patch.object(self.adapter, "snapshot", return_value={"phase": "released", "active_channels": []}):
+            self.apply(value)
+        self.assertEqual(self.adapter.calls, [("start", {"cpu"}), ("write", {"cpu": 255})])
+        self.adapter.calls.clear()
+        value["channels"]["system"]["mode"] = "manual"
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("start", {"cpu", "system"}), ("write", {"cpu": 255, "system": 255})])
+
+    def test_old_control_receipt_cannot_authorize_in_place_lowering(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.controller.channels["cpu"]["applied_monotonic"] = 90
+        # No vendor_mode means this test exercises the native ownership gate,
+        # rather than the existing explicit-official recovery precondition.
+        value["channels"]["system"].pop("vendor_mode")
+        self.adapter.calls.clear()
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("start", {"cpu"}), ("write", {"cpu": 255})])
+
+    def test_same_mask_write_failure_restores_and_never_commits_unacknowledged_rules(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        value["channels"]["cpu"]["manual_percent"] = 86
+        self.adapter.calls.clear()
+        self.adapter.failure = True
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("release",)])
+        self.assertFalse(state["active"])
+        self.assertFalse(state["active_on_boot"])
+        self.assertNotEqual(self.controller.active_config, value)
+        self.assertIsNotNone(state["last_error"])
+
+    def test_live_edit_still_requires_explicit_boolean_confirmation(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.calls.clear()
+        for confirmed in (None, False, "true", 1):
+            result = self.controller.action("fan.policy.update", {"config": value, "apply": True,
+                                            "confirmed": confirmed})
+            self.assertFalse(result["ok"])
+        self.assertEqual(self.adapter.calls, [])
+
+    def test_failed_live_edit_recovery_keeps_unconfirmed_marker(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.failure = True
+        with mock.patch.object(self.adapter, "release", side_effect=RuntimeError("fixture recovery rejected")):
+            state = self.apply(value)
+        self.assertFalse(state["recovery_confirmed"])
+        self.assertFalse(state["active"])
+        self.assertFalse(state["active_on_boot"])
+
+    def test_source_failure_stop_request_never_writes_a_new_edit_target(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        def stopped_source():
+            self.controller.stop_event.set()
+            return [source("cpu", 40)]
+        self.controller.sources.snapshot.side_effect = stopped_source
+        self.adapter.calls.clear()
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("release",)])
+        self.assertFalse(state["active"])
+
+    def test_same_native_grade_skips_rpc_but_external_change_requires_ordered_handoff(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.calls.clear()
+        # The UI cache says low but a fresh passive read sees the vendor app's
+        # newer high selection. Skipping based on snapshot alone would be wrong.
+        self.histor.snapshot.side_effect = None
+        self.histor.snapshot.return_value = {"available": True, "control_available": True, "mode": "low"}
+        self.mode = "high"
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "low"),
+                                             ("start", {"cpu"}), ("write", {"cpu": 255})])
+        self.adapter.calls.clear()
+        self.histor.set_mode.reset_mock()
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 178})])
+        self.histor.set_mode.assert_not_called()
+
+    def test_unknown_passive_mode_cannot_authorize_omitting_vendor_rpc(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        self.adapter.calls.clear()
+        self.histor.verified_mode.side_effect = None
+        self.histor.verified_mode.return_value = None
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "low"),
+                                             ("start", {"cpu"}), ("write", {"cpu": 255})])
+
+    def test_live_edit_during_real_histor_rpm_poll_keeps_existing_native_ownership(self):
+        from test_histor import histor
+        from types import SimpleNamespace
+        entered, finish = threading.Event(), threading.Event()
+        failures = []
+        root = self.directory / "passive-host"
+        program = root / "histor/bin/product_test"
+        program.parent.mkdir(parents=True)
+        program.write_text("fixture factory query, never executed", encoding="utf-8")
+        config_path = root / "tmp/nand_config/config.txt"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text('{"fan":{"fan_mode":2}}', encoding="utf-8")
+        def slow_rpm(argv, timeout):
+            entered.set()
+            if not finish.wait(3):
+                raise TimeoutError("fixture poll did not finish")
+            return SimpleNamespace(stdout="cpu[1300]-sys[850]", returncode=0)
+        native_histor = histor.HistorAdapter(root=root, allow_writes=True, hardware_supported=True,
+                                            clock=lambda: 100, runner=slow_rpm)
+        native_histor._has_device = native_histor._has_socket = lambda: True
+        native_histor._rpc = mock.Mock(side_effect=AssertionError("live edit must never call vendor RPC"))
+        self.controller.histor = native_histor
+        def poll():
+            try:
+                native_histor.poll_once()
+            except Exception as error:
+                failures.append(error)
+        with mock.patch.object(histor.os, "O_NONBLOCK", getattr(histor.os, "O_NONBLOCK", 0), create=True):
+            value = self.native_config("manual", "low")
+            value["channels"]["cpu"]["manual_percent"] = 75
+            self.apply(value)
+            self.adapter.calls.clear()
+            poller = threading.Thread(target=poll)
+            poller.start()
+            self.assertTrue(entered.wait(1))
+            try:
+                value["channels"]["cpu"]["manual_percent"] = 60
+                state = self.apply(value)
+                self.assertEqual(self.adapter.calls, [("write", {"cpu": 153})])
+                self.assertEqual(state["channels"]["cpu"]["target_percent"], 60)
+                self.assertFalse(finish.is_set())
+                native_histor._rpc.assert_not_called()
+            finally:
+                finish.set()
+                poller.join(timeout=2)
+        self.assertFalse(poller.is_alive())
+        self.assertEqual(failures, [])
 
     def test_official_rpc_waits_until_all_channel_recovery_has_returned_success(self):
         entered, finish = threading.Event(), threading.Event()

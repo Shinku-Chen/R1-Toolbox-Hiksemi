@@ -159,7 +159,11 @@ const SHEETS = {
   },
   disk: {
     icon: a => { const d = disksOf(S.o).find(z => z.name === a); return d ? diskIcon(d) : 'hdd'; },
-    title: a => '硬盘 ' + a, sub: (o, a) => { const d = disksOf(o).find(z => z.name === a); return d ? vendorModel(d) : ''; },
+    title: a => {
+      const d = disksOf(S.o).find(z => z.name === a);
+      const name = d && (d.user_name || d.volume_label || volumeName(d));
+      return name ? name + ' · ' + a : '硬盘 ' + a;
+    }, sub: (o, a) => { const d = disksOf(o).find(z => z.name === a); return d ? vendorModel(d) : ''; },
     build(b, a) {
       const d0 = disksOf(S.o).find(z => z.name === a);
       if (!d0) { b.innerHTML = `<div class="empty"><b>未找到硬盘 ${esc(a)}</b><span>它可能已被移除，或尚未被识别。</span></div>`; return; }
@@ -238,7 +242,7 @@ const SHEETS = {
             : slotState === 'ready'
               ? '<span class="faint" title="iDRAC 明细里没有这块盘：可能不在阵列卡下，或序列号对不上">—</span>'
               : '<span class="faint" title="iDRAC 未启用，读不到机箱槽位（设置 → iDRAC 里填地址和账号即可）">—</span>';
-        setHTML(x.info, kvHTML([['型号', dash(vendorModel(dd))], ['序列号', `<span class="mono">${dash(dd.serial)}</span>`],
+        setHTML(x.info, kvHTML([['名称', esc(volLabel(dd))], ['型号', dash(vendorModel(dd))], ['序列号', `<span class="mono">${dash(dd.serial)}</span>`],
           ['类型', KIND_TXT[diskKind(dd)]], ['硬盘容量', F.dsizeStr(dd.size)],
           ['挂载点', `<span class="mono">${dash((dd.mounts || []).join(', '))}</span>`],
           ['实际硬盘位', slot]].concat(extra)));

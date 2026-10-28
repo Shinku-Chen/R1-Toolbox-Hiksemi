@@ -88,7 +88,7 @@ def read_bundle(tar_path, expected_sha):
                         'ui.tar 包含不支持的目录：' + name)
                 continue
             require(name in ('manifest.json', 'frontend/index.html', 'runtime/ui_service.py',
-                             'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
+                             'runtime/toolbox.py', 'runtime/insights.py', 'runtime/disk_names.py', 'runtime/device_info.py', 'runtime/histor.py',
                              'runtime/web_config.py', 'runtime/fan_policy.py', 'runtime/fan_native.py',
                              'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'runtime/fan_guard.so', 'frontend/web/index.html',
                              'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py',
@@ -122,7 +122,7 @@ def read_bundle(tar_path, expected_sha):
         require(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest)
                 and hashlib.sha256(files[name]).hexdigest() == digest, 'manifest 文件校验失败：' + name)
     require(all(files.get(name) for name in ('frontend/index.html', 'runtime/ui_service.py',
-                                           'runtime/toolbox.py', 'runtime/insights.py', 'runtime/device_info.py', 'runtime/histor.py',
+                                           'runtime/toolbox.py', 'runtime/insights.py', 'runtime/disk_names.py', 'runtime/device_info.py', 'runtime/histor.py',
                                            'runtime/web_config.py', 'runtime/fan_policy.py', 'runtime/fan_native.py',
                                            'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'frontend/web/index.html',
                                            'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py',

@@ -4,6 +4,8 @@
    ===================================================================== */
 
 /* 双路温控 / 灯光 / 小屏卡片的共享行布局 */
+.bay-top > span:first-child { min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+.sheet-title { overflow-wrap: anywhere; }
 .r1-chans { display: grid; gap: 14px; }
 .r1-chan { background: var(--card-sunk); border-radius: 18px; padding: 16px 18px; }
 .r1-chan-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }

@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -280,6 +281,187 @@ class HistorTests(unittest.TestCase):
         self.assertIsNone(state["cpu_rpm"])
         with self.assertRaises(ValueError):
             adapter.set_mode("high", confirmed=True)
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_reads_current_native_config_even_when_cache_is_stale_without_commands(self):
+        adapter = self.activate()
+        self.assertEqual(adapter.snapshot()["mode"], "auto")
+        original_calls = list(self.calls)
+        self.now += 16
+        self.write("/tmp/nand_config/config.txt", '{"fan":{"fan_mode":2},"password":"must-not-return"}')
+        self.assertFalse(adapter.snapshot()["control_available"])
+        self.assertEqual(adapter.verified_mode(), "low")
+        self.assertEqual(adapter.snapshot()["mode"], "low")
+        self.assertFalse(adapter.snapshot()["control_available"])
+        self.assertEqual(self.calls, original_calls)
+        self.assertEqual(self.sockets.sent, [])
+        self.assertNotIn("must-not-return", json.dumps(adapter.snapshot()))
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_keeps_writes_disabled_failed_rpc_and_stopped_gates(self):
+        for state in ("writes_disabled", "rpc_disabled", "stopped", "device_missing", "socket_missing"):
+            with self.subTest(state=state):
+                adapter = self.adapter(True)
+                if state == "writes_disabled":
+                    adapter.allow_writes = False
+                elif state == "rpc_disabled":
+                    adapter._control_disabled = True
+                elif state == "stopped":
+                    adapter.stopped.set()
+                elif state == "device_missing":
+                    adapter._has_device = lambda: False
+                else:
+                    adapter._has_socket = lambda: False
+                self.assertIsNone(adapter.verified_mode())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.sockets.sent, [])
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_requires_known_current_driver_and_rechecks_after_read(self):
+        adapter = self.native_adapter(histor._SUPPORTED_DRIVER_NOTE)
+        self.assertEqual(adapter.verified_mode(), "auto")
+        self.write("/sys/module/hikio/notes/.note.gnu.build-id", histor._UNSUPPORTED_DRIVER_NOTE)
+        self.assertIsNone(adapter.verified_mode())
+        self.write("/sys/module/hikio/notes/.note.gnu.build-id", histor._SUPPORTED_DRIVER_NOTE)
+        original_mode = adapter._config_mode
+        def replaced_during_mode_read():
+            value = original_mode()
+            self.write("/sys/module/hikio/notes/.note.gnu.build-id", histor._UNSUPPORTED_DRIVER_NOTE)
+            return value
+        adapter._config_mode = replaced_during_mode_read
+        self.assertIsNone(adapter.verified_mode())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.sockets.sent, [])
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_never_waits_behind_factory_rpm_poll_or_connects_rpc(self):
+        adapter = self.adapter(True)
+        entered, finish = threading.Event(), threading.Event()
+        failures = []
+        def slow_runner(argv, timeout):
+            self.calls.append((argv, timeout))
+            entered.set()
+            if not finish.wait(3):
+                raise TimeoutError("fixture RPM poll did not finish")
+            return SimpleNamespace(stdout="cpu[1300]-sys[850]", stderr="", returncode=0)
+        def poll():
+            try:
+                adapter.poll_once()
+            except Exception as error:
+                failures.append(error)
+        adapter.runner = slow_runner
+        worker = threading.Thread(target=poll)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        try:
+            self.write("/tmp/nand_config/config.txt", '{"fan":{"fan_mode":2}}')
+            self.assertEqual(adapter.verified_mode(), "low")
+            self.assertFalse(finish.is_set())
+            self.assertEqual(adapter._mode_generation, 0)
+        finally:
+            finish.set()
+            worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.sockets.sent, [])
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_rejects_read_during_real_set_rpc_without_waiting(self):
+        adapter = self.activate()
+        entered, finish = threading.Event(), threading.Event()
+        results, failures, commands = [], [], []
+        def rpc(command, value):
+            commands.append((command, value))
+            if command == "set_fan_status":
+                self.write("/tmp/nand_config/config.txt", '{"fan":{"fan_mode":4}}')
+                return "OK!"
+            if len(commands) == 1:
+                entered.set()
+                self.assertTrue(finish.wait(3))
+                return "5"
+            return "4"
+        def change():
+            try:
+                results.append(adapter.set_mode("high", confirmed=True))
+            except Exception as error:
+                failures.append(error)
+        adapter._rpc = rpc
+        worker = threading.Thread(target=change)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        try:
+            self.assertIsNone(adapter.verified_mode())
+            self.assertTrue(adapter._mode_mutating)
+            self.assertFalse(finish.is_set())
+        finally:
+            finish.set()
+            worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(results[0]["mode"], "high")
+        self.assertFalse(adapter._mode_mutating)
+        self.assertEqual(adapter._mode_generation, 2)
+        self.assertEqual(adapter.verified_mode(), "high")
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_generation_rejects_complete_rpc_overlapping_passive_read(self):
+        adapter = self.activate()
+        entered, finish = threading.Event(), threading.Event()
+        results, failures = [], []
+        original_mode = adapter._config_mode
+        reader = None
+        def config_read():
+            value = original_mode()
+            if threading.current_thread() is reader:
+                entered.set()
+                self.assertTrue(finish.wait(3))
+            return value
+        def rpc(command, value):
+            if command == "set_fan_status":
+                self.write("/tmp/nand_config/config.txt", '{"fan":{"fan_mode":4}}')
+                return "OK!"
+            return str(original_mode())
+        def read():
+            try:
+                results.append(adapter.verified_mode())
+            except Exception as error:
+                failures.append(error)
+        adapter._config_mode, adapter._rpc = config_read, rpc
+        reader = threading.Thread(target=read)
+        reader.start()
+        self.assertTrue(entered.wait(1))
+        try:
+            self.assertEqual(adapter.set_mode("high", confirmed=True)["mode"], "high")
+        finally:
+            finish.set()
+            reader.join(timeout=2)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(results, [None])
+        self.assertFalse(adapter._mode_mutating)
+        self.assertEqual(adapter._mode_generation, 2)
+        self.assertEqual(adapter.snapshot()["mode"], "high")
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_fence_closes_after_failed_set_and_keeps_control_disabled(self):
+        adapter = self.activate()
+        with patch.object(adapter, "_rpc", return_value="invalid"):
+            with self.assertRaises(ValueError):
+                adapter.set_mode("high", confirmed=True)
+        self.assertFalse(adapter._mode_mutating)
+        self.assertEqual(adapter._mode_generation, 2)
+        self.assertIsNone(adapter.verified_mode())
+
+    @patch.object(histor.os, "O_NONBLOCK", getattr(os, "O_NONBLOCK", 0), create=True)
+    def test_verified_mode_rejects_unknown_native_mode_without_initializing_defaults(self):
+        adapter = self.adapter(True)
+        for data in ('{}', '{"fan":{"fan_mode":1}}', '{"fan":{"fan_mode":true}}', 'bad json'):
+            with self.subTest(data=data):
+                self.write("/tmp/nand_config/config.txt", data)
+                self.assertIsNone(adapter.verified_mode())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.sockets.sent, [])
 
     def test_stop_never_restores_guessed_vendor_policy_or_restarts_worker(self):
         adapter = self.activate()

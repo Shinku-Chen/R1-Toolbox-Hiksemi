@@ -68,19 +68,20 @@
   const titles = {
     overview: '概览', storage: '存储', network: '网络', apps: '应用', thermal: '温度与风扇', controls: '设置',
     metrics: '核心指标', processor: '处理器与内存', trends: '历史趋势',
-    containers: 'Docker 容器', container: '容器详情', ports: '监听端口', web: '网页设置', power: '电源管理',
+    container: '容器详情', ports: '监听端口', web: '网页设置', power: '电源管理',
   };
   const parentTabs = {
     metrics: 'overview', processor: 'overview', trends: 'overview',
-    containers: 'apps', container: 'apps', ports: 'network', web: 'controls', power: 'controls',
+    container: 'apps', ports: 'network', web: 'controls', power: 'controls',
   };
 
   const icons = {
-    overview: '<path d="M3 10 12 3l9 7v10H3Z"/><path d="M9 20v-7h6v7"/>',
-    storage: '<rect x="4" y="3" width="16" height="18" rx="4"/><path d="M4 14h16M8 18h1m3 0h1"/>',
-    network: '<path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/>',
-    apps: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
-    controls: '<path d="M3 6h18M3 18h18M3 12h18"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="9" cy="18" r="2"/>',
+    overview: '<path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5H15v-6H9v6H5.5A1.5 1.5 0 0 1 4 19v-8.5Z"/>',
+    storage: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>',
+    network: '<path d="M7.5 20V4m0 0L4 7.5M7.5 4 11 7.5M16.5 4v16m0 0L13 16.5m3.5 3.5 3.5-3.5"/>',
+    apps: '<path d="M12 2.8 20.5 7.4v9.2L12 21.2l-8.5-4.6V7.4L12 2.8Z"/><path d="M3.5 7.4 12 12l8.5-4.6M12 12v9.2"/>',
+    thermal: '<path d="M14 14.76V5a2 2 0 1 0-4 0v9.76a4 4 0 1 0 4 0Z"/><path d="M12 9.5v8"/>',
+    controls: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>',
     back: '<path d="m15 5-7 7 7 7"/>',
     fan: '<circle cx="12" cy="12" r="2"/><path d="M10 10C2 11 3 2 9 3c4 0 5 4 3 7m2 1c3-8 10-2 6 3-2 3-6 2-7 0m-2 0c6 6-3 10-5 5-2-4 1-7 4-7"/>',
   };
@@ -489,13 +490,16 @@
     return `<article class="card"><div class="card-top"><p class="kicker">PROCESSOR</p><span class="badge">负载 ${load === null ? '--' : esc(load.toFixed(2))}</span></div><div class="big-value lime">${dotNumber(percentText(system.cpu_usage_percent ?? obj(state.data.status).cpu?.usage_percent))}<small>%</small></div><p class="body-copy" style="margin-top:16px">${esc(cpuModel())}</p><p class="caption">${cpuCores() || '--'} 逻辑核心${num(obj(obj(insights.device).cpu).physical_cores, 1) ? ' · ' + obj(obj(insights.device).cpu).physical_cores + ' 物理核心' : ''} · ${esc(obj(obj(insights.device).cpu).architecture || '')}</p><div class="divider"></div>${cores.slice(0, 8).map((core, index) => `<div class="core-row"><span>核心 ${index + 1}</span>${bar(core.usage_percent, statusLevel(core.usage_percent) === 'warn' ? 'var(--orange)' : 'var(--lime)')}<span class="mono">${percentText(core.usage_percent)}%</span></div>`).join('')}${cores.length ? '' : '<p class="caption">分核读数暂不可用。</p>'}${spark(state.live.cpu, 'lime')}</article><article class="card"><div class="card-top"><p class="kicker">MEMORY</p><span class="badge neutral">${bytes(mem.total)}</span></div><div class="big-value purple">${dotNumber(percentText(mem.percent))}<small>%</small></div><p class="body-copy" style="margin:16px 0">${bytes(mem.used)} / ${bytes(mem.total)}</p>${bar(mem.percent, 'var(--purple)')}<div class="stat-row"><span class="muted">可用内存</span><span class="value">${bytes(mem.available)}</span></div><div class="stat-row"><span class="muted">交换空间</span><span class="value">${mem.swapTotal ? bytes(mem.swapUsed) + ' / ' + bytes(mem.swapTotal) : '--'}</span></div></article>${menu('trends', '查看历史趋势', 'CPU、内存与温度曲线')}`;
   }
 
+  // These labels come from explicit host metadata, never from a model or mount path.
+  const driveName = (disk, index = 0) => disk.user_name || disk.display_name || disk.id || 'disk ' + (index + 1);
+
   function driveCard(disk, index) {
     const temp = num(disk.temp_c, -40, 200);
     const standby = disk.standby === true;
     const size = bytes(disk.size_bytes);
     const health = obj(disk.health);
     const smart = health.passed === false ? 'SMART 异常' : health.passed === true ? 'SMART 正常' : 'SMART 未读取';
-    return `<article class="card"><div class="drive-row"><div class="drive-symbol" style="color:${standby ? 'var(--dim)' : temp !== null && temp >= 50 ? 'var(--orange)' : 'var(--green)'}"><svg viewBox="0 0 28 58" aria-hidden="true" fill="currentColor">${Array.from({ length: 10 }, (_, row) => `<circle cx="8" cy="${6 + row * 5}" r="1.7"/><circle cx="14" cy="${6 + row * 5}" r="1.7"/><circle cx="20" cy="${6 + row * 5}" r="1.7"/>`).join('')}</svg></div><div class="drive-content"><div class="drive-title"><h3>${esc(disk.id || 'disk ' + (index + 1))}</h3><span class="drive-temperature ${standby ? 'muted' : temp !== null && temp >= 50 ? 'orange' : 'green'}">${standby ? '--' : tempText(temp)}</span></div><p class="drive-meta">${esc(disk.model || '未知型号')} · ${esc(size)}</p>${standby ? '<p class="drive-standby">休眠中 · 保留休眠，不主动唤醒</p>' : `<p class="caption">${esc(smart)}${num(disk.temperature_critical_c, 0) ? ' · 临界 ' + disk.temperature_critical_c + '°C' : ''}</p>`}</div></div></article>`;
+    return `<article class="card"><div class="drive-row"><div class="drive-symbol" style="color:${standby ? 'var(--dim)' : temp !== null && temp >= 50 ? 'var(--orange)' : 'var(--green)'}"><svg viewBox="0 0 28 58" aria-hidden="true" fill="currentColor">${Array.from({ length: 10 }, (_, row) => `<circle cx="8" cy="${6 + row * 5}" r="1.7"/><circle cx="14" cy="${6 + row * 5}" r="1.7"/><circle cx="20" cy="${6 + row * 5}" r="1.7"/>`).join('')}</svg></div><div class="drive-content"><div class="drive-title"><h3>${esc(driveName(disk, index))}</h3><span class="drive-temperature ${standby || temp === null ? 'muted' : temp >= 50 ? 'orange' : 'green'}">${tempText(temp)}</span></div><p class="drive-meta">${esc(disk.model || '未知型号')} · ${esc(size)}</p>${standby ? `<p class="drive-standby">休眠中 · ${temp === null ? '暂无缓存读数' : '已有缓存读数'} · 不主动唤醒</p>` : `<p class="caption">${esc(smart)}${num(disk.temperature_critical_c, 0) ? ' · 临界 ' + disk.temperature_critical_c + '°C' : ''}</p>`}</div></div></article>`;
   }
 
   function storage() {
@@ -527,13 +531,18 @@
     const docker = dstate();
     const listRows = containers();
     const running = listRows.filter(item => item.state === 'running').length;
-    return `<article class="card"><div class="card-top"><p class="kicker">CONTAINERS</p><span class="badge ${docker.available ? '' : 'warn'}"><span class="dot"></span>${docker.available ? 'Docker' : '不可用'}</span></div><div class="app-summary lime">${dotNumber(String(running))}<span class="slash">/</span><span class="total">${listRows.length}</span></div><div class="app-count-meta"><span>运行中</span><span>${listRows.length - running} 个已停止</span></div>${docker.available ? '' : `<p class="caption" style="margin-top:14px">${esc(docker.reason || 'Docker 状态暂不可读')}</p>`}</article><div class="section-label"><h2>RUNNING / 容器预览</h2><button type="button" data-view="containers">全部 ›</button></div>${listRows.slice(0, 3).map(item => appCard(item)).join('')}${listRows.length ? '' : '<p class="info-note">没有可显示的容器。</p>'}`;
+    return `<article class="card"><div class="card-top"><p class="kicker">CONTAINERS</p><span class="badge ${docker.available ? '' : 'warn'}"><span class="dot"></span>${docker.available ? 'Docker' : '不可用'}</span></div><div class="app-summary lime">${dotNumber(String(running))}<span class="slash">/</span><span class="total">${listRows.length}</span></div><div class="app-count-meta"><span>运行中</span><span>${listRows.length - running} 个已停止</span></div>${docker.available ? '' : `<p class="caption" style="margin-top:14px">${esc(docker.reason || 'Docker 状态暂不可读')}</p>`}</article><div class="section-label"><h2>DOCKER / 全部容器</h2><span>${listRows.length} 个</span></div>${listRows.map(item => appCard(item)).join('')}${listRows.length ? '' : '<p class="info-note">没有可显示的容器。</p>'}<p class="info-note">点击容器查看详情与操作。容器 CPU 可超过 100%，未知统计显示为 --。</p>`;
   }
 
-  function containersView() {
-    const docker = dstate();
-    const rows = containers();
-    return `<div class="detail-lead"><p class="kicker">DOCKER CONTAINERS</p><h2>${rows.filter(item => item.state === 'running').length} 个容器运行中</h2><p>${rows.length} 个已发现 · 点击查看详情与操作</p></div>${rows.map(item => appCard(item)).join('')}${rows.length ? '' : `<p class="info-note">${esc(docker.reason || '没有可显示的容器')}</p>`}<p class="info-note">容器 CPU 可超过 100%。未知统计显示为 --。</p>`;
+  /** Render only the existing insights cache; opening this page never queries SMART. */
+  function diskTemperatures(insights) {
+    const drives = list(obj(insights.disks).items).filter(row => row && row.id);
+    return `<article class="card disk-temperatures"><div class="card-top"><h2>硬盘温度</h2><span class="badge neutral">后台缓存</span></div>${drives.map((disk, index) => {
+      const value = num(disk.temp_c, -40, 200);
+      const standby = disk.standby === true;
+      const note = standby ? '休眠中 · ' + (value === null ? '暂无缓存读数' : '已有缓存读数') : value === null ? '温度暂不可读' : '后台采集读数';
+      return `<div class="temperature-row disk-temperature-row" data-disk="${esc(disk.id)}"><div class="temperature-top"><span>${esc(driveName(disk, index))}</span><b class="${standby || value === null ? 'muted' : value >= 50 ? 'orange' : 'green'}">${tempText(value)}</b></div><p class="caption">${esc(note)}</p>${value !== null && !standby ? bar(Math.max(0, Math.min(100, (value - 20) / 40 * 100)), value >= 50 ? 'var(--orange)' : 'var(--green)') : ''}</div>`;
+    }).join('')}${drives.length ? '' : '<p class="caption">未读取到物理硬盘。</p>'}<p class="caption disk-temperature-note">保留休眠状态，不主动唤醒硬盘；缓存读数不代表当前温度。</p></article>`;
   }
 
   function containerView() {
@@ -554,7 +563,7 @@
     return `<article class="card"><div class="card-top"><p class="kicker">THERMAL SENSORS</p><span class="badge ${statusLevel(cpuTemp()) === 'warn' || statusLevel(cpuTemp()) === 'crit' ? 'warn' : 'neutral'}">${temps.length} 个测点</span></div>${temps.map(row => {
       const value = row.celsius;
       return `<div class="temperature-row"><div class="temperature-top"><span>${esc(row.label || row.channel || '传感器')}${row.driver ? ' · ' + esc(row.driver) : ''}</span><b class="${value >= 55 ? 'orange' : 'green'}">${tempText(value)}</b></div>${bar(Math.max(0, Math.min(100, (value - 20) / 60 * 100)), value >= 55 ? 'var(--orange)' : 'var(--green)')}</div>`;
-    }).join('')}${temps.length ? '' : '<p class="caption">暂未读取到温度传感器。</p>'}</article><article class="card"><div class="card-top"><p class="kicker">FANS</p><span class="badge neutral">${policy.active ? '独立温控' : '原厂管理'}</span></div>${fans.map(fan => `<div class="fan-row"><span class="fan-label">${esc(fan.label || fan.channel || '风扇')}</span><span class="fan-value">${num(fan.rpm, 0) === null ? '--' : fan.rpm} <small>RPM</small></span></div>`).join('')}${channels.cpu ? `<div class="divider"></div>${['cpu', 'system'].map(name => {
+    }).join('')}${temps.length ? '' : '<p class="caption">暂未读取到温度传感器。</p>'}</article>${diskTemperatures(insights)}<article class="card"><div class="card-top"><p class="kicker">FANS</p><span class="badge neutral">${policy.active ? '独立温控' : '原厂管理'}</span></div>${fans.map(fan => `<div class="fan-row"><span class="fan-label">${esc(fan.label || fan.channel || '风扇')}</span><span class="fan-value">${num(fan.rpm, 0) === null ? '--' : fan.rpm} <small>RPM</small></span></div>`).join('')}${channels.cpu ? `<div class="divider"></div>${['cpu', 'system'].map(name => {
       const channel = obj(channels[name]);
       return `<div class="fan-row"><span class="fan-label">${name === 'cpu' ? 'CPU' : '系统'}温控</span><span class="fan-value" style="font-size:19px">${channel.active ? tempText(channel.reference_c) + ' · ' + percentText(channel.target_percent) + '%' : '原厂管理'}</span></div>`;
     }).join('')}` : ''}</article>${fanControl(policy)}`;
@@ -722,7 +731,7 @@
     return `<div class="detail-lead"><p class="kicker">CONTINUE ON THE WEB</p><h2>大一点的屏幕，<br>更完整的设置。</h2></div><article class="card"><div class="card-top"><h2>网页访问地址</h2><span class="badge neutral">${web.enabled ? '已启用' : '未启用'}</span></div><p class="web-address">${esc(address || '--')}</p><p class="body-copy">${address ? '在同一局域网的手机或电脑上打开。' : '网页服务暂未返回可访问地址。'}</p><div class="divider"></div><p class="caption">${passwordMode ? '写操作使用登录口令保护；默认未启用口令。' : '网页默认公开只读；修改设置需要一次性配对码或登录口令。'}</p></article>${accessCard}<article class="card"><p class="kicker">AVAILABLE ON THE WEB</p><div class="stat-row"><span>风扇温控</span><span class="caption">曲线与来源</span></div><div class="stat-row"><span>机身灯光</span><span class="caption">颜色与联动</span></div><div class="stat-row"><span>${passwordMode ? '登录口令' : '登录与配对'}</span><span class="caption">${passwordMode ? '可选保护' : '保护写操作'}</span></div></article><p class="info-note">局域网 HTTP 未加密，请只在可信网络使用；${passwordMode ? '写操作默认开放，建议设置登录口令。' : '公开监控与配对共用同一端口。'}</p>`;
   }
 
-  const views = { overview, metrics, processor, storage, network, apps, containers: containersView, container: containerView, thermal, trends, ports, controls, power, web };
+  const views = { overview, metrics, processor, storage, network, apps, container: containerView, thermal, trends, ports, controls, power, web };
 
   // ------------------------------------------------------------------ actions
   function openConfirm({ title, message, accept, danger = false, onAccept }) {

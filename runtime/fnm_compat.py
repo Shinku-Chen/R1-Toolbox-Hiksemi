@@ -673,6 +673,10 @@ class FnmonitorPanel:
             media = ('HDD' if rpm == 1 else 'SSD' if rpm == 0 else '')
             rows.append({
                 'name': name, 'device': item.get('device') or '/dev/' + name,
+                'user_name': _text(item.get('user_name'), 128),
+                'space_names': [_text(value, 128) for value in _list(item.get('space_names'), 256)
+                                if isinstance(value, str) and value.strip()],
+                'name_source': _text(item.get('name_source'), 64),
                 'model': _text(item.get('model') or physical.get('model'), 120),
                 'vendor': _text(physical.get('vendor'), 80),
                 'serial': _text(physical.get('serial'), 120),

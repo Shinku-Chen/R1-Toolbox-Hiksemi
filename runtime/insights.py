@@ -26,6 +26,7 @@ import time
 import uuid
 
 from device_info import collect_device_info
+from disk_names import read_disk_names
 
 try:
     import fcntl
@@ -195,7 +196,8 @@ class InsightsCollector:
     def __init__(self, proc_root="/proc", sys_root="/sys", runner=None,
                  command_finder=None, clock=None, sample_interval=2.0,
                  slow_interval=30.0, history_limit=120, ipv4_provider=None,
-                 page_size=None, clock_ticks=None, etc_root=None, run_root=None):
+                 page_size=None, clock_ticks=None, etc_root=None, run_root=None,
+                 disk_config_root=None):
         self.proc_root, self.sys_root = Path(proc_root), Path(sys_root)
         self.runner = runner or _command
         self.command_finder = command_finder or shutil.which
@@ -210,6 +212,9 @@ class InsightsCollector:
             Path("/etc") if self.proc_root == Path("/proc") else self.proc_root.parent / "etc")
         self.run_root = Path(run_root) if run_root is not None else (
             Path("/run") if self.proc_root == Path("/proc") else self.proc_root.parent / "run")
+        self.disk_config_root = Path(disk_config_root) if disk_config_root is not None else (
+            Path("/tmp/nand_config") if self.proc_root == Path("/proc") and self.sys_root == Path("/sys")
+            else self.proc_root.parent / "tmp/nand_config")
         self._lock = threading.RLock()
         self._action_lock = threading.Lock()
         self._stop = threading.Event()
@@ -600,8 +605,30 @@ class InsightsCollector:
         cached = self._smart_cache.get(name)
         return copy.deepcopy(cached[1]) if cached else None
 
+    def _disk_serial(self, name, folder):
+        """Use existing sysfs/udev metadata; never issue an identity probe."""
+        paths = [folder / "device/serial", folder / "serial"]
+        if name.startswith("nvme"):
+            controller = re.match(r"nvme\d+", name)[0]
+            paths.append(self.sys_root / "class/nvme" / controller / "serial")
+        values = set()
+        for path in paths:
+            value = (_text(path, 513) or "").strip()
+            if 0 < len(value) <= 512:
+                values.add(value)
+        dev = (_text(folder / "dev", 32) or "").strip()
+        if re.fullmatch(r"\d{1,6}:\d{1,6}", dev):
+            metadata = _text(self.run_root / "udev/data" / ("b" + dev), 65537) or ""
+            if len(metadata) <= 65536:
+                for line in metadata.splitlines():
+                    if line.startswith("E:ID_SERIAL_SHORT="):
+                        value = line.partition("=")[2].strip()
+                        if 0 < len(value) <= 512:
+                            values.add(value)
+        return next(iter(values)) if len(values) == 1 else None
+
     def _disks(self):
-        rows, active = [], set()
+        rows, active, serials = [], set(), {}
         for folder in sorted((self.sys_root / "block").glob("*"))[:128]:
             if self._stop.is_set():
                 break
@@ -609,6 +636,7 @@ class InsightsCollector:
             if not re.fullmatch(r"(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)", name):
                 continue
             active.add(name)
+            serials[name] = self._disk_serial(name, folder)
             sectors = _integer(folder / "size")
             rotational = _integer(folder / "queue/rotational")
             media = "NVMe SSD" if name.startswith("nvme") else "eMMC" if name.startswith("mmcblk") else "HDD" if rotational == 1 else "SSD" if rotational == 0 else None
@@ -629,7 +657,11 @@ class InsightsCollector:
                      "temperature_critical_c": smart.get('temperature_critical_c')}
             rows.append(entry)
         self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
-        return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows}
+        names = read_disk_names(serials, self.disk_config_root)
+        for row in rows:
+            row.update(names["items"][row["id"]])
+        return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows,
+                "names": {"available": names["available"], "reason": names["reason"]}}
 
     def _container_listing(self, timeout=DOCKER_READ_TIMEOUT):
         command, error = self._run("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"], timeout=timeout)

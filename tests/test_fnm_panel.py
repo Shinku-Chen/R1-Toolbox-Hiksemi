@@ -332,6 +332,25 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(row['volume'], 'VOL1')
         self.assertIsNone(row['volume_label'])
 
+    def test_disk_names_are_copied_from_background_and_keep_space_scope(self):
+        class NamedInsights(Insights):
+            def snapshot(self):
+                data = super().snapshot()
+                data['disks']['items'][0].update(user_name='家庭照片', space_names=[],
+                                                 name_source='hiksemi_space_db')
+                data['disks']['items'][1].update(user_name=None, space_names=['共享 RAID'],
+                                                 name_source='hiksemi_space_db')
+                return data
+
+        panel = panel_for(tempfile.mkdtemp(prefix='r1-panel-names-'), insights=NamedInsights())
+        rows = panel.overview()['disks_detail']
+        self.assertEqual(rows[0]['name'], 'sda')
+        self.assertEqual(rows[0]['user_name'], '家庭照片')
+        self.assertEqual(rows[0]['space_names'], [])
+        self.assertEqual(rows[0]['name_source'], 'hiksemi_space_db')
+        self.assertIsNone(rows[1]['user_name'])
+        self.assertEqual(rows[1]['space_names'], ['共享 RAID'])
+
     def test_volume_label_falls_back_to_udev_database(self):
         sys_root = Path(tempfile.mkdtemp(prefix='r1-panel-sys-'))
         dev = sys_root / 'block' / 'sda'

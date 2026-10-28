@@ -80,6 +80,7 @@ class Adapter:
     def __init__(self, available):
         self.available, self.channels, self.targets = available, set(), {}
         self.fail_release = False
+        self.starts, self.releases = 0, 0
         self.reason = "模拟设备：原厂风扇配置无法解析"
     def capabilities(self):
         return {'available': self.available, 'reason': '' if self.available else self.reason,
@@ -87,13 +88,17 @@ class Adapter:
     def start(self, channels):
         assert self.available
         time.sleep(0.15)
+        self.starts += 1
         self.channels = set(channels)
+    def snapshot(self):
+        return {'phase': 'active' if self.channels else 'released', 'active_channels': sorted(self.channels)}
     def write(self, targets):
         assert set(targets) <= self.channels and all(type(value) is int and 128 <= value <= 255 for value in targets.values())
         self.targets = dict(targets)
     def release(self):
         if self.fail_release:
             raise OSError("fixture restore not acknowledged")
+        self.releases += 1
         self.channels, self.targets = set(), {}
 policies = []
 officials = {}
@@ -106,6 +111,8 @@ class Histor:
         return {'available': self.available, 'control_available': self.available, 'mode': self.mode,
                 'scope': 'system_fan', 'cpu_policy': 'vendor_auto',
                 'reason': '' if self.available else 'fixture: vendor control unavailable'}
+    def verified_mode(self):
+        return self.mode if self.available else None
     def set_mode(self, mode, confirmed=True):
         assert confirmed is True and self.available and mode in ('auto', 'low', 'medium', 'high')
         self.mode = mode
@@ -146,7 +153,7 @@ class Insights:
                     'network':[{'name':'eth0','speed_mbps':2500,'ipv6_addresses':[{'address':'2001:db8:1234:5678:90ab:cdef:1234:5678','prefix_length':64,'scope':'global'}]}],
                     'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
                   'interfaces':[{'name':'eth0','ipv4':['192.168.1.10'],'mac':'00:11:22:33:44:55','operstate':'up','rx_bytes':400000000,'tx_bytes':100000000,'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000}],
-                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'smart_available':True,'health':{'passed':True},'volume':'FixtureVolume','volume_label':None,'mounts':['/drives/FixtureVolume']},{'id':'sdb','device':'/dev/sdb','model':'Fixture No SMART','size_bytes':2e12,'temp_c':None,'standby':False,'smart_available':False,'health':{'passed':None,'reason':'SMART 未读取'}}]},
+                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'smart_available':True,'health':{'passed':True},'user_name':'自定义 <img src=x onerror="window.diskNameInjected=1"> 数据盘','volume':'FixtureVolume','volume_label':'FixtureLabel','mounts':['/drives/FixtureVolume']},{'id':'sdb','device':'/dev/sdb','model':'Fixture No SMART','size_bytes':2e12,'temp_c':None,'standby':False,'smart_available':False,'health':{'passed':None,'reason':'SMART 未读取'}}]},
                   'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False,'cpu_percent':3.2,'memory_bytes':134217728,'memory_limit_bytes':1073741824,'ports':'0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp'},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
                   'vms':{'available':False,'reason':'fixture: no VM','items':[]},'ports':[{'protocol':'tcp','address':'127.0.0.1','port':18731}],
                   'processes':[{'pid':101,'name':'fixture-monitor','cpu_percent':1.2,'memory_bytes':40000000}],
@@ -202,6 +209,7 @@ try:
             primary.controller = controller(fixture)
             primary.fan_policy.stop()
             primary.fan_policy = policy(fixture, True)
+            primary.panel.fan_policy = primary.fan_policy
         elif operation == 'stale_board':
             board_stale = True
         elif operation == 'fresh_board':
@@ -214,6 +222,10 @@ try:
             with primary.fan_policy.lock:
                 primary.fan_policy.config['channels']['cpu'].update(mode='manual', manual_percent=75)
                 primary.fan_policy.config['channels']['system'].update(mode='manual', manual_percent=100)
+        elif operation == 'fan_legacy_other':
+            with primary.fan_policy.lock:
+                primary.fan_policy.config['channels']['cpu'].update(mode='manual', manual_percent=55)
+                primary.fan_policy.config['channels']['system'].update(mode='manual', manual_percent=73)
         elif operation == 'unsupported_official_unknown':
             unsupported.fan_policy.histor.mode = None
             with unsupported.fan_policy.lock:
@@ -241,6 +253,8 @@ try:
             with unsupported.fan_policy.lock:
                 unsupported.fan_policy.busy = False
             unsupported.fan_policy.tick()
+        elif operation == 'fan_calls':
+            pass
         elif operation == 'app_refresh':
             item = insights.data['containers']['items'][0]
             item['cpu_percent'] = round(item.get('cpu_percent', 0) + 1, 1)
@@ -250,7 +264,10 @@ try:
             insights.data['containers']['items'][0].update(state='running', available_actions=['stop','restart'])
         elif operation != 'stop':
             raise AssertionError('unknown fixture operation')
-        print(json.dumps({'id': request['id'], 'ok': True, 'command_count': len(commands)}), flush=True)
+        print(json.dumps({'id': request['id'], 'ok': True, 'command_count': len(commands),
+                          'fan_calls': {'starts': primary.fan_policy.adapter.starts,
+                                        'releases': primary.fan_policy.adapter.releases,
+                                        'official': len(primary.fan_policy.histor.calls)}}), flush=True)
         if operation == 'stop':
             break
 finally:
@@ -309,7 +326,7 @@ finally:
     page.on('response', async r => {
       if (!r.url().endsWith('/api/r1/fan')) return;
       let body = null; try { body = await r.json(); } catch (e) { body = null; }
-      fanResponses.push({ status: r.status(), body });
+      fanResponses.push({ status: r.status(), body, request: r.request().postDataJSON() });
     });
     const shot = async name => {
       if (!screenshotDir) return;
@@ -328,7 +345,7 @@ finally:
     };
     const reloadFanSettings = async target => {
       await target.reload();
-      await target.waitForSelector('#set-r1-fan [data-channel="system"] select');
+      await target.waitForSelector('#set-r1-fan .r1-edit[aria-busy="false"] [data-channel="system"] select');
     };
 
     /* 1. 面板加载 */
@@ -391,13 +408,18 @@ finally:
     await page.locator('#pageSeg button[data-page="storage"]').click();
     await page.waitForSelector('#layout-storage section[data-mod="storage"] .bay', { timeout: 8000 });
     check('存储页列出无 SMART 的物理盘', await page.locator('#layout-storage .bay').count() === 2);
-    await page.waitForFunction(() => /FixtureVolume/.test(document.querySelector('#layout-storage')?.textContent || ''), null, { timeout: 10000 }).catch(() => {});
-    check('存储页显示卷名而不是未挂载', /FixtureVolume/.test(await page.locator('#layout-storage').textContent()), await page.locator('#layout-storage').textContent());
+    const customDiskName = '自定义 <img src=x onerror="window.diskNameInjected=1"> 数据盘';
+    await page.waitForFunction(expected => [...document.querySelectorAll('#layout-storage .bay-top > span:first-child')].some(node => node.textContent === expected), customDiskName, { timeout: 10000 }).catch(() => {});
+    const namedDisk = page.locator('#layout-storage .bay[data-sheet="disk/sda"]');
+    check('物理盘卡片优先自定义名而非卷标或卷目录', await namedDisk.locator('.bay-top > span').first().textContent() === customDiskName, await namedDisk.textContent());
+    check('自定义盘名在卡片中按文本转义', await namedDisk.locator('img').count() === 0 && await page.evaluate(() => window.diskNameInjected) === undefined);
     await page.locator('#layout-storage section[data-mod="storage"] .bay').first().click();
     await page.waitForSelector('#sheetBody', { timeout: 8000 });
     await page.waitForTimeout(1000);
     await page.waitForFunction(() => /Reallocated_Sector_Ct/.test(document.querySelector('#sheetBody')?.textContent || ''), null, { timeout: 8000 }).catch(() => {});
     check('硬盘详情显示完整 SMART 属性', /Reallocated_Sector_Ct/.test(await page.locator('#sheetBody').textContent()));
+    check('硬盘详情标题优先自定义名', await page.locator('#sheetTitle').textContent() === customDiskName + ' · sda');
+    check('自定义盘名在详情中按文本转义', /自定义 <img src=x onerror="window.diskNameInjected=1"> 数据盘/.test(await page.locator('#sheetBody').textContent()) && await page.locator('#sheetBody img, #sheetTitle img').count() === 0 && await page.evaluate(() => window.diskNameInjected) === undefined);
     await page.locator('#sheetClose').click();
     await page.locator('#pageSeg button[data-page="overview"]').click();
     await page.locator('#btnSearch').click();
@@ -476,16 +498,17 @@ finally:
     const systemEditor = fanCard.locator('[data-channel="system"]');
     const cpuModes = cpuEditor.locator('select').first();
     const systemModes = systemEditor.locator('select').first();
-    check('CPU 仅自动与手动', JSON.stringify(await cpuModes.locator('option').allTextContents()) === JSON.stringify(['自动', '手动']));
-    check('系统保留原厂四档与手动', JSON.stringify(await systemModes.locator('option').allTextContents()) === JSON.stringify(['自动', '低档', '中档', '高档', '手动']));
+    check('CPU 固定档上移并保持五档顺序', JSON.stringify(await cpuModes.locator('option').allTextContents()) === JSON.stringify(['自动', '高档', '中档', '低档', '手动']));
+    check('系统保留原厂四档与手动顺序', JSON.stringify(await systemModes.locator('option').allTextContents()) === JSON.stringify(['自动', '高档', '中档', '低档', '手动']));
     check('旧原厂配置使用实际低档初始化', await systemModes.inputValue() === 'low');
     await fixtureCall('fan_legacy_fixed');
     await reloadFanSettings(page);
-    check('旧固定 75% 映射手动而非原厂中档', await cpuModes.inputValue() === 'manual' && await cpuEditor.locator('select').nth(1).inputValue() === 'manual' && await cpuEditor.locator('input[aria-label="cpu固定输出"]').inputValue() === '75');
-    check('旧系统固定 100% 映射手动而非原厂高档', await systemModes.inputValue() === 'manual' && await systemEditor.locator('select').nth(1).inputValue() === 'manual' && await systemEditor.locator('input[aria-label="system固定输出"]').inputValue() === '100');
-    check('旧固定输出尚未接管时不显示已生效', /手动未生效/.test(await cpuEditor.locator('[data-ref="state"]').textContent()));
+    check('CPU 旧固定 75% 无损映射中档', await cpuModes.inputValue() === 'medium' && await cpuEditor.locator('.r1-fixed').textContent() === '75%');
+    check('旧系统固定 100% 明确独立而非原厂高档', await systemModes.inputValue() === 'legacy:100' && /独立固定 100%（旧配置）/.test(await systemModes.textContent()) && await systemEditor.locator('.r1-fixed').textContent() === '100%');
+    check('旧固定输出尚未接管时不显示已生效', /固定输出未生效/.test(await cpuEditor.locator('[data-ref="state"]').textContent()));
     check('固定输出不显示设备与曲线', await cpuEditor.locator('.r1-ms, .r1-curve').count() === 0);
-    await cpuEditor.locator('select').nth(1).selectOption('temperature');
+    await cpuModes.selectOption('manual');
+    check('手动直接进入曲线且没有控制类型选择', await cpuEditor.locator('select').count() === 1);
     check('温控曲线显示设备多选', await cpuEditor.locator('.r1-ms').count() === 1 && await fanCard.locator('.r1-sources').count() === 0);
     check('手动温控显示曲线', await cpuEditor.locator('.r1-curve').count() === 1);
     check('设备多选默认收起', await fanCard.locator('.r1-ms-menu').isHidden());
@@ -499,19 +522,16 @@ finally:
     await cpuModes.selectOption('manual');
     check('切回手动保留设备多选', await fanCard.locator('.r1-ms').count() === 1);
     await systemModes.selectOption('manual');
-    await systemEditor.locator('select').nth(1).selectOption('manual');
-    await systemEditor.locator('input[aria-label="system固定输出"]').fill('73');
-    await systemEditor.locator('input[aria-label="system固定输出"]').dispatchEvent('change');
+    check('系统手动直接显示温控曲线', await systemEditor.locator('select').count() === 1 && await systemEditor.locator('.r1-curve, .r1-ms').count() === 2);
     await systemModes.selectOption('low');
     await systemModes.selectOption('manual');
-    check('系统手动固定输出保留任意安全值', await systemEditor.locator('select').nth(1).inputValue() === 'manual' && await systemEditor.locator('input[aria-label="system固定输出"]').inputValue() === '73');
+    check('系统切回手动仍直接编辑曲线', await systemEditor.locator('select').count() === 1 && await systemEditor.locator('.r1-curve').count() === 1 && await systemEditor.locator('.r1-fixed').count() === 0);
     await systemModes.selectOption('medium');
     check('系统原厂档位不显示手动编辑器', await systemEditor.locator('.r1-ms, .r1-curve, input[type="number"]').count() === 0);
-    check('配置只保留保存按钮', await fanCard.locator('[data-ref="save"]').count() === 1 && await fanCard.locator('[data-ref="apply"]').count() === 0);
+    check('风扇只保留保存按钮并移除专门复位', await fanCard.locator('.set-actions button').count() === 1 && await fanCard.locator('[data-ref="save"]').count() === 1 && await fanCard.locator('[data-ref="release"]').count() === 0);
     await fanCard.locator('[data-ref="save"]').click();
-    check('确认文案区分 CPU 接管和系统原厂中档', /CPU 风扇：手动接管/.test(await page.locator('.fullmask').textContent()) && /系统风扇：原厂中档/.test(await page.locator('.fullmask').textContent()));
-    await page.locator('.fullmask [data-yes]').click();
     await page.waitForSelector('#r1Pair', { timeout: 8000 });
+    check('风扇点击保存直接申请写入且无确认弹窗', await page.locator('#r1AskT').count() === 0);
     check('未配对时写入要求五位配对码', true);
     await page.locator('#r1PairCode').fill(fixture.primary.code);
     await page.locator('#r1Pair [data-go]').click();
@@ -525,6 +545,7 @@ finally:
     check('风扇写入由真实温控服务处理', !!fanRecord && !!fanRecord.body && !!fanRecord.body.fan_policy,
       JSON.stringify(fanRecord && fanRecord.body && fanRecord.body.error));
     check('风扇设置成功提交到协调控制器', fanRecord.status === 200 && fanRecord.body.ok === true, JSON.stringify(fanRecord.body.error));
+    check('直接保存仍携带后端明确应用标志', fanRecord.request.apply === true && fanRecord.request.confirmed === true);
     if (fanRecord && fanRecord.status === 200) {
       check('风扇配置已写入', fanRecord.body.fan_policy.config.channels.cpu.mode === 'temperature' && fanRecord.body.fan_policy.config.channels.cpu.sources.length === 1);
       check('系统保存 vendor_mode 而非固定百分比', fanRecord.body.fan_policy.config.channels.system.mode === 'vendor' && fanRecord.body.fan_policy.config.channels.system.vendor_mode === 'medium');
@@ -534,6 +555,66 @@ finally:
     check('CPU 手动与系统原厂中档同时生效', fanState.body.fan.channels.cpu.active === true && fanState.body.fan.channels.system.active === false && fanState.body.fan.official.mode === 'medium', JSON.stringify({ channels: fanState.body.fan.channels, official: fanState.body.fan.official, last_error: fanState.body.fan.last_error }));
     await reloadFanSettings(page);
     check('编辑器显示手动已接管与实际中档', /手动接管中/.test(await cpuEditor.textContent()) && /原厂 · 中档/.test(await systemEditor.textContent()));
+    const saveFanDirect = async label => {
+      const selectedModes = { cpu: await cpuModes.inputValue(), system: await systemModes.inputValue() };
+      const responsePromise = page.waitForResponse(response => response.url().endsWith('/api/r1/fan') && response.request().method() === 'POST');
+      await fanCard.locator('[data-ref="save"]').click();
+      const response = await responsePromise;
+      const body = await response.json();
+      const payload = response.request().postDataJSON();
+      check(label + '直接保存并应用', response.status() === 200 && body.ok === true && payload.apply === true && payload.confirmed === true && await page.locator('#r1AskT').count() === 0, JSON.stringify(body.error));
+      for (const name of ['cpu', 'system']) {
+        const selected = selectedModes[name], submitted = payload.config.channels[name];
+        const expected = selected === 'manual' ? 'temperature' : selected.startsWith('legacy:') || (name === 'cpu' && ['high', 'medium', 'low'].includes(selected)) ? 'manual' : 'vendor';
+        check(label + name + '提交当前显示的模式', submitted.mode === expected, JSON.stringify({ selected, submitted, body: body.fan_policy }));
+      }
+      // Poll awaited HTTP snapshots in Node. An async waitForFunction predicate
+      // is a truthy Promise in this Playwright version, even when it resolves
+      // false, and therefore cannot establish the actual terminal state.
+      const deadline = Date.now() + 8000;
+      let actual, applied = false;
+      while (Date.now() < deadline) {
+        actual = (await api('/api/r1')).body.fan;
+        applied = !actual.busy && Object.entries(payload.config.channels).every(([name, item]) => {
+          const live = actual.channels[name];
+          return live.mode === item.mode && live.active === (item.mode !== 'vendor') && (item.mode !== 'manual' || live.target_percent === item.manual_percent);
+        });
+        if (applied) break;
+        await page.waitForTimeout(50);
+      }
+      check(label + '运行模式与输出实际生效', applied, JSON.stringify({ requested: payload.config.channels, actual }));
+      await reloadFanSettings(page);
+      return (await api('/api/r1')).body.fan;
+    };
+    await fixtureCall('fan_legacy_other');
+    await reloadFanSettings(page);
+    check('CPU 非标准旧值 55% 不偷偷映射低档', await cpuModes.inputValue() === 'legacy:55' && /独立固定 55%（旧配置）/.test(await cpuModes.textContent()) && await cpuEditor.locator('.r1-fixed').textContent() === '55%');
+    check('系统旧固定 73% 不转换成原厂档', await systemModes.inputValue() === 'legacy:73' && /独立固定 73%（旧配置）/.test(await systemModes.textContent()));
+    const keptLegacy = await saveFanDirect('旧配置');
+    check('未选择新模式时保存原样保留旧固定值', keptLegacy.config.channels.cpu.manual_percent === 55 && keptLegacy.config.channels.system.manual_percent === 73 && keptLegacy.config.channels.cpu.mode === 'manual' && keptLegacy.config.channels.system.mode === 'manual');
+    check('旧固定配置两路均实际接管', keptLegacy.channels.cpu.active === true && keptLegacy.channels.system.active === true, JSON.stringify({ channels: keptLegacy.channels, last_error: keptLegacy.last_error }));
+    for (const width of [390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await noOverflow('旧固定档 ' + width);
+    }
+    await page.setViewportSize({ width: 1120, height: 1000 });
+    const callsBeforeFixed = (await fixtureCall('fan_calls')).fan_calls;
+    for (const [mode, percent] of [['high', 100], ['medium', 75], ['low', 50]]) {
+      await cpuModes.selectOption(mode);
+      check('CPU ' + mode + '直接显示固定输出', await cpuEditor.locator('.r1-fixed').textContent() === percent + '%' && await cpuEditor.locator('.r1-curve, .r1-ms').count() === 0 && await cpuModes.locator('option[value^="legacy:"]').count() === 0);
+      const fixed = await saveFanDirect('CPU ' + mode);
+      check('CPU ' + mode + '发送独立固定值且不改系统旧值', fixed.config.channels.cpu.mode === 'manual' && fixed.config.channels.cpu.manual_percent === percent && fixed.channels.cpu.active === true && fixed.config.channels.system.manual_percent === 73 && fixed.config.channels.system.mode === 'manual');
+      const callsAfterFixed = (await fixtureCall('fan_calls')).fan_calls;
+      check('CPU ' + mode + '调速沿用接管且不复位或重复设原厂档', JSON.stringify(callsAfterFixed) === JSON.stringify(callsBeforeFixed), JSON.stringify({ before: callsBeforeFixed, after: callsAfterFixed }));
+    }
+    await cpuModes.selectOption('auto');
+    await systemModes.selectOption('medium');
+    const automatic = await saveFanDirect('自动');
+    check('选择自动恢复 CPU 原厂且不需要专门复位', automatic.config.channels.cpu.mode === 'vendor' && automatic.channels.cpu.active === false && automatic.channels.system.active === false && automatic.official.mode === 'medium');
+    await cpuModes.selectOption('manual');
+    check('从固定档切换手动直接进入已保留的曲线', await cpuEditor.locator('select').count() === 1 && await cpuEditor.locator('.r1-curve').count() === 1 && await cpuEditor.locator('.r1-ms-row input:checked').count() === 1);
+    const restoredManual = await saveFanDirect('手动曲线');
+    check('曲线重新生效且系统仍用原厂中档', restoredManual.config.channels.cpu.mode === 'temperature' && restoredManual.channels.cpu.active === true && restoredManual.config.channels.system.mode === 'vendor' && restoredManual.official.mode === 'medium', JSON.stringify({ config: restoredManual.config, channels: restoredManual.channels, official: restoredManual.official, last_error: restoredManual.last_error, request: fanResponses[fanResponses.length - 1]?.request }));
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       await noOverflow('风扇设置 ' + width);
@@ -546,7 +627,7 @@ finally:
     const nativePage = await nativeContext.newPage();
     nativePage.on('pageerror', error => pageErrors.push(error.message));
     await nativePage.goto(fixture.unsupported.origin + '/#/settings');
-    await nativePage.waitForSelector('#set-r1-fan [data-channel="system"] select');
+    await nativePage.waitForSelector('#set-r1-fan .r1-edit[aria-busy="false"] [data-channel="system"] select');
     const nativeCard = nativePage.locator('#set-r1-fan');
     const nativeSystem = nativeCard.locator('[data-channel="system"]');
     check('独立接管不可用时原厂档位仍可选', await nativeSystem.locator('select option[value="high"]').isEnabled() && /手动接管暂不可用/.test(await nativeCard.textContent()));
@@ -555,9 +636,9 @@ finally:
       if (!response.ok) throw new Error('fixture native pairing failed');
     }, fixture.unsupported.code);
     await nativeSystem.locator('select').first().selectOption('high');
+    const nativeWrite = nativePage.waitForResponse(response => response.url().endsWith('/api/r1/fan') && response.request().method() === 'POST');
     await nativeCard.locator('[data-ref="save"]').click();
-    check('纯原厂确认文案不声称将接管', /CPU 风扇：原厂自动/.test(await nativePage.locator('.fullmask').textContent()) && /系统风扇：原厂高档/.test(await nativePage.locator('.fullmask').textContent()));
-    await nativePage.locator('.fullmask [data-yes]').click();
+    check('纯原厂保存立即发送且无确认弹窗', (await nativeWrite).status() === 200 && await nativePage.locator('#r1AskT').count() === 0);
     await nativePage.waitForFunction(() => /原厂 · 高档/.test(document.querySelector('#set-r1-fan [data-channel="system"] [data-ref="state"]')?.textContent || ''), null, { timeout: 8000 });
     const nativeState = await nativePage.evaluate(async () => (await fetch('/api/r1')).json());
     check('独立预检失败仍成功切换原厂高档', nativeState.fan.official.mode === 'high' && !nativeState.fan.channels.cpu.active && !nativeState.fan.channels.system.active);

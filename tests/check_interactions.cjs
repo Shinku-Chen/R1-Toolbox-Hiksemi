@@ -18,6 +18,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
   const checks = [], sizes = [], pageErrors = [], posts = [], external = [];
   let offline = false, failNextAction = false, failNextCancel = false, delayAction = false, lightDelay = false, historyFail = false, pairingExpires = 180;
+  const apiReads = [];
   const fanConfig = { schema_version: 1, channels: {
     cpu: { mode: 'vendor', sources: [], quiet_below: 40, normal_at: 55, full_at: 70, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
     system: { mode: 'vendor', sources: [], quiet_below: 35, normal_at: 45, full_at: 55, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
@@ -51,8 +52,8 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     system: { model: 'HIKSEMI R1', cpu_model: 'Intel N100', cpu_logical_cores: 4, load_average: [.34, .52, .6], process_count: 142, memory: { used_bytes: 3e9, available_bytes: 13e9, total_bytes: 16e9, usage_percent: 18.75, swap_used_bytes: 0, swap_total_bytes: 0 }, cpu_cores: [0, 1, 2, 3].map(id => ({ id, usage_percent: 16 + id })) },
     device: { identity: { hostname: 'R1-NAS', os: 'Linux fixture', firmware: 'fixture-firmware', kernel: '6.1-fixture', dmi: { model: 'R1' } }, cpu: { architecture: 'x86_64', physical_cores: 4, sockets: 1 }, thermal: [{ id: 'coretemp:0', driver: 'coretemp', label: 'Package', celsius: 46, critical_celsius: 100 }], fans: [{ id: 'hwmon0:fan1', label: 'fan1', rpm: 1200 }], network: [{ name: 'eth0', mtu: 1500, speed_mbps: 2500, duplex: 'full', ipv6_addresses: [{ address: '2001:db8:1234:5678:90ab:cdef:1234:5678', prefix_length: 64, scope: 'global' }], address_status: { ipv6: 'ok' }, default_gateways: { ipv4: [{ gateway: '192.168.1.1', metric: 100, source: '/proc/net/route' }], ipv6: [{ gateway: 'fe80::1', metric: 200, source: '/proc/net/ipv6_route' }] }, route_status: { ipv4: 'ok', ipv6: 'ok' } }], network_config: { default_routes: { ipv4: [{ interface: 'eth0', gateway: '192.168.1.1', metric: 100, source: '/proc/net/route' }], ipv6: [{ interface: 'eth0', gateway: 'fe80::1', metric: 200, source: '/proc/net/ipv6_route' }] }, route_status: { ipv4: 'ok', ipv6: 'ok' }, dns: { servers: ['127.0.0.53', '2001:4860:4860::8888'], upstream_servers: ['192.168.1.1', '2001:4860:4860::8888'], stub_servers: ['127.0.0.53'], search: ['home.arpa', 'fixture.local'], domains: ['home.arpa'], status: 'partial', reason: '部分解析器状态文件不可读取' } }, storage: { devices: [{ name: 'sda', model: 'Test disk', serial: 'FIXTURE-ONLY', vendor: 'Fixture', state: 'running' }], raid: [] }, capabilities: {} },
     interfaces: [{ name: 'eth0', ipv4: ['192.168.1.10'], mac: '00:11:22:33:44:55', operstate: 'up', rx_bytes: 3e9, tx_bytes: 1e9, rx_bytes_per_sec: 4096, tx_bytes_per_sec: 1024 }],
-    disks: { available: true, reason: '', items: [{ id: 'sda', device: '/dev/sda', model: 'Test disk', size_bytes: 4e12, temp_c: 38, health: { passed: true }, standby: false, smart_available: true }, { id: 'sdb', device: '/dev/sdb', model: 'No SMART disk', size_bytes: 1e12, temp_c: null, health: { passed: null }, standby: false, smart_available: false }] },
-    containers: { available: true, reason: '', items: [{ id: 'abcdef123456', name: 'test-db', image: 'postgres:17', state: 'running', status: 'Up 2 hours', cpu_percent: 125, memory_bytes: 125829120, ports: '0.0.0.0:5432->5432/tcp', protected: false, available_actions: ['stop', 'restart'] }, { id: '123456abcdef', name: 'r1-toolbox', image: 'ghcr.io/shinku-chen/r1-toolbox:preview', state: 'exited', protected: true, available_actions: [] }] },
+    disks: { available: true, reason: '', items: [{ id: 'sda', user_name: '家庭照片与备份盘', device: '/dev/sda', model: 'Test disk', size_bytes: 4e12, temp_c: 38, health: { passed: true }, standby: false, smart_available: true }, { id: 'sdb', device: '/dev/sdb', model: 'No SMART disk', size_bytes: 1e12, temp_c: null, health: { passed: null }, standby: false, smart_available: false }, { id: 'sdc', display_name: '休眠盘暂无温度', temp_c: null, standby: true, smart_available: false }, { id: 'sdd', user_name: '超长用户自定义硬盘名称家庭影音文档备份共享数据资料归档', temp_c: 34, standby: true, smart_available: false }] },
+    containers: { available: true, reason: '', items: [{ id: 'abcdef123456', name: 'test-db', image: 'postgres:17', state: 'running', status: 'Up 2 hours', cpu_percent: 125, memory_bytes: 125829120, ports: '0.0.0.0:5432->5432/tcp', protected: false, available_actions: ['stop', 'restart'] }, { id: '123456abcdef', name: 'r1-toolbox', image: 'ghcr.io/shinku-chen/r1-toolbox:preview', state: 'exited', protected: true, available_actions: [] }, ...Array.from({ length: 6 }, (_, i) => ({ id: 'fixture-extra-' + i, name: 'extra-container-' + i, image: 'fixture/image:latest', state: 'running', cpu_percent: null, memory_bytes: null, protected: false, available_actions: [] }))] },
     vms: { available: false, reason: '宿主未提供 libvirt 服务', items: [] }, gpu: { available: false, reason: '没有可用 GPU 采样', devices: [] },
     ports: [{ protocol: 'tcp', address: '127.0.0.1', port: 18731 }], processes: [{ pid: 900, name: 'hiksemi-sub', cpu_percent: 120, memory_bytes: 2e8 }],
     history: [10, 20, 15, 40, 28].map(cpu => ({ cpu_usage_percent: cpu, memory_usage_percent: 35 })),
@@ -77,6 +78,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await page.route('http://127.0.0.1:18731/api/**', async route => {
       if (offline) return route.abort('connectionrefused');
       const req = route.request(), endpoint = new URL(req.url()).pathname;
+      if (req.method() === 'GET') apiReads.push(endpoint);
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type, X-R1-Token' } });
       let data;
       if (endpoint.endsWith('/action')) {
@@ -160,6 +162,13 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.equal(style.nav.length, 6);
     assert.ok(style.nav.every(item => item.height >= 56 && item.width >= 52 && item.font >= 17), JSON.stringify(style.nav));
     assert.ok(style.body >= 22 && style.title >= 20, JSON.stringify(style));
+    const webSymbols = fs.readFileSync(path.resolve(__dirname, '../ui/panel-src/20-icons.svg'), 'utf8');
+    for (const [tab, name] of Object.entries({ overview: 'home', storage: 'storage', network: 'net', apps: 'box', thermal: 'temp', controls: 'gear' })) {
+      const expected = webSymbols.match(new RegExp('<symbol id="i-' + name + '"[^>]*>(.*?)</symbol>'))[1];
+      const actual = await page.locator(`[data-tab="${tab}"] svg`).evaluate(svg => svg.innerHTML);
+      const canonical = html => html.replace(/\s*\/?>/g, '>').replace(/<\/(path|circle|ellipse)>/g, '');
+      assert.equal(canonical(actual), canonical(expected), `${tab} must use the web navigation icon`);
+    }
     checks.push('six touch tabs at 376/320 without overflow; 56px+ targets and larger touch typography');
 
     await root('overview');
@@ -189,8 +198,16 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.equal(await title(), '温度与风扇');
     assert.match(await page.locator('.screen-body').textContent(), /Package/);
     assert.equal(await page.locator('.fan-quick-row').count(), 2);
+    assert.equal(await page.locator('.disk-temperature-row').count(), 4, 'every physical disk has a temperature row');
+    assert.match(await page.locator('[data-disk="sda"]').textContent(), /家庭照片与备份盘.*38°/);
+    assert.match(await page.locator('[data-disk="sdb"]').textContent(), /sdb.*--.*温度暂不可读/);
+    assert.match(await page.locator('[data-disk="sdc"]').textContent(), /--.*休眠中 · 暂无缓存读数/);
+    assert.match(await page.locator('[data-disk="sdd"]').textContent(), /34°.*休眠中 · 已有缓存读数/);
+    assert.equal(await page.locator('[data-disk="sdc"] .bar, [data-disk="sdd"] .bar').count(), 0, 'sleeping disk caches are not graphed as current readings');
+    assert.equal(apiReads.filter(endpoint => /smart|disk-temperature/.test(endpoint)).length, 0, 'opening temperature uses insights cache only');
+    await shot('thermal');
     await root('storage');
-    assert.equal(await page.locator('.drive-row').count(), 2, 'all physical disks are listed, including SMART-less ones');
+    assert.equal(await page.locator('.drive-row').count(), 4, 'all physical disks are listed, including SMART-less ones');
     const storageText = await page.locator('.screen-body').textContent();
     assert.match(storageText, /SMART/);
     assert.doesNotMatch(storageText, /\/drives\/data/, 'filesystem mounts are not shown as physical disks');
@@ -211,9 +228,20 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     checks.push('metrics, processor, history charts, temperature tab, SMART physical disks and network/ports details');
 
     await root('apps');
-    assert.equal(await page.locator('.app-summary .total').textContent(), '2');
+    assert.equal(await page.locator('.app-summary .total').textContent(), '8');
     assert.match(await page.locator('.app-count-meta').textContent(), /1 个已停止/);
-    assert.equal(await page.locator('.app-card').count(), 2);
+    assert.equal(await page.locator('.app-card').count(), 8, 'the application page directly lists every container');
+    assert.equal(await page.locator('[data-view="containers"]').count(), 0, 'there is no second-level all-containers entry');
+    await shot('apps');
+    await page.locator('.app-card').last().scrollIntoViewIfNeeded();
+    const appsOffset = await page.locator('#screen-body').evaluate(node => node.scrollTop);
+    assert.ok(appsOffset > 0, 'the complete list scrolls vertically');
+    assert.match(await page.locator('.app-card').last().textContent(), /extra-container-5/);
+    await page.locator('.app-card').last().click();
+    assert.equal(await title(), '容器详情');
+    await back();
+    assert.equal(await title(), '应用', 'container details return directly to applications');
+    assert.ok(Math.abs(await page.locator('#screen-body').evaluate(node => node.scrollTop) - appsOffset) <= 1, 'returning restores application list scroll');
     assert.equal(await page.locator('.menu-row').filter({ hasText: '虚拟机' }).count(), 0, 'no VM entry on a NAS without VMs');
     await page.locator('.app-card').first().click();
     assert.equal(await title(), '容器详情');
@@ -228,7 +256,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await back();
     insights.containers.items[0].available_actions = ['stop', 'restart'];
     insights.containers.items[0].state = 'running';
-    checks.push('container list/detail, confirmed stop and protected container; no VM module');
+    checks.push('complete container list with restored parent scroll, confirmed stop and protected container; no VM module');
 
     await root('thermal');
     await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]').click();

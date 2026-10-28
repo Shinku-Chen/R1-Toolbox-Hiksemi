@@ -112,7 +112,8 @@ function volumeName(d) {
   }
   return volOf(d) ? `vol${volOf(d)}` : '';
 }
-const volLabel = d => (d && d.volume_label) || volumeName(d) || '未挂载';
+/** 物理盘名称优先使用原厂已确认的自定义名，其次卷标与挂载目录名。 */
+const volLabel = d => (d && (d.user_name || d.volume_label)) || volumeName(d) || '未挂载';
 /** 盘位排序：优先按卷名，未挂载的排最后。 */
 const byVol = (a, b) => {
   const va = volumeName(a), vb = volumeName(b);

@@ -163,9 +163,9 @@ defineModule({
     dd.forEach(d => {
       const k = diskKind(d);
       const volume = volumeName(d);
-      const volTxt = d.volume_label ? `卷 ${d.volume_label}` : volume ? `存储空间 ${volume}` : '未挂载';
+      const volTxt = d.user_name ? `硬盘 ${d.user_name}` : d.volume_label ? `卷 ${d.volume_label}` : volume ? `存储空间 ${volume}` : '未挂载';
       const el = mount(`<button class="bay" type="button" data-sheet="disk/${esc(encodeURIComponent(d.name))}" data-type="${k === 'nvme' ? 'nvme' : 'hdd'}" aria-label="硬盘 ${esc(d.name)}，${esc(vendorModel(d))}，${esc(volTxt)}，查看详情">
-          <span class="bay-top"><span title="${esc(volTxt)}">${volLabel(d)}</span><span class="bay-warn">${ic('alert')}</span><i class="bay-led" data-ref="led"></i></span>
+          <span class="bay-top"><span title="${esc(volTxt)}">${esc(volLabel(d))}</span><span class="bay-warn">${ic('alert')}</span><i class="bay-led" data-ref="led"></i></span>
           <span class="bay-body">
             <span class="bay-gauge" data-ref="g"></span>
             <span class="bay-zz" aria-hidden="true"><span class="dm" data-dm="Zz"></span>休眠</span>
@@ -191,7 +191,7 @@ defineModule({
     setHTML(x.poolLeg, has ? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>${o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : ''}` : '<span>未读取到存储池用量（fnOS 存储池挂载在 /vol*）</span>');
     const sy = o.system || {}, hw = (o.hardware || {}).board || {};
     setText(x.chName, sy.hostname || ''); setText(x.chModel, String(hw.product_name || hw.board_name || 'NAS').slice(0, 24) + ` · ${dd.length} 盘`);
-    const sig = dd.map(d => d.name + diskKind(d) + volumeName(d)).join(',');
+    const sig = JSON.stringify(dd.map(d => [d.name, diskKind(d), volumeName(d), volLabel(d)]));
     if (m.sig !== sig) { m.sig = sig; this.buildBays(dd, m); }
     m.io = {}; (o.diskio || []).forEach(z => { m.io[z.name] = (+z.read_rate || 0) + (+z.write_rate || 0); });
     dd.forEach(d => {

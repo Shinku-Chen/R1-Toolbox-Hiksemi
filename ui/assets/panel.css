@@ -144,3 +144,9 @@ body{font-size:22px}
   .screen-nav{grid-template-columns:repeat(3,minmax(0,1fr));height:auto;padding-top:6px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
 }
 .screen-nav{position:relative;z-index:6}
+.drive-title h3,.app-heading h3{min-width:0;overflow-wrap:anywhere}
+.temperature-top{gap:12px;align-items:flex-start}
+.temperature-top>span{min-width:0;overflow-wrap:anywhere}
+.temperature-top>b{flex-shrink:0;white-space:nowrap}
+.disk-temperature-row .caption{margin-bottom:10px}
+.disk-temperature-note{margin-top:22px}
