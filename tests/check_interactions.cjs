@@ -143,6 +143,9 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.match(await page.locator('.inline-summary').textContent(), /25/);
     assert.equal(await page.locator('.screen-header').count(), 0, 'main pages have no top header');
     await shot('overview');
+    await page.locator('.status-card').click();
+    await page.waitForTimeout(200);
+    assert.ok(posts.some(item => item.action === 'screen.activity'), 'a touch must reset the host idle timer');
     checks.push('real status feeds dot clock, status card and CPU/memory/storage/network summary without a top header');
 
     for (const width of [376, 320]) {

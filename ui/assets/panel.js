@@ -944,6 +944,21 @@
     navigate(next, true);
   }, { passive: true });
 
+  /* Any real interaction resets the host-side idle timer.  Without this the
+     small screen went to sleep 10 s after the last settings/API action even
+     while the user was still tapping pages or sliders. */
+  let lastActivitySent = 0;
+  function noteScreenActivity() {
+    if (state.sleeping || !controlToken || !state.online) return;
+    const now = Date.now();
+    if (now - lastActivitySent < 2000) return;
+    lastActivitySent = now;
+    request('/action', { action: 'screen.activity' }).catch(() => {});
+  }
+  document.addEventListener('pointerdown', noteScreenActivity, { capture: true, passive: true });
+  document.addEventListener('keydown', noteScreenActivity, true);
+  document.addEventListener('wheel', noteScreenActivity, { capture: true, passive: true });
+
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
   window.setInterval(tickClock, 1000);
   render();

@@ -426,9 +426,14 @@ class FanPolicyController:
                         raise
             return {"ok": True, "settings_saved": True, "applied": False, "pending": apply,
                     "fan_policy": self.snapshot()}
-        except (OSError, ValueError, TypeError, RuntimeError):
+        except (OSError, ValueError, TypeError, RuntimeError) as error:
+            # Keep the actionable preflight/validation reason available to the
+            # panel.  Do not expose raw OS/path details; those stay generic.
+            detail = str(error).strip()[:160] if type(error) in (ValueError, RuntimeError) else ''
+            with self.lock:
+                self.last_error = ('风扇配置未应用：' + detail) if detail else '风扇配置未应用；请检查设备支持或设置数据卷'
             return {"ok": False, "settings_saved": saved, "applied": False, "pending": False,
-                    "error": "风扇配置未应用；请检查阈值、来源、设备支持或设置数据卷",
+                    "error": self.last_error,
                     "fan_policy": self.snapshot()}
 
     def _loop(self):

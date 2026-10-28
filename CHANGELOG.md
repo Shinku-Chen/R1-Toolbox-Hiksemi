@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- fix(fan): 风扇预检或配置失败时保留可读失败原因，不再只显示泛化提示。
+- fix(ui): 小屏触摸、按键和滚轮操作会刷新宿主息屏计时，避免操作过程中按旧的 10 秒计时自动待机。
 - fix(web): 磁盘卷标在 `/dev/disk/by-label` 缺失时读取分区对应的 `/run/udev/data` `ID_FS_LABEL`，不打开磁盘、不唤醒休眠盘。
 - fix(web): 卷标读取在 `/dev/disk/by-label` 缺失时回退 `/run/udev/data` 的 `ID_FS_LABEL`，休眠盘无需唤醒也能显示系统磁盘名。
 - fix(web): 修正磁盘 I/O 适配器读取嵌套的 `monitoring.current.disk_io`，网页与硬盘详情恢复每块物理盘的实时读写速度。
