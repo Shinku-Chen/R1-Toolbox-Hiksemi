@@ -308,7 +308,15 @@ class SystemBackend:
         if require_guard:
             maps = read_bytes(base / "maps", 1024 * 1024)
             paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
-            ready = ready and os.fsencode(self.guard_path.resolve()) in paths
+            expected = os.fsencode(self.guard_path.resolve())
+            guard_name = os.fsencode(self.guard_path.name)
+            # A mapped file may show ``(deleted)`` after a RAM bundle refresh, or
+            # resolve through a different absolute path.  The process identity
+            # and the fixed guard filename still prove this is our shim.
+            guard_ok = any(path == expected or path == expected + b" (deleted)"
+                           or path.rsplit(b"/", 1)[-1].removesuffix(b" (deleted)") == guard_name
+                           for path in paths)
+            ready = ready and guard_ok
         if not self.alive(identity):
             raise RuntimeError("原厂温控启动身份无法确认")
         return ready
