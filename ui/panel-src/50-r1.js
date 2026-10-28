@@ -394,13 +394,19 @@ function fanUiMode(item) {
   if (!item || item.mode === 'vendor' || !item.mode) return 'auto';
   if (item.mode === 'manual') {
     const hit = Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === item.manual_percent);
-    return hit || 'low';
+    return hit || ('fixed:' + item.manual_percent);
   }
   return 'manual';
 }
 
 function setFanUiMode(item, mode) {
   if (mode === 'auto') { item.mode = 'vendor'; return; }
+  if (String(mode).startsWith('fixed:')) {
+    const value = Number(String(mode).slice(6));
+    item.mode = 'manual';
+    if (Number.isFinite(value)) item.manual_percent = clamp(Math.round(value), 50, 100);
+    return;
+  }
   if (FAN_FIXED[mode]) { item.mode = 'manual'; item.manual_percent = FAN_FIXED[mode]; return; }
   item.mode = 'temperature';
   if (!Array.isArray(item.sources)) item.sources = [];
@@ -477,7 +483,11 @@ function r1FanSettings(card) {
         <div class="r1-chan-head"><b>${R1.chanName(name)}</b><span class="pill" data-ref="state"></span></div>
         <div class="r1-form" data-ref="form"></div></div>`);
       const form = ch._r.form;
-      form.append(r1Field('转速模式', r1Select(FAN_UI_MODES, fanUiMode(item), value => {
+      const modeOptions = FAN_UI_MODES.slice();
+      if (item.mode === 'manual' && !Object.values(FAN_FIXED).includes(item.manual_percent)) {
+        modeOptions.splice(4, 0, ['fixed:' + item.manual_percent, '固定 ' + item.manual_percent + '%']);
+      }
+      form.append(r1Field('转速模式', r1Select(modeOptions, fanUiMode(item), value => {
         setFanUiMode(item, value); touch(); render();
       }, name + '转速模式'), '自动：交给原厂固件。低/中/高档：固定输出 50/75/100%。手动：按所选设备温度的曲线调速。'));
       if (item.mode === 'temperature') {
