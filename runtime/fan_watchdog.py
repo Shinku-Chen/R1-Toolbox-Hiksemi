@@ -284,7 +284,7 @@ class SystemBackend:
         except (OSError, ValueError, RuntimeError) as error:
             # Preserve only a readiness detail; identity/exit failures keep the
             # established generic spawn error and its safety semantics.
-            if "信号处理器就绪未确认" in str(error):
+            if "信号处理器就绪未确认" in str(error) or "执行者竞争" in str(error):
                 last_error = error
         if expected is not None and self.alive(expected):
             self.stop_process(expected)
@@ -352,7 +352,7 @@ class SystemBackend:
                 if now - stable_since >= stable_seconds:
                     return identity
             elif stable_since is not None:
-                raise RuntimeError("原厂温控信号处理器就绪未确认")
+                raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
             self.sleep(min(0.025, max(0, deadline - now)))
         raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
 
