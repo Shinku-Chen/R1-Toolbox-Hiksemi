@@ -324,7 +324,8 @@ finally:
     await page.locator('#pageSeg button[data-page="storage"]').click();
     await page.waitForSelector('#layout-storage section[data-mod="storage"] .bay', { timeout: 8000 });
     check('存储页列出无 SMART 的物理盘', await page.locator('#layout-storage .bay').count() === 2);
-    check('存储页显示卷名而不是未挂载', /FixtureVolume/.test(await page.locator('#layout-storage').textContent()));
+    await page.waitForFunction(() => /FixtureVolume/.test(document.querySelector('#layout-storage')?.textContent || ''), null, { timeout: 10000 }).catch(() => {});
+    check('存储页显示卷名而不是未挂载', /FixtureVolume/.test(await page.locator('#layout-storage').textContent()), await page.locator('#layout-storage').textContent());
     await page.locator('#layout-storage section[data-mod="storage"] .bay').first().click();
     await page.waitForTimeout(200);
     await page.locator('#sheetClose').click();
