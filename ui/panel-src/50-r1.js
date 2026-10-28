@@ -5,7 +5,7 @@
    file only *adds* what the HikSemi R1 can do and fnOS cannot:
 
      · 双路风扇（CPU / 系统）独立温控的实时状态与编辑
-     · 机身灯光（手动灯效 / 温度联动 / 夜间亮度）
+     · 机身灯光（四种原生灯效 / 夜间亮度）
      · 小屏亮度、息屏与 NAS 电源操作
      · 本地告警阈值、历史保留与流量统计范围
      · 登录口令 + 小屏五位配对码
@@ -199,7 +199,7 @@ defineModule({
    --------------------------------------------------------------------- */
 defineModule({
   id: 'r1light', page: 'overview', kicker: 'R1 LIGHT', title: '机身灯光',
-  dek: '手动灯效，或按温度连续混色',
+  dek: '四种原生灯效：关闭、常亮、彩虹、呼吸',
   actions: () => {
     const b = mount(`<button class="link-btn" type="button">灯光设置${ic('chev', 'i-sm')}</button>`);
     b.onclick = () => focusGroup('r1-light');
@@ -218,15 +218,14 @@ defineModule({
     const l = R1.light(), config = l.config || {}, target = l.target || {}, runtime = l.runtime || {};
     const active = !!l.active;
     const color = target.color || (config.manual && config.manual.color) || '#666666';
-    const modeText = config.mode === 'temperature' ? '温度联动' : '手动灯效';
-    const stateText = active ? `${modeText}${config.mode === 'manual' && target.mode != null ? ' · ' + (R1_EFFECT_TXT[target.mode] || '') : ''}`
-      : config.enabled ? '规则已保存，尚未接管' : '未启用灯光联动';
+    const effect = target.mode != null ? R1_EFFECT_TXT[target.mode] : null;
+    const stateText = active ? `灯光已接管${effect ? ' · ' + effect : ''}`
+      : config.enabled ? '规则已保存，尚未接管' : '未启用灯光策略';
     setText(m.x.state, stateText);
     m.x.sw.style.background = color;
     m.x.sw.style.opacity = active && target.mode === 0 ? .25 : 1;
-    setText(m.x.sub, active && ok(target.brightness) ? `亮度 ${F.int(target.brightness)}%${ok(l.reference_c) ? ' · 参考 ' + F.int(l.reference_c) + '℃' : ''}` : '由原厂主题管理机身灯');
-    const rows = [['数据来源', l.source_label || (config.mode === 'temperature' ? (config.sources || []).length + ' 个温度来源' : '手动')]];
-    if (runtime.fallback) rows.push(['低亮保护', '温度来源失效，已降到警示低亮']);
+    setText(m.x.sub, active && ok(target.brightness) ? `亮度 ${F.int(target.brightness)}%` : '由原厂主题管理机身灯');
+    const rows = [['灯效', effect || '--']];
     if (runtime.schedule_active) rows.push(['夜间计划', '生效中']);
     setHTML(m.x.rows, rows.map(([k, v]) => `<div class="row-i" style="grid-template-columns:auto 1fr"><span class="faint">${esc(k)}</span><span style="text-align:right">${esc(String(v))}</span></div>`).join(''));
     setHTML(m.x.note, l.last_error ? `<span class="st-crit">${esc(l.last_error)}</span>`
@@ -536,43 +535,16 @@ function r1LightSettings(card) {
   const touch = () => { dirty = true; };
   const render = () => {
     const l = R1.light(), config = draft;
-    const sources = l.sources || [];
+    // The UI now exposes only the four native effects.  Existing temperature
+    // drafts are converted to manual when the user opens and saves the card.
+    config.mode = 'manual';
     const wrap = mount(`<div class="card set-card r1-editor"><div class="r1-form" data-ref="form"></div></div>`);
     const form = wrap._r.form;
     form.append(r1Field('启用灯光策略', r1Check('保存后允许接管机身灯光', !!config.enabled, v => { config.enabled = v; touch(); }), '关闭并应用会释放接管，恢复原厂主题。'));
-    form.append(r1Field('运行模式', r1Select([['manual', '手动灯效'], ['temperature', '温度联动颜色']], config.mode, v => { config.mode = v; touch(); render(); })));
-    if (config.mode === 'manual') {
-      const manual = config.manual || (config.manual = { mode: 1, color: '#00C832', brightness: 70 });
-      form.append(r1Field('灯效', r1Select([[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']], manual.mode, v => { manual.mode = +v; touch(); })));
-      form.append(r1Field('颜色', r1Color(manual.color, v => { manual.color = v; touch(); })));
-      form.append(r1Field('亮度', r1Number(manual.brightness, 0, 100, '%', v => { manual.brightness = v; touch(); })));
-    } else {
-      form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, config.sources, v => { config.sources = v; touch(); }),
-        '点开下拉多选；来源缺失、过期或均休眠时使用低亮警示色。'));
-      const stops = config.stops || (config.stops = [{ temperature: 35, color: '#00C832' }, { temperature: 60, color: '#FFAA00' }, { temperature: 80, color: '#FF3030' }]);
-      const stopHost = mount(`<div class="r1-stops"></div>`);
-      const drawStops = () => {
-        stopHost.innerHTML = stops.map((s, i) => `<div class="r1-stop-row"><span class="faint">${i + 1}</span>
-          <input type="number" min="20" max="90" value="${s.temperature}" aria-label="节点温度 ${i + 1}">℃
-          <input type="color" value="${esc(s.color)}" aria-label="节点颜色 ${i + 1}">
-          <button class="btn ghost" type="button" data-del="${i}" ${stops.length <= 2 ? 'disabled' : ''}>删除</button></div>`).join('');
-        stopHost.querySelectorAll('input[type=number]').forEach((inp, i) => inp.addEventListener('change', () => { stops[i].temperature = clamp(Math.round(+inp.value || 35), 20, 90); touch(); }));
-        stopHost.querySelectorAll('input[type=color]').forEach((inp, i) => inp.addEventListener('change', () => { stops[i].color = inp.value.toUpperCase(); touch(); }));
-        stopHost.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { stops.splice(+b.dataset.del, 1); touch(); drawStops(); });
-      };
-      drawStops();
-      const addStop = mount(`<button class="btn ghost" type="button">增加颜色节点</button>`);
-      addStop.onclick = () => {
-        if (stops.length >= 8) { toast('最多 8 个颜色节点', { icon: 'info' }); return; }
-        const last = stops[stops.length - 1] || { temperature: 35, color: '#FFFFFF' };
-        stops.push({ temperature: clamp(last.temperature + 5, 20, 90), color: last.color });
-        touch(); drawStops();
-      };
-      const stopField = mount(`<div></div>`);
-      stopField.append(stopHost, addStop);
-      form.append(r1Field('颜色节点', stopField, '2–8 个节点，温度必须递增；区间内连续混色。'));
-      form.append(r1Field('联动亮度', r1Number(config.brightness, 0, 100, '%', v => { config.brightness = v; touch(); })));
-    }
+    const manual = config.manual || (config.manual = { mode: 1, color: '#00C832', brightness: 70 });
+    form.append(r1Field('灯效', r1Select([[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']], manual.mode, v => { manual.mode = +v; touch(); })));
+    form.append(r1Field('颜色', r1Color(manual.color, v => { manual.color = v; touch(); })));
+    form.append(r1Field('亮度', r1Number(manual.brightness, 0, 100, '%', v => { manual.brightness = v; touch(); })));
     const schedule = config.schedule || (config.schedule = { enabled: false, start: '22:00', end: '07:00', brightness: 15 });
     form.append(r1Field('夜间亮度上限', r1Check('夜间限制灯光亮度', !!schedule.enabled, v => { schedule.enabled = v; touch(); render(); }), '支持跨午夜时段。'));
     if (schedule.enabled) {

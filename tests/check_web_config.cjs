@@ -363,6 +363,10 @@ finally:
     for (const id of ['r1-fan', 'r1-light', 'r1-screen', 'r1-monitor', 'look', 'r1-auth', 'r1-conn', 'about']) {
       check('设置分组 ' + id, await page.locator('#set-' + id).count() === 1);
     }
+    const lightCard = page.locator('#set-r1-light');
+    const lightOptions = await lightCard.locator('.r1-editor select').first().locator('option').allTextContents();
+    check('灯光只保留四种原生模式', JSON.stringify(lightOptions) === JSON.stringify(['关闭', '常亮', '彩虹', '呼吸']), lightOptions.join(','));
+    check('网页面板不提供温度联动编辑', !/温度联动|温度设备|颜色节点/.test(await lightCard.textContent()));
     const fanCard = page.locator('#set-r1-fan');
     const modeOptions = await fanCard.locator('.r1-editor select').first().locator('option').allTextContents();
     check('风扇转速五档', ['自动', '低档', '中档', '高档', '手动'].every(label => modeOptions.includes(label)), modeOptions.join(','));

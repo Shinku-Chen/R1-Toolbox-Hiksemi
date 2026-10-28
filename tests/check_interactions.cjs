@@ -257,6 +257,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.match(await page.locator('.fan-control').textContent(), /应用失败/);
     assert.match(await page.locator('.fan-control').textContent(), /模拟风扇应用失败/);
     independentPolicy = { ...independentPolicy, last_error: null };
+    assert.deepEqual(await page.locator('#light-effect option').allTextContents(), ['关闭', '常亮', '彩虹', '呼吸']);
     await page.locator('#light-hue').evaluate(node => { node.value = '120'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); });
     await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光已提交，等待设备确认');
     assert.deepEqual(lightConfig.manual, { mode: 1, color: '#00FF00', brightness: 70 });
