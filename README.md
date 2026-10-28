@@ -36,17 +36,17 @@
 
 默认正文放大为 20px、辅助说明 18px，常用数据用单列大卡片展示；七个导航入口分成两行，长地址换行，复杂信息留在可滚动的二级/三级页。字号设置继续可调。
 
-网页监控位于 `http://NAS_IP:18732`，直接打开即可查看总览、趋势、存储、网络、应用与设备；桌面侧栏、手机横向导航，支持明暗切换和减少动效。公开结构化接口为 `/api/v1/status`，另有历史、流量、告警、报告、CSV及OpenAPI。第三方读取不需要配对，详见[公开API](docs/public-api.md)。
+网页监控位于 `http://NAS_IP:18732`，直接打开即可查看总览、趋势、存储、网络、应用与设备。网页端直接使用 [fnMonitor](https://github.com/MisiteQ/fnmonitor) 的面板框架（MIT，源码固定在 `d002d1d2`，见 `ui/panel-src/`），R1 只填充数据并新增专有模块，因此磁贴、点阵数字、顶部/手机导航、详情抽屉、布局编辑和设置方式与上游一致。公开结构化接口为 `/api/v1/status`，另有历史、流量、告警、报告、CSV及OpenAPI。第三方读取不需要配对，详见[公开API](docs/public-api.md)；面板与鉴权细节见[网页面板](docs/web-panel.md)。
 
-网页容器列表支持搜索和状态筛选，卡片显示真实资源占用与端口，点击打开详情。小屏和已配对网页均可确认后启动、停止或重启普通容器；按当前状态开放操作，Toolbox 自身受保护。停止与重启会等待优雅退出；超时仅表示结果未确认，需要刷新查看，不会自动重复操作。Toolbox 安装容器完成后停止属于正常行为。设置按小屏、双路风扇、灯光、历史提醒与连接分组；复杂规则在网页编辑，控制中心保留常用操作。入口与使用范围见[界面与容器指南](docs/interface-guide.md)。
+网页容器列表支持搜索和状态筛选，卡片显示真实资源占用与端口，点击打开详情。小屏和已配对网页均可确认后启动、停止或重启普通容器；按当前状态开放操作，Toolbox 自身受保护。停止与重启会等待优雅退出；超时仅表示结果未确认，需要刷新查看，不会自动重复操作。Toolbox 安装容器完成后停止属于正常行为。设置按双路风扇、机身灯光、小屏与显示、历史提醒、外观、登录口令和连接分组；复杂规则在网页编辑，控制中心保留常用操作。R1 专有的双路温控、灯光联动、小屏亮度与电源操作以 fnMonitor 的磁贴和设置控件加入面板。入口与使用范围见[界面与容器指南](docs/interface-guide.md)。
 
-只有设置和控制操作需要解锁：在小屏“设置 → 网页配置”生成五位数字配对码，180秒有效、一次使用。网页与小屏共用面板、两路风扇、灯光及统计配置；保存待用规则不会直接接管，应用后等待运行状态确认。已配对网页还可执行已有的确认式容器／虚拟机操作及5秒可取消关机／重启，不提供任意命令。会话最长8小时，服务重启需重新配对，配置不丢失。可设 `R1_WEB_PORT: '0'` 禁用网页，或 `R1_WEB_BIND: '127.0.0.1'` 限制为本机。
+只有设置和控制操作需要解锁：默认在小屏“设置 → 网页配置”生成五位数字配对码，180秒有效、一次使用；也可在网页“设置 → 登录口令”开启可选口令登录，开启后访问面板需要先输入口令。两种授权都只解锁已有白名单操作，不提供任意命令。网页与小屏共用面板、两路风扇、灯光及统计配置；保存待用规则不会直接接管，应用后等待运行状态确认。已解锁网页还可执行已有的确认式容器／虚拟机操作及5秒可取消关机／重启。配对会话最长8小时、服务重启后需重新配对；口令会话按设置保持 1–30 天，配置不丢失。可设 `R1_WEB_PORT: '0'` 禁用网页，或 `R1_WEB_BIND: '127.0.0.1'` 限制为本机。
 
 灯光按原厂DesignWare适配器识别逻辑自动寻找唯一 `0x26` 灯控芯片，验证 `0x01=0x55` 后读取模式、亮度及RGB，不需手选总线。支持手动灯效、多温度源最高温颜色渐变和跨午夜亮度上限计划。默认只读探测，显式应用的规则才可持久恢复；检测到原厂主题或其他程序改灯时让回控制。详见[灯光策略与固件证据](docs/light-policy.md)。
 
 原有控制令牌仍只用于 NAS 本机小屏；普通前端文件预览保持只读。重启/关机需确认，提交后有 5 秒可取消倒计时；关机后不会自动开机。面板设置与独立风扇规则保存在同一独立 Docker 命名卷；`fan-policy.json` 分开记录待用规则与最后成功应用规则，只有成功应用的配置才会尝试开机恢复。单纯保存新参数不会替换当前运行或开机恢复的旧规则。IT87 hwmon 接管／曲线和 RGB 即时操作仍不作为开机自动执行配置保存。原厂系统风扇策略仅对匹配的已加载驱动开放，每次设置重新核验；它会由官方服务保存配置，恢复 UI 不自动撤销该策略，协议回执也不能替代物理效果验证。
 
-监控展示、趋势和报告需求也参考 [fnMonitor](https://github.com/MisiteQ/fnmonitor)。信息分组和功能需求参考 [r1-toolbox-go](https://github.com/lemon6515/r1-toolbox-go)、[r1-frontscreen](https://github.com/mingyangbest/r1-frontscreen) 及用户提供的 R1 Panel 1.1.7、R1 Toolbox 4.8.10 安装包。本仓库的界面、采集与控制代码独立实现，不导入参考程序的授权模块或受限代码。当前继续使用官方 HistorSub 的 Electron 窗口。
+网页面板框架与视觉来自 [fnMonitor](https://github.com/MisiteQ/fnmonitor)（MIT），完整源码固定在 `ui/panel-src/`，构建脚本为 `scripts/build-panel.py`；面板读取的 fnMonitor 兼容接口由 `runtime/fnm_compat.py` 用本机现有快照填充，不导入上游的 fnOS 专有集成。小屏界面仍为本仓库独立实现。信息分组和功能需求参考 [r1-toolbox-go](https://github.com/lemon6515/r1-toolbox-go)、[r1-frontscreen](https://github.com/mingyangbest/r1-frontscreen) 及用户提供的 R1 Panel 1.1.7、R1 Toolbox 4.8.10 安装包。采集与控制代码不导入参考程序的授权模块或受限代码。当前继续使用官方 HistorSub 的 Electron 窗口。
 
 ## 宿主文件与运行方式
 
@@ -70,6 +70,7 @@ python3 -m venv .venv
 python -m pip install -r requirements-dev.txt
 npm ci --ignore-scripts
 python tools/boot-once/build-compose.py
+python scripts/build-panel.py
 python scripts/build-ui.py
 node tests/check_histor_bridge.cjs
 node tests/check_interactions.cjs
@@ -80,7 +81,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 docker run --rm --network none r1-toolbox:local --help
 ```
 
-前端在 `ui/`；`runtime/ui_service.py` 提供 API 并管理小屏进程，`runtime/toolbox.py` 负责设置和硬件控制，`runtime/histor.py` 负责有明确协议的原厂接口适配，`runtime/insights.py` 负责系统、磁盘和应用采集，`runtime/device_info.py` 负责有界、只读设备库存；`runtime/temperature_sources.py` 提供带时效的温度来源，`runtime/fan_policy.py` 执行独立规则，`runtime/fan_native.py` 与 `runtime/fan_watchdog.py` 协调白名单适配层及独立恢复服务。修改后重新打包和构建镜像，无需将源码或页面复制到 NAS。
+网页面板源码在 `ui/panel-src/`（fnMonitor，MIT），`python scripts/build-panel.py` 生成 `ui/web/index.html` 与 `login.html`；小屏界面源码在 `ui/index.html` 与 `ui/assets/`，`python scripts/build-ui.py` 再打包成镜像内的 UI 包。`runtime/ui_service.py` 提供 API 并管理小屏进程，`runtime/web_config.py` 提供网页面板、只读 `/api/v1/*`、配对与可选口令登录，`runtime/fnm_compat.py` 将现有快照映射为面板接口，`runtime/fnm_auth.py` 处理口令哈希与会话，`runtime/toolbox.py` 负责设置和硬件控制，`runtime/histor.py` 负责有明确协议的原厂接口适配，`runtime/insights.py` 负责系统、磁盘和应用采集，`runtime/device_info.py` 负责有界、只读设备库存；`runtime/temperature_sources.py` 提供带时效的温度来源，`runtime/fan_policy.py` 执行独立规则，`runtime/fan_native.py` 与 `runtime/fan_watchdog.py` 协调白名单适配层及独立恢复服务。修改后重新构建面板、打包和构建镜像，无需将源码或页面复制到 NAS。
 
 前端交互检查需要本机 Chrome/Chromium，可通过 `CHROME_BIN` 指定可执行文件；`playwright-core` 仅为开发依赖。小屏检查使用拦截数据，网页端到端检查使用真实本地 HTTP 服务、临时 sys/dev/data 和内存适配器；均不连接 NAS 或执行真实硬件操作。
 

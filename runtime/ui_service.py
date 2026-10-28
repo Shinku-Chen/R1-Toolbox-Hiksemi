@@ -576,7 +576,9 @@ def create_web_config(controller, insights, fan_policy=None, *, light_policy=Non
         return None
     from web_config import WebConfigServer
     return WebConfigServer(controller, insights, fan_policy=fan_policy, light_policy=light_policy,
-                           monitoring=monitoring, monitor=monitor, host=host, port=int(raw_port))
+                           monitoring=monitoring, monitor=monitor, host=host, port=int(raw_port),
+                           state_dir=getattr(controller, 'state_dir', None),
+                           version=os.environ.get('R1_TOOLBOX_VERSION', 'dev'))
 
 
 def run_service(app, port=PORT, controller=None, insights=None):

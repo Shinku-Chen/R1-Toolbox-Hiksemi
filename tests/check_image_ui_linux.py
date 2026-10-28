@@ -108,8 +108,8 @@ def service_pid(unit):
 def check_web_config():
     with HTTP.open(f'http://127.0.0.1:{WEB_PORT}/', timeout=2) as response:
         assert response.status == 200 and b'<!doctype html>' in response.read().lower(), '网页监控页面不可用'
-    with HTTP.open(f'http://127.0.0.1:{WEB_PORT}/monitor.js', timeout=2) as response:
-        assert response.status == 200 and len(response.read()) > 100, '公开监控脚本未交付'
+    with HTTP.open(f'http://127.0.0.1:{WEB_PORT}/login.html', timeout=2) as response:
+        assert response.status == 200 and len(response.read()) > 100, '登录页未交付'
     request = urllib.request.Request(f'http://127.0.0.1:{WEB_PORT}/api/v1/status',
                                     headers={'Origin': 'https://third-party.example'})
     with HTTP.open(request, timeout=2) as response:

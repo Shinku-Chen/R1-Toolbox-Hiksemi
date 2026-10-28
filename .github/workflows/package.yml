@@ -33,10 +33,10 @@ jobs:
           done
       - name: Build bundled UI and check JavaScript syntax
         run: |
+          python scripts/build-panel.py
+          git diff --exit-code -- ui/web/index.html ui/web/login.html
           python scripts/build-ui.py
-          for script in ui/assets/*.js; do node --check "$script"; done
-          node --check ui/web/config.js
-          node --check ui/web/monitor.js
+          for script in ui/assets/*.js ui/panel-src/*.js; do node --check "$script"; done
       - name: Check the official hidden-window handshake
         run: node tests/check_histor_bridge.cjs
       - name: Check fan daemon signal readiness with owned Linux helpers

@@ -309,10 +309,10 @@ class WebTests(unittest.TestCase):
         self.login()
         for body in (b'{}' * 5000, b'{"code":"1","code":"2"}', b'{"x":NaN}', b'[]'):
             self.assertEqual(self.request('POST', '/api/pair', body)[0], 400)
-        for route in ('/../runtime/web_config.py', '/config.js/../../settings.json', '/%2e%2e/settings.json', '/api/session?code=123'):
+        for route in ('/../runtime/web_config.py', '/login.html/../../settings.json', '/%2e%2e/settings.json', '/api/session?code=123'):
             self.assertIn(self.request('GET', route)[0], (400, 404))
         self.assertEqual(self.request('GET', '/')[0], 200)
-        self.assertEqual(self.request('GET', '/config.js')[0], 200)
+        self.assertEqual(self.request('GET', '/login.html')[0], 200)
         self.assertEqual(self.request('OPTIONS', '/api/action')[0], 405)
 
     def test_duplicate_security_headers_are_rejected(self):

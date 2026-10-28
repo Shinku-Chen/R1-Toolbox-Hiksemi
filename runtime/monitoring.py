@@ -666,6 +666,22 @@ class MonitoringService:
         with self.lock:
             return copy.deepcopy(self.history_cache[range])
 
+    def history_diag(self):
+        """Bounded diagnostics for the panel; never creates or repairs a file."""
+        path = self.state_dir / "monitoring.sqlite3"
+        result = {"available": self.db is not None, "data_dir": str(self.state_dir),
+                  "db_file": str(path), "db_exists": path.is_file(), "rows": None,
+                  "last_ts": None, "recording": bool(self.settings.get("history_enabled")),
+                  "db_error": self.db_reason, "sample_interval_seconds": 30}
+        try:
+            if self.db is not None:
+                row = self.db.execute("SELECT COUNT(*), MAX(ts) FROM samples").fetchone()
+                if row is not None:
+                    result["rows"], result["last_ts"] = int(row[0] or 0), row[1]
+        except Exception as error:
+            result["db_error"] = type(error).__name__
+        return result
+
     def _traffic_snapshot(self, stamp):
         day, month = self._periods(stamp)
         names = sorted({key[2] for key in self.traffic_totals if key[1] in (day, month)})

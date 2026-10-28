@@ -10,9 +10,18 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 import urllib.parse
+
+# Companion modules live beside this file, including when tests import it by path.
+_RUNTIME_DIR = str(Path(__file__).resolve().parent)
+if _RUNTIME_DIR not in sys.path:
+    sys.path.insert(0, _RUNTIME_DIR)
+
+from fnm_auth import AuthStore, COOKIE as AUTH_COOKIE
+from fnm_compat import FnmonitorPanel
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'brightness',
                       'night_enabled', 'night_start', 'night_end', 'night_brightness', 'enabled_pages'))
@@ -20,6 +29,35 @@ COOKIE = 'r1_web_session'
 PAIR_TTL, SESSION_TTL = 180, 8 * 3600
 PUBLIC_ROUTES = frozenset(('/api/v1', '/api/v1/status', '/api/v1/history', '/api/v1/traffic',
                            '/api/v1/alerts', '/api/v1/report', '/api/v1/export.csv', '/api/v1/openapi.json'))
+
+# Static files the panel needs.  Everything else stays unserved.
+PANEL_ASSETS = {'/': ('index.html', 'text/html; charset=utf-8'),
+                '/index.html': ('index.html', 'text/html; charset=utf-8'),
+                '/login.html': ('login.html', 'text/html; charset=utf-8')}
+
+# fnmonitor GET routes that accept the query parameters its UI sends.
+PANEL_QUERY_ROUTES = frozenset(('/api/history', '/api/smart', '/api/vms', '/api/apps',
+                                '/api/report', '/api/export', '/api/update/check', '/api/daily'))
+
+# Every fnmonitor route the vendored panel calls (plus the R1 extension).
+PANEL_GET_ROUTES = frozenset((
+    '/api/auth/config', '/api/auth/session',
+    '/api/overview', '/api/system', '/api/sensors', '/api/fans', '/api/docker', '/api/ports',
+    '/api/hardware', '/api/memory', '/api/power', '/api/power_stats', '/api/traffic', '/api/gpu',
+    '/api/raidcard', '/api/processes', '/api/apps', '/api/modules', '/api/vms', '/api/history',
+    '/api/history/diag', '/api/smart', '/api/disk_health', '/api/scan_log', '/api/notify',
+    '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
+    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1',
+)) | PANEL_QUERY_ROUTES
+
+PANEL_POST_ROUTES = frozenset((
+    '/api/auth/password', '/api/auth/setup', '/api/auth/logout',
+    '/api/config/save', '/api/ui', '/api/docker/action', '/api/vm/action',
+    '/api/notify/save', '/api/notify/test', '/api/idrac/save', '/api/idrac/test',
+    '/api/idrac/refresh', '/api/disk_scan/now', '/api/scan_log/clear', '/api/update/install',
+    '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
+    '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
+))
 
 
 class _Reader:
@@ -96,7 +134,7 @@ class _Server(http.server.ThreadingHTTPServer):
 class WebConfigServer:
     def __init__(self, controller, insights=None, *, fan_policy=None, light_policy=None, monitoring=None,
                  monitor=None, host='0.0.0.0', port=18732,
-                 asset_dir=None, clock=None):
+                 asset_dir=None, clock=None, state_dir=None, version='dev'):
         if host not in ('127.0.0.1', '0.0.0.0') or type(port) is not int or not (port == 0 or 1024 <= port <= 65535):
             raise ValueError('网页监听只允许 127.0.0.1/0.0.0.0 和 1024–65535 端口')
         self.controller, self.insights = controller, insights
@@ -112,6 +150,19 @@ class WebConfigServer:
         self.pair_hash, self.pair_until = None, 0
         self.sessions, self.attempts = {}, {}
         self.global_attempts = []
+        self.version = version
+        if state_dir is not None:
+            self.state_dir = Path(state_dir)
+        elif getattr(controller, 'state_dir', None) is not None:
+            self.state_dir = Path(controller.state_dir) / 'web'
+        else:
+            # Tests and embedding callers without a writable volume still need a
+            # private directory; never fall back to the current working tree.
+            import tempfile
+            self.state_dir = Path(tempfile.mkdtemp(prefix='r1-panel-'))
+        self.auth = AuthStore(self.state_dir)
+        self.panel = FnmonitorPanel(controller, insights, monitoring, fan_policy, light_policy, monitor,
+                                    state_dir=self.state_dir, version=version, web=self)
 
     def _expire(self):
         now = self.clock()
@@ -384,6 +435,355 @@ class WebConfigServer:
         return {'ok': ok, 'saved': saved, 'applied': ok, 'state': fresh,
                 'error': None if ok else ('设置已保存，但设备应用未完成，请在小屏检查' if saved else '操作未完成，请在小屏检查')}
 
+    # ------------------------------------------------------------------
+    # fnmonitor panel: authentication, read routes and write routes
+    # ------------------------------------------------------------------
+    def password_session(self, headers):
+        """``None`` when no valid password session cookie was sent."""
+        return self.auth.session(headers.get('Cookie') or '')
+
+    def panel_authorized(self, headers, *, network_csrf=True):
+        """Password session, or the small-screen pairing session, may write.
+
+        The pairing session normally proves itself with ``X-R1-CSRF`` on
+        ``/api/action``.  fnmonitor's front-end has no such token, so panel
+        writes accept a same-origin POST carrying ``X-FNM-Request: 1`` instead:
+        that custom header forces a CORS preflight this server never grants, and
+        the handler already rejects foreign origins and non-JSON bodies.
+        """
+        if self.password_session(headers) is not None:
+            return 'password'
+        _, session = self._session(headers.get('Cookie') or '')
+        if session is not None and network_csrf:
+            return 'pair'
+        return None
+
+    def panel_readable(self, headers):
+        if not self.auth.required():
+            return True
+        return self.password_session(headers) is not None
+
+    def auth_status(self, headers):
+        session = self.password_session(headers)
+        return {'logged_in': session is not None, 'auth_required': self.auth.required(),
+                'authorized': session is not None,
+                'session': {'label': session.get('label'),
+                            'expires_in': max(0, int(session['expires_wall'] - time.time()))} if session else None,
+                'config': self.auth.auth_config()}
+
+    @staticmethod
+    def _panel_query(query, allowed):
+        try:
+            parsed = urllib.parse.parse_qs(query, keep_blank_values=False, max_num_fields=6)
+        except ValueError:
+            raise ValueError('查询参数无效')
+        if set(parsed) - set(allowed) or any(len(values) != 1 for values in parsed.values()):
+            raise ValueError('查询参数无效')
+        return {key: values[0] for key, values in parsed.items()}
+
+    def panel_get(self, route, query, headers):
+        """Return ``(status, payload, content_type)`` for a panel GET route."""
+        panel = self.panel
+        if route == '/api/auth/config':
+            return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
+        if route == '/api/auth/session':
+            return 200, self.auth_status(headers), 'application/json; charset=utf-8'
+        if route == '/api/r1':
+            authorized = self.panel_authorized(headers) is not None
+            return 200, panel.r1_state(authorized=authorized), 'application/json; charset=utf-8'
+        params = self._panel_query(query, {
+            '/api/history': ('metric', 'range'), '/api/smart': ('dev',),
+            '/api/vms': ('probe',), '/api/apps': ('refresh',), '/api/gpu': ('diag',),
+            '/api/report': ('format',), '/api/export': ('type', 'range'),
+            '/api/update/check': ('force',), '/api/daily': ('days',), '/api/scan_log': ('limit',),
+        }.get(route, ()))
+        if route == '/api/overview':
+            return 200, panel.overview(), 'application/json; charset=utf-8'
+        if route == '/api/system':
+            return 200, panel.system(), 'application/json; charset=utf-8'
+        if route == '/api/sensors':
+            return 200, panel.sensors(), 'application/json; charset=utf-8'
+        if route == '/api/fans':
+            return 200, panel.fans(), 'application/json; charset=utf-8'
+        if route == '/api/docker':
+            return 200, panel.docker(), 'application/json; charset=utf-8'
+        if route == '/api/ports':
+            return 200, panel.ports(), 'application/json; charset=utf-8'
+        if route == '/api/hardware':
+            return 200, panel.hardware(), 'application/json; charset=utf-8'
+        if route == '/api/memory':
+            return 200, panel.memory(), 'application/json; charset=utf-8'
+        if route == '/api/power':
+            return 200, panel.power(), 'application/json; charset=utf-8'
+        if route == '/api/power_stats':
+            return 200, panel.power_stats(), 'application/json; charset=utf-8'
+        if route == '/api/traffic':
+            return 200, panel.traffic(), 'application/json; charset=utf-8'
+        if route == '/api/gpu':
+            return 200, panel.gpu(diag=params.get('diag') in ('1', 'true')), 'application/json; charset=utf-8'
+        if route == '/api/raidcard':
+            return 200, panel.raidcard(), 'application/json; charset=utf-8'
+        if route == '/api/processes':
+            return 200, panel.processes(), 'application/json; charset=utf-8'
+        if route == '/api/apps':
+            return 200, panel.apps(), 'application/json; charset=utf-8'
+        if route == '/api/modules':
+            return 200, panel.modules(), 'application/json; charset=utf-8'
+        if route == '/api/vms':
+            if params.get('probe') in ('1', 'true', 'yes'):
+                return 200, panel.vm_probe(), 'application/json; charset=utf-8'
+            return 200, panel.vms(), 'application/json; charset=utf-8'
+        if route == '/api/history':
+            return 200, panel.history(params.get('metric', 'cpu'), params.get('range', '1h')), 'application/json; charset=utf-8'
+        if route == '/api/history/diag':
+            return 200, panel.history_diag(), 'application/json; charset=utf-8'
+        if route == '/api/smart':
+            return 200, panel.smart(params.get('dev', '')), 'application/json; charset=utf-8'
+        if route == '/api/disk_health':
+            return 200, panel.disk_health(), 'application/json; charset=utf-8'
+        if route == '/api/scan_log':
+            return 200, panel.scan_log(), 'application/json; charset=utf-8'
+        if route == '/api/notify':
+            return 200, panel.notify(), 'application/json; charset=utf-8'
+        if route == '/api/idrac':
+            return 200, panel.idrac(), 'application/json; charset=utf-8'
+        if route == '/api/daily':
+            return 200, panel.daily(params.get('days', '30')), 'application/json; charset=utf-8'
+        if route == '/api/monthly_summary':
+            return 200, panel.monthly_summary(), 'application/json; charset=utf-8'
+        if route == '/api/weather':
+            return 200, panel.weather(), 'application/json; charset=utf-8'
+        if route == '/api/update/check':
+            return 200, {'ok': True, 'has_update': False, 'latest': self.version,
+                         'note': 'R1 Toolbox 通过镜像标签更新，不在面板内自更新'}, 'application/json; charset=utf-8'
+        if route == '/api/config':
+            return 200, {'config': panel.config()}, 'application/json; charset=utf-8'
+        if route == '/api/ui':
+            return 200, {'ui': panel.store.ui()}, 'application/json; charset=utf-8'
+        if route == '/api/report':
+            fmt = params.get('format', 'json')
+            if fmt == 'html':
+                return 200, panel.report('html').encode('utf-8'), 'text/html; charset=utf-8'
+            return 200, panel.report(), 'application/json; charset=utf-8'
+        if route == '/api/export':
+            kind = params.get('type', 'history')
+            if kind != 'history':
+                raise ValueError('仅支持历史 CSV')
+            return 200, panel.export_csv(params.get('range', '7d')).encode('utf-8-sig'), 'text/csv; charset=utf-8'
+        return 404, {'ok': False, 'error': 'not_found'}, 'application/json; charset=utf-8'
+
+    def panel_post(self, route, body, headers, ip=''):
+        """Return ``(status, payload, cookie)`` for a panel POST route."""
+        if route == '/api/auth/password':
+            wait = self.auth.limiter.retry_after(ip)
+            if wait:
+                return 429, {'ok': False, 'error': '尝试次数过多，请 %d 秒后再试' % wait, 'retry_after': wait}, None
+            result = self.auth.login(str(body.get('password') or ''), ip)
+            if not result.get('ok'):
+                return 401, result, None
+            return 200, {'ok': True}, self._auth_cookie(result['sid'])
+        if route == '/api/auth/setup':
+            # The first password is a device-level setting: require the same
+            # small-screen unlock as other writes instead of letting any LAN
+            # client claim the panel and lock the owner out.
+            if self.auth.password_set():
+                return 400, {'ok': False, 'error': '已设置口令，请使用登录修改'}, None
+            if self.panel_authorized(headers) is None:
+                return 403, {'ok': False, 'error': 'need_pairing',
+                             'message': '设置登录口令需要先在小屏生成五位配对码'}, None
+            result = self.auth.setup(str(body.get('password') or ''), ip)
+            if not result.get('ok'):
+                return 400, result, None
+            return 200, {'ok': True}, self._auth_cookie(result['sid'])
+        if route == '/api/auth/logout':
+            sid = self.auth.cookie_sid(headers.get('Cookie') or '')
+            if sid:
+                self.auth.revoke(sid)
+            return 200, {'ok': True}, self._auth_cookie('', clear=True)
+        authorized = self.panel_authorized(headers) is not None
+        if not authorized and not (route == '/api/ui' and not self.auth.required()):
+            # With a login password the panel is already gated, so a 401 sends the
+            # browser to the login page.  Without one, keep public monitoring and
+            # ask for the small screen's one-time pairing code instead.
+            if self.auth.required():
+                return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
+            return 403, {'ok': False, 'error': 'need_pairing',
+                         'message': '需要在小屏「设置 → 网页配置」生成五位配对码后解锁设置'}, None
+        # Serialise writes: settings files are read-modify-write, and a fan or
+        # light apply must not interleave with another configuration save.
+        if not self.operation_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有设置正在保存或应用，请稍后重试'}, None
+        try:
+            try:
+                status, payload = self._panel_write(route, body, headers)
+            except ValueError as error:
+                return 400, {'ok': False, 'error': str(error)}, None
+            except Exception:
+                return 503, {'ok': False, 'error': '服务暂不可用，未确认操作结果'}, None
+            return status, payload, None
+        finally:
+            self.operation_lock.release()
+
+    def _auth_cookie(self, sid, clear=False):
+        if clear:
+            return '%s=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' % AUTH_COOKIE
+        return '%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d' % (
+            AUTH_COOKIE, sid, self.auth.session_days() * 86400)
+
+    def _panel_write(self, route, body, headers=None):
+        if not isinstance(body, dict):
+            raise ValueError('请求体必须是 JSON 对象')
+        panel = self.panel
+        if route == '/api/ui':
+            clean = panel.store.save_ui(body)
+            return 200, {'ok': True, 'ui': clean}
+        if route == '/api/config/save':
+            return 200, panel.save_config(dict(body))
+        if route == '/api/docker/action':
+            identity, action = body.get('id'), body.get('action')
+            if action not in ('start', 'stop', 'restart') or not isinstance(identity, str):
+                raise ValueError('容器操作参数无效')
+            if self.insights is None:
+                raise ValueError('应用控制服务不可用')
+            result = self.insights.action('container.action',
+                                          {'id': identity, 'operation': action, 'confirmed': True})
+            return 200, {'ok': result.get('ok') is True, 'error': result.get('reason') or result.get('error'),
+                         'refresh_pending': bool(result.get('refresh_pending'))}
+        if route == '/api/vm/action':
+            identity, action = body.get('uuid'), body.get('action')
+            if action not in ('start', 'shutdown', 'reboot', 'suspend', 'resume') or not isinstance(identity, str):
+                raise ValueError('虚拟机操作参数无效')
+            if self.insights is None:
+                raise ValueError('虚拟机控制服务不可用')
+            result = self.insights.action('vm.action', {'id': identity, 'operation': action, 'confirmed': True})
+            return 200, {'ok': result.get('ok') is True, 'error': result.get('reason') or result.get('error'),
+                         'refresh_pending': bool(result.get('refresh_pending'))}
+        if route == '/api/r1/fan':
+            if set(body) - {'config', 'apply', 'confirmed'} or not isinstance(body.get('config'), dict):
+                raise ValueError('风扇配置参数无效')
+            if self.fan_policy is None:
+                raise ValueError('独立温控未启用')
+            result = self.fan_policy.action('fan.policy.update', {
+                'config': body['config'], 'apply': body.get('apply') is True,
+                'confirmed': body.get('confirmed') is True})
+            return (200 if result.get('ok') else 400), self._policy_result(result)
+        if route == '/api/r1/fan/release':
+            if self.fan_policy is None:
+                raise ValueError('独立温控未启用')
+            result = self.fan_policy.action('fan.policy.release', {'confirmed': body.get('confirmed') is True})
+            return (200 if result.get('ok') else 400), self._policy_result(result)
+        if route == '/api/r1/light':
+            if set(body) - {'config', 'apply'} or not isinstance(body.get('config'), dict):
+                raise ValueError('灯光配置参数无效')
+            if self.light_policy is None:
+                raise ValueError('灯光联动未启用')
+            result = self.light_policy.action('light.policy.update',
+                                              {'config': body['config'], 'apply': body.get('apply') is True})
+            return (200 if result.get('ok') else 400), self._policy_result(result)
+        if route == '/api/r1/rgb':
+            if self.controller is None or set(body) - {'mode', 'color', 'brightness'} or not {'mode', 'color'} <= set(body):
+                raise ValueError('灯光操作参数无效')
+            result = self.controller.action('rgb.set', body)
+            return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
+                                                        'error': None if result.get('ok') else '灯光操作未完成',
+                                                        'state': self._state()}
+        if route == '/api/r1/screen':
+            action = body.get('action')
+            if action == 'brightness':
+                if type(body.get('value')) is not int or not 5 <= body['value'] <= 100:
+                    raise ValueError('亮度需要 5–100%')
+                payload = {'value': body['value']}
+                name = 'screen.brightness'
+            elif action in ('sleep', 'wake'):
+                payload, name = {}, 'screen.' + action
+            else:
+                raise ValueError('不支持的屏幕操作')
+            if self.controller is None:
+                raise ValueError('屏幕控制不可用')
+            result = self.controller.action(name, payload)
+            return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
+                                                        'error': None if result.get('ok') else '屏幕操作未完成，请在小屏检查',
+                                                        'state': self._state()}
+        if route == '/api/r1/settings':
+            changes = body.get('settings')
+            if not isinstance(changes, dict) or not changes:
+                raise ValueError('屏幕与外观设置无效')
+            if self.controller is None:
+                raise ValueError('设置服务不可用')
+            result = self.controller.action('settings.update', {'settings': changes})
+            return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
+                                                        'saved': result.get('settings_saved') is True,
+                                                        'error': None if result.get('ok') else '设置已保存但未应用到设备，请在小屏检查',
+                                                        'state': self._state()}
+        if route == '/api/r1/monitor':
+            changes = body.get('settings')
+            if not isinstance(changes, dict) or not changes or self.monitoring is None:
+                raise ValueError('统计设置无效')
+            result = self.monitoring.action('monitor.settings.update', {'settings': changes})
+            return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
+                                                        'saved': result.get('settings_saved') is True,
+                                                        'error': None if result.get('ok') else '统计设置未能保存',
+                                                        'settings': self.monitoring.snapshot().get('settings')}
+        if route == '/api/r1/power':
+            operation = body.get('operation')
+            if operation not in ('reboot', 'poweroff'):
+                raise ValueError('电源操作参数无效')
+            if body.get('confirmed') is not True:
+                raise ValueError('电源操作需要明确确认')
+            if self.controller is None:
+                raise ValueError('电源控制不可用')
+            result = self.controller.action('power.request', {'operation': operation, 'confirmed': True})
+            return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
+                                                        'error': None if result.get('ok') else '电源操作未开始，请在小屏检查',
+                                                        'state': self._state()}
+        if route == '/api/r1/power/cancel':
+            if self.controller is None:
+                raise ValueError('电源控制不可用')
+            result = self.controller.action('power.cancel', {})
+            return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
+                                                        'error': None if result.get('ok') else '取消失败，操作可能已开始',
+                                                        'state': self._state()}
+        if route == '/api/r1/auth':
+            action = body.get('action')
+            if action == 'change':
+                result = self.auth.change(str(body.get('old_password') or ''),
+                                          str(body.get('new_password') or ''))
+                if not result.get('ok'):
+                    return 400, result
+                cookie = self._auth_cookie(result['sid']) if result.get('sid') else None
+                return 200, {'ok': True, 'cleared': bool(result.get('cleared')),
+                             'config': self.auth.public_config()}, cookie
+            if action == 'enable':
+                self.auth.set_enabled(True)
+                return 200, {'ok': True, 'config': self.auth.public_config()}
+            if action == 'disable':
+                self.auth.set_enabled(False)
+                return 200, {'ok': True, 'config': self.auth.public_config()}
+            if action == 'session_days':
+                days = body.get('days')
+                if type(days) is not int or not 1 <= days <= 30:
+                    raise ValueError('会话天数需要 1–30')
+                cookie = (headers or {}).get('Cookie') or ''
+                self.auth.set_session_days(days, keep=self.auth.cookie_sid(cookie))
+                return 200, {'ok': True, 'config': self.auth.public_config()}
+            raise ValueError('不支持的登录设置')
+        if route in ('/api/notify/save', '/api/notify/test'):
+            raise ValueError('R1 Toolbox 不发送外部通知')
+        if route in ('/api/idrac/save', '/api/idrac/test', '/api/idrac/refresh'):
+            raise ValueError('R1 不是戴尔 iDRAC 平台')
+        if route in ('/api/disk_scan/now', '/api/scan_log/clear'):
+            raise ValueError('R1 Toolbox 只做只读 SMART 观测，不执行巡检自检')
+        if route == '/api/update/install':
+            raise ValueError('请通过更新 Compose 镜像升级，面板内不自更新')
+        return 404, {'ok': False, 'error': 'not_found'}
+
+    @staticmethod
+    def _policy_result(result):
+        return {'ok': result.get('ok') is True, 'saved': result.get('settings_saved') is True,
+                'pending': bool(result.get('pending')),
+                'error': None if result.get('ok') else result.get('error') or '配置未应用',
+                'fan_policy': result.get('fan_policy'), 'light_policy': result.get('light_policy')}
+
     def start(self):
         with self.lock:
             if self.server:
@@ -412,9 +812,11 @@ class WebConfigServer:
                 def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False):
                     data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
                     self.send_response(code)
+                    csp = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                           "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
                     for key, content in {'Content-Type': mime, 'Content-Length': str(len(data)), 'Cache-Control': 'no-store',
                                          'Connection': 'close', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-                                         'Content-Security-Policy': "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"}.items():
+                                         'Content-Security-Policy': csp}.items():
                         self.send_header(key, content)
                     if cookie:
                         self.send_header('Set-Cookie', cookie)
@@ -423,6 +825,8 @@ class WebConfigServer:
                         self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
                     if mime.startswith('text/csv'):
                         self.send_header('Content-Disposition', 'attachment; filename="r1-monitoring.csv"')
+                    elif mime.startswith('text/html') and code == 200 and self.path.startswith('/api/'):
+                        self.send_header('Content-Disposition', 'attachment; filename="r1-report.html"')
                     self.end_headers()
                     try:
                         self.wfile.write(data)
@@ -430,8 +834,8 @@ class WebConfigServer:
                         pass
                     self.close_connection = True
 
-                def valid(self, post=False, public=False):
-                    for name in ('Host', 'Origin', 'Cookie', 'Content-Length', 'Connection', 'X-R1-CSRF'):
+                def valid(self, post=False, public=False, panel=False):
+                    for name in ('Host', 'Origin', 'Cookie', 'Content-Length', 'Connection', 'X-R1-CSRF', 'X-FNM-Request'):
                         if len(self.headers.get_all(name, [])) > 1:
                             self.send(400, {'error': '重复请求头'})
                             return False
@@ -449,16 +853,16 @@ class WebConfigServer:
                     if post and self.headers.get('Origin') != 'http://' + host:
                         self.send(403, {'error': '写入请求需要同源网页'})
                         return False
-                    if urllib.parse.urlsplit(self.path).query and not public:
+                    if urllib.parse.urlsplit(self.path).query and not (public or panel):
                         self.send(400, {'error': '接口不接受查询参数'})
                         return False
                     return True
 
-                def body(self):
+                def body(self, limit=8192):
                     length = self.headers.get('Content-Length', '')
-                    if not re.fullmatch(r'[0-9]{1,4}', length) or not 0 < int(length) <= 8192:
+                    if not re.fullmatch(r'[0-9]{1,6}', length) or not 0 < int(length) <= limit:
                         raise ValueError('请求长度无效')
-                    if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+                    if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
                         raise ValueError('请求必须为 JSON')
                     def unique(pairs):
                         obj = {}
@@ -486,7 +890,8 @@ class WebConfigServer:
                     parsed = urllib.parse.urlsplit(self.path)
                     route = parsed.path
                     public = route in PUBLIC_ROUTES
-                    if not self.valid(public=public):
+                    panel = route in PANEL_GET_ROUTES
+                    if not self.valid(public=public, panel=panel):
                         return
                     if public:
                         try:
@@ -497,16 +902,32 @@ class WebConfigServer:
                         except Exception:
                             self.send(503, {'error': '监控来源暂不可用'}, public=True)
                         return
-                    static = {'/': ('index.html', 'text/html; charset=utf-8'), '/config.css': ('config.css', 'text/css; charset=utf-8'),
-                              '/config.js': ('config.js', 'application/javascript; charset=utf-8'),
-                              '/monitor.js': ('monitor.js', 'application/javascript; charset=utf-8')}
-                    if route in static:
-                        name, mime = static[route]
+                    if route in PANEL_ASSETS:
+                        name, mime = PANEL_ASSETS[route]
+                        if route != '/login.html' and outer.auth.required() and outer.password_session(self.headers) is None:
+                            name, mime = 'login.html', 'text/html; charset=utf-8'
+                        elif route == '/login.html' and not outer.auth.required():
+                            # No password protection: the panel is public, so the
+                            # login page would only offer a setup form that now
+                            # requires pairing.  Send the visitor to the panel.
+                            name, mime = 'index.html', 'text/html; charset=utf-8'
                         path = outer.asset_dir / name
-                        if not path.is_symlink() and path.is_file() and path.stat().st_size <= 256 * 1024:
+                        if not path.is_symlink() and path.is_file() and path.stat().st_size <= 2 * 1024 * 1024:
                             self.send(200, path.read_bytes(), mime=mime)
                         else:
                             self.send(503, {'error': '网页资源不可用'})
+                        return
+                    if panel:
+                        if route not in ('/api/auth/config', '/api/auth/session') and not outer.panel_readable(self.headers):
+                            self.send(401, {'ok': False, 'error': '未登录', 'auth_required': True})
+                            return
+                        try:
+                            status, value, mime = outer.panel_get(route, parsed.query, self.headers)
+                        except ValueError:
+                            status, value, mime = 400, {'ok': False, 'error': '查询参数无效'}, 'application/json; charset=utf-8'
+                        except Exception:
+                            status, value, mime = 503, {'ok': False, 'error': '数据来源暂不可用'}, 'application/json; charset=utf-8'
+                        self.send(status, value, mime=mime)
                         return
                     _, session = self.authenticated()
                     if session is None:
@@ -523,13 +944,34 @@ class WebConfigServer:
                         self.send(404, {'error': '接口不存在'})
 
                 def do_POST(self):
-                    if not self.valid(post=True):
-                        return
                     route = urllib.parse.urlsplit(self.path).path
+                    panel = route in PANEL_POST_ROUTES
+                    if not self.valid(post=True, panel=panel):
+                        return
                     try:
-                        body = self.body()
+                        body = self.body(limit=65536 if panel else 8192)
                     except (ValueError, UnicodeError, RecursionError):
                         self.send(400, {'error': '请求格式或长度无效'})
+                        return
+                    if panel:
+                        # fnmonitor's cross-site gate: JSON plus a custom header the
+                        # server never allows through CORS preflight.  A pairing
+                        # session's CSRF token is accepted as an equivalent proof
+                        # for callers that already hold one.
+                        marker = (self.headers.get('X-FNM-Request') or '').strip() == '1'
+                        supplied = self.headers.get('X-R1-CSRF', '')
+                        _, pair = outer._session(self.headers.get('Cookie') or '')
+                        csrf_ok = bool(pair) and re.fullmatch(r'[A-Za-z0-9_-]{43}', supplied) and secrets.compare_digest(supplied, pair['csrf'])
+                        if not marker and not csrf_ok:
+                            self.send(403, {'ok': False, 'error': 'csrf_rejected',
+                                            'message': '请求被拒绝：缺少 X-FNM-Request 头或会话校验失败'})
+                            return
+                        try:
+                            status, value, cookie = outer.panel_post(route, body, self.headers,
+                                                                     self.client_address[0])
+                        except Exception:
+                            status, value, cookie = 503, {'ok': False, 'error': '服务暂不可用'}, None
+                        self.send(status, value, cookie=cookie)
                         return
                     if route == '/api/pair':
                         if not isinstance(body, dict) or set(body) != {'code'}:
