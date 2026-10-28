@@ -56,6 +56,7 @@
     toastTimer: null,
     countdownTimer: null,
     sleeping: false,
+    saver: false,
     swallowUntil: 0,
     swipeUntil: 0,
     actionBusy: false,
@@ -333,8 +334,9 @@
 
   // ------------------------------------------------------------------ render
   function softRender(force = false) {
-    if (state.modal || state.sleeping) { renderPower(); syncSleep(); return; }
-    if (!force && document.activeElement && ['brightness', 'light-hue', 'light-brightness', 'light-effect', 'sleep-timeout'].includes(document.activeElement.id)) return;
+    if (state.modal || state.sleeping) { renderPower(); syncSleep(); syncSaver(); return; }
+    if (state.saver) { syncSaver(); return; }
+    if (!force && document.activeElement && ['brightness', 'light-hue', 'light-brightness', 'light-effect', 'sleep-timeout', 'saver-timeout', 'saver-brightness', 'saver-content'].includes(document.activeElement.id)) return;
     const body = $('screen-body');
     render(body ? body.scrollTop : 0);
   }
@@ -355,6 +357,7 @@
     syncBrightness();
     renderPower();
     syncSleep();
+    syncSaver();
   }
 
   function tickClock() {
@@ -380,10 +383,31 @@
     state.toastTimer = window.setTimeout(() => { node.hidden = true; }, error ? 5000 : 3200);
   }
 
+  function syncSaver() {
+    const node = $('saver');
+    if (!node) return;
+    const screen = obj(obj(state.data.toolbox).screen);
+    const settings = obj(obj(state.data.toolbox).settings);
+    const active = !state.sleeping && screen.saver === true;
+    state.saver = active;
+    if (!active) { node.hidden = true; return; }
+    const status = obj(state.data.status);
+    const cpu = percentText(obj(status.cpu).usage_percent);
+    const mem = percentText(obj(status.memory).usage_percent);
+    const cpuT = tempText(cpuTemp());
+    const boardT = tempText(mbTemp());
+    const content = settings.saver_content === 'temperature'
+      ? `<div class="saver-metrics"><div class="saver-metric"><strong>CPU 温度</strong><span class="value">${esc(cpuT)}</span></div><div class="saver-metric"><strong>主板温度</strong><span class="value">${esc(boardT)}</span></div></div>`
+      : `<div class="saver-metrics"><div class="saver-metric"><strong>CPU 使用率</strong><span class="value">${esc(cpu)}%</span></div><div class="saver-metric"><strong>内存使用率</strong><span class="value">${esc(mem)}%</span></div></div>`;
+    const now = new Date();
+    node.innerHTML = `<span class="saver-time">${dotNumber(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`)}</span><span class="saver-title">屏幕保护</span>${content}<span class="saver-hint">轻触返回</span>`;
+    node.hidden = false;
+  }
+
   function syncSleep() {
     const overlay = $('sleep');
     if (!overlay) return;
-    if (!state.sleeping) { overlay.hidden = true; return; }
+    if (!state.sleeping) { overlay.hidden = true; syncSaver(); return; }
     overlay.innerHTML = `<span data-clock-digits>${dotNumber(new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }))}</span><span>轻触唤醒</span>`;
     overlay.hidden = false;
   }
@@ -637,6 +661,11 @@
     return value === null ? 0 : value;
   }
 
+  function saverTimeoutValue(toolbox) {
+    const value = num(obj(toolbox.settings).saver_timeout, 0, 86400);
+    return value === null ? 0 : value;
+  }
+
   function lightControl(light) {
     const config = obj(light.config);
     const manual = obj(config.manual);
@@ -658,7 +687,11 @@
     const choices = [[0, '关闭'], [60, '1 分钟'], [300, '5 分钟'], [600, '10 分钟'], [1800, '30 分钟'], [3600, '1 小时']];
     const custom = !choices.some(([value]) => value === timeout);
     const disabled = !available || !canWrite();
-    return `<div class="control-select-row"><label class="control-label" for="sleep-timeout">自动息屏</label><select class="control-select" id="sleep-timeout" ${disabled ? 'disabled' : ''}>${choices.map(([value, text]) => `<option value="${value}" ${timeout === value ? 'selected' : ''}>${text}</option>`).join('')}${custom ? `<option value="${timeout}" selected>自定义 ${timeout} 秒</option>` : ''}</select></div>`;
+    const saverTimeout = saverTimeoutValue(toolbox);
+    const saverChoices = [[0, '关闭'], [60, '1 分钟'], [300, '5 分钟'], [600, '10 分钟'], [1800, '30 分钟'], [3600, '1 小时']];
+    const saverCustom = !saverChoices.some(([value]) => value === saverTimeout);
+    const saverContent = String(obj(toolbox.settings).saver_content || 'usage') === 'temperature' ? 'temperature' : 'usage';
+    return `<div class="control-select-row"><label class="control-label" for="saver-timeout">屏幕保护</label><select class="control-select" id="saver-timeout" ${disabled ? 'disabled' : ''}>${saverChoices.map(([value, text]) => `<option value="${value}" ${saverTimeout === value ? 'selected' : ''}>${text}</option>`).join('')}${saverCustom ? `<option value="${saverTimeout}" selected>自定义 ${saverTimeout} 秒</option>` : ''}</select></div>${saverTimeout > 0 ? `<div class="control-select-row"><label class="control-label" for="saver-brightness">保护亮度</label><select class="control-select" id="saver-brightness" ${disabled ? 'disabled' : ''}>${[10,20,30,40,50,60,70,80,90,100].map(v => `<option value="${v}" ${(+obj(toolbox.settings).saver_brightness || 30) === v ? 'selected' : ''}>${v}%</option>`).join('')}</select></div><div class="control-select-row"><label class="control-label" for="saver-content">保护内容</label><select class="control-select" id="saver-content" ${disabled ? 'disabled' : ''}><option value="usage" ${saverContent === 'usage' ? 'selected' : ''}>CPU / 内存使用率</option><option value="temperature" ${saverContent === 'temperature' ? 'selected' : ''}>CPU / 主板温度</option></select></div>` : ''}<div class="control-select-row"><label class="control-label" for="sleep-timeout">关闭屏幕</label><select class="control-select" id="sleep-timeout" ${disabled ? 'disabled' : ''}>${choices.map(([value, text]) => `<option value="${value}" ${timeout === value ? 'selected' : ''}>${text}</option>`).join('')}${custom ? `<option value="${timeout}" selected>自定义 ${timeout} 秒</option>` : ''}</select></div>`;
   }
 
   function controls() {
@@ -682,7 +715,11 @@
     const address = addresses[0] || (ipv4 ? `http://${ipv4}:18732` : '');
     const pairing = state.pairing;
     const remaining = pairing ? Math.max(0, Math.ceil((state.pairingDeadline - Date.now()) / 1000)) : 0;
-    return `<div class="detail-lead"><p class="kicker">CONTINUE ON THE WEB</p><h2>大一点的屏幕，<br>更完整的设置。</h2></div><article class="card"><div class="card-top"><h2>网页访问地址</h2><span class="badge neutral">${web.enabled ? '已启用' : '未启用'}</span></div><p class="web-address">${esc(address || '--')}</p><p class="body-copy">${address ? '在同一局域网的手机或电脑上打开。' : '网页服务暂未返回可访问地址。'}</p><div class="divider"></div><p class="caption">网页默认公开只读；修改设置需要一次性配对码或登录口令。</p></article><article class="card"><p class="kicker">PAIRING CODE</p>${pairing ? `<p class="pairing-code">${esc(pairing.code)}</p><p class="caption" style="text-align:center">${remaining} 秒内有效 · 仅可使用一次</p>` : '<p class="body-copy" style="margin:16px 0">需要修改网页设置时，生成五位配对码并在网页输入。</p>'}<button type="button" class="action-button primary" data-action="pairing" ${canWrite() && web.enabled ? '' : 'disabled'}>${pairing ? '重新生成配对码' : '生成一次性配对码'}</button><p class="caption" style="margin-top:12px">代码只显示在本机小屏，不会发送到网络。</p></article><article class="card"><p class="kicker">AVAILABLE ON THE WEB</p><div class="stat-row"><span>风扇温控</span><span class="caption">曲线与来源</span></div><div class="stat-row"><span>机身灯光</span><span class="caption">颜色与联动</span></div><div class="stat-row"><span>登录与配对</span><span class="caption">保护写操作</span></div></article><p class="info-note">局域网 HTTP 未加密，请只在可信网络使用；公开监控与配对共用同一端口。</p>`;
+    const passwordMode = web.auth_mode === 'password';
+    const accessCard = passwordMode
+      ? `<article class="card"><p class="kicker">WEB ACCESS</p><p class="body-copy" style="margin:16px 0">网页写操作不要求配对码。登录口令默认关闭；如已设置口令，修改设置前需要先登录。</p><p class="caption">仅建议在可信局域网使用；未设置口令时，任何能访问 18732 的设备都可以修改设置。</p></article>`
+      : `<article class="card"><p class="kicker">PAIRING CODE</p>${pairing ? `<p class="pairing-code">${esc(pairing.code)}</p><p class="caption" style="text-align:center">${remaining} 秒内有效 · 仅可使用一次</p>` : '<p class="body-copy" style="margin:16px 0">需要修改网页设置时，生成五位配对码并在网页输入。</p>'}<button type="button" class="action-button primary" data-action="pairing" ${canWrite() && web.enabled ? '' : 'disabled'}>${pairing ? '重新生成配对码' : '生成一次性配对码'}</button><p class="caption" style="margin-top:12px">代码只显示在本机小屏，不会发送到网络。</p></article>`;
+    return `<div class="detail-lead"><p class="kicker">CONTINUE ON THE WEB</p><h2>大一点的屏幕，<br>更完整的设置。</h2></div><article class="card"><div class="card-top"><h2>网页访问地址</h2><span class="badge neutral">${web.enabled ? '已启用' : '未启用'}</span></div><p class="web-address">${esc(address || '--')}</p><p class="body-copy">${address ? '在同一局域网的手机或电脑上打开。' : '网页服务暂未返回可访问地址。'}</p><div class="divider"></div><p class="caption">${passwordMode ? '写操作使用登录口令保护；默认未启用口令。' : '网页默认公开只读；修改设置需要一次性配对码或登录口令。'}</p></article>${accessCard}<article class="card"><p class="kicker">AVAILABLE ON THE WEB</p><div class="stat-row"><span>风扇温控</span><span class="caption">曲线与来源</span></div><div class="stat-row"><span>机身灯光</span><span class="caption">颜色与联动</span></div><div class="stat-row"><span>${passwordMode ? '登录口令' : '登录与配对'}</span><span class="caption">${passwordMode ? '可选保护' : '保护写操作'}</span></div></article><p class="info-note">局域网 HTTP 未加密，请只在可信网络使用；${passwordMode ? '写操作默认开放，建议设置登录口令。' : '公开监控与配对共用同一端口。'}</p>`;
   }
 
   const views = { overview, metrics, processor, storage, network, apps, containers: containersView, container: containerView, thermal, trends, ports, controls, power, web };
@@ -765,7 +802,25 @@
   async function setSleepTimeout() {
     const value = Number($('sleep-timeout')?.value);
     if (!Number.isFinite(value)) return;
-    await action('settings.update', { settings: { sleep_timeout: value } }, '息屏时间已保存');
+    await action('settings.update', { settings: { sleep_timeout: value } }, '关闭屏幕时间已保存');
+    softRender(true);
+  }
+
+  async function setSaverTimeout() {
+    const value = Number($('saver-timeout')?.value);
+    if (!Number.isFinite(value)) return;
+    await action('settings.update', { settings: { saver_timeout: value } }, '屏幕保护时间已保存');
+    softRender(true);
+  }
+
+  async function setSaverOptions() {
+    const settings = {};
+    const brightness = $('saver-brightness');
+    const content = $('saver-content');
+    if (brightness && brightness.value) settings.saver_brightness = Number(brightness.value);
+    if (content && content.value) settings.saver_content = content.value;
+    if (!Object.keys(settings).length) return;
+    await action('settings.update', { settings }, '屏幕保护设置已保存');
     softRender(true);
   }
 
@@ -866,6 +921,10 @@
     const act = button.dataset.action;
     if (act === 'back') back();
     if (act === 'sleep') { if (state.powerDeadline !== null) { toast('电源倒计时期间请先取消操作。', true); return; } action('screen.sleep', {}, null).then(result => { if (result) { state.sleeping = true; syncSleep(); } }); }
+    if (act === 'saver-wake') {
+      action('screen.activity', {}, null).then(result => { if (result) { state.saver = false; syncSaver(); } });
+      return;
+    }
     if (act === 'wake') {
       if (Date.now() < state.swallowUntil) return;
       state.swallowUntil = Date.now() + 650;
@@ -907,6 +966,8 @@
     if (event.target.id === 'brightness') setBrightness();
     if (['light-hue', 'light-brightness', 'light-effect'].includes(event.target.id)) setLight();
     if (event.target.id === 'sleep-timeout') setSleepTimeout();
+    if (event.target.id === 'saver-timeout') setSaverTimeout();
+    if (['saver-brightness', 'saver-content'].includes(event.target.id)) setSaverOptions();
   });
 
   document.addEventListener('keydown', event => {

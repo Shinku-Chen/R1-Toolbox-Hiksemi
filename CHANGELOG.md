@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- feat(screen): 增加屏幕保护时间、保护亮度、CPU/内存使用率或 CPU/主板温度内容和独立的关闭屏幕时间；休眠盘不参与。
+- feat(web): 新增 `R1_WEB_AUTH_MODE=password` 登录口令模式；该模式不再要求配对码，口令默认关闭，启用后写操作需登录。
 - fix(fan): 监督进程提前退出时保留其 `status.json` 原因；开发者命令增加只读 `fan_status` 用于查看监督状态。
 - fix(deploy): 将开发者模式开关、IP 白名单、时限和命令开关纳入配置指纹，修改后同次开机也会重新部署宿主服务。
 - feat(dev): `/api/auth/session` 返回服务端实际看到的 `client_ip`，便于核对开发者白名单。

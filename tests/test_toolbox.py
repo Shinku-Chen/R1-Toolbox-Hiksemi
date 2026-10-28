@@ -250,6 +250,28 @@ class ToolboxTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("14400", (self.backlight / "brightness").read_text())
 
+    def test_screen_saver_dims_and_restores_on_activity(self):
+        result = self.controller.action("settings.update", {"settings": {
+            "saver_timeout": 10, "saver_brightness": 30,
+            "saver_content": "temperature", "sleep_timeout": 0,
+        }})
+        self.assertTrue(result["ok"], result)
+        self.now = 9
+        self.controller.tick()
+        self.assertFalse(self.controller.saver)
+        self.now = 10
+        self.controller.tick()
+        self.assertTrue(self.controller.saver)
+        self.assertEqual(self.snapshot_saver(), True)
+        self.assertEqual((self.backlight / "brightness").read_text(), "28800")
+        self.controller.action("screen.activity", {})
+        self.assertFalse(self.controller.saver)
+        self.assertEqual(self.snapshot_saver(), False)
+        self.assertEqual((self.backlight / "brightness").read_text(), "76800")
+
+    def snapshot_saver(self):
+        return self.controller.snapshot()["screen"]["saver"]
+
     def test_power_requires_confirmation_delays_and_cancels(self):
         self.assertFalse(self.controller.action("power.request", {"operation": "reboot", "confirmed": 1})["ok"])
         self.assertFalse(self.controller.action("power.request", {"operation": "shell", "confirmed": True})["ok"])

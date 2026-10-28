@@ -528,6 +528,10 @@ def main():
                     'R1_WEB_PORT 需要为 1024–65535，或 0 禁用网页')
             environment['R1_WEB_BIND'] = web_bind
             environment['R1_WEB_PORT'] = web_port
+            auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'pair')
+            if auth_mode not in ('pair', 'password'):
+                raise SystemExit('R1_WEB_AUTH_MODE 只能是 pair 或 password')
+            environment['R1_WEB_AUTH_MODE'] = auth_mode
             dev_no_pairing = os.environ.get('R1_DEV_NO_PAIRING', '')
             if dev_no_pairing not in ('', '0', '1'):
                 raise SystemExit('R1_DEV_NO_PAIRING 只能是 0 或 1')

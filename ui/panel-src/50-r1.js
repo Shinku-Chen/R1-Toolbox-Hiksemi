@@ -605,7 +605,12 @@ function r1ScreenSettings(card) {
     if (caps.brightness && caps.brightness.available === true) {
       rows.append(r1Field('屏幕亮度', r1Number(s.brightness, 5, 100, '%', v => apply({ brightness: v })), '5–100%，同时保存在小屏设置中'));
     }
-    rows.append(r1Field('无操作息屏', r1Number(s.sleep_timeout || 0, 0, 86400, '秒', v => apply({ sleep_timeout: v })), '0 为关闭；触摸只唤醒，不触发页面操作'));
+    rows.append(r1Field('屏幕保护', r1Number(s.saver_timeout || 0, 0, 86400, '秒', v => apply({ saver_timeout: v })), '无操作达到该时间后进入屏幕保护；0 为关闭'));
+    if (s.saver_timeout > 0) {
+      rows.append(r1Field('屏幕保护亮度', r1Number(s.saver_brightness || 30, 5, 100, '%', v => apply({ saver_brightness: v })), '屏幕保护时使用的背光亮度'));
+      rows.append(r1Field('屏幕保护内容', r1Select([['usage', 'CPU / 内存使用率'], ['temperature', 'CPU / 主板温度']], s.saver_content || 'usage', v => apply({ saver_content: v }))));
+    }
+    rows.append(r1Field('关闭屏幕', r1Number(s.sleep_timeout || 0, 0, 86400, '秒', v => apply({ sleep_timeout: v })), '无操作达到该时间后关闭背光；0 为关闭。建议大于屏幕保护时间'));
     rows.append(r1Field('夜间自动调暗', r1Check('启用夜间亮度', !!s.night_enabled, v => apply({ night_enabled: v })), '按 NAS 本地时间，支持跨午夜'));
     if (s.night_enabled) {
       rows.append(r1Field('夜间开始', r1Time(s.night_start, v => apply({ night_start: v }))));
@@ -763,7 +768,7 @@ SET_SCHEMA.push(
   { id: 'r1-monitor', title: '历史与告警', icon: 'pulse', desc: '历史采样、保留天数、流量统计范围与本地告警阈值。', custom: r1MonitorSettings },
   ...(R1_THRESHOLDS ? [R1_THRESHOLDS] : []),
   { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
-  { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选）。修改设置与设备操作始终受授权保护。', custom: r1AuthSettings },
+  { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选，默认关闭）。启用后网页写操作需要先登录；也可通过 R1_WEB_AUTH_MODE=password 完全停用配对码。', custom: r1AuthSettings },
   { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
   { id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [
     { k: 'weatherAuto', label: '自动定位', type: 'toggle', hint: '按 NAS 公网 IP 估算城市；需要外网。关闭后可手动填写下方位置。',

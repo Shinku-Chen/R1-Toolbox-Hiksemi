@@ -511,6 +511,19 @@ class DeveloperModeTests(unittest.TestCase):
                 server.stop()
 
 
+class PasswordOnlyModeTests(unittest.TestCase):
+    def test_password_mode_allows_writes_without_pairing_when_no_password(self):
+        directory = Path(tempfile.mkdtemp(prefix='r1-panel-pwmode-'))
+        with mock.patch.dict(os.environ, {'R1_WEB_AUTH_MODE': 'password'}):
+            server = web.WebConfigServer(Controller(), Insights(), host='127.0.0.1', port=0,
+                                         asset_dir=ROOT / 'ui/web', state_dir=directory)
+            try:
+                self.assertEqual(server.panel_authorized({}, peer='192.168.1.50'), 'open')
+                self.assertTrue(server.auth_status({}, peer='192.168.1.50')['authorized'])
+            finally:
+                server.stop()
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp(prefix='r1-panel-http-'))

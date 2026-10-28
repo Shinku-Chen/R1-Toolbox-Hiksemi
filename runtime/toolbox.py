@@ -16,7 +16,8 @@ import time
 PAGES = ("overview", "storage", "network", "controls", "apps", "system", "settings")
 DEFAULTS = {
     "theme": "dark", "font_scale": 100, "page_interval": 0,
-    "sleep_timeout": 0, "brightness": 80, "night_enabled": False,
+    "sleep_timeout": 0, "saver_timeout": 0, "saver_brightness": 30,
+    "saver_content": "usage", "brightness": 80, "night_enabled": False,
     "night_start": "22:00", "night_end": "07:00", "night_brightness": 20,
     "enabled_pages": list(PAGES),
 }
@@ -69,9 +70,11 @@ def validated_settings(changes, original):
     result.update(changes)
     require(result["theme"] in ("dark", "light", "ink", "jade"), "不支持的主题")
     for name, low, high in (("font_scale", 80, 140), ("page_interval", 0, 3600),
-                            ("sleep_timeout", 0, 86400), ("brightness", 5, 100),
+                            ("sleep_timeout", 0, 86400), ("saver_timeout", 0, 86400),
+                            ("brightness", 5, 100), ("saver_brightness", 5, 100),
                             ("night_brightness", 5, 100)):
         integer(result[name], low, high, name)
+    require(result["saver_content"] in ("usage", "temperature"), "不支持的屏幕保护内容")
     require(type(result["night_enabled"]) is bool, "night_enabled 必须是布尔值")
     for name in ("night_start", "night_end"):
         require(isinstance(result[name], str) and re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", result[name]),
@@ -96,7 +99,9 @@ class ToolboxController:
         self.settings_error = None
         self.last_activity = self.clock()
         self.asleep = False
+        self.saver = False
         self.saved_brightness = None
+        self.saver_saved_brightness = None
         self.original_screen = {}
         self.night_active = None
         self.owned_fans = {}
@@ -206,13 +211,38 @@ class ToolboxController:
             return self.settings["night_brightness"]
         return self.settings["brightness"]
 
+    def _saver_start(self):
+        if self.saver or self.asleep:
+            return
+        if not self.settings.get("saver_timeout"):
+            return
+        self.saver_saved_brightness = self._brightness()
+        self._set_brightness(self.settings["saver_brightness"])
+        self.saver = True
+
+    def _saver_stop(self):
+        if not self.saver:
+            return
+        self.saver = False
+        if not self.asleep:
+            try:
+                self._set_brightness(self._effective_brightness())
+            except (OSError, ValueError):
+                pass
+        self.saver_saved_brightness = None
+
     def _sleep(self):
         folder, _ = self._backlight()
         blank = self.sys_root / "class/graphics/fb0/blank"
         require(blank.is_file() or folder is not None, "未发现可用的息屏接口")
         if self.asleep:
             return
-        self.saved_brightness = self._brightness()
+        if self.saver:
+            self.saved_brightness = self.saver_saved_brightness
+            self.saver = False
+            self.saver_saved_brightness = None
+        else:
+            self.saved_brightness = self._brightness()
         self._remember_screen()
         if blank.is_file():
             self._write_int(blank, 4)
@@ -222,6 +252,8 @@ class ToolboxController:
 
     def _wake(self):
         self.last_activity = self.clock()
+        self.saver = False
+        self.saver_saved_brightness = None
         folder, _ = self._backlight()
         blank = self.sys_root / "class/graphics/fb0/blank"
         if not self.asleep and self._brightness() != 0 and self._read_int(blank) in (None, 0):
@@ -517,7 +549,7 @@ class ToolboxController:
                 },
                 "settings": copy.deepcopy(self.settings), "settings_error": self.settings_error,
                 "screen": {"brightness": self._brightness(), "asleep": self.asleep or (self._read_int(blank) or 0) != 0,
-                           "max_brightness": maximum},
+                           "saver": self.saver, "max_brightness": maximum},
                 "fans": {"channels": fans, "official": official,
                          "temperature_c": self._temperature(), "last_error": self.fan_error},
                 "rgb": {"bus": self.rgb_bus, "mode": self.rgb_mode, "color": self.rgb_color,
@@ -564,6 +596,7 @@ class ToolboxController:
                     self._wake()
                 elif name == "screen.activity":
                     keys(payload, ())
+                    self._saver_stop()
                     self.last_activity = self.clock()
                 elif name == "fan.set":
                     self._set_fan(payload)
@@ -614,9 +647,13 @@ class ToolboxController:
                         if not self.asleep:
                             self._set_brightness(self._effective_brightness())
                         self.night_active = active
+                idle = self.clock() - self.last_activity
                 timeout = self.settings["sleep_timeout"]
-                if timeout and not self.asleep and self.clock() - self.last_activity >= timeout:
+                if timeout and not self.asleep and idle >= timeout:
                     self._sleep()
+                elif (not self.asleep and not self.saver and self.settings.get("saver_timeout")
+                      and idle >= self.settings["saver_timeout"]):
+                    self._saver_start()
                 for channel, original in list(self.owned_fans.items()):
                     try:
                         path, _ = self._fan_paths(channel)

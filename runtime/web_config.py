@@ -25,7 +25,8 @@ if _RUNTIME_DIR not in sys.path:
 from fnm_auth import AuthStore, COOKIE as AUTH_COOKIE
 from fnm_compat import FnmonitorPanel
 
-SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'brightness',
+SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
+                      'saver_brightness', 'saver_content', 'brightness',
                       'night_enabled', 'night_start', 'night_end', 'night_brightness', 'enabled_pages'))
 COOKIE = 'r1_web_session'
 PAIR_TTL, SESSION_TTL = 180, 8 * 3600
@@ -202,6 +203,9 @@ class WebConfigServer:
         # Opt-in development bypass.  It is off unless both an explicit flag
         # and a client allowlist are supplied, and it expires automatically.
         # Never enable this on a production LAN without understanding the risk.
+        self.auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'pair')
+        if self.auth_mode not in ('pair', 'password'):
+            self.auth_mode = 'pair'
         self.dev_no_pairing = os.environ.get('R1_DEV_NO_PAIRING') == '1'
         self.dev_allow_ips = set()
         for item in os.environ.get('R1_DEV_ALLOW_IPS', '').split(','):
@@ -267,7 +271,7 @@ class WebConfigServer:
             self._expire()
             return {'enabled': self.server is not None, 'host': self.host, 'port': self.port,
                     'scheme': 'http', 'addresses': self._addresses() if self.server else [],
-                    'reason': self.reason, 'session_count': len(self.sessions),
+                    'reason': self.reason, 'session_count': len(self.sessions), 'auth_mode': self.auth_mode,
                     'pairing': {'active': self.pair_hash is not None,
                                 'expires_in': max(0, int(self.pair_until - self.clock())) if self.pair_hash else 0}}
 
@@ -523,6 +527,8 @@ class WebConfigServer:
             return 'password'
         if self._dev_authorized(peer) and not self.auth.required():
             return 'dev'
+        if self.auth_mode == 'password' and not self.auth.required():
+            return 'open'
         _, session = self._session(headers.get('Cookie') or '')
         if session is not None and network_csrf:
             return 'pair'
@@ -537,7 +543,8 @@ class WebConfigServer:
         session = self.password_session(headers)
         dev = self._dev_authorized(peer) and not self.auth.required()
         return {'logged_in': session is not None, 'auth_required': self.auth.required(),
-                'authorized': session is not None or dev, 'dev_mode': dev,
+                'authorized': session is not None or dev or (self.auth_mode == 'password' and not self.auth.required()),
+                'auth_mode': self.auth_mode, 'dev_mode': dev,
                 'client_ip': str(peer) if peer else None,
                 'session': {'label': session.get('label'),
                             'expires_in': max(0, int(session['expires_wall'] - time.time()))} if session else None,
