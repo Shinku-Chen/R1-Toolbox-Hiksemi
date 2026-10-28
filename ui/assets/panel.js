@@ -38,6 +38,10 @@
     view: 'overview',
     history: [],
     data: {},
+    dataAvailable: {},
+    dataReadAt: {},
+    dataReadWallAt: {},
+    dataRequestedAt: {},
     online: false,
     brightness: null,
     brightnessDirty: false,
@@ -57,6 +61,9 @@
     countdownTimer: null,
     sleeping: false,
     saver: false,
+    saverStartedAt: null,
+    saverItemsKey: '',
+    saverLabels: {},
     swallowUntil: 0,
     swipeUntil: 0,
     actionBusy: false,
@@ -169,12 +176,19 @@
   const tempText = value => num(value, -40, 200) === null ? '--' : `${Math.round(value)}°`;
   const percentText = value => pct(value) === null ? '--' : String(Math.round(value));
 
-  function cpuTemp() {
+  function cpuTemp(includeStatus = true) {
     const status = obj(state.data.status);
     const direct = num(obj(status.cpu).temp_c, -40, 200);
-    if (direct !== null) return direct;
+    if (includeStatus && direct !== null) return direct;
     const device = obj(obj(state.data.insights).device);
     const rows = list(device.thermal).filter(row => row && /coretemp|k10temp/.test(String(row.driver || '')) && num(row.celsius, -40, 200) !== null);
+    return rows.length ? Math.max(...rows.map(row => row.celsius)) : null;
+  }
+
+  function mbTemp() {
+    if (!saverDeviceFresh()) return null;
+    const rows = list(obj(obj(state.data.insights).device).thermal).filter(row => row &&
+      !/coretemp|k10temp|zenpower|cpu[_-]?thermal|x86_pkg_temp|soc_thermal|(?:^|\W)cpu(?:$|\W)|nvme|drivetemp|amdgpu|nouveau|nvidia/i.test(String(row.driver || '') + ' ' + String(row.label || '')) && num(row.celsius, -40, 200) !== null);
     return rows.length ? Math.max(...rows.map(row => row.celsius)) : null;
   }
 
@@ -267,11 +281,20 @@
       ['status', '/status'], ['toolbox', '/toolbox'], ['insights', '/insights'],
       ['fan', '/fan-policy'], ['light', '/light-policy'], ['monitoring', '/monitoring'], ['web', '/web-config'],
     ];
-    const results = await Promise.allSettled(tasks.map(([, path]) => request(path)));
+    const requestedAt = {};
+    const results = await Promise.allSettled(tasks.map(([key, path]) => {
+      requestedAt[key] = performance.now();
+      return request(path);
+    }));
     let success = 0;
     results.forEach((result, index) => {
+      const key = tasks[index][0];
+      state.dataAvailable[key] = result.status === 'fulfilled';
       if (result.status === 'fulfilled') {
-        state.data[tasks[index][0]] = result.value;
+        state.data[key] = result.value;
+        state.dataReadAt[key] = performance.now();
+        state.dataReadWallAt[key] = Date.now();
+        state.dataRequestedAt[key] = requestedAt[key];
         success += 1;
       }
     });
@@ -337,7 +360,7 @@
   function softRender(force = false) {
     if (state.modal || state.sleeping) { renderPower(); syncSleep(); syncSaver(); return; }
     if (state.saver) { syncSaver(); return; }
-    if (!force && document.activeElement && ['brightness', 'light-hue', 'light-brightness', 'light-effect', 'sleep-timeout', 'saver-timeout', 'saver-brightness', 'saver-content'].includes(document.activeElement.id)) return;
+    if (!force && document.activeElement && (document.activeElement.matches('[data-saver-item]') || ['brightness', 'light-hue', 'light-brightness', 'light-effect', 'sleep-timeout', 'saver-timeout', 'saver-brightness'].includes(document.activeElement.id))) return;
     const body = $('screen-body');
     render(body ? body.scrollTop : 0);
   }
@@ -372,6 +395,7 @@
     });
     document.querySelectorAll('[data-clock-seconds]').forEach(node => { node.textContent = String(now.getSeconds()).padStart(2, '0'); });
     document.querySelectorAll('[data-clock-date]').forEach(node => { node.textContent = now.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }); });
+    if (state.saver) syncSaver();
   }
 
   function toast(message, error = false) {
@@ -384,25 +408,107 @@
     state.toastTimer = window.setTimeout(() => { node.hidden = true; }, error ? 5000 : 3200);
   }
 
+  const SAVER_FIXED = {
+    cpu_usage: 'CPU 使用率', memory_usage: '内存使用率',
+    cpu_temperature: 'CPU 温度', board_temperature: '主板温度',
+  };
+
+  function saverItems(settings) {
+    const items = settings.saver_items;
+    if (Array.isArray(items) && items.length >= 1 && items.length <= 12 && new Set(items).size === items.length &&
+      items.every(item => typeof item === 'string' && (Object.hasOwn(SAVER_FIXED, item) ||
+        (item.startsWith('temperature:') && item.length > 12 && item.length <= 268 && !/[\x00-\x1f\x7f]/.test(item))))) return items.slice();
+    return settings.saver_content === 'temperature' ? ['cpu_temperature', 'board_temperature'] : ['cpu_usage', 'memory_usage'];
+  }
+
+  function saverDataAvailable(key) {
+    return state.online && state.dataAvailable[key] === true && obj(state.data[key]).available !== false;
+  }
+
+  function saverSampleFresh(key, stamp, maxAge) {
+    if (!saverDataAvailable(key) || typeof stamp !== 'string') return false;
+    const sampled = Date.parse(stamp), received = state.dataReadWallAt[key];
+    if (!Number.isFinite(sampled) || !Number.isFinite(received)) return false;
+    const initialAge = (received - sampled) / 1000;
+    const elapsed = Math.max(0, performance.now() - state.dataReadAt[key]) / 1000;
+    return initialAge >= -1 && Math.max(0, initialAge) + elapsed <= maxAge;
+  }
+
+  const saverDeviceFresh = () => obj(obj(state.data.insights).device).available !== false &&
+    saverSampleFresh('insights', obj(obj(state.data.insights).device).sampled_at, 90);
+
+  function saverSourceCurrent(source) {
+    if (!saverDataAvailable('fan') || source.fresh !== true) return false;
+    const age = num(source.age_seconds, 0), limit = num(source.max_age_seconds, 0, 300);
+    // The backend owns freshness; elapsed client time can only expire a sample.
+    return age === null || limit === null || age + Math.max(0, performance.now() - state.dataRequestedAt.fan) / 1000 <= limit;
+  }
+
+  const saverSourceFresh = source => saverSourceCurrent(source) && source.status === 'ok';
+
+  function saverCatalog() {
+    const sources = new Map();
+    for (const source of list(fanPolicy().sources).slice(0, 512)) {
+      if (!source || typeof source.id !== 'string') continue;
+      const key = 'temperature:' + source.id;
+      if (typeof source.label === 'string' && source.label.trim()) state.saverLabels[key] = source.label.trim().slice(0, 256);
+      sources.set(key, sources.has(key) ? null : source);
+    }
+    return sources;
+  }
+
+  function saverLabel(key) {
+    return SAVER_FIXED[key] || state.saverLabels[key] || '离线温度设备 · ' + key.slice(-8);
+  }
+
+  /** All saver values come from existing polls; rotation never requests data. */
+  function saverMetric(key, sources) {
+    let value = null, unit = key === 'cpu_usage' || key === 'memory_usage' ? '%' : '℃', note = '';
+    const status = obj(state.data.status);
+    const statusFresh = saverSampleFresh('status', status.timestamp, 10);
+    if (key === 'cpu_usage') value = statusFresh ? pct(obj(status.cpu).usage_percent) : null;
+    else if (key === 'memory_usage') value = statusFresh ? pct(obj(status.memory).usage_percent) : null;
+    else if (key === 'cpu_temperature') {
+      value = statusFresh ? num(obj(status.cpu).temp_c, -40, 200) : null;
+      if (value === null && statusFresh && saverDeviceFresh()) value = cpuTemp(false);
+    } else if (key === 'board_temperature') value = mbTemp();
+    else {
+      const source = sources.get(key);
+      if (!source) note = '设备离线';
+      else if (!saverDataAvailable('fan')) note = '温度来源暂不可用';
+      else if (saverSourceCurrent(source) && source.status === 'standby') note = '休眠中';
+      else if (saverSourceFresh(source)) value = num(source.temperature_c, -40, 200);
+      else note = source.fresh === false || source.status === 'stale' ? '读数已过期' : '读数暂不可用';
+    }
+    if (!state.online) { value = null; note = '本机服务离线'; }
+    return { key, label: saverLabel(key), value: value === null ? '--' : String(Math.round(value)), unit, note };
+  }
+
   function syncSaver() {
     const node = $('saver');
     if (!node) return;
     const screen = obj(obj(state.data.toolbox).screen);
     const settings = obj(obj(state.data.toolbox).settings);
     const active = !state.sleeping && screen.saver === true;
+    const wasActive = state.saver;
     state.saver = active;
-    if (!active) { node.hidden = true; return; }
-    const status = obj(state.data.status);
-    const cpu = percentText(obj(status.cpu).usage_percent);
-    const mem = percentText(obj(status.memory).usage_percent);
-    const cpuT = tempText(cpuTemp());
-    const boardT = tempText(mbTemp());
-    const content = settings.saver_content === 'temperature'
-      ? `<div class="saver-metrics"><div class="saver-metric"><strong>CPU 温度</strong><span class="value">${esc(cpuT)}</span></div><div class="saver-metric"><strong>主板温度</strong><span class="value">${esc(boardT)}</span></div></div>`
-      : `<div class="saver-metrics"><div class="saver-metric"><strong>CPU 使用率</strong><span class="value">${esc(cpu)}%</span></div><div class="saver-metric"><strong>内存使用率</strong><span class="value">${esc(mem)}%</span></div></div>`;
+    if (!active) { node.hidden = true; state.saverStartedAt = null; state.saverItemsKey = ''; return; }
+    const items = saverItems(settings), key = items.join('\n');
+    if (state.saverStartedAt === null || key !== state.saverItemsKey) {
+      state.saverStartedAt = Date.now(); state.saverItemsKey = key;
+    }
+    const pageSize = innerHeight < 720 ? 2 : 4;
+    const pages = Math.ceil(items.length / pageSize);
+    const page = Math.floor(Math.max(0, Date.now() - state.saverStartedAt) / 10000) % pages;
+    const sources = saverCatalog();
+    const content = `<div class="saver-metrics">${items.slice(page * pageSize, (page + 1) * pageSize).map(item => {
+      const metric = saverMetric(item, sources);
+      return `<div class="saver-metric" data-saver-key="${esc(metric.key)}" aria-label="${esc(metric.label)}"><div class="saver-metric-heading"><strong title="${esc(metric.label)}">${esc(metric.label)}</strong><span class="value"><span data-saver-value>${esc(metric.value)}</span><small>${esc(metric.unit)}</small></span></div>${metric.note ? `<span class="saver-metric-note">${esc(metric.note)}</span>` : ''}</div>`;
+    }).join('')}</div>`;
     const now = new Date();
-    node.innerHTML = `<span class="saver-time">${dotNumber(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`)}</span><span class="saver-title">屏幕保护</span>${content}<span class="saver-hint">轻触返回</span>`;
+    node.innerHTML = `<span class="saver-time">${dotNumber(`${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`)}</span><span class="saver-title">屏幕保护</span>${content}<span class="saver-page" aria-label="屏保页码">${page + 1} / ${pages}</span><span class="saver-hint">轻触返回</span>`;
     node.hidden = false;
+    if (!wasActive) node.focus({ preventScroll: true });
   }
 
   function syncSleep() {
@@ -699,8 +805,18 @@
     const saverTimeout = saverTimeoutValue(toolbox);
     const saverChoices = [[0, '关闭'], [60, '1 分钟'], [300, '5 分钟'], [600, '10 分钟'], [1800, '30 分钟'], [3600, '1 小时']];
     const saverCustom = !saverChoices.some(([value]) => value === saverTimeout);
-    const saverContent = String(obj(toolbox.settings).saver_content || 'usage') === 'temperature' ? 'temperature' : 'usage';
-    return `<div class="control-select-row"><label class="control-label" for="saver-timeout">屏幕保护</label><select class="control-select" id="saver-timeout" ${disabled ? 'disabled' : ''}>${saverChoices.map(([value, text]) => `<option value="${value}" ${saverTimeout === value ? 'selected' : ''}>${text}</option>`).join('')}${saverCustom ? `<option value="${saverTimeout}" selected>自定义 ${saverTimeout} 秒</option>` : ''}</select></div>${saverTimeout > 0 ? `<div class="control-select-row"><label class="control-label" for="saver-brightness">保护亮度</label><select class="control-select" id="saver-brightness" ${disabled ? 'disabled' : ''}>${[10,20,30,40,50,60,70,80,90,100].map(v => `<option value="${v}" ${(+obj(toolbox.settings).saver_brightness || 30) === v ? 'selected' : ''}>${v}%</option>`).join('')}</select></div><div class="control-select-row"><label class="control-label" for="saver-content">保护内容</label><select class="control-select" id="saver-content" ${disabled ? 'disabled' : ''}><option value="usage" ${saverContent === 'usage' ? 'selected' : ''}>CPU / 内存使用率</option><option value="temperature" ${saverContent === 'temperature' ? 'selected' : ''}>CPU / 主板温度</option></select></div>` : ''}<div class="control-select-row"><label class="control-label" for="sleep-timeout">关闭屏幕</label><select class="control-select" id="sleep-timeout" ${disabled ? 'disabled' : ''}>${choices.map(([value, text]) => `<option value="${value}" ${timeout === value ? 'selected' : ''}>${text}</option>`).join('')}${custom ? `<option value="${timeout}" selected>自定义 ${timeout} 秒</option>` : ''}</select></div>`;
+    return `<div class="control-select-row"><label class="control-label" for="saver-timeout">屏幕保护</label><select class="control-select" id="saver-timeout" ${disabled ? 'disabled' : ''}>${saverChoices.map(([value, text]) => `<option value="${value}" ${saverTimeout === value ? 'selected' : ''}>${text}</option>`).join('')}${saverCustom ? `<option value="${saverTimeout}" selected>自定义 ${saverTimeout} 秒</option>` : ''}</select></div>${saverTimeout > 0 ? `<div class="control-select-row"><label class="control-label" for="saver-brightness">保护亮度</label><select class="control-select" id="saver-brightness" ${disabled ? 'disabled' : ''}>${[10,20,30,40,50,60,70,80,90,100].map(v => `<option value="${v}" ${(+obj(toolbox.settings).saver_brightness || 30) === v ? 'selected' : ''}>${v}%</option>`).join('')}</select></div>${saverPicker(toolbox.settings, disabled)}` : ''}<div class="control-select-row"><label class="control-label" for="sleep-timeout">关闭屏幕</label><select class="control-select" id="sleep-timeout" ${disabled ? 'disabled' : ''}>${choices.map(([value, text]) => `<option value="${value}" ${timeout === value ? 'selected' : ''}>${text}</option>`).join('')}${custom ? `<option value="${timeout}" selected>自定义 ${timeout} 秒</option>` : ''}</select></div>`;
+  }
+
+  function saverPicker(settings, disabled) {
+    const selected = saverItems(obj(settings)), sources = saverCatalog();
+    const choices = [...new Set([...selected, ...Object.keys(SAVER_FIXED), ...sources.keys()])];
+    return `<fieldset class="saver-picker"><legend>屏保展示内容 · ${selected.length} / 12</legend><p class="caption">至少 1 项，最多 12 项。按勾选顺序展示，每页最多 4 项，每 10 秒轮换。</p>${choices.map(key => {
+      const checked = selected.includes(key);
+      const limited = checked ? selected.length === 1 : selected.length === 12;
+      const missing = !SAVER_FIXED[key] && !sources.get(key);
+      return `<label class="saver-choice${missing ? ' is-missing' : ''}"><input type="checkbox" data-saver-item="${esc(key)}" ${checked ? 'checked' : ''} ${disabled || limited ? 'disabled' : ''}><span>${esc(saverLabel(key))}${missing ? '<small>设备离线，保留原选择</small>' : ''}</span>${checked ? `<b aria-label="展示顺序 ${selected.indexOf(key) + 1}">${selected.indexOf(key) + 1}</b>` : ''}</label>`;
+    }).join('')}</fieldset>`;
   }
 
   function controls() {
@@ -825,11 +941,18 @@
   async function setSaverOptions() {
     const settings = {};
     const brightness = $('saver-brightness');
-    const content = $('saver-content');
     if (brightness && brightness.value) settings.saver_brightness = Number(brightness.value);
-    if (content && content.value) settings.saver_content = content.value;
     if (!Object.keys(settings).length) return;
     await action('settings.update', { settings }, '屏幕保护设置已保存');
+    softRender(true);
+  }
+
+  async function setSaverItem(input) {
+    const key = input.dataset.saverItem;
+    const selected = saverItems(obj(obj(state.data.toolbox).settings));
+    const items = input.checked ? [...selected.filter(item => item !== key), key] : selected.filter(item => item !== key);
+    if (items.length < 1 || items.length > 12) { softRender(true); return; }
+    await action('settings.update', { settings: { saver_items: items } }, '屏保展示内容已保存');
     softRender(true);
   }
 
@@ -912,6 +1035,7 @@
 
   document.addEventListener('click', event => {
     if (Date.now() < state.swipeUntil) { event.preventDefault(); event.stopPropagation(); return; }
+    if (Date.now() < state.swallowUntil) { event.preventDefault(); event.stopPropagation(); return; }
     const button = event.target.closest('button');
     if (!button) return;
     if (button.dataset.tab) { navigate(button.dataset.tab, true); return; }
@@ -931,7 +1055,10 @@
     if (act === 'back') back();
     if (act === 'sleep') { if (state.powerDeadline !== null) { toast('电源倒计时期间请先取消操作。', true); return; } action('screen.sleep', {}, null).then(result => { if (result) { state.sleeping = true; syncSleep(); } }); }
     if (act === 'saver-wake') {
-      action('screen.activity', {}, null).then(result => { if (result) { state.saver = false; syncSaver(); } });
+      state.swallowUntil = Date.now() + 650;
+      action('screen.activity', {}, null).then(result => {
+        if (result) { state.saver = false; syncSaver(); softRender(true); }
+      });
       return;
     }
     if (act === 'wake') {
@@ -976,10 +1103,12 @@
     if (['light-hue', 'light-brightness', 'light-effect'].includes(event.target.id)) setLight();
     if (event.target.id === 'sleep-timeout') setSleepTimeout();
     if (event.target.id === 'saver-timeout') setSaverTimeout();
-    if (['saver-brightness', 'saver-content'].includes(event.target.id)) setSaverOptions();
+    if (event.target.id === 'saver-brightness') setSaverOptions();
+    if (event.target.matches('[data-saver-item]')) setSaverItem(event.target);
   });
 
   document.addEventListener('keydown', event => {
+    if (state.saver || state.sleeping) return;
     if (state.modal) {
       const modal = $('modal');
       const buttons = modal ? [...modal.querySelectorAll('button')] : [];
@@ -997,7 +1126,7 @@
 
   let touchStart = null;
   document.addEventListener('touchstart', event => {
-    if (event.touches.length !== 1 || state.modal || event.target.closest('input,#modal,#sleep')) { touchStart = null; return; }
+    if (event.touches.length !== 1 || state.modal || event.target.closest('input,#modal,#sleep,#saver')) { touchStart = null; return; }
     const touch = event.touches[0];
     touchStart = { x: touch.clientX, y: touch.clientY };
   }, { passive: true });
@@ -1019,7 +1148,7 @@
      while the user was still tapping pages or sliders. */
   let lastActivitySent = 0;
   function noteScreenActivity() {
-    if (state.sleeping || !controlToken || !state.online) return;
+    if (state.sleeping || state.saver || !controlToken || !state.online) return;
     const now = Date.now();
     if (now - lastActivitySent < 2000) return;
     lastActivitySent = now;
@@ -1030,6 +1159,7 @@
   document.addEventListener('wheel', noteScreenActivity, { capture: true, passive: true });
 
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+  window.addEventListener('resize', () => { if (state.saver) syncSaver(); });
   window.setInterval(tickClock, 1000);
   render();
   poll();

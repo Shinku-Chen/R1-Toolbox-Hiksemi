@@ -19,13 +19,27 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
   const checks = [], sizes = [], pageErrors = [], posts = [], external = [];
   let offline = false, failNextAction = false, failNextCancel = false, delayAction = false, lightDelay = false, historyFail = false, pairingExpires = 180;
   const apiReads = [];
+  const failedAPIs = new Set();
+  let freezeStatusStamp = false, freezeDeviceStamp = false;
+  let delayInsightsOnce = 0;
+  let statusAgeSeconds = 0;
+  const diskSource = 'disk:serial:' + 'a'.repeat(24);
+  const standbySource = 'disk:serial:' + 'b'.repeat(24);
+  const staleSource = 'disk:serial:' + 'c'.repeat(24);
+  const missingSource = 'disk:serial:' + 'd'.repeat(24);
+  const saverSources = [
+    { id: diskSource, label: '家庭照片与文档备份硬盘温度', kind: 'disk', temperature_c: 33, status: 'ok', fresh: true },
+    { id: standbySource, label: '休眠归档盘', kind: 'disk', temperature_c: 90, status: 'standby', fresh: true },
+    { id: staleSource, label: '已过期硬盘', kind: 'disk', temperature_c: 99, status: 'ok', fresh: false },
+    ...Array.from({ length: 12 }, (_, i) => ({ id: 'hwmon:' + String(i).padStart(24, '0'), label: '主板测点 ' + i, kind: 'board', temperature_c: i, status: 'ok', fresh: true })),
+  ];
   const fanConfig = { schema_version: 1, channels: {
     cpu: { mode: 'vendor', sources: [], quiet_below: 40, normal_at: 55, full_at: 70, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
     system: { mode: 'vendor', sources: [], quiet_below: 35, normal_at: 45, full_at: 55, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
   } };
   let independentPolicy = { config: fanConfig, active: false, busy: false, capability: { available: true, reason: '' }, channels: {
     cpu: { active: false, target_percent: null, reference_c: null }, system: { active: false, target_percent: null, reference_c: null },
-  }, sources: [] };
+  }, sources: saverSources };
   const lightConfig = { schema_version: 1, enabled: false, mode: 'manual', sources: [], stops: [], brightness: 70,
     manual: { mode: 1, color: '#00C832', brightness: 70 }, schedule: { enabled: false, start: '22:00', end: '07:00', brightness: 15 } };
   let lightPolicy = { config: lightConfig, active: false, busy: false, capability: { available: true, reason: '' },
@@ -64,6 +78,9 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     const context = await browser.newContext({ viewport: { width: 376, height: 960 }, deviceScaleFactor: 1, locale: 'zh-CN', hasTouch: true });
     await context.addInitScript(() => {
       const nativeTimeout = window.setTimeout;
+      const nativeNow = Date.now.bind(Date);
+      window._fixtureTimeOffset = 0;
+      Date.now = () => nativeNow() + window._fixtureTimeOffset;
       window._fixtureContainerTimeouts = [];
       window.setTimeout = function (callback, delay, ...args) { if (delay === 60000) window._fixtureContainerTimeouts.push(delay); return nativeTimeout.call(this, callback, delay, ...args); };
       window.require = name => name === 'process' ? { env: { R1_TOOLBOX_CONTROL_TOKEN: 'fixture-only-not-real' } } : { ipcRenderer: { once: (_n, cb) => { window._fixtureAck = cb; }, send: n => { if (n === 'showWin' && window._fixtureAck) window._fixtureAck(); } } };
@@ -76,10 +93,19 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     const page = await context.newPage();
     page.on('pageerror', error => pageErrors.push(error.message));
     await page.route('http://127.0.0.1:18731/api/**', async route => {
-      if (offline) return route.abort('connectionrefused');
+      if (offline || failedAPIs.has(new URL(route.request().url()).pathname)) return route.abort('connectionrefused');
       const req = route.request(), endpoint = new URL(req.url()).pathname;
       if (req.method() === 'GET') apiReads.push(endpoint);
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type, X-R1-Token' } });
+      if (endpoint.endsWith('/insights') && delayInsightsOnce) {
+        const delay = delayInsightsOnce; delayInsightsOnce = 0;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      if (endpoint.endsWith('/status') && !freezeStatusStamp) status.timestamp = new Date(Date.now() - statusAgeSeconds * 1000).toISOString();
+      if (endpoint.endsWith('/insights')) {
+        insights.timestamp = new Date().toISOString();
+        if (!freezeDeviceStamp) insights.device.sampled_at = new Date().toISOString();
+      }
       let data;
       if (endpoint.endsWith('/action')) {
         assert.equal(req.headers()['x-r1-token'], 'fixture-only-not-real');
@@ -89,6 +115,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
         if (body.action === 'screen.brightness') { if (delayAction) { delayAction = false; await new Promise(r => setTimeout(r, 600)); } state.screen.brightness = body.value; }
         if (body.action === 'screen.sleep') state.screen.asleep = true;
         if (body.action === 'screen.wake') state.screen.asleep = false;
+        if (body.action === 'screen.activity') state.screen.saver = false;
         if (body.action === 'settings.update') Object.assign(settings, body.settings);
         if (body.action === 'power.request') { assert.equal(body.confirmed, true); state.power.pending = { operation: body.operation, seconds_remaining: 5 }; }
         if (body.action === 'power.cancel') state.power.pending = null;
@@ -325,6 +352,213 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     state.screen.asleep = false;
     await page.waitForFunction(() => document.getElementById('sleep').hidden);
     checks.push('settings light uses four native modes, sleep timeout, brightness failure and sleep/wake');
+
+    const saverInput = key => page.locator(`input[data-saver-item="${key}"]`);
+    const saverValue = key => page.locator(`#saver [data-saver-key="${key}"] [data-saver-value]`).textContent();
+    const waitSaverItems = async expected => page.waitForFunction(items =>
+      JSON.stringify(Array.from(document.querySelectorAll('#saver [data-saver-key]'), node => node.dataset.saverKey)) === JSON.stringify(items), expected);
+    const saverMeasure = async label => {
+      const dimensions = await page.locator('#saver').evaluate(node => ({
+        width: innerWidth, height: innerHeight, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth,
+        scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
+        items: Array.from(node.querySelectorAll('.saver-metric'), item => ({
+          top: item.getBoundingClientRect().top, bottom: item.getBoundingClientRect().bottom,
+          font: parseFloat(getComputedStyle(item.querySelector('strong')).fontSize),
+        })),
+      }));
+      assert.ok(dimensions.scrollWidth <= dimensions.clientWidth && dimensions.scrollHeight <= dimensions.clientHeight + 1,
+        label + ' overlay overflow ' + JSON.stringify(dimensions));
+      assert.ok(dimensions.items.every(item => item.top >= 0 && item.bottom <= dimensions.height && item.font >= 22), label);
+      sizes.push({ name: label, ...dimensions });
+    };
+    await page.locator('#saver-timeout').selectOption('60');
+    await page.waitForFunction(() => !!document.querySelector('.saver-picker'));
+    assert.equal(await saverInput('cpu_usage').isChecked(), true);
+    assert.equal(await saverInput('memory_usage').isChecked(), true);
+    await saverInput('cpu_temperature').check();
+    await page.waitForFunction(() => document.querySelectorAll('[data-saver-item]:checked').length === 3);
+    assert.deepEqual(settings.saver_items, ['cpu_usage', 'memory_usage', 'cpu_temperature']);
+    await saverInput('memory_usage').uncheck();
+    await page.waitForFunction(() => document.querySelectorAll('[data-saver-item]:checked').length === 2);
+    await saverInput('cpu_usage').uncheck();
+    await page.waitForFunction(() => document.querySelectorAll('[data-saver-item]:checked').length === 1);
+    assert.equal(await saverInput('cpu_temperature').isDisabled(), true, 'the last chosen metric cannot be removed');
+    for (const source of saverSources.slice(0, 11)) {
+      const expectedCount = settings.saver_items.length + 1;
+      await saverInput('temperature:' + source.id).check();
+      await page.waitForFunction(count => document.querySelectorAll('[data-saver-item]:checked').length === count, expectedCount);
+    }
+    assert.equal(settings.saver_items.length, 12);
+    assert.equal(settings.saver_items[0], 'cpu_temperature');
+    assert.equal(settings.saver_items[1], 'temperature:' + diskSource);
+    assert.equal(await saverInput('memory_usage').isDisabled(), true, 'a thirteenth item is disabled');
+    assert.equal(await page.locator('#modal').isHidden(), true, 'saver selections save immediately without confirmation');
+    await saverInput('temperature:' + saverSources[10].id).uncheck();
+    await page.waitForFunction(() => document.querySelectorAll('[data-saver-item]:checked').length === 11);
+    assert.equal(await saverInput('memory_usage').isDisabled(), false);
+    await page.setViewportSize({ width: 320, height: 960 });
+    await measure('saver-picker-320');
+    await saverInput('temperature:' + diskSource).scrollIntoViewIfNeeded();
+    const choiceMetrics = await page.locator('.saver-choice').evaluateAll(nodes => nodes.map(node => ({
+      height: node.getBoundingClientRect().height, font: parseFloat(getComputedStyle(node).fontSize),
+    })));
+    assert.ok(choiceMetrics.every(item => item.height >= 56 && item.font >= 22));
+    await shot('saver-picker-320');
+    settings.saver_items = ['temperature:offline_usage'];
+    await page.waitForTimeout(2200);
+    await root('controls');
+    assert.equal(await saverInput('temperature:offline_usage').isChecked(), true, 'a saved source remains selected when absent from the catalog');
+    assert.match(await page.locator('.saver-choice').first().textContent(), /设备离线，保留原选择/);
+    state.screen.saver = true;
+    await waitSaverItems(['temperature:offline_usage']);
+    assert.equal(await saverValue('temperature:offline_usage'), '--');
+    assert.equal(await page.locator('#saver [data-saver-key="temperature:offline_usage"] small').textContent(), '℃', 'offline source IDs ending in usage are still temperatures');
+
+    const originalThermals = insights.device.thermal.slice();
+    insights.device.thermal.push({ id: 'board:fixture', driver: 'acpitz', label: '主板环境', celsius: 0 },
+      { id: 'thermal_zone0', driver: 'thermal', label: 'x86_pkg_temp', celsius: 90 });
+    const originalCPU = status.cpu.usage_percent, originalMemory = status.memory.usage_percent;
+    status.cpu.usage_percent = 0; status.memory.usage_percent = null;
+    delete settings.saver_items;
+    settings.saver_content = 'usage'; state.screen.saver = true;
+    await waitSaverItems(['cpu_usage', 'memory_usage']);
+    assert.equal(await saverValue('cpu_usage'), '0');
+    assert.equal(await saverValue('memory_usage'), '--');
+    settings.saver_content = 'temperature';
+    await waitSaverItems(['cpu_temperature', 'board_temperature']);
+    assert.equal(await saverValue('cpu_temperature'), '46');
+    assert.equal(await saverValue('board_temperature'), '0', 'CPU thermal zones must not masquerade as mainboard temperature');
+    insights.device.thermal = originalThermals.slice();
+    await page.waitForFunction(() => document.querySelector('#saver [data-saver-key="board_temperature"] [data-saver-value]')?.textContent === '--');
+    insights.device.thermal.push({ id: 'board:fixture', driver: 'acpitz', label: '主板环境', celsius: 0 });
+
+    const mixedSaverItems = ['cpu_usage', 'cpu_temperature', 'temperature:' + diskSource,
+      'temperature:' + standbySource, 'temperature:' + staleSource, 'temperature:' + missingSource];
+    settings.saver_items = mixedSaverItems;
+    await waitSaverItems(mixedSaverItems.slice(0, 4));
+    assert.equal(await saverValue('cpu_usage'), '0');
+    assert.equal(await saverValue('temperature:' + diskSource), '33');
+    assert.equal(await saverValue('temperature:' + standbySource), '--');
+    assert.match(await page.locator(`#saver [data-saver-key="temperature:${standbySource}"]`).textContent(), /休眠中/);
+    assert.equal(await page.locator('#saver .saver-page').textContent(), '1 / 2');
+    await saverMeasure('saver-mixed-320');
+    await shot('saver-mixed-320');
+    await page.setViewportSize({ width: 376, height: 960 });
+    await saverMeasure('saver-mixed-376');
+    await shot('saver-mixed-376');
+    await page.evaluate(() => { window._fixtureTimeOffset += 10000; });
+    await waitSaverItems(mixedSaverItems.slice(4));
+    assert.equal(await saverValue('temperature:' + staleSource), '--', 'stale 99°C is never displayed');
+    assert.equal(await saverValue('temperature:' + missingSource), '--', 'a missing stable source is not replaced');
+    assert.match(await page.locator(`#saver [data-saver-key="temperature:${staleSource}"]`).textContent(), /读数已过期/);
+    assert.equal(await page.locator('#saver .saver-page').textContent(), '2 / 2');
+    await shot('saver-second-page-376');
+    await page.evaluate(() => { window._fixtureTimeOffset = 0; });
+    settings.saver_items = mixedSaverItems.slice(0, 4);
+    await waitSaverItems(mixedSaverItems.slice(0, 4));
+    await page.waitForFunction(() => document.querySelector('#saver .saver-page')?.textContent === '1 / 1');
+
+    failedAPIs.add('/api/fan-policy');
+    await page.waitForFunction(key => document.querySelector(`#saver [data-saver-key="${key}"] [data-saver-value]`)?.textContent === '--', 'temperature:' + diskSource);
+    assert.equal(await saverValue('cpu_temperature'), '46', 'other live APIs still supply their own values');
+    failedAPIs.clear();
+    await page.waitForFunction(key => document.querySelector(`#saver [data-saver-key="${key}"] [data-saver-value]`)?.textContent === '33', 'temperature:' + diskSource);
+    saverSources[1].fresh = false;
+    await page.waitForFunction(key => document.querySelector(`#saver [data-saver-key="${key}"]`)?.textContent.includes('读数已过期'), 'temperature:' + standbySource);
+    assert.equal(await saverValue('temperature:' + standbySource), '--', 'an old standby observation stays unknown');
+    saverSources[1].fresh = true;
+    failedAPIs.add('/api/status');
+    await page.waitForFunction(() => document.querySelector('#saver [data-saver-key="cpu_usage"] [data-saver-value]')?.textContent === '--');
+    assert.equal(await saverValue('cpu_temperature'), '--', 'failed status cannot keep a cached CPU temperature visible');
+    assert.equal(await saverValue('temperature:' + diskSource), '33');
+    failedAPIs.clear();
+    settings.saver_items = ['board_temperature'];
+    await waitSaverItems(['board_temperature']);
+    await page.waitForFunction(() => document.querySelector('#saver [data-saver-key="board_temperature"] [data-saver-value]')?.textContent === '0');
+    failedAPIs.add('/api/insights');
+    await page.waitForFunction(() => document.querySelector('#saver [data-saver-key="board_temperature"] [data-saver-value]')?.textContent === '--');
+    failedAPIs.clear();
+    freezeDeviceStamp = true;
+    insights.device.sampled_at = '2000-01-01T00:00:00Z';
+    insights.device.thermal.find(row => row.id === 'board:fixture').celsius = 95;
+    status.cpu.temp_c = null;
+    settings.saver_items = ['board_temperature', 'cpu_temperature'];
+    await waitSaverItems(settings.saver_items);
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#saver [data-saver-value]')).every(node => node.textContent === '--'));
+    assert.equal(await saverValue('board_temperature'), '--', 'a fresh insights envelope cannot refresh its old device block');
+    assert.equal(await saverValue('cpu_temperature'), '--', 'CPU fallback must not borrow an old device sample');
+    freezeDeviceStamp = false;
+    insights.device.thermal.find(row => row.id === 'board:fixture').celsius = 0;
+    status.cpu.temp_c = 46;
+    freezeStatusStamp = true;
+    status.timestamp = '2000-01-01T00:00:00Z';
+    settings.saver_items = ['cpu_usage', 'memory_usage', 'cpu_temperature'];
+    await waitSaverItems(settings.saver_items);
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#saver [data-saver-value]')).every(node => node.textContent === '--'));
+    assert.equal(await saverValue('cpu_usage'), '--', 'HTTP 200 cannot make an old status sample current');
+    freezeStatusStamp = false;
+    await page.waitForFunction(() => document.querySelector('#saver [data-saver-key="cpu_usage"] [data-saver-value]')?.textContent === '0');
+    const earlySource = 'hwmon:' + 'f'.repeat(24);
+    independentPolicy.sources = [{ id: earlySource, label: '先返回的 3 秒温度样本', kind: 'board',
+      temperature_c: 77, status: 'ok', fresh: true, age_seconds: 0, max_age_seconds: 3 }];
+    settings.saver_items = ['temperature:' + earlySource, 'cpu_usage'];
+    statusAgeSeconds = 4;
+    delayInsightsOnce = 3500;
+    await waitSaverItems(settings.saver_items);
+    assert.equal(await saverValue('temperature:' + earlySource), '--', 'waiting for another API cannot extend an early 3-second source TTL');
+    assert.equal(await saverValue('cpu_usage'), '0', 'fixed timestamp age does not count the request wait twice');
+    statusAgeSeconds = 0;
+
+    const longSources = Array.from({ length: 4 }, (_, i) => ({
+      id: 'hwmon:' + 'a'.repeat(249) + i, label: '超长用户自定义硬盘名称与主板温度测点'.repeat(16).slice(0, 256),
+      kind: 'disk', temperature_c: i, status: 'ok', fresh: true,
+    }));
+    independentPolicy.sources = longSources;
+    settings.saver_items = longSources.map(source => 'temperature:' + source.id);
+    await waitSaverItems(settings.saver_items);
+    assert.ok((await page.locator('#saver .saver-metric').first().getAttribute('aria-label')).length === 256);
+    await saverMeasure('saver-long-names-376');
+    await shot('saver-long-names-376');
+    await page.setViewportSize({ width: 320, height: 960 });
+    await saverMeasure('saver-long-names-320');
+    await shot('saver-long-names-320');
+    await page.setViewportSize({ width: 320, height: 540 });
+    await waitSaverItems(settings.saver_items.slice(0, 2));
+    await saverMeasure('saver-short-screen');
+    await page.setViewportSize({ width: 376, height: 960 });
+    settings.saver_items = ['cpu_usage', 'memory_usage', 'cpu_temperature', 'board_temperature'];
+    await waitSaverItems(settings.saver_items);
+    offline = true;
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('#saver [data-saver-value]')).every(node => node.textContent === '--'));
+    assert.match(await page.locator('#saver').textContent(), /本机服务离线/);
+    offline = false;
+    await page.waitForFunction(() => document.querySelector('#saver [data-saver-key="cpu_usage"] [data-saver-value]')?.textContent === '0');
+
+    const writesBeforeWake = posts.filter(item => item.action !== 'screen.activity').length;
+    await page.locator('#saver').click();
+    await page.waitForFunction(() => document.getElementById('saver').hidden);
+    assert.equal(await saverInput('cpu_usage').isChecked(), true, 'wake refreshes settings changed while the saver was visible');
+    await saverInput('cpu_usage').dispatchEvent('click');
+    assert.equal(await saverInput('cpu_usage').isChecked(), true, 'wake click-through cannot toggle a checkbox');
+    await page.locator('[data-tab="thermal"]').dispatchEvent('click');
+    assert.equal(await title(), '设置', 'the wake gesture does not activate controls underneath');
+    assert.equal(posts.filter(item => item.action !== 'screen.activity').length, writesBeforeWake);
+    await page.waitForTimeout(700);
+    await root('thermal');
+    assert.equal(await title(), '温度与风扇');
+    state.screen.saver = true; state.screen.asleep = true;
+    await page.waitForFunction(() => !document.getElementById('sleep').hidden);
+    assert.equal(await page.locator('#saver').isHidden(), true, 'screen-off takes precedence over the saver');
+    state.screen.saver = false; state.screen.asleep = false;
+    settings.saver_timeout = 0;
+    delete settings.saver_items;
+    independentPolicy.sources = saverSources;
+    status.cpu.usage_percent = originalCPU; status.memory.usage_percent = originalMemory;
+    insights.device.thermal = originalThermals;
+    await page.waitForFunction(() => document.getElementById('sleep').hidden);
+    await root('controls');
+    assert.equal(apiReads.filter(endpoint => /smart|disk-temperature/.test(endpoint)).length, 0, 'saver selection and rotation only use existing caches');
+    checks.push('mixed ordered saver items, 1..12 immediate selections, legacy fallback, 10s pages, long-label layouts, stale/standby/offline isolation and guarded wake');
 
     await page.locator('[data-view="power"]').click();
     assert.equal(await title(), '电源管理');

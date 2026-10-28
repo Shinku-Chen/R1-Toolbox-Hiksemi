@@ -27,7 +27,7 @@ from fnm_compat import FnmonitorPanel
 from fan_diagnostics import FanDiagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
-                      'saver_brightness', 'saver_content', 'brightness',
+                      'saver_brightness', 'saver_content', 'saver_items', 'brightness',
                       'night_enabled', 'night_start', 'night_end', 'night_brightness', 'enabled_pages'))
 COOKIE = 'r1_web_session'
 PAIR_TTL, SESSION_TTL = 180, 8 * 3600
@@ -912,14 +912,18 @@ class WebConfigServer:
                                                         'state': self._state()}
         if route == '/api/r1/settings':
             changes = body.get('settings')
-            if not isinstance(changes, dict) or not changes:
+            if (set(body) != {'settings'} or not isinstance(changes, dict)
+                    or not changes or set(changes) - SETTINGS):
                 raise ValueError('屏幕与外观设置无效')
             if self.controller is None:
                 raise ValueError('设置服务不可用')
             result = self.controller.action('settings.update', {'settings': changes})
+            saved = result.get('settings_saved') is True
             return (200 if result.get('ok') else 400), {'ok': result.get('ok') is True,
-                                                        'saved': result.get('settings_saved') is True,
-                                                        'error': None if result.get('ok') else '设置已保存但未应用到设备，请在小屏检查',
+                                                        'saved': saved,
+                                                        'error': None if result.get('ok') else (
+                                                            '设置已保存但未应用到设备，请在小屏检查' if saved else
+                                                            '设置未保存，请检查显示项目或设置数据卷'),
                                                         'state': self._state()}
         if route == '/api/r1/monitor':
             changes = body.get('settings')

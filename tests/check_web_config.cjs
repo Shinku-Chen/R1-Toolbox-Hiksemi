@@ -61,8 +61,21 @@ blank.write_text('0')
 (fixture / 'unsupported/sys').mkdir(parents=True)
 (fixture / 'unsupported/dev').mkdir()
 controllers = []
+class BrowserToolboxController(ToolboxController):
+    fail_settings = False
+    def _save_settings(self, settings):
+        if self.fail_settings:
+            raise OSError('fixture settings write failed')
+        try:
+            return super()._save_settings(settings)
+        except PermissionError as error:
+            # Preserve real fixture JSON persistence, omitting only Windows'
+            # unsupported directory-fsync open, as in BrowserFanPolicy below.
+            if os.name != 'nt' or not error.filename or Path(error.filename).resolve() != self.state_dir.resolve():
+                raise
+
 def controller(folder):
-    value = ToolboxController(state_dir=folder / 'data', sys_root=folder / 'sys', dev_root=folder / 'dev', runner=runner)
+    value = BrowserToolboxController(state_dir=folder / 'data', sys_root=folder / 'sys', dev_root=folder / 'dev', runner=runner)
     value.systemctl = None
     value.i2cget, value.i2cset = 'fixture-i2cget', 'fixture-i2cset'
     controllers.append(value)
@@ -70,13 +83,18 @@ def controller(folder):
 
 board_stale = False
 cpu_stale = False
+saver_extra_sources = False
+missing_sources = set()
 class Sources:
     def snapshot(self):
         now = time.monotonic()
+        entries = [('cpu', 'CPU Package', 'cpu', 62), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]
+        if saver_extra_sources:
+            entries += [('extra:' + str(index), ('<img src=x onerror="window.saverLabelInjected=1">' + '超长温度设备名' * 20) if index == 0 else '扩展温度 ' + str(index), 'disk', 35) for index in range(12)]
         return [{'id': name, 'label': label, 'kind': kind, 'temperature_c': temperature, 'status': 'ok',
                  'sampled_monotonic': now - (30 if (name == 'board' and board_stale) or (name == 'cpu' and cpu_stale) else 0),
                  'max_age_seconds': 10, 'critical_celsius': 95 if kind == 'cpu' else None}
-                for name, label, kind, temperature in [('cpu', 'CPU Package', 'cpu', 62), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]]
+                for name, label, kind, temperature in entries if name not in missing_sources]
 class Adapter:
     def __init__(self, available):
         self.available, self.channels, self.targets = available, set(), {}
@@ -208,13 +226,33 @@ try:
             lights[0]._probe()
         elif operation == 'reconstruct':
             primary.controller = controller(fixture)
+            primary.panel.controller = primary.controller
             primary.fan_policy.stop()
             primary.fan_policy = policy(fixture, True)
             primary.panel.fan_policy = primary.fan_policy
+        elif operation == 'saver_legacy_temperature':
+            legacy = copy.deepcopy(primary.controller.settings)
+            legacy.pop('saver_items', None)
+            legacy.update(saver_content='temperature', saver_timeout=60)
+            (primary.controller.state_dir / 'settings.json').write_text(json.dumps(legacy), encoding='utf-8')
+            primary.controller = controller(fixture)
+            primary.panel.controller = primary.controller
+        elif operation == 'saver_extra_sources':
+            saver_extra_sources = True
+            primary.fan_policy.tick()
+        elif operation == 'saver_disconnect_disk':
+            missing_sources.add('disk')
+            primary.fan_policy.tick()
+        elif operation == 'saver_fail_save':
+            primary.controller.fail_settings = True
+        elif operation == 'saver_allow_save':
+            primary.controller.fail_settings = False
         elif operation == 'stale_board':
             board_stale = True
+            primary.fan_policy.tick()
         elif operation == 'fresh_board':
             board_stale = False
+            primary.fan_policy.tick()
         elif operation == 'stale_cpu':
             cpu_stale = True
             primary.fan_policy.tick()
@@ -332,6 +370,11 @@ finally:
     });
     const page = await context.newPage();
     page.on('pageerror', error => pageErrors.push(error.message));
+    let screenWrites = 0, smartRequests = 0;
+    page.on('request', request => {
+      if (request.url().endsWith('/api/r1/settings') && request.method() === 'POST') screenWrites += 1;
+      if (request.url().includes('/api/smart?')) smartRequests += 1;
+    });
     const fanResponses = [];
     page.on('response', async r => {
       if (!r.url().endsWith('/api/r1/fan')) return;
@@ -717,6 +760,118 @@ finally:
     const nativeWidth = await nativePage.evaluate(() => ({ width: innerWidth, body: document.body.scrollWidth, root: document.documentElement.scrollWidth }));
     check('风扇新控件移动端无横向溢出', nativeWidth.body <= nativeWidth.width + 1 && nativeWidth.root <= nativeWidth.width + 1, JSON.stringify(nativeWidth));
     await nativeContext.close();
+
+    /* 屏保混选现有缓存指标：点击即保存，不额外探测温度或读取 SMART。 */
+    const screenCard = page.locator('#set-r1-screen');
+    const saver = screenCard.locator('.r1-saver-picker');
+    const saverInput = id => saver.locator('input[value="' + id + '"]');
+    const waitSaver = async expected => {
+      await page.waitForFunction(expected => {
+        const picker = document.querySelector('#set-r1-screen .r1-saver-picker');
+        const actual = picker ? [...picker.querySelectorAll('input:checked')].map(input => input.value) : [];
+        return picker?.getAttribute('aria-busy') === 'false' && actual.length === expected.length && expected.every(id => actual.includes(id));
+      }, expected, { timeout: 8000 });
+    };
+    const chooseSaver = async (id, checked = true) => {
+      const responsePromise = page.waitForResponse(response => response.url().endsWith('/api/r1/settings') && response.request().method() === 'POST');
+      if (checked) await saverInput(id).check(); else await saverInput(id).uncheck();
+      const response = await responsePromise, body = await response.json();
+      const requested = response.request().postDataJSON().settings.saver_items;
+      check('屏保项目点击即保存且保持鉴权写接口', response.status() === 200 && body.ok === true && await page.locator('#r1AskT').count() === 0, JSON.stringify(body));
+      await waitSaver(requested);
+      const settings = (await api('/api/r1')).body.control.settings;
+      check('屏保指标按点击顺序保存稳定 ID', JSON.stringify(settings.saver_items) === JSON.stringify(requested), JSON.stringify(settings.saver_items));
+      return requested;
+    };
+    const screenSmartBefore = smartRequests;
+    const screenCommandsBefore = (await fixtureCall('fan_calls')).command_count;
+    await waitSaver(['cpu_usage', 'memory_usage']);
+    check('屏保关闭时也可预先选择显示项目', (await api('/api/r1')).body.control.settings.saver_timeout === 0 && await saver.isVisible());
+    check('旧使用率配置仍显示 CPU 和内存使用率', await saverInput('cpu_usage').isChecked() && await saverInput('memory_usage').isChecked());
+    await chooseSaver('memory_usage', false);
+    check('仅剩一个项目时禁止清空', await saverInput('cpu_usage').isDisabled());
+    const writesBeforeEmpty = screenWrites;
+    await saverInput('cpu_usage').evaluate(input => { input.checked = false; input.dispatchEvent(new Event('change', { bubbles: true })); });
+    check('UI 空选择恢复原勾选且不提交', screenWrites === writesBeforeEmpty && await saverInput('cpu_usage').isChecked() && /1–12/.test(await saver.textContent()));
+    const mixedItems = await chooseSaver('temperature:disk');
+    check('屏保可以混选使用率与指定硬盘温度', JSON.stringify(mixedItems) === JSON.stringify(['cpu_usage', 'temperature:disk']));
+    await reloadFanSettings(page);
+    await waitSaver(mixedItems);
+    check('刷新后混选与稳定来源 ID 保持', await saverInput('temperature:disk').isChecked() && /硬盘 A/.test(await saver.textContent()));
+    await fixtureCall('saver_disconnect_disk');
+    await reloadFanSettings(page);
+    await waitSaver(mixedItems);
+    const absentDisk = saver.locator('.r1-saver-option:has(input[value="temperature:disk"])');
+    check('断开来源不删除勾选且保留原标签', await saverInput('temperature:disk').isChecked() && /硬盘 A/.test(await absentDisk.textContent()) && /不可用.*未连接/.test(await absentDisk.textContent()));
+    let releaseScreenWrite;
+    const screenWriteGate = new Promise(resolve => { releaseScreenWrite = resolve; });
+    const delayedScreenWrite = async route => {
+      if (route.request().method() === 'POST') await screenWriteGate;
+      await route.continue();
+    };
+    await page.route(origin + '/api/r1/settings', delayedScreenWrite);
+    const delayedScreenResponse = page.waitForResponse(response => response.url().endsWith('/api/r1/settings') && response.request().method() === 'POST');
+    await saverInput('memory_usage').check();
+    check('屏保写入期间禁用全部选项', await saver.locator('input:enabled').count() === 0 && await saver.getAttribute('aria-busy') === 'true');
+    await fixtureCall('stale_board');
+    const changedSources = page.waitForResponse(response => response.url().endsWith('/api/r1') && response.request().method() === 'GET');
+    await page.locator('#btnRefresh').click();
+    const changedSnapshot = await changedSources;
+    await changedSnapshot.finished();
+    check('保存延迟期间已取得后台来源状态更新', (await changedSnapshot.json()).fan.sources.some(source => source.id === 'board' && source.fresh === false));
+    check('来源状态刷新仍保持写入锁与待保存勾选', await saver.locator('input:enabled').count() === 0 && await saver.getAttribute('aria-busy') === 'true' && await saverInput('memory_usage').isChecked());
+    releaseScreenWrite();
+    check('延迟写入最终成功', (await delayedScreenResponse).status() === 200);
+    await waitSaver([...mixedItems, 'memory_usage']);
+    await page.unroute(origin + '/api/r1/settings', delayedScreenWrite);
+    await chooseSaver('memory_usage', false);
+    await fixtureCall('fresh_board');
+    await fixtureCall('saver_fail_save');
+    const failedSaverResponse = page.waitForResponse(response => response.url().endsWith('/api/r1/settings') && response.request().method() === 'POST');
+    await saverInput('memory_usage').check();
+    const failedSaver = await failedSaverResponse;
+    const failedSaverBody = await failedSaver.json();
+    check('设置写入失败明确未保存', failedSaver.status() === 400 && failedSaverBody.saved === false, JSON.stringify(failedSaverBody));
+    await waitSaver(mixedItems);
+    check('失败后恢复服务端选择而非假勾选', !(await saverInput('memory_usage').isChecked()) && JSON.stringify((await api('/api/r1')).body.control.settings.saver_items) === JSON.stringify(mixedItems));
+    check('失败提示不冒称设置已保存', /小屏设置未保存/.test(await page.locator('body').textContent()));
+    await fixtureCall('saver_allow_save');
+    await fixtureCall('saver_legacy_temperature');
+    await reloadFanSettings(page);
+    await waitSaver(['cpu_temperature', 'board_temperature']);
+    check('旧温度二选一配置由后端迁移到汇总温度项目', JSON.stringify((await api('/api/r1')).body.control.settings.saver_items) === JSON.stringify(['cpu_temperature', 'board_temperature']));
+    await fixtureCall('saver_extra_sources');
+    await reloadFanSettings(page);
+    await waitSaver(['cpu_temperature', 'board_temperature']);
+    check('现有来源按 CPU 主板与硬盘分类', /CPU 温度来源/.test(await saver.textContent()) && /主板温度来源/.test(await saver.textContent()) && /硬盘温度来源/.test(await saver.textContent()));
+    check('温度来源长标签作为文本转义', /<img src=x onerror="window.saverLabelInjected=1">/.test(await saver.textContent()) && await saver.locator('img').count() === 0 && await page.evaluate(() => window.saverLabelInjected) === undefined);
+    await chooseSaver('cpu_usage');
+    let twelveItems = await chooseSaver('temperature:extra:0');
+    while (twelveItems.length < 12) {
+      const next = await saver.locator('input:not(:checked)').first().inputValue();
+      twelveItems = await chooseSaver(next);
+    }
+    check('恰好 12 项时禁止继续勾选', await saver.locator('input:not(:checked):enabled').count() === 0 && /已选 12 项/.test(await saver.textContent()));
+    const writesBeforeThirteen = screenWrites;
+    await saver.locator('input:not(:checked)').first().evaluate(input => { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); });
+    check('UI 超过 12 项恢复原选择且不提交', screenWrites === writesBeforeThirteen && await saver.locator('input:checked').count() === 12);
+    const emptySaver = await post('/api/r1/settings', { settings: { saver_items: [] } });
+    const oversizedSaver = await post('/api/r1/settings', { settings: { saver_items: Array.from({ length: 13 }, (_, index) => 'temperature:extra:' + index) } });
+    check('后端拒绝空选择和超过 12 项', emptySaver.status === 400 && emptySaver.body.saved === false && oversizedSaver.status === 400 && oversizedSaver.body.saved === false);
+    check('无效请求不覆盖已保存项目', JSON.stringify((await api('/api/r1')).body.control.settings.saver_items) === JSON.stringify(twelveItems));
+    const lastSaverItem = twelveItems[twelveItems.length - 1];
+    await chooseSaver(lastSaverItem, false);
+    twelveItems = await chooseSaver(lastSaverItem);
+    check('边界拒绝后仍可继续保存有效选择', await saver.locator('[data-ref="error"]').isHidden() && twelveItems.length === 12);
+    if (screenshotDir) await page.waitForFunction(() => !document.querySelector('.toasts .toast'), null, { timeout: 6000 });
+    await page.setViewportSize({ width: 320, height: 844 });
+    await saver.scrollIntoViewIfNeeded();
+    await noOverflow('屏保项目 320');
+    await shot('saver-320');
+    await page.setViewportSize({ width: 1120, height: 1000 });
+    await saver.scrollIntoViewIfNeeded();
+    await shot('saver-desktop');
+    check('选择屏保项目不触发 SMART 或硬件探测', smartRequests === screenSmartBefore && (await fixtureCall('fan_calls')).command_count === screenCommandsBefore);
 
     /* 7. 电源操作受确认保护 */
     await page.locator('#pageSeg button[data-page="overview"]').click();

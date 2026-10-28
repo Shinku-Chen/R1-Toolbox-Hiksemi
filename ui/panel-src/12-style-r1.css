@@ -32,6 +32,20 @@
 .r1-pwr .faint { font-size: 12px; }
 .r1-pwr .btn .i { width: 15px; height: 15px; }
 
+/* 屏保指标与风扇来源分开编辑，显示顺序由勾选顺序决定。 */
+.r1-saver-picker { width: 100%; max-width: 420px; min-width: 0; }
+.r1-saver-count { font-size: 13px; color: var(--ink-2); }
+.r1-saver-selected { max-height: 112px; overflow-y: auto; margin: 8px 0 12px; padding-left: 24px; font-size: 13px; color: var(--ink-2); }
+.r1-saver-selected li { overflow-wrap: anywhere; }
+.r1-saver-groups { max-height: 340px; overflow-y: auto; border: 1px solid var(--line); border-radius: 14px; padding: 8px 10px; }
+.r1-saver-group { min-width: 0; margin: 0; padding: 6px 0; border: 0; }
+.r1-saver-group + .r1-saver-group { border-top: 1px solid var(--line); }
+.r1-saver-group legend { padding: 0; color: var(--ink-3); font-size: 12px; }
+.r1-saver-option { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 44px; padding: 6px 0; cursor: pointer; }
+.r1-saver-option input { width: 20px; height: 20px; flex: none; accent-color: var(--ink-1); }
+.r1-saver-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.r1-saver-note { color: var(--ink-3); font-size: 12px; }
+
 /* 设置编辑器 */
 .r1-edit { display: grid; gap: 14px; }
 .r1-editor { padding: 18px 20px; }

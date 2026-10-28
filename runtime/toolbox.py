@@ -14,10 +14,16 @@ import threading
 import time
 
 PAGES = ("overview", "storage", "network", "controls", "apps", "system", "settings")
+SAVER_ITEMS = frozenset(("cpu_usage", "memory_usage", "cpu_temperature", "board_temperature"))
+LEGACY_SAVER_ITEMS = {
+    "usage": ("cpu_usage", "memory_usage"),
+    "temperature": ("cpu_temperature", "board_temperature"),
+}
 DEFAULTS = {
     "theme": "dark", "font_scale": 100, "page_interval": 0,
     "sleep_timeout": 0, "saver_timeout": 0, "saver_brightness": 30,
-    "saver_content": "usage", "brightness": 80, "night_enabled": False,
+    "saver_content": "usage", "saver_items": list(LEGACY_SAVER_ITEMS["usage"]),
+    "brightness": 80, "night_enabled": False,
     "night_start": "22:00", "night_end": "07:00", "night_brightness": 20,
     "enabled_pages": list(PAGES),
 }
@@ -67,7 +73,7 @@ def curve_duty(points, temperature):
 def validated_settings(changes, original):
     keys(changes, DEFAULTS)
     result = copy.deepcopy(original)
-    result.update(changes)
+    result.update(copy.deepcopy(changes))
     require(result["theme"] in ("dark", "light", "ink", "jade"), "不支持的主题")
     for name, low, high in (("font_scale", 80, 140), ("page_interval", 0, 3600),
                             ("sleep_timeout", 0, 86400), ("saver_timeout", 0, 86400),
@@ -75,6 +81,18 @@ def validated_settings(changes, original):
                             ("night_brightness", 5, 100)):
         integer(result[name], low, high, name)
     require(result["saver_content"] in ("usage", "temperature"), "不支持的屏幕保护内容")
+    # Explicit legacy changes retain their old two-item meaning. An unrelated
+    # update must preserve a custom ordered selection, including absent devices.
+    if "saver_items" not in changes and ("saver_content" in changes or "saver_items" not in result):
+        result["saver_items"] = list(LEGACY_SAVER_ITEMS[result["saver_content"]])
+    items = result["saver_items"]
+    # Dynamic IDs refer to cached fan.sources keys, never filesystem paths.
+    # Validate their shape without probing hardware or replacing missing IDs.
+    require(isinstance(items, list) and 1 <= len(items) <= 12
+            and all(isinstance(item, str) and (item in SAVER_ITEMS
+                    or re.fullmatch(r"temperature:[A-Za-z0-9:_.-]{1,256}", item)) for item in items)
+            and len(items) == len(set(items)),
+            "屏幕保护需选择 1–12 个不重复的有效指标")
     require(type(result["night_enabled"]) is bool, "night_enabled 必须是布尔值")
     for name in ("night_start", "night_end"):
         require(isinstance(result[name], str) and re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", result[name]),

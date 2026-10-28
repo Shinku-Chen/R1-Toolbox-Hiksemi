@@ -209,6 +209,72 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.action(name, payload)[0], 400)
         self.assertEqual(self.controller.calls, [])
 
+    def test_saver_items_are_allowlisted_ordered_and_keep_pairing_origin_and_csrf_gates(self):
+        items = ['memory_usage', 'temperature:sysfs:missing-device', 'cpu_temperature']
+        payload = {'settings': {'saver_items': items}}
+        self.assertEqual(self.action(payload=payload)[0], 401)
+        self.login()
+        for headers in ({'Origin': 'http://evil.invalid'}, {'X-R1-CSRF': ''}, {'Host': 'evil.invalid'}):
+            self.assertEqual(self.action(payload=payload, extra=headers)[0], 403)
+        self.assertEqual(self.controller.calls, [])
+        code, _, result = self.action(payload=payload)
+        self.assertEqual(code, 200)
+        self.assertTrue(result['saved'])
+        self.assertEqual(result['state']['settings']['saver_items'], items)
+        self.assertEqual(self.request('GET', '/api/session')[2]['state']['settings']['saver_items'], items)
+        self.assertEqual(self.action(payload={'settings': {'saver_timeout': 60}})[0], 200)
+        self.assertEqual(self.controller.settings['saver_items'], items)
+
+    def test_panel_saver_items_require_authorization_and_strict_setting_fields(self):
+        route = '/api/r1/settings'
+        payload = {'settings': {'saver_items': ['temperature:thermal:stable-id', 'cpu_usage']}}
+        marker = {'X-FNM-Request': '1'}
+        self.assertEqual(self.request('POST', route, payload, marker)[0], 403)
+        self.login()
+        self.assertEqual(self.request('POST', route, payload)[0], 403)
+        self.assertEqual(self.request('POST', route, payload, {**marker, 'Origin': 'http://evil.invalid'})[0], 403)
+        self.assertEqual(self.controller.calls, [])
+        for body in ({**payload, 'command': 'anything'}, {'settings': {'saver_items': ['cpu_usage'], 'command': 'anything'}}):
+            self.assertEqual(self.request('POST', route, body, marker)[0], 400)
+        self.assertEqual(self.controller.calls, [])
+        status, _, result = self.request('POST', route, payload, marker)
+        self.assertEqual(status, 200)
+        self.assertTrue(result['saved'])
+        self.assertEqual(result['state']['settings']['saver_items'], payload['settings']['saver_items'])
+
+    def test_invalid_saver_items_are_rejected_over_both_write_routes(self):
+        self.login()
+        original = copy.deepcopy(self.controller.settings)
+        for items in ([], ['cpu_usage', 'cpu_usage'], ['gpu_usage'], ['temperature:bad/path'],
+                      ['temperature:' + 'x' * 257], ['temperature:' + str(index) for index in range(13)]):
+            with self.subTest(items=items):
+                payload = {'settings': {'saver_items': items}}
+                self.assertEqual(self.action(payload=payload)[0], 400)
+                status, _, result = self.request('POST', '/api/r1/settings', payload, {'X-FNM-Request': '1'})
+                self.assertEqual(status, 400)
+                self.assertNotIn('已保存', result.get('error', ''))
+                self.assertEqual(self.controller.settings, original)
+
+    def test_panel_saver_save_failure_is_not_reported_as_saved_and_hides_private_paths(self):
+        self.login()
+        original = copy.deepcopy(self.controller.settings)
+        body = {'settings': {'saver_items': ['temperature:sysfs:missing', 'cpu_usage']}}
+        self.controller.fail_save = True
+        status, _, result = self.request('POST', '/api/r1/settings', body, {'X-FNM-Request': '1'})
+        self.assertEqual(status, 400)
+        self.assertFalse(result['saved'])
+        self.assertIn('设置未保存', result['error'])
+        self.assertNotIn('已保存', result['error'])
+        self.assertNotIn('/secret', json.dumps(result))
+        self.assertEqual(self.controller.settings, original)
+        self.controller.fail_save = False
+        self.controller.fail_apply = True
+        status, _, result = self.request('POST', '/api/r1/settings', body, {'X-FNM-Request': '1'})
+        self.assertEqual(status, 400)
+        self.assertTrue(result['saved'])
+        self.assertIn('设置已保存', result['error'])
+        self.assertNotIn('/secret', json.dumps(result))
+
     def test_public_monitoring_never_requires_pairing_or_discloses_write_material(self):
         from types import SimpleNamespace
         self.web.monitor = SimpleNamespace(snapshot=lambda: {'available': True, 'cpu': {'usage_percent': 42}})
@@ -482,7 +548,9 @@ class WebTests(unittest.TestCase):
         controller = toolbox.ToolboxController(state_dir=folder / 'data', sys_root=folder / 'sys', dev_root=folder / 'dev')
         self.web.controller = controller
         self.login()
-        self.assertEqual(self.action(payload={'settings': {'theme': 'jade', 'font_scale': 120, 'page_interval': 15}})[0], 200)
+        items = ['memory_usage', 'temperature:disk:wwn:missing', 'cpu_temperature']
+        self.assertEqual(self.action(payload={'settings': {'theme': 'jade', 'font_scale': 120, 'page_interval': 15,
+                                                         'saver_items': items}})[0], 200)
         self.assertEqual(self.action('screen.brightness', {'value': 65})[0], 200)
         recreated = toolbox.ToolboxController(state_dir=folder / 'data', sys_root=folder / 'sys', dev_root=folder / 'dev')
         self.web.controller = recreated
@@ -490,6 +558,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(recreated.settings['font_scale'], 120)
         self.assertEqual(recreated.settings['page_interval'], 15)
         self.assertEqual(recreated.settings['brightness'], 65)
+        self.assertEqual(recreated.settings['saver_items'], items)
         self.assertEqual((backlight / 'brightness').read_text(), '65')
         self.assertEqual(self.request('GET', '/api/session')[2]['state']['settings']['brightness'], 65)
 

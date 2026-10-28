@@ -150,3 +150,29 @@ body{font-size:22px}
 .temperature-top>b{flex-shrink:0;white-space:nowrap}
 .disk-temperature-row .caption{margin-bottom:10px}
 .disk-temperature-note{margin-top:22px}
+
+/* Screen saver choices preserve selected stable source IDs, including offline ones. */
+.saver-picker{min-width:0;border:0;padding:0;margin:24px 0 0}
+.saver-picker legend{font-size:22px;margin-bottom:8px}
+.saver-picker>.caption{margin-bottom:12px}
+.saver-choice{display:flex;align-items:center;gap:12px;min-height:64px;padding:12px 0;border-bottom:1px solid var(--line);font-size:22px;text-align:left}
+.saver-choice input{width:26px;height:26px;flex-shrink:0;margin:0;accent-color:var(--lime)}
+.saver-choice>span{min-width:0;flex:1;overflow-wrap:anywhere;line-height:1.4}
+.saver-choice small{display:block;font-size:18px;color:var(--dim);margin-top:4px}
+.saver-choice b{font:20px var(--mono);color:var(--dim);min-width:24px;text-align:right}
+.saver-choice:has(input:disabled){opacity:.6}
+.saver-layer{gap:16px;padding:24px 20px;text-align:left}
+.saver-title,.saver-page,.saver-hint{font-size:22px;line-height:1.3;text-align:center}
+.saver-metrics{grid-template-columns:minmax(0,1fr);gap:12px}
+.saver-metric{align-items:stretch;gap:6px;padding:14px;text-align:left}
+.saver-metric-heading{display:flex;align-items:center;gap:12px;min-width:0}
+.saver-metric strong{font-size:22px;line-height:1.35;min-width:0;flex:1;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.saver-metric .value{font-size:30px;white-space:nowrap;flex-shrink:0}
+.saver-metric .value small{font-size:22px;color:var(--muted);margin-left:5px}
+.saver-metric-note{font-size:22px;line-height:1.3;color:var(--muted);overflow-wrap:anywhere}
+.saver-page{font-family:var(--mono);color:var(--muted)}
+@media(max-height:720px){
+  .saver-layer{padding:16px;gap:12px}
+  .saver-time .dot-number{--dot-height:44px}
+  .saver-title{display:none}
+}

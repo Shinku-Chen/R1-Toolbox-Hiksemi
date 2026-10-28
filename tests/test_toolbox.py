@@ -1,4 +1,6 @@
+import copy
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,6 +10,67 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("r1_toolbox_controls", Path(__file__).resolve().parents[1] / "runtime/toolbox.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+class SaverSettingsTests(unittest.TestCase):
+    """Ordered saver selections are configuration, never hardware discovery."""
+
+    def test_defaults_and_mixed_items_preserve_order_and_do_not_alias_inputs(self):
+        self.assertEqual(MODULE.DEFAULTS["saver_items"], ["cpu_usage", "memory_usage"])
+        items = ["temperature:disk:wwn:absent-123", "memory_usage", "cpu_temperature", "cpu_usage"]
+        original = copy.deepcopy(MODULE.DEFAULTS)
+        result = MODULE.validated_settings({"saver_items": items}, original)
+        self.assertEqual(result["saver_items"], items)
+        items.append("board_temperature")
+        self.assertNotEqual(result["saver_items"], items)
+        self.assertEqual(original, MODULE.DEFAULTS)
+
+    def test_legacy_content_migrates_only_when_explicit_or_items_are_absent(self):
+        custom = copy.deepcopy(MODULE.DEFAULTS)
+        custom["saver_items"] = ["temperature:sysfs:missing", "memory_usage"]
+        for content, expected in (("usage", ["cpu_usage", "memory_usage"]),
+                                   ("temperature", ["cpu_temperature", "board_temperature"])):
+            with self.subTest(content=content):
+                result = MODULE.validated_settings({"saver_content": content}, custom)
+                self.assertEqual(result["saver_items"], expected)
+                legacy = copy.deepcopy(MODULE.DEFAULTS)
+                legacy.pop("saver_items")
+                legacy["saver_content"] = content
+                result = MODULE.validated_settings({"saver_timeout": 60}, legacy)
+                self.assertEqual(result["saver_items"], expected)
+
+    def test_explicit_items_win_over_simultaneous_legacy_content(self):
+        result = MODULE.validated_settings({"saver_content": "temperature", "saver_items": ["memory_usage"]},
+                                           MODULE.DEFAULTS)
+        self.assertEqual(result["saver_items"], ["memory_usage"])
+        self.assertEqual(result["saver_content"], "temperature")
+
+    def test_unrelated_updates_preserve_custom_and_unknown_device_selections(self):
+        original = copy.deepcopy(MODULE.DEFAULTS)
+        original["saver_items"] = ["temperature:disk:wwn:unplugged", "cpu_usage", "board_temperature"]
+        for changes in ({"brightness": 60}, {"saver_timeout": 300}, {"saver_brightness": 20}, {"theme": "light"}):
+            with self.subTest(changes=changes):
+                result = MODULE.validated_settings(changes, original)
+                self.assertEqual(result["saver_items"], original["saver_items"])
+                self.assertIsNot(result["saver_items"], original["saver_items"])
+
+    def test_dynamic_id_maximum_length_and_twelve_item_limit_are_accepted(self):
+        longest = "temperature:" + "A0:_.-" * 42 + "abcd"
+        self.assertEqual(len(longest), 268)
+        self.assertEqual(MODULE.validated_settings({"saver_items": [longest]}, MODULE.DEFAULTS)["saver_items"], [longest])
+        items = ["temperature:sysfs:source-" + str(index) for index in range(12)]
+        self.assertEqual(MODULE.validated_settings({"saver_items": items}, MODULE.DEFAULTS)["saver_items"], items)
+
+    def test_empty_duplicate_unknown_invalid_type_and_overlong_selections_are_rejected(self):
+        invalid = ([], None, "cpu_usage", ("cpu_usage",), [True], [1], [{}], [["cpu_usage"]],
+                   ["cpu_usage", "cpu_usage"], ["gpu_usage"], ["temperature:"],
+                   ["temperature:" + "x" * 257], ["temperature:含中文"], ["temperature:a/b"],
+                   ["temperature:a\\b"], ["temperature:a b"], ["temperature:a\n"],
+                   ["temperature:a\x00"], ["temperature:a%20"],
+                   ["temperature:sysfs:" + str(index) for index in range(13)])
+        for items in invalid:
+            with self.subTest(items=items), self.assertRaises(ValueError):
+                MODULE.validated_settings({"saver_items": items}, MODULE.DEFAULTS)
 
 
 class ToolboxTests(unittest.TestCase):
@@ -81,6 +144,48 @@ class ToolboxTests(unittest.TestCase):
         other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, dev_root=self.dev)
         self.assertEqual(other.snapshot()["settings"]["font_scale"], 120)
         self.assertEqual(other.snapshot()["settings"]["theme"], "jade")
+
+    def test_custom_saver_items_persist_and_reload_after_brightness_update(self):
+        items = ["temperature:disk:wwn:gone-device", "memory_usage", "cpu_temperature"]
+        result = self.controller.action("settings.update", {"settings": {"saver_items": items}})
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["settings_saved"])
+        result = self.controller.action("settings.update", {"settings": {"brightness": 65}})
+        self.assertTrue(result["ok"], result)
+        saved = json.loads((self.state / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["saver_items"], items)
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, dev_root=self.dev)
+        self.assertEqual(other.snapshot()["settings"]["saver_items"], items)
+
+    def test_legacy_settings_file_migrates_in_memory_without_rewriting_or_hardware_reads(self):
+        before = self.files()
+        self.state.mkdir()
+        path = self.state / "settings.json"
+        raw = '{"saver_content":"temperature","saver_timeout":300}'
+        path.write_text(raw, encoding="utf-8")
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, dev_root=self.dev)
+        self.assertEqual(other.settings["saver_items"], ["cpu_temperature", "board_temperature"])
+        self.assertIsNone(other.settings_error)
+        self.assertEqual(path.read_text(encoding="utf-8"), raw)
+        self.assertEqual(before, self.files())
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_saved_items_fall_back_to_defaults_with_error(self):
+        self.state.mkdir()
+        (self.state / "settings.json").write_text('{"saver_items":[]}', encoding="utf-8")
+        other = MODULE.ToolboxController(self.state, self.sys, runner=self.runner, dev_root=self.dev)
+        self.assertEqual(other.settings["saver_items"], ["cpu_usage", "memory_usage"])
+        self.assertIsNotNone(other.settings_error)
+
+    def test_invalid_saver_selection_never_reaches_storage_or_hardware(self):
+        before = self.files()
+        with mock.patch.object(self.controller, "_save_settings") as save:
+            for items in ([], ["cpu_usage", "cpu_usage"], ["temperature:../bad/path"], ["gpu_usage"]):
+                result = self.controller.action("settings.update", {"settings": {"saver_items": items}})
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["settings_saved"])
+            save.assert_not_called()
+        self.assertEqual(before, self.files())
 
     def test_same_value_save_failure_is_not_reported_as_persisted(self):
         changes = {"theme": self.controller.settings["theme"]}

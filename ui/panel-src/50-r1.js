@@ -655,6 +655,15 @@ function r1LightSettings(card) {
 
 function r1ScreenSettings(card) {
   let sig = '';
+  let saverPending = false;
+  const labelKey = 'r1SaverSourceLabels';
+  const sourceLabels = new Map();
+  try {
+    const cached = JSON.parse(localStorage.getItem(labelKey) || '{}');
+    Object.entries(cached).slice(0, 12).forEach(([id, label]) => {
+      if (/^temperature:[A-Za-z0-9:_.-]{1,256}$/.test(id) && typeof label === 'string') sourceLabels.set(id, label.slice(0, 256));
+    });
+  } catch (_) { /* Storage is optional; unknown sources still retain their IDs. */ }
   card.innerHTML = `<div data-ref="rows"></div><div class="r1-inline" data-ref="acts">
       <button class="btn" type="button" data-ref="sleep">立即息屏</button>
       <button class="btn" type="button" data-ref="wake">唤醒小屏</button></div>
@@ -663,15 +672,97 @@ function r1ScreenSettings(card) {
   const apply = async settings => {
     try {
       const j = await R1.post('/api/r1/settings', { settings });
-      toast(j.ok ? '小屏设置已保存' : '设置已保存，但设备应用未完成', j.ok ? {} : { icon: 'alert' });
+      const saved = j.ok === true || j.saved === true || j.settings_saved === true;
+      toast(j.ok ? '小屏设置已保存' : saved ? '小屏设置已保存，但设备应用未完成' : '小屏设置未保存，请重试', { key: j.ok ? 'screen-save' : 'screen-save-error', icon: j.ok ? 'check' : 'alert' });
       await R1.refresh();
-    } catch (e) { if (!e.handled && e.status !== 401) toast('保存失败 · ' + String(e.message).slice(0, 70), { icon: 'alert' }); }
+      return saved;
+    } catch (e) {
+      const saved = e.body && (e.body.saved === true || e.body.settings_saved === true);
+      if (!e.handled && e.status !== 401) toast(saved ? '小屏设置已保存，但设备应用未完成' : '小屏设置未保存，请重试', { key: 'screen-save-error', icon: 'alert' });
+      await R1.refresh();
+      return !!saved;
+    }
+  };
+  const saverPicker = settings => {
+    const loaded = typeof settings.saver_timeout === 'number';
+    let picked = Array.isArray(settings.saver_items) && settings.saver_items.length ? settings.saver_items.slice()
+      : settings.saver_content === 'temperature' ? ['cpu_temperature', 'board_temperature'] : ['cpu_usage', 'memory_usage'];
+    const groups = new Map([
+      ['使用率', [{ id: 'cpu_usage', label: 'CPU 使用率' }, { id: 'memory_usage', label: '内存使用率' }]],
+      ['汇总温度', [{ id: 'cpu_temperature', label: 'CPU 温度（最高值）' }, { id: 'board_temperature', label: '主板温度（最高值）' }]],
+    ]);
+    const options = new Map([...groups.values()].flat().map(item => [item.id, item]));
+    for (const source of R1.sources()) {
+      const sourceId = String(source.id || '');
+      if (!/^[A-Za-z0-9:_.-]{1,256}$/.test(sourceId)) continue;
+      const id = 'temperature:' + sourceId;
+      if (options.has(id)) continue;
+      const label = String(source.label || sourceId).slice(0, 256);
+      sourceLabels.set(id, label);
+      const group = source.kind === 'cpu' ? 'CPU 温度来源' : source.kind === 'board' ? '主板温度来源' : source.kind === 'disk' ? '硬盘温度来源' : '其他温度来源';
+      if (!groups.has(group)) groups.set(group, []);
+      const available = source.fresh !== false && source.status === 'ok' && ok(source.temperature_c);
+      const item = { id, label, note: available ? '' : source.status === 'standby' ? '不可用 · 休眠' : '不可用' };
+      groups.get(group).push(item); options.set(id, item);
+    }
+    for (const id of picked) {
+      if (options.has(id)) continue;
+      const group = '未连接的温度来源';
+      if (!groups.has(group)) groups.set(group, []);
+      const item = { id, label: sourceLabels.get(id) || id.replace(/^temperature:/, ''), note: '不可用 · 未连接' };
+      groups.get(group).push(item); options.set(id, item);
+    }
+    const remember = () => {
+      const labels = Object.fromEntries(picked.filter(id => sourceLabels.has(id)).map(id => [id, sourceLabels.get(id)]));
+      try { localStorage.setItem(labelKey, JSON.stringify(labels)); } catch (_) { /* Keep selection usable when browser storage is disabled. */ }
+    };
+    if (loaded) remember();
+    const picker = mount(`<div class="r1-saver-picker" role="group" aria-label="屏幕保护项目" aria-busy="false">
+      <div class="r1-saver-count" data-ref="count"></div><ol class="r1-saver-selected" aria-label="显示顺序" data-ref="order"></ol>
+      <div class="r1-saver-groups" data-ref="groups"></div><p class="sub st-crit" data-ref="error" role="status" hidden></p></div>`);
+    const x = collect(picker);
+    for (const [title, items] of groups) {
+      x.groups.append(mount(`<fieldset class="r1-saver-group"><legend>${esc(title)}</legend>${items.map(item => `<label class="r1-saver-option"><input type="checkbox" value="${esc(item.id)}" ${picked.includes(item.id) ? 'checked' : ''}><span class="r1-saver-name">${esc(item.label)}</span>${item.note ? `<span class="r1-saver-note">${esc(item.note)}</span>` : ''}</label>`).join('')}</fieldset>`));
+    }
+    const refresh = () => {
+      picker.setAttribute('aria-busy', String(saverPending || !loaded));
+      setText(x.count, `已选 ${picked.length} 项，最多 12 项`);
+      x.order.replaceChildren(...picked.map(id => {
+        const li = document.createElement('li');
+        li.textContent = (options.get(id) || {}).label || id;
+        return li;
+      }));
+      picker.querySelectorAll('input').forEach(input => {
+        input.checked = picked.includes(input.value);
+        input.disabled = !loaded || saverPending || (input.checked ? picked.length === 1 : picked.length >= 12);
+      });
+    };
+    picker.addEventListener('change', async event => {
+      const input = event.target.closest('input[type="checkbox"]');
+      if (!input) return;
+      const next = input.checked ? [...picked, input.value] : picked.filter(id => id !== input.value);
+      if (!loaded || saverPending || !options.has(input.value) || next.length < 1 || next.length > 12 || new Set(next).size !== next.length) {
+        setText(x.error, '请选择 1–12 个不重复的项目。'); x.error.hidden = false; refresh(); return;
+      }
+      const before = picked;
+      picked = next; saverPending = true; x.error.hidden = true; remember(); refresh();
+      if (!(await apply({ saver_items: picked }))) {
+        const savedItems = (R1.control().settings || {}).saver_items;
+        picked = Array.isArray(savedItems) && savedItems.length ? savedItems.slice() : before;
+        remember();
+      }
+      saverPending = false; card._sync(); refresh();
+    });
+    refresh();
+    return picker;
   };
   x.sleep.onclick = async () => { try { await R1.post('/api/r1/screen', { action: 'sleep' }); toast('已请求息屏'); } catch (e) { if (!e.handled && e.status !== 401) toast('操作失败', { icon: 'alert' }); } };
   x.wake.onclick = async () => { try { await R1.post('/api/r1/screen', { action: 'wake' }); toast('已请求唤醒'); } catch (e) { if (!e.handled && e.status !== 401) toast('操作失败', { icon: 'alert' }); } };
   card._sync = () => {
+    if (saverPending) return;
     const control = R1.control(), s = control.settings || {}, caps = control.capabilities || {};
-    const key = JSON.stringify([s, caps.screen, caps.brightness]);
+    const sources = R1.sources().map(source => [source.id, source.label, source.kind, source.fresh, source.status]);
+    const key = JSON.stringify([s, caps.screen, caps.brightness, sources]);
     if (key === sig) return;
     sig = key;
     const rows = mount(`<div></div>`);
@@ -681,8 +772,8 @@ function r1ScreenSettings(card) {
     rows.append(r1Field('屏幕保护', r1Number(s.saver_timeout || 0, 0, 86400, '秒', v => apply({ saver_timeout: v })), '无操作达到该时间后进入屏幕保护；0 为关闭'));
     if (s.saver_timeout > 0) {
       rows.append(r1Field('屏幕保护亮度', r1Number(s.saver_brightness || 30, 5, 100, '%', v => apply({ saver_brightness: v })), '屏幕保护时使用的背光亮度'));
-      rows.append(r1Field('屏幕保护内容', r1Select([['usage', 'CPU / 内存使用率'], ['temperature', 'CPU / 主板温度']], s.saver_content || 'usage', v => apply({ saver_content: v }))));
     }
+    rows.append(r1Field('屏幕保护项目', saverPicker(s), '使用率与温度可混选，至少 1 项、最多 12 项；按勾选顺序显示。断开的来源保留为不可用。'));
     rows.append(r1Field('关闭屏幕', r1Number(s.sleep_timeout || 0, 0, 86400, '秒', v => apply({ sleep_timeout: v })), '无操作达到该时间后关闭背光；0 为关闭。建议大于屏幕保护时间'));
     rows.append(r1Field('夜间自动调暗', r1Check('启用夜间亮度', !!s.night_enabled, v => apply({ night_enabled: v })), '按 NAS 本地时间，支持跨午夜'));
     if (s.night_enabled) {
