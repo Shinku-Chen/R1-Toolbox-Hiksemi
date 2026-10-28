@@ -246,6 +246,8 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       await brightness.evaluate(el => { el.value = '55'; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); });
       assert.equal(await inside('[data-light-brightness]').textContent(), '55%');
       await inside('#light-effect').selectOption('2');
+      assert.deepEqual(await inside('#light-effect option').allTextContents(), ['关闭', '常亮', '彩虹', '呼吸'],
+        'prototype exposes only the four native light modes');
       assert.equal(await inside('#light-effect').inputValue(), '2');
       await inside('#sleep-timeout').selectOption('300');
       assert.equal(await inside('#sleep-timeout').inputValue(), '300');
