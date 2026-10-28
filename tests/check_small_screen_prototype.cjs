@@ -32,10 +32,10 @@ if (screenshotDir) fs.mkdirSync(screenshotDir, { recursive: true });
 const mainTabs = ['overview', 'storage', 'network', 'apps', 'thermal', 'controls'];
 const viewTitles = {
   overview: '概览', metrics: '核心指标', processor: '处理器与内存', storage: '存储', network: '网络',
-  apps: '应用', containers: 'Docker 容器', container: '容器详情', vms: '虚拟机', thermal: '温度与风扇',
+  apps: '应用', containers: 'Docker 容器', container: '容器详情', thermal: '温度与风扇',
   trends: '历史趋势', ports: '监听端口', controls: '设置', web: '网页设置',
 };
-const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'containers', 'vms', 'ports', 'controls', 'web'];
+const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', 'thermal', 'network', 'containers', 'ports', 'controls', 'web'];
 
 (async () => {
   const browser = await chromium.launch({ executablePath: chromeBin, headless: true });
@@ -162,14 +162,6 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
         assert.equal(await inside('.screen-title').textContent(), viewTitles.apps);
         assert.ok(Math.abs(await scrollTop() - appsOffset) <= 1, 'applications scroll is restored');
 
-        const vmEntry = inside('[data-view="vms"]');
-        await vmEntry.scrollIntoViewIfNeeded();
-        const vmParentOffset = await scrollTop();
-        assert.ok(vmParentOffset > 0, 'the applications page must actually scroll before opening virtual machines');
-        await vmEntry.tap();
-        assert.equal(await inside('.screen-title').textContent(), viewTitles.vms);
-        await back();
-        assert.ok(Math.abs(await scrollTop() - vmParentOffset) <= 1, 'applications scroll is restored after virtual machine details');
       } finally {
         await page.setViewportSize({ width: 376, height: 960 });
       }
@@ -351,13 +343,13 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       });
     }
 
-    await check('desktop gallery lays out twelve pages in a grid and each entry opens an interactive page', async () => {
+    await check('desktop gallery lays out eleven pages in a grid and each entry opens an interactive page', async () => {
       await page.setViewportSize({ width: 1600, height: 1200 });
       await open('overview', 'gallery');
       assert.equal(await page.locator('#gallery-container').isVisible(), true);
       assert.equal(await page.locator('#stage').isHidden(), true);
-      assert.equal(await page.locator('#gallery .gallery-item').count(), 12);
-      assert.equal(await page.locator('#gallery .device[data-preview-device]').count(), 12);
+      assert.equal(await page.locator('#gallery .gallery-item').count(), 11);
+      assert.equal(await page.locator('#gallery .device[data-preview-device]').count(), 11);
       assert.equal(await page.locator('#gallery .device[inert]').count(), 0, 'inert would prevent scrolling long previews');
       const gallery = await page.locator('#gallery .device').evaluateAll(devices => devices.map(el => {
         const rect = el.getBoundingClientRect();
