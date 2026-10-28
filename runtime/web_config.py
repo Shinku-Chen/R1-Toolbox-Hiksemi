@@ -149,8 +149,48 @@ _DEV_COMMANDS = {
 }
 
 
+def _dev_fan_process():
+    """Bounded read-only snapshot of the vendor temp_control readiness fields."""
+    import glob
+    rows = []
+    for folder in glob.glob('/proc/[0-9]*')[:4096]:
+        try:
+            raw = Path(folder, 'cmdline').read_bytes()[:16384]
+        except OSError:
+            continue
+        if b'temp_control' not in raw:
+            continue
+        def read(name, limit=1048576):
+            try:
+                return Path(folder, name).read_bytes()[:limit]
+            except OSError:
+                return b''
+        status = read('status')
+        fields = {}
+        for line in status.splitlines():
+            key, sep, value = line.partition(b':')
+            if sep:
+                fields[key.decode('ascii', 'replace')] = value.strip().decode('ascii', 'replace')
+        maps = read('maps')
+        environ = read('environ', 65536)
+        env_names = sorted({item.split(b'=', 1)[0].decode('ascii', 'replace') for item in environ.split(b'\0') if b'=' in item})
+        rows.append({
+            'pid': int(folder.rsplit('/', 1)[-1]),
+            'state': fields.get('State', ''),
+            'sigcgt': fields.get('SigCgt', ''),
+            'sigblk': fields.get('SigBlk', ''),
+            'guard_loaded': b'fan_guard.so' in maps,
+            'ld_preload': 'LD_PRELOAD' in env_names,
+            'r1_fan_env': [name for name in env_names if name.startswith('R1_FAN_')],
+            'cmdline': [item.decode('utf-8', 'replace')[:200] for item in raw.split(b'\0') if item][:8],
+        })
+    return {'ok': True, 'name': 'fan_process', 'processes': rows, 'count': len(rows)}
+
+
 def _run_dev_command(name):
     """Run one fixed, read-only diagnostic command; never a shell string."""
+    if name == 'fan_process':
+        return _dev_fan_process()
     command = _DEV_COMMANDS.get(name)
     if command is None:
         raise ValueError('未知的开发者诊断命令')

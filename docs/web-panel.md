@@ -107,7 +107,7 @@ X-FNM-Request: 1
 {"name": "blocks"}
 ```
 
-命令名固定为 `identity`、`uname`、`processes`、`blocks`、`failed_units`、`fan_units`、`boot_log`、`fan_files`、`fan_status`。接口不接受 `cmd`、`shell` 或参数拼接，不能用它执行任意命令；输出截断到 64 KiB、10 秒超时。需要更多诊断命令时必须修改白名单代码。日志可能包含主机信息，只在调试窗口内使用。
+命令名固定为 `identity`、`uname`、`processes`、`blocks`、`failed_units`、`fan_units`、`boot_log`、`fan_files`、`fan_status`、`fan_process`。接口不接受 `cmd`、`shell` 或参数拼接，不能用它执行任意命令；输出截断到 64 KiB、10 秒超时。需要更多诊断命令时必须修改白名单代码。日志可能包含主机信息，只在调试窗口内使用。
 
 ## 已知边界
 

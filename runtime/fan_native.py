@@ -255,7 +255,7 @@ class FanNativeAdapter:
                 else:
                     self.child = self.popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-                deadline = self.clock() + 15
+                deadline = self.clock() + 30
                 while self.clock() < deadline:
                     if self.child.poll() is not None:
                         status = self._status() or {}

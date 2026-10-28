@@ -268,7 +268,7 @@ class SystemBackend:
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True, close_fds=True)
         self.children.append(child)
-        deadline = self.clock() + 5
+        deadline = self.clock() + 20
         expected = None
         try:
             while self.clock() < deadline:
@@ -321,7 +321,7 @@ class SystemBackend:
 
     def wait_ready(self, identity, *, require_guard=False, deadline=None, stable_seconds=0.15):
         """Bounded startup gate, also used by harmless real-/proc Linux fixtures."""
-        deadline = min(self.clock() + 5, deadline) if deadline is not None else self.clock() + 5
+        deadline = min(self.clock() + 20, deadline) if deadline is not None else self.clock() + 20
         stable_since = None
         while self.clock() < deadline:
             ready = self._ready(identity, require_guard)

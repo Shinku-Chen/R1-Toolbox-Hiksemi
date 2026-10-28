@@ -693,7 +693,7 @@ class NativeFanTests(unittest.TestCase):
                     with patch("subprocess.Popen", return_value=child), patch.object(backend, "stop_process") as stop:
                         with self.assertRaisesRegex(RuntimeError, "信号处理器就绪未确认"):
                             backend.spawn(original)
-                    self.assertLessEqual(now[0], 5)
+                    self.assertLessEqual(now[0], 20)
                     if failure == "timeout":
                         stop.assert_called_once_with(identity)
                     else:
