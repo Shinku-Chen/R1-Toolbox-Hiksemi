@@ -1,7 +1,7 @@
 """Independent fan rules, persistent configuration and supervised native control.
 
 The browser edits rules; this service samples and applies them independently.
-No hardware is accessed here except through the injected native adapter.
+Hardware is accessed only through the injected native and official adapters.
 """
 import copy
 import json
@@ -15,6 +15,7 @@ import time
 
 
 CHANNELS = ("cpu", "system")
+VENDOR_MODES = ("auto", "low", "medium", "high")
 QUICK_PERCENT = {"low": 50, "medium": 75, "high": 100}
 FIELDS = {"mode", "sources", "quiet_below", "normal_at", "full_at",
           "quiet_percent", "normal_percent", "manual_percent"}
@@ -45,8 +46,14 @@ def validate_config(value):
     result = copy.deepcopy(value)
     for name in CHANNELS:
         item = result["channels"][name]
-        _require(isinstance(item, dict) and set(item) == FIELDS, "风扇通道配置字段无效")
+        allowed = FIELDS | ({"vendor_mode"} if name == "system" else set())
+        _require(isinstance(item, dict) and FIELDS <= set(item) <= allowed, "风扇通道配置字段无效")
         _require(item["mode"] in ("vendor", "manual", "temperature"), "风扇模式无效")
+        if "vendor_mode" in item:
+            # Absence means preserve the existing vendor policy, so old schema
+            # one configurations must not acquire an implicit auto selection.
+            _require(isinstance(item["vendor_mode"], str) and item["vendor_mode"] in VENDOR_MODES,
+                     "系统风扇原厂档位无效")
         sources = item["sources"]
         _require(isinstance(sources, list) and len(sources) <= 32
                  and all(isinstance(source, str) and 0 < len(source) <= 256
@@ -148,8 +155,9 @@ def decide(policy, rows, previous=None):
 
 
 class FanPolicyController:
-    def __init__(self, state_dir, sources, adapter, *, clock=None, interval=1):
+    def __init__(self, state_dir, sources, adapter, *, histor=None, clock=None, interval=1):
         self.state_dir, self.sources, self.adapter = Path(state_dir), sources, adapter
+        self.histor = histor
         self.clock, self.interval = clock or time.monotonic, interval
         self.lock = threading.RLock()
         self.control_lock = threading.Lock()
@@ -225,6 +233,15 @@ class FanPolicyController:
             self.capability = copy.deepcopy(capability)
 
     def snapshot(self):
+        # Histor.snapshot reads its worker's cache only. Never use the vendor
+        # getter here: it signals temp_control and is a control operation.
+        try:
+            official = self.histor.snapshot() if self.histor is not None else None
+        except Exception:
+            official = None
+        if not isinstance(official, dict):
+            official = {"available": False, "control_available": False, "mode": None,
+                        "scope": "system_fan", "reason": "原厂风扇接口不可用"}
         with self.lock:
             now = self.clock()
             sources = observed_sources(self.catalog, now)
@@ -238,11 +255,15 @@ class FanPolicyController:
                 if selected is not None and not selected["fresh"]:
                     state["reference_c"] = None
             active = any(item["active"] for item in channels.values())
+            system = self.config["channels"]["system"]
+            official_pending = (system["mode"] == "vendor" and "vendor_mode" in system
+                                and system["vendor_mode"] != official.get("mode"))
             recovery_confirmed = not any("未确认" in item["reason"] or "待确认" in item["reason"] for item in channels.values())
             return {"config": copy.deepcopy(self.config), "active_on_boot": self.active_on_boot,
-                    "pending_changes": self.config != self.active_config or (not active and not self.busy
+                    "pending_changes": official_pending or self.config != self.active_config or (not active and not self.busy
                         and any(item["mode"] != "vendor" for item in self.config["channels"].values())), "active": active,
                     "busy": self.busy, "capability": copy.deepcopy(self.capability), "channels": channels,
+                    "official": copy.deepcopy(official),
                     "sources": sources, "settings_error": self.settings_error,
                     "last_error": self.last_error, "recovery_confirmed": recovery_confirmed}
 
@@ -309,14 +330,38 @@ class FanPolicyController:
             self.channels = states
             self.last_error = None
 
-    def _apply_worker(self, config):
+    def _apply_worker(self, config, apply_official=True):
         with self.control_lock:
-            self._apply_locked(config)
+            self._apply_locked(config, apply_official=apply_official)
 
-    def _apply_locked(self, config):
+    def _set_official(self, mode):
+        """Run the complete vendor RPC only after native release is confirmed."""
+        _require(self.histor is not None, "原厂风扇接口不可用")
+        _require(not self.stop_event.is_set(), "风扇服务正在停止")
+        # set_mode includes its own hardware/driver gates and exact ACK + mode
+        # readback. There is no native lease or recovery worker during this RPC.
+        result = self.histor.set_mode(mode, confirmed=True)
+        _require(not self.stop_event.is_set(), "风扇服务正在停止")
+        _require(isinstance(result, dict) and result.get("mode") == mode,
+                 "原厂风扇设置结果未能确认")
+
+    def _apply_locked(self, config, *, apply_official=True):
         wanted = {name for name in CHANNELS if config["channels"][name]["mode"] != "vendor"}
         try:
-            self.adapter.start(wanted) if wanted else self.adapter.release()
+            system = config["channels"]["system"]
+            set_official = apply_official and system["mode"] == "vendor" and "vendor_mode" in system
+            if set_official:
+                # Vendor get/set/get can exceed a native lease and signals the
+                # current temp_control process. Release every guarded channel
+                # first so lease expiry/recovery cannot race those signals.
+                # The CPU briefly returns to vendor auto; its selected active
+                # rule is restarted only after the entire RPC is confirmed.
+                self.adapter.release()
+                self._set_official(system["vendor_mode"])
+            if wanted:
+                self.adapter.start(wanted)
+            elif not set_official:
+                self.adapter.release()
             if self.stop_event.is_set():
                 self.adapter.release()
                 return
@@ -348,7 +393,7 @@ class FanPolicyController:
                         state["reason"] = "接管失败，原厂恢复未确认；请检查监督服务"
                 self.active_config = copy.deepcopy(DEFAULT_CONFIG)
                 self.active_on_boot = False
-                self.last_error = ("配置已保存，但接管未完成：" + detail + "；已请求恢复原厂管理，需检查适配状态后重新应用") if detail else "配置已保存，但接管未完成；已请求恢复原厂管理，需检查适配状态后重新应用"
+                self.last_error = ("配置已保存，但风扇切换未完成：" + detail + "；已请求恢复原厂管理，需检查适配状态后重新应用") if detail else "配置已保存，但风扇切换未完成；已请求恢复原厂管理，需检查适配状态后重新应用"
                 try:
                     self._save(self.config, DEFAULT_CONFIG, False)
                 except (OSError, ValueError):
@@ -358,16 +403,29 @@ class FanPolicyController:
                 self.busy = False
 
     def action(self, name, payload):
+        # Target construction and worker scheduling share the same lock as a
+        # completed apply. A single-channel action cannot capture an old CPU
+        # rule while a preceding worker commits its newly active configuration.
+        with self.lock:
+            return self._action_locked(name, payload)
+
+    def _action_locked(self, name, payload):
         saved = False
         try:
             _require(isinstance(payload, dict), "需要配置对象")
+            _require(not self.busy and not self.stop_event.is_set(), "风扇控制正在切换或停止，请稍后重试")
             confirmed = False
             apply_config = None
+            apply_official = True
             if name == "fan.policy.release":
                 _require(set(payload) == {"confirmed"} and payload["confirmed"] is True, "恢复原厂管理需要明确确认")
                 config = copy.deepcopy(self.config)
                 for item in config["channels"].values():
                     item["mode"] = "vendor"
+                # Releasing ownership preserves the vendor's current choice,
+                # including a newer mode selected in its own application.
+                config["channels"]["system"].pop("vendor_mode", None)
+                apply_official = False
                 apply, confirmed = True, True
             elif name == "fan.policy.quick":
                 _require(set(payload) == {"channel", "mode"}, "风扇快速调节参数无效")
@@ -378,6 +436,8 @@ class FanPolicyController:
                 item = config["channels"][channel]
                 if mode == "auto":
                     item["mode"] = "vendor"
+                    if channel == "system":
+                        item.pop("vendor_mode", None)
                 elif mode in QUICK_PERCENT:
                     item["mode"] = "manual"
                     item["manual_percent"] = QUICK_PERCENT[mode]
@@ -390,6 +450,19 @@ class FanPolicyController:
                 for other in CHANNELS:
                     if other != channel:
                         apply_config["channels"][other] = copy.deepcopy(self.active_config["channels"][other])
+                # Legacy shortcuts select ownership/fixed percentages only;
+                # they cannot reassert a stale saved native system mode.
+                apply_official = False
+                apply, confirmed = True, True
+            elif name == "fan.official":
+                _require(set(payload) == {"mode", "confirmed"} and payload["confirmed"] is True,
+                         "原厂风扇策略需要明确确认")
+                _require(isinstance(payload["mode"], str) and payload["mode"] in VENDOR_MODES,
+                         "不支持的原厂风扇策略")
+                config = copy.deepcopy(self.config)
+                config["channels"]["system"].update(mode="vendor", vendor_mode=payload["mode"])
+                apply_config = copy.deepcopy(config)
+                apply_config["channels"]["cpu"] = copy.deepcopy(self.active_config["channels"]["cpu"])
                 apply, confirmed = True, True
             elif name == "fan.policy.update":
                 _require(not set(payload) - {"config", "apply", "confirmed"} and "config" in payload
@@ -403,7 +476,6 @@ class FanPolicyController:
                 apply_config = validate_config(apply_config)
             _require(not apply or confirmed, "应用风扇温控需要明确确认")
             with self.lock:
-                _require(not self.busy and not self.stop_event.is_set(), "风扇控制正在切换或停止，请稍后重试")
                 resume = self.active_on_boot
                 apply_target = apply_config if apply_config is not None else config
                 if apply and all(item["mode"] == "vendor" for item in apply_target["channels"].values()):
@@ -414,11 +486,16 @@ class FanPolicyController:
                 self.active_on_boot = resume
                 self.settings_error = None
                 if apply:
+                    system = apply_target["channels"]["system"]
+                    if apply_official and system["mode"] == "vendor" and "vendor_mode" in system:
+                        _require(self.snapshot()["recovery_confirmed"],
+                                 "原厂恢复尚未确认；请先恢复原厂管理，再更改原厂档位")
                     capability = self.capability
                     _require(not any(item["mode"] != "vendor" for item in apply_target["channels"].values())
                              or capability.get("available") is True, "当前设备尚不满足独立调速条件；配置已保存，未接管")
                     self.busy = True
-                    self.worker = threading.Thread(target=self._apply_worker, args=(copy.deepcopy(apply_target),),
+                    self.worker = threading.Thread(target=self._apply_worker,
+                                                   args=(copy.deepcopy(apply_target), apply_official),
                                                    daemon=True, name="r1-fan-policy-apply")
                     try:
                         self.worker.start()
@@ -472,7 +549,9 @@ class FanPolicyController:
         if self.active_on_boot:
             with self.lock:
                 self.busy = True
-                self.worker = threading.Thread(target=self._apply_worker, args=(copy.deepcopy(self.active_config),),
+                # Native modes persist in the vendor's configuration. Boot
+                # recovery must not overwrite a newer official-app selection.
+                self.worker = threading.Thread(target=self._apply_worker, args=(copy.deepcopy(self.active_config), False),
                                                daemon=True, name="r1-fan-policy-restore")
                 self.worker.start()
         self.thread = threading.Thread(target=self._loop, daemon=True, name="r1-fan-policy")

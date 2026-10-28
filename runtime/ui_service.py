@@ -419,7 +419,8 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                     except Exception:
                         self.send_json(400, {"ok": False, "error": "网页配对暂不可用，请检查网页服务状态"}, origin)
                 return
-            if action in ("fan.policy.update", "fan.policy.release", "fan.policy.quick"):
+            policy_actions = ("fan.policy.update", "fan.policy.release", "fan.policy.quick")
+            if action in policy_actions or (action == "fan.official" and fan_policy is not None):
                 if fan_policy is None:
                     self.send_json(400, {"ok": False, "error": "独立温控服务未启用"}, origin)
                 else:
@@ -434,7 +435,7 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                     value = destination.action(action, payload)
                     self.send_json(200 if value.get("ok") else 400, value, origin)
                 return
-            if action in ("fan.set", "fan.restore", "fan.official") and fan_policy is not None:
+            if action in ("fan.set", "fan.restore") and fan_policy is not None:
                 state = fan_policy.snapshot()
                 if state.get("active") or state.get("busy") or state.get("recovery_confirmed") is False:
                     self.send_json(409, {"ok": False, "error": "请先恢复原厂管理，再使用原厂固定档位或其他风扇控制"}, origin)
@@ -565,7 +566,7 @@ def create_fan_policy(controller, insights):
     native = FanNativeAdapter(controller.state_dir, "/run/r1-toolbox/fan-control",
                               guard_path=Path(__file__).resolve().parent / "fan_guard.so",
                               histor=controller.histor, allow_writes=True)
-    return FanPolicyController(controller.state_dir, TemperatureSources(insights), native)
+    return FanPolicyController(controller.state_dir, TemperatureSources(insights), native, histor=controller.histor)
 
 
 def create_light_policy(controller, fan_policy):

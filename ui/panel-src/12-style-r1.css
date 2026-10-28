@@ -6,7 +6,8 @@
 /* 双路温控 / 灯光 / 小屏卡片的共享行布局 */
 .r1-chans { display: grid; gap: 14px; }
 .r1-chan { background: var(--card-sunk); border-radius: 18px; padding: 16px 18px; }
-.r1-chan-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.r1-chan-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.r1-chan-head .pill { max-width: 100%; white-space: normal; }
 .r1-chan-head b { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
 .r1-chan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
 .r1-chan-grid .num { display: flex; align-items: baseline; gap: 3px; font-size: 26px; font-weight: 620; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }

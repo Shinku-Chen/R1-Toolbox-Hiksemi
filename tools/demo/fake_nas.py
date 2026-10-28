@@ -52,8 +52,10 @@ class FakeNas:
         self.brightness = 80
         self.asleep = False
         self.rgb = {'mode': 1, 'color': '#7CAF98', 'brightness': 60}
-        self.official = {'control_available': False, 'cpu_rpm': 1350, 'system_rpm': 1080,
-                         'mode': 'auto', 'reason': '演示模式：原厂转速为模拟读数'}
+        self.official = {'available': True, 'control_available': True,
+                         'cpu_rpm': 1350, 'system_rpm': 1080, 'scope': 'system_fan',
+                         'cpu_policy': 'vendor_auto', 'mode': 'auto',
+                         'reason': '演示模式：原厂档位仅在内存中模拟'}
         self.fan_config = copy.deepcopy(FAN_DEFAULT)
         self.fan_active = False
         self.light_config = copy.deepcopy(LIGHT_DEFAULT)
@@ -210,7 +212,9 @@ class FakeNas:
             return {'config': copy.deepcopy(self.fan_config),
                     'active': self.fan_active,
                     'busy': False,
-                    'pending_changes': False,
+                    'pending_changes': self.fan_config['channels']['system']['mode'] == 'vendor'
+                        and self.fan_config['channels']['system'].get('vendor_mode', self.official['mode']) != self.official['mode'],
+                    'official': copy.deepcopy(self.official),
                     'capability': {'available': True, 'reason': '', 'channels': ['cpu', 'system'],
                                    'rpm_available': False},
                     'channels': channels,
@@ -221,9 +225,11 @@ class FakeNas:
 
     def fan_action(self, name, payload):
         with self.lock:
+            apply_official = name == 'fan.policy.update'
             if name == 'fan.policy.release':
                 for item in self.fan_config['channels'].values():
                     item['mode'] = 'vendor'
+                self.fan_config['channels']['system'].pop('vendor_mode', None)
                 self.fan_active = False
                 return {'ok': True, 'settings_saved': True, 'pending': False,
                         'fan_policy': self.fan_snapshot()}
@@ -234,6 +240,8 @@ class FakeNas:
                 item = config['channels'][payload['channel']]
                 if payload['mode'] == 'auto':
                     item['mode'] = 'vendor'
+                    if payload['channel'] == 'system':
+                        item.pop('vendor_mode', None)
                 elif payload['mode'] == 'manual':
                     item['mode'] = 'temperature'
                 else:
@@ -250,11 +258,18 @@ class FakeNas:
                 item = config['channels'].get(channel)
                 if not isinstance(item, dict) or item.get('mode') not in ('vendor', 'manual', 'temperature'):
                     return {'ok': False, 'settings_saved': False, 'error': '风扇模式无效'}
+                if 'vendor_mode' in item and (channel != 'system' or item['vendor_mode'] not in ('auto', 'low', 'medium', 'high')):
+                    return {'ok': False, 'settings_saved': False, 'error': '系统风扇原厂档位无效'}
                 if item['mode'] == 'temperature' and not item.get('sources'):
                     return {'ok': False, 'settings_saved': False, 'error': '手动模式至少选择一个温度设备'}
             self.fan_config = copy.deepcopy(config)
             if payload.get('apply') is True:
                 self.fan_active = any(item['mode'] != 'vendor' for item in config['channels'].values())
+                system = config['channels']['system']
+                # Match the real editor without calling a device: only an
+                # explicit apply changes the simulated native system mode.
+                if apply_official and system['mode'] == 'vendor' and 'vendor_mode' in system:
+                    self.official['mode'] = system['vendor_mode']
             return {'ok': True, 'settings_saved': True, 'pending': bool(payload.get('apply')),
                     'fan_policy': self.fan_snapshot()}
 

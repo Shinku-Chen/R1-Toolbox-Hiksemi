@@ -137,5 +137,37 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(snapshot['config']['channels']['cpu']['manual_percent'], 75)
 
 
+class DemoNativeFanModesTests(unittest.TestCase):
+    def test_native_system_mode_applies_without_owning_system_and_preserves_cpu(self):
+        nas = demo_module.FakeNas()
+        config = nas.fan_snapshot()['config']
+        config['channels']['cpu'].update(mode='manual', manual_percent=73)
+        config['channels']['system'].update(mode='vendor', vendor_mode='high')
+        saved = nas.fan_action('fan.policy.update', {'config': config, 'apply': False})
+        self.assertEqual(saved['fan_policy']['official']['mode'], 'auto')
+        self.assertTrue(saved['fan_policy']['pending_changes'])
+        applied = nas.fan_action('fan.policy.update', {'config': config, 'apply': True})['fan_policy']
+        self.assertEqual(applied['official']['mode'], 'high')
+        self.assertTrue(applied['channels']['cpu']['active'])
+        self.assertEqual(applied['channels']['cpu']['target_percent'], 73)
+        self.assertFalse(applied['channels']['system']['active'])
+        self.assertFalse(applied['pending_changes'])
+        nas.official['mode'] = 'low'
+        nas.fan_action('fan.policy.quick', {'channel': 'cpu', 'mode': 'medium'})
+        self.assertEqual(nas.official['mode'], 'low')
+        nas.fan_action('fan.policy.release', {'confirmed': True})
+        self.assertEqual(nas.official['mode'], 'low')
+        self.assertNotIn('vendor_mode', nas.fan_config['channels']['system'])
+
+    def test_demo_rejects_native_cpu_modes_and_unknown_system_modes(self):
+        for channel, mode in (('cpu', 'high'), ('system', 'stop')):
+            with self.subTest(channel=channel, mode=mode):
+                nas = demo_module.FakeNas()
+                config = nas.fan_snapshot()['config']
+                config['channels'][channel]['vendor_mode'] = mode
+                self.assertFalse(nas.fan_action('fan.policy.update', {'config': config, 'apply': True})['ok'])
+                self.assertEqual(nas.official['mode'], 'auto')
+
+
 if __name__ == '__main__':
     unittest.main()

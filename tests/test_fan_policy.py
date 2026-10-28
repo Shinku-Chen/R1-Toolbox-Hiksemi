@@ -37,12 +37,14 @@ class Adapter:
         self.available = True
         self.calls = []
         self.failure = False
+        self.channels = set()
 
     def capabilities(self):
         return {"available": self.available, "channels": ["cpu", "system"], "rpm_available": False}
 
     def start(self, channels):
         self.calls.append(("start", set(channels)))
+        self.channels = set(channels)
 
     def write(self, targets):
         if self.failure:
@@ -51,6 +53,7 @@ class Adapter:
 
     def release(self):
         self.calls.append(("release",))
+        self.channels.clear()
 
 
 class RulesTests(unittest.TestCase):
@@ -128,6 +131,20 @@ class RulesTests(unittest.TestCase):
             candidate = copy.deepcopy(value)
             candidate["channels"]["cpu"].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
+                policy.validate_config(candidate)
+
+    def test_optional_native_system_mode_preserves_schema_one_compatibility(self):
+        legacy = config()
+        self.assertEqual(policy.validate_config(legacy), legacy)
+        self.assertNotIn("vendor_mode", policy.validate_config(legacy)["channels"]["system"])
+        for mode in policy.VENDOR_MODES:
+            candidate = copy.deepcopy(legacy)
+            candidate["channels"]["system"]["vendor_mode"] = mode
+            self.assertEqual(policy.validate_config(candidate), candidate)
+        for channel, mode in (("cpu", "auto"), ("system", "stop"), ("system", 5), ("system", None)):
+            candidate = copy.deepcopy(legacy)
+            candidate["channels"][channel]["vendor_mode"] = mode
+            with self.subTest(channel=channel, mode=mode), self.assertRaises(ValueError):
                 policy.validate_config(candidate)
 
 
@@ -334,6 +351,298 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(data["resume_on_boot"])
         finish.set()
         self.controller.worker.join(timeout=3)
+
+
+class NativeModeTests(unittest.TestCase):
+    """Official policy changes use the same serialized ownership transaction."""
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="r1-fan-native-modes-"))
+        self.adapter = Adapter()
+        self.histor = mock.Mock()
+        self.mode = "low"
+        self.histor.snapshot.side_effect = lambda: {
+            "available": True, "control_available": True, "mode": self.mode, "scope": "system_fan"}
+        self.histor.set_mode.side_effect = self.set_mode
+        sources = mock.Mock()
+        sources.snapshot.return_value = [source("cpu", 40)]
+        self.controller = policy.FanPolicyController(self.directory, sources, self.adapter,
+                                                    histor=self.histor, clock=lambda: 100)
+        # These tests exercise ownership/RPC sequencing rather than directory
+        # fsync portability; persistent-file behavior has separate regressions.
+        self.controller._save = mock.Mock()
+        self.addCleanup(self.controller.stop)
+
+    def set_mode(self, mode, confirmed=False):
+        self.assertIs(confirmed, True)
+        self.assertFalse(self.adapter.channels, "official RPC requires every native channel to be released")
+        self.adapter.calls.append(("official", mode))
+        self.mode = mode
+        return self.histor.snapshot()
+
+    def apply(self, value):
+        result = self.controller.action("fan.policy.update", {"config": value, "apply": True, "confirmed": True})
+        if self.controller.worker is not None:
+            self.controller.worker.join(timeout=4)
+            self.assertFalse(self.controller.worker.is_alive())
+        self.assertTrue(result["ok"], result)
+        return self.controller.snapshot()
+
+    def native_config(self, cpu="vendor", mode="high"):
+        value = copy.deepcopy(policy.DEFAULT_CONFIG)
+        value["channels"]["cpu"]["mode"] = cpu
+        value["channels"]["system"]["vendor_mode"] = mode
+        return value
+
+    def test_snapshot_uses_cache_without_rpc_and_missing_adapter_is_explicit(self):
+        state = self.controller.snapshot()
+        self.assertEqual(state["official"]["mode"], "low")
+        self.histor.set_mode.assert_not_called()
+        self.controller.histor = None
+        unavailable = self.controller.snapshot()["official"]
+        self.assertFalse(unavailable["available"])
+        self.assertFalse(unavailable["control_available"])
+
+    def test_native_system_only_releases_before_confirmed_set_and_does_not_resume_on_boot(self):
+        self.adapter.available = False
+        self.controller._refresh_capability()
+        state = self.apply(self.native_config())
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "high")])
+        self.assertFalse(state["active"])
+        self.assertFalse(state["active_on_boot"])
+        self.assertFalse(state["pending_changes"])
+        self.assertIsNone(state["last_error"])
+
+    def test_cpu_only_and_vendor_system_can_coexist_after_system_is_released(self):
+        value = self.native_config("manual")
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "high"),
+                                             ("start", {"cpu"}), ("write", {"cpu": 255})])
+        self.assertTrue(state["channels"]["cpu"]["active"])
+        self.assertFalse(state["channels"]["system"]["active"])
+        self.assertTrue(state["active_on_boot"])
+        self.assertEqual(self.controller.active_config, value)
+
+    def test_official_rpc_waits_until_all_channel_recovery_has_returned_success(self):
+        entered, finish = threading.Event(), threading.Event()
+        self.adapter.channels = {"cpu", "system"}
+        original_release = self.adapter.release
+        def pending_release():
+            entered.set()
+            self.assertTrue(finish.wait(3))
+            original_release()
+        self.adapter.release = pending_release
+        result = self.controller.action("fan.policy.update", {"config": self.native_config("manual"),
+                                        "apply": True, "confirmed": True})
+        self.assertTrue(result["ok"])
+        self.assertTrue(entered.wait(1))
+        self.assertEqual(self.adapter.channels, {"cpu", "system"})
+        self.histor.set_mode.assert_not_called()
+        self.assertEqual(self.adapter.calls, [])
+        finish.set()
+        self.controller.worker.join(timeout=3)
+        self.assertFalse(self.controller.worker.is_alive())
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "high"),
+                                             ("start", {"cpu"}), ("write", {"cpu": 255})])
+
+    def test_manual_system_retains_native_fallback_without_applying_it(self):
+        value = self.native_config(mode="medium")
+        value["channels"]["system"]["mode"] = "manual"
+        self.apply(value)
+        self.histor.set_mode.assert_not_called()
+        self.assertEqual(self.controller.active_config["channels"]["system"]["vendor_mode"], "medium")
+        self.controller.action("fan.policy.release", {"confirmed": True})
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.adapter.calls[-1], ("release",))
+        self.assertNotIn("vendor_mode", self.controller.config["channels"]["system"])
+        self.histor.set_mode.assert_not_called()
+
+    def test_legacy_config_without_native_mode_preserves_actual_vendor_choice(self):
+        self.apply(copy.deepcopy(policy.DEFAULT_CONFIG))
+        self.assertEqual(self.mode, "low")
+        self.histor.set_mode.assert_not_called()
+        self.assertNotIn("vendor_mode", self.controller.active_config["channels"]["system"])
+
+    def test_official_action_uses_active_cpu_rule_instead_of_unsaved_cpu_draft(self):
+        active = self.native_config("manual", "low")
+        self.apply(active)
+        draft = copy.deepcopy(active)
+        draft["channels"]["cpu"]["manual_percent"] = 99
+        self.controller.action("fan.policy.update", {"config": draft, "apply": False})
+        result = self.controller.action("fan.official", {"mode": "medium", "confirmed": True})
+        self.assertTrue(result["ok"], result)
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.controller.config["channels"]["cpu"]["manual_percent"], 99)
+        self.assertEqual(self.controller.active_config["channels"]["cpu"], active["channels"]["cpu"])
+        self.assertEqual(self.controller.snapshot()["official"]["mode"], "medium")
+        self.assertTrue(self.controller.snapshot()["pending_changes"])
+
+    def test_official_action_requires_exact_confirmation_and_known_mode(self):
+        for payload in ({"mode": "high"}, {"mode": "stop", "confirmed": True},
+                        {"mode": "low", "confirmed": 1}, {"mode": "auto", "confirmed": True, "channel": "cpu"}):
+            self.assertFalse(self.controller.action("fan.official", payload)["ok"])
+        self.assertEqual(self.adapter.calls, [])
+        self.histor.set_mode.assert_not_called()
+
+    def test_unconfirmed_recovery_blocks_official_until_release_is_confirmed(self):
+        self.controller.channels["system"]["reason"] = "原厂恢复未确认"
+        result = self.controller.action("fan.official", {"mode": "high", "confirmed": True})
+        self.assertFalse(result["ok"])
+        self.assertIn("原厂恢复尚未确认", result["error"])
+        self.assertEqual(self.adapter.calls, [])
+        self.histor.set_mode.assert_not_called()
+        result = self.controller.action("fan.policy.release", {"confirmed": True})
+        self.assertTrue(result["ok"])
+        self.controller.worker.join(timeout=3)
+        self.assertTrue(self.controller.snapshot()["recovery_confirmed"])
+        result = self.controller.action("fan.official", {"mode": "high", "confirmed": True})
+        self.assertTrue(result["ok"])
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.adapter.calls, [("release",), ("release",), ("official", "high")])
+
+    def test_explicit_native_update_cannot_bypass_unconfirmed_recovery(self):
+        self.controller.channels["cpu"]["reason"] = "控制回执过期，恢复状态待确认"
+        result = self.controller.action("fan.policy.update", {"config": self.native_config(),
+                                        "apply": True, "confirmed": True})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["settings_saved"])
+        self.assertEqual(self.adapter.calls, [])
+        self.histor.set_mode.assert_not_called()
+
+    def test_single_channel_target_is_constructed_under_state_lock(self):
+        entered = threading.Event()
+        results = []
+        def official_action():
+            entered.set()
+            results.append(self.controller.action("fan.official", {"mode": "high", "confirmed": True}))
+        with self.controller.lock:
+            action = threading.Thread(target=official_action)
+            action.start()
+            self.assertTrue(entered.wait(1))
+            latest = copy.deepcopy(policy.DEFAULT_CONFIG["channels"]["cpu"])
+            latest.update(mode="manual", manual_percent=88)
+            self.controller.active_config["channels"]["cpu"] = latest
+        action.join(timeout=2)
+        self.assertFalse(action.is_alive())
+        self.assertTrue(results[0]["ok"], results)
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.controller.active_config["channels"]["cpu"], latest)
+
+    def test_external_vendor_change_sets_pending_without_background_overwrite(self):
+        self.apply(self.native_config("manual", "low"))
+        self.mode = "high"
+        self.histor.set_mode.reset_mock()
+        self.controller.tick()
+        self.assertTrue(self.controller.snapshot()["pending_changes"])
+        self.histor.set_mode.assert_not_called()
+        self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": "low"})
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.mode, "high")
+        self.histor.set_mode.assert_not_called()
+
+    def test_release_and_legacy_system_auto_preserve_newer_external_native_selection(self):
+        for action, payload in (("fan.policy.release", {"confirmed": True}),
+                                ("fan.policy.quick", {"channel": "system", "mode": "auto"})):
+            with self.subTest(action=action):
+                self.apply(self.native_config("manual", "low"))
+                self.mode = "high"
+                self.histor.set_mode.reset_mock()
+                self.controller.action(action, payload)
+                self.controller.worker.join(timeout=3)
+                self.assertEqual(self.mode, "high")
+                self.histor.set_mode.assert_not_called()
+                self.assertNotIn("vendor_mode", self.controller.config["channels"]["system"])
+
+    def test_startup_restores_only_independent_cpu_and_preserves_external_vendor_mode(self):
+        self.controller.config = self.controller.active_config = self.native_config("manual", "low")
+        self.controller.active_on_boot = True
+        self.mode = "high"
+        self.controller.start()
+        self.controller.worker.join(timeout=3)
+        self.assertTrue(self.controller.snapshot()["channels"]["cpu"]["active"])
+        self.assertTrue(self.controller.snapshot()["pending_changes"])
+        self.histor.set_mode.assert_not_called()
+
+    def test_startup_of_vendor_only_mode_does_not_launch_native_or_send_rpc(self):
+        self.controller.config = self.controller.active_config = self.native_config()
+        self.controller.start()
+        self.assertEqual(self.adapter.calls, [])
+        self.assertIsNone(self.controller.worker)
+        self.histor.set_mode.assert_not_called()
+
+    def test_official_failure_releases_cpu_and_never_marks_target_applied(self):
+        self.histor.set_mode.side_effect = ValueError("fixture rejected ACK")
+        state = self.apply(self.native_config("manual"))
+        self.assertEqual(self.adapter.calls[-1], ("release",))
+        self.assertFalse(state["active"])
+        self.assertFalse(state["active_on_boot"])
+        self.assertTrue(state["pending_changes"])
+        self.assertIn("fixture rejected ACK", state["last_error"])
+        self.assertNotEqual(self.controller.active_config, self.controller.config)
+        self.assertFalse(any(call[0] == "start" for call in self.adapter.calls))
+
+    def test_official_readback_mismatch_cannot_claim_success(self):
+        self.histor.set_mode.side_effect = lambda mode, confirmed: {"mode": "low"}
+        state = self.apply(self.native_config("manual", "high"))
+        self.assertFalse(state["active"])
+        self.assertTrue(state["pending_changes"])
+        self.assertIn("设置结果未能确认", state["last_error"])
+
+    def test_failed_official_recovery_remains_unconfirmed(self):
+        self.histor.set_mode.side_effect = ValueError("fixture rejected ACK")
+        with mock.patch.object(self.adapter, "release", side_effect=RuntimeError("fixture recovery failure")):
+            state = self.apply(self.native_config("manual"))
+        self.assertFalse(state["recovery_confirmed"])
+        self.assertFalse(state["active"])
+        self.histor.set_mode.assert_not_called()
+        self.assertFalse(any(call[0] == "start" for call in self.adapter.calls))
+
+    def test_missing_official_adapter_does_not_report_native_selection_as_applied(self):
+        self.controller.histor = None
+        state = self.apply(self.native_config())
+        self.assertTrue(state["pending_changes"])
+        self.assertIn("原厂风扇接口不可用", state["last_error"])
+
+    def test_slow_rpc_runs_without_native_guard_and_restarts_selected_cpu_rule_afterwards(self):
+        entered, finish = threading.Event(), threading.Event()
+        active = self.native_config("manual", "low")
+        active["channels"]["cpu"]["manual_percent"] = 83
+        self.apply(active)
+        self.adapter.calls.clear()
+        def blocked_set(mode, confirmed=False):
+            self.assertFalse(self.adapter.channels)
+            entered.set()
+            self.assertTrue(finish.wait(4))
+            self.assertFalse(self.adapter.channels)
+            return self.set_mode(mode, confirmed)
+        self.histor.set_mode.side_effect = blocked_set
+        result = self.controller.action("fan.official", {"mode": "high", "confirmed": True})
+        self.assertTrue(result["ok"])
+        self.assertTrue(entered.wait(1))
+        self.assertTrue(self.controller.snapshot()["busy"])
+        self.assertFalse(self.adapter.channels)
+        # A normal sample cannot write or restart ownership while a slow
+        # official RPC is in flight under the shared control lock.
+        self.controller.tick()
+        self.assertEqual(self.adapter.calls, [("release",)])
+        finish.set()
+        self.controller.worker.join(timeout=3)
+        self.assertFalse(self.controller.worker.is_alive())
+        self.assertIsNone(self.controller.snapshot()["last_error"])
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "high"),
+                                             ("start", {"cpu"}), ("write", {"cpu": 255})])
+        self.assertEqual(self.controller.active_config["channels"]["cpu"], active["channels"]["cpu"])
+        self.controller.tick()
+        self.assertEqual(self.adapter.calls[-1], ("write", {"cpu": round(83 * 255 / 100)}))
+
+    def test_cpu_restart_failure_after_official_ack_does_not_report_completed_handoff(self):
+        self.adapter.start = mock.Mock(side_effect=RuntimeError("fixture CPU handoff rejected"))
+        state = self.apply(self.native_config("manual"))
+        self.assertEqual(self.mode, "high")
+        self.assertFalse(state["active"])
+        self.assertFalse(state["active_on_boot"])
+        self.assertIn("fixture CPU handoff rejected", state["last_error"])
+        self.assertEqual(self.adapter.calls[-1], ("release",))
 
 
 if __name__ == "__main__":

@@ -2,12 +2,32 @@
 
 import http.client
 import json
+import sys
 import threading
 import types
 import unittest
 from unittest import mock
 
 from test_ui_service import service
+
+
+class FanPolicyFactoryTests(unittest.TestCase):
+    def test_production_factory_shares_official_adapter_with_native_and_policy(self):
+        native, policy, sources = mock.Mock(), mock.Mock(), mock.Mock()
+        modules = {
+            "fan_native": types.SimpleNamespace(FanNativeAdapter=native),
+            "fan_policy": types.SimpleNamespace(FanPolicyController=policy),
+            "temperature_sources": types.SimpleNamespace(TemperatureSources=sources),
+        }
+        controller = types.SimpleNamespace(state_dir="fixture-state", histor=mock.sentinel.histor)
+        with mock.patch.dict(sys.modules, modules):
+            result = service.create_fan_policy(controller, mock.sentinel.insights)
+        self.assertIs(result, policy.return_value)
+        self.assertIs(native.call_args.kwargs["histor"], controller.histor)
+        self.assertTrue(native.call_args.kwargs["allow_writes"])
+        sources.assert_called_once_with(mock.sentinel.insights)
+        policy.assert_called_once_with("fixture-state", sources.return_value, native.return_value,
+                                       histor=controller.histor)
 
 
 class ControlAPITests(unittest.TestCase):
@@ -95,10 +115,25 @@ class ControlAPITests(unittest.TestCase):
         self.light.action.assert_called_once_with("light.policy.quick", light)
         for state in ({"active": True}, {"busy": True}, {"recovery_confirmed": False}):
             self.policy.snapshot.return_value = state
-            for name, values in (("fan.official", {"mode": "low", "confirmed": True}),
-                                  ("fan.set", {"channel": "anything"}), ("fan.restore", {})):
+            for name, values in (("fan.set", {"channel": "anything"}), ("fan.restore", {})):
                 self.assertEqual(self.action({"action": name, **values})[0], 409)
         self.controller.action.assert_not_called()
+
+    def test_official_modes_use_policy_coordination_even_during_cpu_ownership(self):
+        self.policy.snapshot.return_value = {"active": True, "busy": False, "recovery_confirmed": True}
+        payload = {"mode": "low", "confirmed": True}
+        code, _, data = self.action({"action": "fan.official", **payload})
+        self.assertEqual(code, 200)
+        self.assertTrue(data["pending"])
+        self.policy.action.assert_called_once_with("fan.official", payload)
+        self.controller.action.assert_not_called()
+        self.policy.action.return_value = {"ok": False, "error": "风扇正在切换"}
+        self.assertEqual(self.action({"action": "fan.official", **payload})[0], 400)
+
+    def test_wrong_token_cannot_reach_coordinated_official_mode_action(self):
+        self.assertEqual(self.action({"action": "fan.official", "mode": "high", "confirmed": True},
+                                     {"X-R1-Token": "wrong"})[0], 403)
+        self.policy.action.assert_not_called()
 
     def test_missing_or_wrong_token_cannot_control_the_host(self):
         for token in ("", "wrong-token", "0" * 64):

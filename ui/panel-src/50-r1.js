@@ -14,7 +14,8 @@
    service in runtime/web_config.py.  No hardware is touched by the browser.
    ===================================================================== */
 
-const R1_MODE_TXT = { vendor: '原厂管理', manual: '固定输出', temperature: '自定义温控' };
+const R1_MODE_TXT = { manual: '手动 · 固定输出', temperature: '手动 · 温控曲线' };
+const R1_NATIVE_FAN_TXT = { auto: '自动', low: '低档', medium: '中档', high: '高档' };
 const R1_LEVEL_TXT = { quiet: '静音', normal: '普通', full: '全速' };
 const R1_EFFECT_TXT = { 0: '关闭', 1: '常亮', 2: '彩虹', 3: '呼吸' };
 
@@ -126,6 +127,37 @@ const R1 = {
   chanName: name => (name === 'cpu' ? 'CPU 风扇' : '系统风扇'),
 };
 
+/** 原厂快照只读缓存；兼容旧版本放在 control 下的同一份状态。 */
+function fanOfficial() {
+  return R1.fan().official || ((R1.control().fans || {}).official) || {};
+}
+
+function fanNativeLabel(name) {
+  if (name === 'cpu') return '原厂自动';
+  const label = R1_NATIVE_FAN_TXT[fanOfficial().mode];
+  return label ? '原厂 · ' + label : '原厂 · 档位未读取';
+}
+
+function fanRunningMode(name) {
+  const live = (R1.fan().channels || {})[name] || {};
+  if (!live.mode) return '运行状态未读取';
+  if (!live.active && R1.fan().recovery_confirmed === false) return '原厂恢复待确认';
+  return live.active ? (R1_MODE_TXT[live.mode] || '手动') : fanNativeLabel(name);
+}
+
+/** 运行状态与保存的配置分别显示，不能把尚未成功的手动请求当作接管。 */
+function fanLiveState(name) {
+  const fan = R1.fan(), live = (fan.channels || {})[name] || {};
+  const configured = ((fan.config || {}).channels || {})[name] || {};
+  if (fan.busy) return '切换中';
+  if (fan.recovery_confirmed === false) return '恢复待确认';
+  if (!live.mode) return '运行状态未读取';
+  if (live.active) return '手动接管中';
+  if (configured.mode && configured.mode !== 'vendor') return '手动未生效 · ' + fanNativeLabel(name);
+  if (name === 'system' && configured.vendor_mode && configured.vendor_mode !== fanOfficial().mode) return '档位未生效 · ' + fanNativeLabel(name);
+  return fanNativeLabel(name);
+}
+
 /* 状态轮询：10 秒；概览、温度与设置页可见时更新 */
 Poll.add('r1', async () => { await R1.load(); renderNow(); syncSettings(); }, 10000,
   () => ['overview', 'thermal', 'settings'].includes(S.page));
@@ -150,7 +182,7 @@ defineModule({
     const f = R1.fan(), channels = f.channels || {};
     const stable = Object.values(channels).map(c => [c.mode, c.active, c.target_percent, c.reference_c,
       c.level, c.reason, c.source_label, c.rpm]);
-    const sig = JSON.stringify([stable, f.capability, f.last_error, f.active, f.recovery_confirmed]);
+    const sig = JSON.stringify([stable, f.config, fanOfficial(), f.busy, f.capability, f.last_error, f.active, f.recovery_confirmed]);
     if (m.sig !== sig) {
       m.sig = sig;
       m.x.chans.innerHTML = ['cpu', 'system'].map(name => `<div class="r1-chan" data-ch="${name}">
@@ -172,25 +204,23 @@ defineModule({
       const lv = c.level && c.level !== 'off' ? (R1_LEVEL_TXT[c.level] || '') : '';
       setText(m.x['t-' + name], ok(c.reference_c) ? F.int(c.reference_c) : '--');
       setText(m.x['p-' + name], ok(c.target_percent) ? F.int(c.target_percent) : '--');
-      const configured = (((R1.fan().config || {}).channels || {})[name] || {});
-      const fixedLabel = c.mode === 'manual' ? (Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === configured.manual_percent) ? { low: '低档', medium: '中档', high: '高档' }[Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === configured.manual_percent)] : '固定输出') : null;
-      setText(m.x['m-' + name], fixedLabel || R1_MODE_TXT[c.mode] || '未读取');
-      setText(m.x['s-' + name], c.source_label ? '来源 · ' + c.source_label : (c.active ? '等待温度来源' : '由原厂固件管理'));
+      setText(m.x['m-' + name], fanRunningMode(name));
+      setText(m.x['s-' + name], c.source_label ? '来源 · ' + c.source_label : (c.active ? '等待温度来源' : f.recovery_confirmed === false ? '原厂管理恢复待确认' : '由原厂固件管理'));
       setText(m.x['l-' + name], [lv, c.reason].filter(Boolean).join(' · '));
       setW(m.x['b-' + name], ok(c.target_percent) ? c.target_percent : 0);
       if (m.x['st-' + name]) m.x['st-' + name].className = 'pill' + (c.active ? ' ok' : '');
-      if (m.x['stt-' + name]) setText(m.x['stt-' + name], c.active ? '接管中' : '原厂管理');
+      if (m.x['stt-' + name]) setText(m.x['stt-' + name], fanLiveState(name));
     });
     const cap = f.capability || {};
     setHTML(m.x.note, f.last_error
       ? `<span class="st-crit">${ic('alert', 'i-sm')}${esc(f.last_error)}</span>`
       : cap.available === true
         ? '百分比是请求输出，不是实测 RPM；温度取所选来源的最高值，保护规则优先于用户阈值。'
-        : `未接管：${esc(cap.reason || '设备尚未满足独立调速条件')}。规则仍可保存为待用配置。`);
+        : `手动接管暂不可用：${esc(cap.reason || '设备尚未满足独立调速条件')}。系统原厂档位可用性单独检查。`);
     const active = Object.values(channels).some(c => c.active);
-    setHTML(m.r.dek, active
-      ? `两路独立执行中${f.busy ? ' · 正在切换' : ''}；<b>保存</b>会立即应用并接管所选通道。`
-      : '当前由原厂固件管理；配置温控规则后可选择接管。');
+    setHTML(m.r.dek, f.recovery_confirmed === false ? '原厂管理恢复尚未确认，请检查风扇运行状态。' : active
+      ? `手动通道接管中${f.busy ? ' · 正在切换' : ''}；系统原厂档位与手动控制分别生效。`
+      : 'CPU 由原厂自动管理；系统风扇可切换原厂档位，手动模式独立接管。');
   },
 });
 
@@ -385,30 +415,13 @@ function r1Color(value, onchange) {
   return el;
 }
 
-const FAN_UI_MODES = [['auto', '自动'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['manual', '手动']];
-const FAN_FIXED = { low: 50, medium: 75, high: 100 };
+const FAN_SYSTEM_MODES = [['auto', '自动'], ['low', '低档'], ['medium', '中档'], ['high', '高档'], ['manual', '手动']];
+const FAN_CPU_MODES = [['auto', '自动'], ['manual', '手动']];
 
-/** 把策略里的厂商/固定/温控模式映射成下拉里的五档。 */
-function fanUiMode(item) {
-  if (!item || item.mode === 'vendor' || !item.mode) return 'auto';
-  if (item.mode === 'manual') {
-    const hit = Object.keys(FAN_FIXED).find(key => FAN_FIXED[key] === item.manual_percent);
-    return hit || ('fixed:' + item.manual_percent);
-  }
-  return 'manual';
-}
-
-function setFanUiMode(item, mode) {
-  if (mode === 'auto') { item.mode = 'vendor'; return; }
-  if (String(mode).startsWith('fixed:')) {
-    const value = Number(String(mode).slice(6));
-    item.mode = 'manual';
-    if (Number.isFinite(value)) item.manual_percent = clamp(Math.round(value), 50, 100);
-    return;
-  }
-  if (FAN_FIXED[mode]) { item.mode = 'manual'; item.manual_percent = FAN_FIXED[mode]; return; }
-  item.mode = 'temperature';
-  if (!Array.isArray(item.sources)) item.sources = [];
+/** 旧固定输出也属于手动；系统原厂档位未知时保持未选择，不能猜成自动。 */
+function fanUiMode(item, name) {
+  if (item && item.mode && item.mode !== 'vendor') return 'manual';
+  return name === 'cpu' ? 'auto' : (R1_NATIVE_FAN_TXT[item && item.vendor_mode] ? item.vendor_mode : '');
 }
 
 /** 三段温控曲线的触摸编辑器：温度节点 + 输出，并实时画出阶梯线。 */
@@ -463,8 +476,16 @@ function fanCurveEditor(item, touch) {
 }
 
 function r1FanSettings(card) {
-  const shell = () => JSON.parse(JSON.stringify(R1.fan().config || {}));
+  const shell = () => {
+    const config = JSON.parse(JSON.stringify(R1.fan().config || {}));
+    const system = (config.channels || {}).system;
+    // 旧配置没有原厂档位时，用实际快照补足；未知时省略字段以保留原厂现状。
+    if (system && system.mode === 'vendor' && !system.vendor_mode && R1_NATIVE_FAN_TXT[fanOfficial().mode]) system.vendor_mode = fanOfficial().mode;
+    return config;
+  };
   let draft = shell(), dirty = false;
+  const manualModes = {};
+  let renderedCapability = '';
   card.innerHTML = `<div class="r1-edit" data-ref="wrap"></div>
     <div class="set-actions"><button class="btn primary" type="button" data-ref="save">保存</button>
     <button class="btn ghost" type="button" data-ref="release">两路恢复原厂管理</button></div>
@@ -474,41 +495,71 @@ function r1FanSettings(card) {
   const render = () => {
     const f = R1.fan(), config = draft.channels || {};
     const sources = f.sources || [], cap = f.capability || {};
+    renderedCapability = JSON.stringify([cap, fanOfficial()]);
     const wrap = mount(`<div></div>`);
     ['cpu', 'system'].forEach(name => {
       const item = config[name] || {};
-      const ch = mount(`<div class="card set-card r1-editor">
+      const ch = mount(`<div class="card set-card r1-editor" data-channel="${name}">
         <div class="r1-chan-head"><b>${R1.chanName(name)}</b><span class="pill" data-ref="state"></span></div>
         <div class="r1-form" data-ref="form"></div></div>`);
       const form = ch._r.form;
-      const modeOptions = FAN_UI_MODES.slice();
-      if (item.mode === 'manual' && !Object.values(FAN_FIXED).includes(item.manual_percent)) {
-        modeOptions.splice(4, 0, ['fixed:' + item.manual_percent, '固定 ' + item.manual_percent + '%']);
+      if (item.mode !== 'vendor') manualModes[name] = item.mode;
+      const modeOptions = (name === 'cpu' ? FAN_CPU_MODES : FAN_SYSTEM_MODES).slice();
+      const mode = fanUiMode(item, name);
+      if (!mode) modeOptions.unshift(['', '原厂档位未读取']);
+      const selector = r1Select(modeOptions, mode, value => {
+        if (value === 'manual') {
+          item.mode = manualModes[name] || 'temperature';
+          delete item.vendor_mode;
+          if (!Array.isArray(item.sources)) item.sources = [];
+        } else {
+          item.mode = 'vendor';
+          if (name === 'system') item.vendor_mode = value;
+        }
+        touch(); render();
+      }, name + '转速模式');
+      for (const option of selector.options) {
+        option.disabled = !option.value || (name === 'system' && option.value !== 'manual' && fanOfficial().control_available !== true);
       }
-      form.append(r1Field('转速模式', r1Select(modeOptions, fanUiMode(item), value => {
-        setFanUiMode(item, value); touch(); render();
-      }, name + '转速模式'), '自动：交给原厂固件。低/中/高档：固定输出 50/75/100%。手动：按所选设备温度的曲线调速。'));
+      form.append(r1Field('转速模式', selector, name === 'cpu'
+        ? '自动：原厂温控。手动：选择固定输出或温控曲线并独立接管。'
+        : '自动／低／中／高：原厂系统档位。手动：选择固定输出或温控曲线并独立接管。'));
+      if (item.mode !== 'vendor') {
+        form.append(r1Field('手动控制', r1Select([['manual', '固定输出'], ['temperature', '温控曲线']], item.mode, value => {
+          item.mode = value; manualModes[name] = value; touch(); render();
+        }, name + '手动控制'), '仅接管该通道，保护规则优先于用户设置。'));
+      }
       if (item.mode === 'temperature') {
         form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, item.sources, value => { item.sources = value; touch(); }), '点开下拉多选；只使用新鲜读数，取所选设备的最高温度。'));
         form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '升温到节点后下一轮升档；降温 3°C 才降档；全速固定 100%，不会停转。'));
       }
       if (item.mode === 'manual') {
-        form.append(r1Field('固定输出', mount(`<span class="r1-fixed">${item.manual_percent}%</span>`), '低/中/高档对应 50 / 75 / 100%，不会停转。'));
+        const output = r1Number(item.manual_percent, 50, 100, '%', value => { item.manual_percent = value; touch(); });
+        output.querySelector('input').setAttribute('aria-label', name + '固定输出');
+        form.append(r1Field('固定输出', output, '可请求 50–100% 输出；不是实测转速，不会停转。'));
       }
       if (item.mode === 'vendor') {
-        form.append(r1Field('当前策略', mount(`<span class="sub">由原厂固件管理，保存后会释放或接管该路。</span>`), ''));
+        form.append(r1Field('当前运行', mount(`<span class="sub r1-native-current">${esc(fanRunningMode(name))}</span>`), name === 'system'
+          ? (fanOfficial().control_available === true ? '保存后切换所选原厂档位，并释放该通道的手动接管。' : esc('原厂档位暂不可切换：' + (fanOfficial().reason || '尚未确认原厂控制能力')))
+          : '保存后释放 CPU 手动接管，恢复原厂自动温控。'));
       }
       const live = (R1.fan().channels || {})[name] || {};
-      setText(ch._r.state, live.active ? '接管中' : '原厂管理');
+      setText(ch._r.state, fanLiveState(name));
       ch._r.state.className = 'pill' + (live.active ? ' ok' : '');
       wrap.append(ch);
     });
-    wrap.append(mount(`<p class="sub">${cap.available === true ? '硬件预检通过，保存后会立即应用。' : esc('暂不可应用：' + (cap.reason || '设备尚未满足独立调速条件'))}。</p>`));
+    wrap.append(mount(`<p class="sub">${cap.available === true ? '手动接管预检通过。' : esc('手动接管暂不可用：' + (cap.reason || '设备尚未满足独立调速条件')) + '。'}${fanOfficial().control_available === true ? '系统原厂档位可切换。' : '系统原厂档位暂不可切换。'}保存后以当前运行状态确认为准。</p>`));
     x.wrap.replaceChildren(wrap);
   };
   x.save.onclick = async () => {
-    if (!(await R1.ask('保存并应用风扇温控？', '保存后会立即接管所选通道。未选的通道与原厂休眠请求会保留；退出或故障时恢复原厂管理。'))) return;
-    if (await R1.save('/api/r1/fan', { config: draft, apply: true, confirmed: true }, '风扇温控')) { dirty = false; draft = shell(); render(); }
+    const summary = ['cpu', 'system'].map(name => {
+      const item = (draft.channels || {})[name] || {};
+      const target = item.mode !== 'vendor' ? '手动接管（' + (item.mode === 'manual' ? '固定输出 ' + item.manual_percent + '%' : '温控曲线') + '）'
+        : name === 'cpu' ? '原厂自动' : R1_NATIVE_FAN_TXT[item.vendor_mode] ? '原厂' + R1_NATIVE_FAN_TXT[item.vendor_mode] : '保留当前原厂档位';
+      return R1.chanName(name) + '：' + target;
+    }).join('；');
+    if (!(await R1.ask('保存并应用风扇设置？', esc(summary) + '。切换期间可能短暂恢复原厂温控，完成后应用手动规则；手动通道在退出或故障时恢复原厂管理。'))) return;
+    if (await R1.save('/api/r1/fan', { config: draft, apply: true, confirmed: true }, '风扇设置')) { dirty = false; draft = shell(); render(); }
   };
   x.release.onclick = async () => {
     if (!(await R1.ask('两路都恢复原厂管理？', '将释放接管并请求原厂执行者恢复温控。恢复结果以运行状态确认为准。', true))) return;
@@ -518,7 +569,19 @@ function r1FanSettings(card) {
     const f = R1.fan();
     setHTML(x.status, f.last_error ? `<span class="st-crit">${esc(f.last_error)}</span>`
       : `保存：${f.pending_changes ? '有未应用的更改' : '与当前运行一致'} · 恢复确认：${f.recovery_confirmed === false ? '待确认' : '正常'}`);
-    if (!dirty) { const fresh = shell(); if (JSON.stringify(fresh) !== JSON.stringify(draft)) { draft = fresh; render(); } }
+    if (!dirty) { const fresh = shell(); if (JSON.stringify(fresh) !== JSON.stringify(draft) || renderedCapability !== JSON.stringify([f.capability || {}, fanOfficial()])) { draft = fresh; render(); } }
+    x.save.disabled = !!f.busy;
+    x.release.disabled = !!f.busy;
+    for (const name of ['cpu', 'system']) {
+      const state = x.wrap.querySelector(`[data-channel="${name}"] [data-ref="state"]`);
+      if (state) { setText(state, fanLiveState(name)); state.className = 'pill' + (((f.channels || {})[name] || {}).active ? ' ok' : ''); }
+      const current = x.wrap.querySelector(`[data-channel="${name}"] .r1-native-current`);
+      if (current) setText(current, fanRunningMode(name));
+      if (name === 'system') {
+        const selector = x.wrap.querySelector('[data-channel="system"] select');
+        if (selector) for (const option of selector.options) option.disabled = !option.value || (option.value !== 'manual' && fanOfficial().control_available !== true);
+      }
+    }
   };
   render();
 }
@@ -770,7 +833,7 @@ function r1About(card) {
 
 SET_SCHEMA.length = 0;
 SET_SCHEMA.push(
-  { id: 'r1-fan', title: '双路风扇', icon: 'fan', desc: 'CPU 与系统风扇分别选择原厂管理、自定义温控或固定输出。保存会立即应用并等待运行状态确认。', custom: r1FanSettings },
+  { id: 'r1-fan', title: '双路风扇', icon: 'fan', desc: 'CPU 选择自动或手动；系统风扇可切换四种原厂档位，或手动独立接管。保存后等待当前运行状态确认。', custom: r1FanSettings },
   { id: 'r1-light', title: '机身灯光', icon: 'palette', desc: '手动灯效或按温度连续混色，可设置夜间亮度上限。默认只读探测；保存并确认后接管。', custom: r1LightSettings },
   { id: 'r1-screen', title: '小屏与显示', icon: 'layout', desc: '亮度、息屏与夜间调暗；屏幕能力未验证时不提供操作。', custom: r1ScreenSettings },
   { id: 'r1-monitor', title: '历史与告警', icon: 'pulse', desc: '历史采样、保留天数、流量统计范围与本地告警阈值。', custom: r1MonitorSettings },
