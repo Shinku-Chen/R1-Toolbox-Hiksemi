@@ -376,6 +376,15 @@ class MappingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.panel.smart('../etc/passwd')
 
+    def test_disk_io_reads_nested_monitoring_sample(self):
+        self.panel.monitoring.snapshot = lambda: {
+            'current': {'disk_io': [{'name': 'sdc', 'read_bytes_per_sec': 2048.0, 'write_bytes_per_sec': 512.0}]},
+        }
+        row = self.panel.overview()['diskio'][0]
+        self.assertEqual(row['name'], 'sdc')
+        self.assertEqual(row['read_rate'], 2048.0)
+        self.assertEqual(row['write_rate'], 512.0)
+
     def test_smart_detail_returns_cached_full_attributes(self):
         self.panel.insights.smart_cached = lambda name: {
             'smart_data': {

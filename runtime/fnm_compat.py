@@ -776,7 +776,13 @@ class FnmonitorPanel:
 
     def _disk_io(self):
         rows = []
-        for row in _list(self._monitoring().get('disk_io'), 128):
+        monitoring = self._monitoring()
+        # MonitoringService.snapshot() nests the live sample under ``current``;
+        # older/embedding callers may still provide the flat compatibility shape.
+        source = monitoring.get('disk_io')
+        if not isinstance(source, list):
+            source = _dict(monitoring.get('current')).get('disk_io')
+        for row in _list(source, 128):
             if not isinstance(row, dict) or not isinstance(row.get('name'), str):
                 continue
             rows.append({'name': row['name'],
