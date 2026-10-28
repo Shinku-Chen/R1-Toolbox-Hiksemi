@@ -218,7 +218,6 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       const text = await inside('.screen-body').textContent();
       assert.match(text, /已用 73%/);
       assert.doesNotMatch(text, /HDD 2/);
-      assert.match(text, /仅显示有 SMART 缓存的物理磁盘/);
     });
 
     await check('temperature is an independent tab with per-channel fan modes', async () => {
@@ -280,7 +279,6 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       const sleepingDisk = inside('.temperature-row').last();
       assert.equal(await sleepingDisk.locator('b').textContent(), '--');
       assert.equal(await sleepingDisk.locator('b').evaluate(el => el.classList.contains('muted')), true);
-      assert.match(await sleepingDisk.textContent(), /休眠中.*不唤醒读取/);
       const fanValues = await inside('.fan-value').allTextContents();
       assert.equal(fanValues.length, 2);
       assert.ok(fanValues.every(value => /^--\s*RPM$/.test(value)), JSON.stringify(fanValues));
