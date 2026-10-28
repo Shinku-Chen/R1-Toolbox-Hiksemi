@@ -117,7 +117,7 @@ class Insights:
                     'network':[{'name':'eth0','speed_mbps':2500,'ipv6_addresses':[{'address':'2001:db8:1234:5678:90ab:cdef:1234:5678','prefix_length':64,'scope':'global'}]}],
                     'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
                   'interfaces':[{'name':'eth0','ipv4':['192.168.1.10'],'mac':'00:11:22:33:44:55','operstate':'up','rx_bytes':400000000,'tx_bytes':100000000,'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000}],
-                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'smart_available':True,'health':{'passed':True}},{'id':'sdb','device':'/dev/sdb','model':'Fixture No SMART','size_bytes':2e12,'temp_c':None,'standby':False,'smart_available':False,'health':{'passed':None,'reason':'SMART 未读取'}}]},
+                  'disks':{'available':True,'items':[{'id':'sda','device':'/dev/sda','model':'Fixture NAS Drive','size_bytes':4e12,'temp_c':39,'standby':False,'smart_available':True,'health':{'passed':True},'volume':'FixtureVolume','volume_label':None,'mounts':['/drives/FixtureVolume']},{'id':'sdb','device':'/dev/sdb','model':'Fixture No SMART','size_bytes':2e12,'temp_c':None,'standby':False,'smart_available':False,'health':{'passed':None,'reason':'SMART 未读取'}}]},
                   'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False,'cpu_percent':3.2,'memory_bytes':134217728,'memory_limit_bytes':1073741824,'ports':'0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp'},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
                   'vms':{'available':False,'reason':'fixture: no VM','items':[]},'ports':[{'protocol':'tcp','address':'127.0.0.1','port':18731}],
                   'processes':[{'pid':101,'name':'fixture-monitor','cpu_percent':1.2,'memory_bytes':40000000}],
@@ -324,6 +324,7 @@ finally:
     await page.locator('#pageSeg button[data-page="storage"]').click();
     await page.waitForSelector('#layout-storage section[data-mod="storage"] .bay', { timeout: 8000 });
     check('存储页列出无 SMART 的物理盘', await page.locator('#layout-storage .bay').count() === 2);
+    check('存储页显示卷名而不是未挂载', /FixtureVolume/.test(await page.locator('#layout-storage').textContent()));
     await page.locator('#layout-storage section[data-mod="storage"] .bay').first().click();
     await page.waitForTimeout(200);
     await page.locator('#sheetClose').click();

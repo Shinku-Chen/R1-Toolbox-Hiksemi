@@ -162,8 +162,8 @@ defineModule({
     if (!dd.length) { m.x.bays.innerHTML = `<div class="bays-empty">${ic('hdd')}<span>未检测到物理硬盘（需要 lsblk 支持）</span></div>`; return; }
     dd.forEach(d => {
       const k = diskKind(d);
-      const v = volOf(d);
-      const volTxt = v ? `存储空间 vol${v}` : '未挂载';
+      const volume = volumeName(d);
+      const volTxt = d.volume_label ? `卷 ${d.volume_label}` : volume ? `存储空间 ${volume}` : '未挂载';
       const el = mount(`<button class="bay" type="button" data-sheet="disk/${esc(encodeURIComponent(d.name))}" data-type="${k === 'nvme' ? 'nvme' : 'hdd'}" aria-label="硬盘 ${esc(d.name)}，${esc(vendorModel(d))}，${esc(volTxt)}，查看详情">
           <span class="bay-top"><span title="${esc(volTxt)}">${volLabel(d)}</span><span class="bay-warn">${ic('alert')}</span><i class="bay-led" data-ref="led"></i></span>
           <span class="bay-body">
@@ -191,7 +191,7 @@ defineModule({
     setHTML(x.poolLeg, has ? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>${o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : ''}` : '<span>未读取到存储池用量（fnOS 存储池挂载在 /vol*）</span>');
     const sy = o.system || {}, hw = (o.hardware || {}).board || {};
     setText(x.chName, sy.hostname || ''); setText(x.chModel, String(hw.product_name || hw.board_name || 'NAS').slice(0, 24) + ` · ${dd.length} 盘`);
-    const sig = dd.map(d => d.name + diskKind(d) + volOf(d)).join(',');
+    const sig = dd.map(d => d.name + diskKind(d) + volumeName(d)).join(',');
     if (m.sig !== sig) { m.sig = sig; this.buildBays(dd, m); }
     m.io = {}; (o.diskio || []).forEach(z => { m.io[z.name] = (+z.read_rate || 0) + (+z.write_rate || 0); });
     dd.forEach(d => {
@@ -218,9 +218,9 @@ defineModule({
       // 把「哪块盘、什么型号、多大、在哪个存储空间、哪个槽位、什么问题」一次说全，
       // 原来只印设备名 +「增长缺陷 49 个」，看不出是哪块盘、也说不出人话。
       const line = list => {
-        const d0 = list[0], bs = bayState(d0), v = volOf(d0);
+        const d0 = list[0], bs = bayState(d0), v = volumeName(d0);
         const cap = d0.size ? ' ' + F.dsizeStr(d0.size) : '';
-        const where = [v ? `vol${v}` : '未挂载', d0.slot != null ? `插槽 ${d0.slot}` : ''].filter(Boolean).join(' · ');
+        const where = [v ? `存储空间 ${v}` : '未挂载', d0.slot != null ? `插槽 ${d0.slot}` : ''].filter(Boolean).join(' · ');
         const more = list.length > 1 ? ` 等 ${list.length} 块` : '';
         return `<b>${esc(d0.name)}</b> · ${esc(vendorModel(d0))}${cap}${where ? ' · ' + esc(where) : ''}${more}：${esc(bs.text)}${bs.detail ? ' · ' + esc(bs.detail) : ''}，建议确认备份。`;
       };

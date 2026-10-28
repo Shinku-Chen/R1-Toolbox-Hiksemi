@@ -103,12 +103,20 @@ function volOf(d) {
   }
   return 0;
 }
-/** 盘位卡左上角的标签：原来印 HDD/SSD，现在换成存储空间编号（未挂载的显式标出来） */
-const volLabel = d => volOf(d) ? `vol${volOf(d)}` : '未挂载';
-/** 盘位排序：按存储空间号升序，同一空间内按设备名；未挂载的排最后 */
+/** 盘位卡左上角显示的真实卷名：优先文件系统卷标，其次 /drives 挂载目录名。 */
+function volumeName(d) {
+  if (d && d.volume) return String(d.volume);
+  for (const mp of (d && d.mounts) || []) {
+    const m = /^\/drives\/([^/]+)/.exec(String(mp));
+    if (m) return m[1];
+  }
+  return volOf(d) ? `vol${volOf(d)}` : '';
+}
+const volLabel = d => (d && d.volume_label) || volumeName(d) || '未挂载';
+/** 盘位排序：优先按卷名，未挂载的排最后。 */
 const byVol = (a, b) => {
-  const va = volOf(a), vb = volOf(b);
-  if (va !== vb) return (va || 999) - (vb || 999);
+  const va = volumeName(a), vb = volumeName(b);
+  if (va !== vb) return (va || '~').localeCompare(vb || '~');
   return String(a.name).localeCompare(String(b.name));
 };
 /** 存储卡副标题里「隐藏本次提醒」的本地记录键（签名变了会自动重新出现） */

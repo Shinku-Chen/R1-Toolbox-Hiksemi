@@ -376,7 +376,7 @@ class FnmonitorPanel:
 
     def __init__(self, controller, insights, monitoring, fan_policy, light_policy, monitor, *,
                  state_dir, version='dev', web=None, clock=time.monotonic, wall_clock=time.time,
-                 proc_root='/proc', sys_root='/sys', weather_fetcher=None):
+                 proc_root='/proc', sys_root='/sys', dev_root='/dev', weather_fetcher=None):
         self.controller = controller
         self.insights = insights
         self.monitoring = monitoring
@@ -391,7 +391,9 @@ class FnmonitorPanel:
         self.wall_clock = wall_clock
         self.proc_root = Path(proc_root)
         self.sys_root = Path(sys_root)
+        self.dev_root = Path(dev_root)
         self._mount_cache = (0.0, {})
+        self._label_cache = (0.0, {})
         self._weather_fetcher = weather_fetcher or fetch_weather
         self._weather_cache = None
         self._weather_at = 0.0
@@ -432,6 +434,51 @@ class FnmonitorPanel:
 
     def _identity(self):
         return _dict(self._device().get('identity'))
+
+    def _volume_labels(self):
+        """Read filesystem labels from udev links without opening a disk.
+
+        ``/dev/disk/by-label`` is populated from metadata already seen by udev;
+        resolving these symlinks does not issue a SMART command or wake a
+        sleeping disk.  Missing links simply mean the label is unknown.
+        """
+        now = self.clock()
+        stamp, cached = self._label_cache
+        if now - stamp < 30:
+            return cached
+        labels = {}
+        for folder_name, priority in (('disk/by-label', 2), ('disk/by-partlabel', 1)):
+            folder = self.dev_root / folder_name
+            try:
+                entries = sorted(folder.iterdir(), key=lambda path: path.name)[:256]
+            except OSError:
+                continue
+            for path in entries:
+                try:
+                    target = path.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                match = re.fullmatch(r'(sd[a-z]+|nvme\d+n\d+|vd[a-z]+|xvd[a-z]+|mmcblk\d+)(?:p?\d+)?', target.name)
+                if not match:
+                    continue
+                label = _text(path.name, 120)
+                disk = match.group(1)
+                if label and (disk not in labels or priority > labels[disk][0]):
+                    labels[disk] = (priority, label)
+        result = {name: value[1] for name, value in labels.items()}
+        self._label_cache = (now, result)
+        return result
+
+    def _volume_name(self, disk_mounts, basic):
+        """Pick the largest /drives mount as the disk's user-visible volume."""
+        candidates = [mount for mount in disk_mounts if mount.startswith('/drives/')]
+        if not candidates:
+            return None
+        def weight(mount):
+            entry = _dict(basic.get(mount))
+            return _number(entry.get('total_bytes'), 0) or 0
+        primary = max(candidates, key=weight)
+        return _text(Path(primary).name, 120)
 
     # ------------------------------------------------------------------
     # mounts (read-only, cached): /dev/sda1 -> ["/drives/data"]
@@ -524,6 +571,8 @@ class FnmonitorPanel:
             health = _dict(item.get('health'))
             passed = health.get('passed')
             disk_mounts = mounts.get(name, [])
+            volume = self._volume_name(disk_mounts, basic) or _text(item.get('volume'), 120)
+            volume_label = self._volume_labels().get(name) or _text(item.get('volume_label'), 120)
             total = used = 0
             measured = False
             for mount in disk_mounts:
@@ -543,7 +592,7 @@ class FnmonitorPanel:
                 'size': size, 'total': total if measured else None,
                 'used': used if measured else None,
                 'percent': used / total * 100 if measured and total > 0 else None,
-                'mounts': disk_mounts, 'slot': None,
+                'mounts': disk_mounts, 'volume': volume, 'volume_label': volume_label, 'slot': None,
                 'rpm': media, 'kind': 'nvme' if name.startswith('nvme') else media.lower(),
                 'temp': _number(item.get('temp_c'), -40, 200),
                 'health': 'PASS' if passed is True else 'FAIL' if passed is False else None,

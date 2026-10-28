@@ -198,11 +198,11 @@ class Monitor:
                            'used_bytes': 10 ** 12, 'usage_percent': 25.0}]}
 
 
-def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None):
+def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None, proc_root=None):
     return compat.FnmonitorPanel(Controller(), insights or Insights(), Monitoring(), fan or FanPolicy(),
                                  light or LightPolicy(), Monitor(), state_dir=state_dir,
                                  version='test', web=web_ref,
-                                 proc_root=Path(tempfile.mkdtemp(prefix='r1-panel-proc-')),
+                                 proc_root=Path(proc_root or tempfile.mkdtemp(prefix='r1-panel-proc-')),
                                  sys_root=Path(tempfile.mkdtemp(prefix='r1-panel-sys-')),
                                  weather_fetcher=weather_fetcher or (lambda city: {'ok': False, 'error': 'fixture: no weather'}))
 
@@ -316,6 +316,17 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(overview['disks_detail'], [])
         self.assertFalse(overview['docker']['available'])
         self.assertIsNone(overview['power']['total'])
+
+    def test_disk_volume_comes_from_drives_mount(self):
+        proc = Path(tempfile.mkdtemp(prefix='r1-panel-proc-'))
+        (proc / 'self').mkdir()
+        (proc / 'self/mountinfo').write_text(
+            '123 1 8:1 / /drives/VOL1 rw - ext4 /dev/sda1 rw\n'
+            '124 1 8:2 / /drives/SYSTEM rw - ext4 /dev/sda2 rw\n', encoding='utf-8')
+        panel = panel_for(tempfile.mkdtemp(prefix='r1-panel-vol-'), proc_root=proc)
+        row = panel.overview()['disks_detail'][0]
+        self.assertEqual(row['volume'], 'VOL1')
+        self.assertIsNone(row['volume_label'])
 
     def test_sleeping_disk_stays_visible_without_smart_or_wakeup(self):
         class SleepingInsights(Insights):
