@@ -136,35 +136,33 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     };
 
     await page.goto(uiURL);
-    await page.waitForFunction(() => document.querySelector('.badge')?.textContent === '本机在线' && document.querySelector('.status-title')?.textContent.includes('正常'));
+    await page.waitForFunction(() => document.querySelector('.clock-live')?.textContent.includes('LOCAL HOST') && document.querySelector('.status-title')?.textContent.includes('正常'));
     assert.match(await page.locator('.clock-digits svg').getAttribute('viewBox'), /^0 0 /);
     assert.ok(await page.locator('.clock-digits circle').count() > 0);
     assert.match(await page.locator('.metric-row').first().textContent(), /CPU/);
     assert.match(await page.locator('.inline-summary').textContent(), /25/);
+    assert.equal(await page.locator('.screen-header').count(), 0, 'main pages have no top header');
     await shot('overview');
-    checks.push('real status feeds dot clock, status card and CPU/memory/storage/network summary');
+    checks.push('real status feeds dot clock, status card and CPU/memory/storage/network summary without a top header');
 
     for (const width of [376, 320]) {
       await page.setViewportSize({ width, height: 960 });
-      for (const name of ['overview', 'storage', 'network', 'apps', 'controls']) { await root(name); await measure(name); }
+      for (const name of ['overview', 'storage', 'network', 'apps', 'thermal', 'controls']) { await root(name); await measure(name); }
     }
+    await page.setViewportSize({ width: 376, height: 960 });
     const style = await page.evaluate(() => {
       const nav = Array.from(document.querySelectorAll('.nav-button')).map(node => ({ width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height, font: parseFloat(getComputedStyle(node).fontSize) }));
       return { nav, body: parseFloat(getComputedStyle(document.body).fontSize), title: parseFloat(getComputedStyle(document.querySelector('.screen-title')).fontSize) };
     });
-    assert.equal(style.nav.length, 5);
-    assert.ok(style.nav.every(item => item.height >= 56 && item.width >= 52 && item.font >= 14), JSON.stringify(style.nav));
-    assert.ok(style.body >= 20 && style.title >= 20, JSON.stringify(style));
-    checks.push('five touch tabs at 376/320 without overflow; 56px+ targets and 20px body text');
+    assert.equal(style.nav.length, 6);
+    assert.ok(style.nav.every(item => item.height >= 56 && item.width >= 52 && item.font >= 17), JSON.stringify(style.nav));
+    assert.ok(style.body >= 22 && style.title >= 20, JSON.stringify(style));
+    checks.push('six touch tabs at 376/320 without overflow; 56px+ targets and larger touch typography');
 
     await root('overview');
     await open('metrics');
     assert.equal(await title(), '核心指标');
     assert.equal(await page.locator('.screen-body .card-button').count(), 6, 'CPU, memory, storage, network, temperature and RAPL power');
-    await page.locator('.screen-header [data-view="controls"]').click();
-    assert.equal(await title(), '控制中心');
-    await page.locator('.screen-header [data-action="back"]').click();
-    assert.equal(await title(), '核心指标', 'control centre opened from a detail returns to it');
     await open('processor');
     assert.equal(await title(), '处理器与内存');
     assert.ok(await page.locator('.core-row').count() >= 4);
@@ -184,10 +182,10 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     historyFail = false;
     await shot('trends');
     await back();
-    await open('thermal');
+    await root('thermal');
     assert.equal(await title(), '温度与风扇');
     assert.match(await page.locator('.screen-body').textContent(), /Package/);
-    await back();
+    assert.equal(await page.locator('.fan-quick-row').count(), 2);
     await root('storage');
     assert.equal(await page.locator('.drive-row').count(), 1, 'only physical disks with SMART are listed');
     const storageText = await page.locator('.screen-body').textContent();
@@ -207,12 +205,13 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await open('ports');
     assert.match(await page.locator('.screen-body').textContent(), /18731/);
     await back();
-    checks.push('metrics, processor, history charts, thermal sensors, SMART physical disks and network/ports details');
+    checks.push('metrics, processor, history charts, temperature tab, SMART physical disks and network/ports details');
 
     await root('apps');
     assert.equal(await page.locator('.app-summary .total').textContent(), '2');
     assert.match(await page.locator('.app-count-meta').textContent(), /1 个已停止/);
     assert.equal(await page.locator('.app-card').count(), 2);
+    assert.equal(await page.locator('.menu-row').filter({ hasText: '虚拟机' }).count(), 0, 'no VM entry on a NAS without VMs');
     await page.locator('.app-card').first().click();
     assert.equal(await title(), '容器详情');
     assert.equal(await page.locator('[data-action="container-act"]').count(), 2);
@@ -226,20 +225,9 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await back();
     insights.containers.items[0].available_actions = ['stop', 'restart'];
     insights.containers.items[0].state = 'running';
-    insights.vms = { available: true, reason: '', items: [{ id: 'vm-1', name: 'fixture-vm', state: 'running' }] };
-    await page.waitForFunction(() => Array.from(document.querySelectorAll('.menu-row')).some(node => node.textContent.includes('虚拟机')));
-    await page.locator('.menu-row').filter({ hasText: '虚拟机' }).click();
-    assert.equal(await title(), '虚拟机');
-    assert.equal(await page.locator('[data-action="vm-act"]').count(), 2);
-    await page.locator('[data-action="vm-act"][data-operation="shutdown"]').click();
-    await page.locator('#modal [data-action="modal-accept"]').click();
-    await page.waitForFunction(() => Array.from(document.querySelectorAll('[data-action="vm-act"]')).some(node => node.textContent === '启动'));
-    assert.ok(posts.some(item => item.action === 'vm.action' && item.operation === 'shutdown' && item.confirmed === true));
-    await back();
-    checks.push('container list/detail, confirmed stop, protected container, VM start/shutdown from real insights');
+    checks.push('container list/detail, confirmed stop and protected container; no VM module');
 
-    await root('controls');
-    assert.equal(await page.locator('.fan-quick-row').count(), 2);
+    await root('thermal');
     await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]').click();
     await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]')?.getAttribute('aria-pressed') === 'true');
     assert.equal(fanConfig.channels.cpu.mode, 'manual');
@@ -257,6 +245,13 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.match(await page.locator('.fan-control').textContent(), /应用失败/);
     assert.match(await page.locator('.fan-control').textContent(), /模拟风扇应用失败/);
     independentPolicy = { ...independentPolicy, last_error: null };
+    checks.push('temperature page owns five fan modes per channel with pending/error status');
+
+    await root('controls');
+    assert.equal(await page.locator('.fan-quick-row').count(), 0, 'settings no longer owns fan controls');
+    assert.equal(await page.locator('[data-view="power"]').count(), 1, 'settings exposes power through a second-level entry');
+    assert.equal(await page.locator('[data-action="reboot"]').count(), 0, 'settings must not expose power actions directly');
+    assert.equal(await page.locator('[data-action="shutdown"]').count(), 0);
     assert.deepEqual(await page.locator('#light-effect option').allTextContents(), ['关闭', '常亮', '彩虹', '呼吸']);
     await page.locator('#light-hue').evaluate(node => { node.value = '120'; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); });
     await page.waitForFunction(() => document.getElementById('toast').textContent === '灯光已提交，等待设备确认');
@@ -298,8 +293,12 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await page.waitForFunction(() => !document.getElementById('sleep').hidden);
     state.screen.asleep = false;
     await page.waitForFunction(() => document.getElementById('sleep').hidden);
-    checks.push('fan quick modes, light hue/brightness/effect, sleep timeout, brightness failure, sleep/wake with external state');
+    checks.push('settings light uses four native modes, sleep timeout, brightness failure and sleep/wake');
 
+    await page.locator('[data-view="power"]').click();
+    assert.equal(await title(), '电源管理');
+    const powerTitle = await page.locator('.screen-title').textContent();
+    assert.equal(powerTitle, '电源管理');
     await page.locator('[data-action="reboot"]').click();
     assert.equal(posts.filter(item => item.action === 'power.request').length, 0);
     await page.locator('#modal [data-action="modal-cancel"]').click();
@@ -316,7 +315,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await page.locator('#power-status [data-action="cancel-power"]').click();
     await page.waitForFunction(() => document.getElementById('power-status').hidden);
     assert.equal(state.power.pending, null);
-    checks.push('power needs explicit confirmation, survives navigation, and stays cancellable');
+    checks.push('power is a second-level settings page with explicit confirmation and cancellable countdown');
 
     await root('controls');
     await page.locator('.menu-row').filter({ hasText: '网页设置' }).click();
@@ -332,11 +331,15 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     checks.push('web address and protected pairing code; code is cleared on leave');
 
     offline = true;
-    await page.waitForFunction(() => document.querySelector('.badge')?.textContent === '离线');
+    await root('overview');
+    await page.waitForFunction(() => document.querySelector('.status-card .badge')?.textContent === '本机服务离线');
+    await root('controls');
     assert.equal(await page.locator('#brightness').isDisabled(), true);
+    await page.locator('[data-view="power"]').click();
     assert.equal(await page.locator('[data-action="reboot"]').isDisabled(), true);
     offline = false;
-    await page.waitForFunction(() => document.querySelector('.badge')?.textContent === '本机在线');
+    await root('overview');
+    await page.waitForFunction(() => document.querySelector('.clock-live')?.textContent.includes('LOCAL HOST'));
     checks.push('offline disables writes and recovers');
 
     const ro = await browser.newContext({ viewport: { width: 376, height: 960 } });
@@ -348,7 +351,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
       return route.fulfill({ status: 200, headers, body: JSON.stringify(path.endsWith('/toolbox') ? state : path.endsWith('/insights') ? insights : path.endsWith('/history') ? historyFixture : path.endsWith('/monitoring') ? monitoring : status) });
     });
     await rp.goto(uiURL);
-    await rp.waitForFunction(() => document.querySelector('.badge')?.textContent === '本机在线');
+    await rp.waitForFunction(() => document.querySelector('.clock-live')?.textContent.includes('LOCAL HOST'));
     await rp.locator('[data-tab="controls"]').click();
     assert.equal(await rp.locator('#brightness').isDisabled(), true);
     assert.equal(readOnlyPosts, 0);

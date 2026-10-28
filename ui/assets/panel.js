@@ -63,15 +63,15 @@
     lastTs: null,
   };
 
-  const mainTabs = ['overview', 'storage', 'network', 'apps', 'controls'];
+  const mainTabs = ['overview', 'storage', 'network', 'apps', 'thermal', 'controls'];
   const titles = {
-    overview: '概览', storage: '存储', network: '网络', apps: '应用', controls: '控制中心',
-    metrics: '核心指标', processor: '处理器与内存', trends: '历史趋势', thermal: '温度与风扇',
-    containers: 'Docker 容器', container: '容器详情', vms: '虚拟机', ports: '监听端口', web: '网页设置',
+    overview: '概览', storage: '存储', network: '网络', apps: '应用', thermal: '温度与风扇', controls: '设置',
+    metrics: '核心指标', processor: '处理器与内存', trends: '历史趋势',
+    containers: 'Docker 容器', container: '容器详情', ports: '监听端口', web: '网页设置', power: '电源管理',
   };
   const parentTabs = {
-    metrics: 'overview', processor: 'overview', trends: 'overview', thermal: 'overview',
-    containers: 'apps', container: 'apps', vms: 'apps', ports: 'network', web: 'controls',
+    metrics: 'overview', processor: 'overview', trends: 'overview',
+    containers: 'apps', container: 'apps', ports: 'network', web: 'controls', power: 'controls',
   };
 
   const icons = {
@@ -218,8 +218,6 @@
 
   const containers = () => list(obj(obj(state.data.insights).containers).items);
   const dstate = () => obj(obj(state.data.insights).containers);
-  const vms = () => list(obj(obj(state.data.insights).vms).items);
-  const vmState = () => obj(obj(state.data.insights).vms);
   const fanPolicy = () => obj(state.data.fan);
   const lightPolicy = () => obj(state.data.light);
   const monitoring = () => obj(state.data.monitoring);
@@ -344,9 +342,9 @@
   function deviceMarkup(view) {
     const main = mainTabs.includes(view);
     const tab = main ? view : parentTabs[view];
-    const online = state.online;
-    const canBack = !main || (view === 'controls' && state.history.length > 0);
-    return `<header class="screen-header">${canBack ? `<button type="button" class="icon-button header-back" data-action="back" aria-label="返回上一页">${icon('back')}</button>` : '<span class="header-mark" aria-hidden="true">R1</span>'}<h1 class="screen-title">${esc(titles[view])}</h1><span class="badge ${online ? '' : 'warn'}">${online ? '本机在线' : '离线'}</span><button type="button" class="icon-button" data-view="${view === 'controls' ? 'web' : 'controls'}" aria-label="${view === 'controls' ? '打开网页设置' : '打开控制中心'}">${icon('controls')}</button></header><div class="screen-body" id="screen-body"><section aria-label="${esc(titles[view])}">${views[view]()}</section></div><nav class="screen-nav" aria-label="小屏页面">${mainTabs.map(name => `<button type="button" class="nav-button" data-tab="${name}" ${tab === name ? 'aria-current="page"' : ''}>${icon(name)}<span>${name === 'controls' ? '控制' : titles[name]}</span></button>`).join('')}</nav>`;
+    const title = `<h1 class="${main ? 'sr-only ' : ''}screen-title">${esc(titles[view])}</h1>`;
+    const header = main ? title : `<header class="screen-header"><button type="button" class="icon-button header-back" data-action="back" aria-label="返回上一页">${icon('back')}</button>${title}</header>`;
+    return `${header}<div class="screen-body" id="screen-body"><section aria-label="${esc(titles[view])}">${views[view]()}</section></div><nav class="screen-nav" aria-label="小屏页面">${mainTabs.map(name => `<button type="button" class="nav-button" data-tab="${name}" ${tab === name ? 'aria-current="page"' : ''}>${icon(name)}<span>${name === 'controls' ? '设置' : name === 'thermal' ? '温度' : titles[name]}</span></button>`).join('')}</nav>`;
   }
 
   function render(scrollTop = 0) {
@@ -485,7 +483,7 @@
     const allDrives = list(obj(obj(state.data.insights).disks).items);
     const drives = allDrives.filter(row => row && row.smart_available === true);
     const hidden = allDrives.length - drives.length;
-    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到带 SMART 信息的物理磁盘。</p>'}${hidden ? `<p class="info-note">${hidden} 块磁盘未提供 SMART 信息，已隐藏。</p>` : ''}<p class="info-note">仅显示有 SMART 缓存的物理磁盘；休眠盘温度未知，不因查看页面唤醒。</p>`;
+    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '等待容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>数据盘</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到带 SMART 信息的物理磁盘。</p>'}`;
   }
 
   function network() {
@@ -498,7 +496,7 @@
     const down = speed(net.rx_bytes_per_sec);
     const up = speed(net.tx_bytes_per_sec);
     const primary = links.find(row => row.name === net.interface) || links[0] || {};
-    return `<article class="card"><div class="card-top"><p class="kicker">ACTIVE INTERFACE</p><span class="badge ${state.online ? '' : 'warn'}"><span class="dot"></span>${state.online ? '已连接' : '离线'}</span></div><div class="stat-row" style="padding-top:0"><span>${esc(net.interface || '--')}</span><span class="value" style="font-size:19px">${esc(net.ipv4 || '--')}</span></div><div class="network-interface"><span>${num(primary.speed_mbps, 1) ? primary.speed_mbps + ' Mbps' : '速率未知'}${primary.duplex ? ' · ' + esc(primary.duplex) : ''}</span><span>IPv4</span></div></article><article class="card network-card"><div class="card-top"><h2>↓ 下载速率</h2><span class="label">实时</span></div><div class="big-value green">${dotNumber(down[0])}<small>${esc(down[1])}</small></div>${spark(state.live.rx, 'green', true)}</article><article class="card network-card"><div class="card-top"><h2>↑ 上传速率</h2><span class="label">实时</span></div><div class="big-value purple">${dotNumber(up[0])}<small>${esc(up[1])}</small></div>${spark(state.live.tx, 'purple', true)}</article>${interfaces.map(item => `<article class="card"><div class="card-top"><h2>${esc(item.name)}</h2><span class="badge neutral">${esc(item.operstate || '--')}</span></div><div class="stat-row"><span class="muted">IPv4</span><span class="value" style="font-size:16px">${esc(list(item.ipv4).join('、') || '--')}</span></div><div class="stat-row"><span class="muted">MAC</span><span class="value" style="font-size:16px">${esc(item.mac || '--')}</span></div></article>`).join('')}${menu('ports', '监听端口', '宿主监听与容器端口映射')}`;
+    return `<article class="card"><div class="card-top"><p class="kicker">ACTIVE INTERFACE</p><span class="badge ${state.online ? '' : 'warn'}"><span class="dot"></span>${state.online ? '已连接' : '离线'}</span></div><div class="stat-row" style="padding-top:0"><span>${esc(net.interface || '--')}</span><span class="value" style="font-size:21px">${esc(net.ipv4 || '--')}</span></div><div class="network-interface"><span>${num(primary.speed_mbps, 1) ? primary.speed_mbps + ' Mbps' : '速率未知'}${primary.duplex ? ' · ' + esc(primary.duplex) : ''}</span><span>IPv4</span></div></article><article class="card network-card"><div class="card-top"><h2>↓ 下载速率</h2><span class="label">实时</span></div><div class="big-value green">${dotNumber(down[0])}<small>${esc(down[1])}</small></div>${spark(state.live.rx, 'green', true)}</article><article class="card network-card"><div class="card-top"><h2>↑ 上传速率</h2><span class="label">实时</span></div><div class="big-value purple">${dotNumber(up[0])}<small>${esc(up[1])}</small></div>${spark(state.live.tx, 'purple', true)}</article>${interfaces.map(item => `<article class="card"><div class="card-top"><h2>${esc(item.name)}</h2><span class="badge neutral">${esc(item.operstate || '--')}</span></div><div class="stat-row"><span class="muted">IPv4</span><span class="value" style="font-size:18px">${esc(list(item.ipv4).join('、') || '--')}</span></div><div class="stat-row"><span class="muted">MAC</span><span class="value" style="font-size:18px">${esc(item.mac || '--')}</span></div></article>`).join('')}${menu('ports', '监听端口', '宿主监听与容器端口映射')}`;
   }
 
   function appCard(item, clickable = true) {
@@ -510,8 +508,7 @@
     const docker = dstate();
     const listRows = containers();
     const running = listRows.filter(item => item.state === 'running').length;
-    const vmInfo = vmState();
-    return `<article class="card"><div class="card-top"><p class="kicker">CONTAINERS</p><span class="badge ${docker.available ? '' : 'warn'}"><span class="dot"></span>${docker.available ? 'Docker' : '不可用'}</span></div><div class="app-summary lime">${dotNumber(String(running))}<span class="slash">/</span><span class="total">${listRows.length}</span></div><div class="app-count-meta"><span>运行中</span><span>${listRows.length - running} 个已停止</span></div>${docker.available ? '' : `<p class="caption" style="margin-top:14px">${esc(docker.reason || 'Docker 状态暂不可读')}</p>`}</article><div class="section-label"><h2>RUNNING / 容器预览</h2><button type="button" data-view="containers">全部 ›</button></div>${listRows.slice(0, 3).map(item => appCard(item)).join('')}${listRows.length ? '' : '<p class="info-note">没有可显示的容器。</p>'}${vmInfo.available ? menu('vms', '虚拟机', `${vms().filter(vm => vm.state === 'running').length} / ${vms().length} 运行中`) : ''}`;
+    return `<article class="card"><div class="card-top"><p class="kicker">CONTAINERS</p><span class="badge ${docker.available ? '' : 'warn'}"><span class="dot"></span>${docker.available ? 'Docker' : '不可用'}</span></div><div class="app-summary lime">${dotNumber(String(running))}<span class="slash">/</span><span class="total">${listRows.length}</span></div><div class="app-count-meta"><span>运行中</span><span>${listRows.length - running} 个已停止</span></div>${docker.available ? '' : `<p class="caption" style="margin-top:14px">${esc(docker.reason || 'Docker 状态暂不可读')}</p>`}</article><div class="section-label"><h2>RUNNING / 容器预览</h2><button type="button" data-view="containers">全部 ›</button></div>${listRows.slice(0, 3).map(item => appCard(item)).join('')}${listRows.length ? '' : '<p class="info-note">没有可显示的容器。</p>'}`;
   }
 
   function containersView() {
@@ -525,16 +522,7 @@
     if (!item) return '<p class="info-note">容器不存在或列表已刷新，请返回应用页重新选择。</p>';
     const actions = list(item.available_actions);
     const label = { start: '启动', stop: '停止', restart: '重启' };
-    return `${appCard(item, false)}<article class="card"><div class="card-top"><h2>容器状态</h2><span class="badge ${item.state === 'running' ? '' : 'neutral'}">${esc(item.state || '未知')}</span></div><div class="stat-row"><span class="muted">CPU 使用率</span><span class="value">${item.cpu_percent != null ? Number(item.cpu_percent).toFixed(1) + '%' : '--'}</span></div><div class="stat-row"><span class="muted">内存使用</span><span class="value">${item.memory_bytes != null ? bytes(item.memory_bytes) : '--'}</span></div><div class="stat-row"><span class="muted">端口文本</span><span class="value mono-wrap" style="font-size:16px">${esc(item.ports || 'Docker 未提供端口文本')}</span></div>${item.protected ? '<p class="info-note">这是 Toolbox 的保护容器，不在此提供启停操作。</p>' : ''}</article>${actions.length && !item.protected ? `<div class="action-stack">${actions.map(action => `<button type="button" class="action-button ${action === 'stop' ? 'danger' : ''}" data-action="container-act" data-id="${esc(item.id)}" data-operation="${esc(action)}">${label[action] || action}</button>`).join('')}</div>` : ''}<p class="info-note">操作前会重新核验容器 ID、状态和保护标记，并要求确认。</p>`;
-  }
-
-  function vmsView() {
-    const info = vmState();
-    if (!info.available) return `<p class="info-note">${esc(info.reason || '宿主未提供 libvirt 服务，虚拟机模块已隐藏。')}</p>`;
-    return `<article class="card"><p class="kicker">VIRTUAL MACHINES</p><div class="app-summary lime" style="margin-top:20px">${dotNumber(String(vms().filter(vm => vm.state === 'running').length))}<span class="slash">/</span><span class="total">${vms().length}</span></div><p class="caption" style="margin-top:16px">运行中 / 已发现</p></article>${vms().map(vm => {
-      const running = ['running', 'blocked'].includes(vm.state);
-      return `<article class="card"><div class="card-top"><h2>${esc(vm.name || vm.id)}</h2><span class="badge ${running ? '' : 'neutral'}">${esc(vm.state || '未知')}</span></div><p class="caption mono-wrap">${esc(vm.id)}</p><div class="action-stack">${running ? `<button type="button" class="action-button" data-action="vm-act" data-id="${esc(vm.id)}" data-operation="reboot">重启</button><button type="button" class="action-button danger" data-action="vm-act" data-id="${esc(vm.id)}" data-operation="shutdown">关机</button>` : `<button type="button" class="action-button" data-action="vm-act" data-id="${esc(vm.id)}" data-operation="start">启动</button>`}</div></article>`;
-    }).join('')}<p class="info-note">虚拟机操作需要确认，结果以刷新后的状态为准。</p>`;
+    return `${appCard(item, false)}<article class="card"><div class="card-top"><h2>容器状态</h2><span class="badge ${item.state === 'running' ? '' : 'neutral'}">${esc(item.state || '未知')}</span></div><div class="stat-row"><span class="muted">CPU 使用率</span><span class="value">${item.cpu_percent != null ? Number(item.cpu_percent).toFixed(1) + '%' : '--'}</span></div><div class="stat-row"><span class="muted">内存使用</span><span class="value">${item.memory_bytes != null ? bytes(item.memory_bytes) : '--'}</span></div><div class="stat-row"><span class="muted">端口文本</span><span class="value mono-wrap" style="font-size:18px">${esc(item.ports || 'Docker 未提供端口文本')}</span></div>${item.protected ? '<p class="info-note">这是 Toolbox 的保护容器，不在此提供启停操作。</p>' : ''}</article>${actions.length && !item.protected ? `<div class="action-stack">${actions.map(action => `<button type="button" class="action-button ${action === 'stop' ? 'danger' : ''}" data-action="container-act" data-id="${esc(item.id)}" data-operation="${esc(action)}">${label[action] || action}</button>`).join('')}</div>` : ''}<p class="info-note">操作前会重新核验容器 ID、状态和保护标记，并要求确认。</p>`;
   }
 
   function thermal() {
@@ -549,8 +537,8 @@
       return `<div class="temperature-row"><div class="temperature-top"><span>${esc(row.label || row.channel || '传感器')}${row.driver ? ' · ' + esc(row.driver) : ''}</span><b class="${value >= 55 ? 'orange' : 'green'}">${tempText(value)}</b></div>${bar(Math.max(0, Math.min(100, (value - 20) / 60 * 100)), value >= 55 ? 'var(--orange)' : 'var(--green)')}</div>`;
     }).join('')}${temps.length ? '' : '<p class="caption">暂未读取到温度传感器。</p>'}</article><article class="card"><div class="card-top"><p class="kicker">FANS</p><span class="badge neutral">${policy.active ? '独立温控' : '原厂管理'}</span></div>${fans.map(fan => `<div class="fan-row"><span class="fan-label">${esc(fan.label || fan.channel || '风扇')}</span><span class="fan-value">${num(fan.rpm, 0) === null ? '--' : fan.rpm} <small>RPM</small></span></div>`).join('')}${channels.cpu ? `<div class="divider"></div>${['cpu', 'system'].map(name => {
       const channel = obj(channels[name]);
-      return `<div class="fan-row"><span class="fan-label">${name === 'cpu' ? 'CPU' : '系统'}温控</span><span class="fan-value" style="font-size:17px">${channel.active ? tempText(channel.reference_c) + ' · ' + percentText(channel.target_percent) + '%' : '原厂管理'}</span></div>`;
-    }).join('')}` : ''}${!fans.length && !channels.cpu ? '<p class="caption">未获得转速反馈。控制目标百分比不代表实测转速。</p>' : ''}${menu('web', '在网页配置温控', '曲线、阈值与温度来源')}</article>`;
+      return `<div class="fan-row"><span class="fan-label">${name === 'cpu' ? 'CPU' : '系统'}温控</span><span class="fan-value" style="font-size:19px">${channel.active ? tempText(channel.reference_c) + ' · ' + percentText(channel.target_percent) + '%' : '原厂管理'}</span></div>`;
+    }).join('')}` : ''}</article>${fanControl(policy)}`;
   }
 
   function chartCard(name, unit, series, color, label) {
@@ -599,7 +587,7 @@
     return `<div class="detail-lead"><p class="kicker">HOST LISTENING PORTS</p><h2>宿主监听</h2><p>读取 /proc/net · 不推测服务归属</p></div>${listeners.map(row => `<article class="card port-row"><span class="port-number">${esc(row.port)}</span><div><p class="port-name">${esc(String(row.protocol || 'tcp').toUpperCase())}</p><p class="port-note mono">${esc(row.address || '')}</p></div></article>`).join('')}${listeners.length ? '' : '<p class="info-note">未读取到监听端口。</p>'}<div class="section-label"><h2>DOCKER / 端口映射</h2></div>${docker.map(item => `<article class="card"><div class="card-top"><h3>${esc(item.name)}</h3><span class="${item.state === 'running' ? 'green' : 'muted'}"><span class="dot"></span></span></div><p class="mono mono-wrap" style="font-size:18px">${esc(item.ports)}</p></article>`).join('')}${docker.length ? '' : '<p class="info-note">没有带端口映射的容器。</p>'}<p class="info-note">Docker 映射与宿主监听来自不同数据源，仅展示各自的原始语义。</p>`;
   }
 
-  const FAN_QUICK_MODES = [['auto', '自动'], ['low', '低档'], ['medium', '中档'], ['high', '高档']];
+  const FAN_QUICK_MODES = [['auto', '自动'], ['low', '低'], ['medium', '中'], ['high', '高'], ['manual', '手动']];
   const FAN_QUICK_PERCENT = { low: 50, medium: 75, high: 100 };
 
   /** Map the policy's vendor/fixed/temperature modes to the four quick buttons. */
@@ -614,10 +602,9 @@
   function fanQuickRow(name, item, live, available, busy) {
     const mode = fanQuickMode(item);
     const disabled = !canWrite() || !available || busy === true;
-    const manualDisabled = disabled || !list(item.sources).length;
     const state = live.active && num(live.target_percent, 0, 100) !== null ? `目标 ${percentText(live.target_percent)}%` : '原厂管理';
     const label = name === 'cpu' ? 'CPU 风扇' : '系统风扇';
-    return `<div class="fan-quick-row"><div class="fan-quick-head"><strong>${label}</strong><span>${esc(state)}</span></div><div class="fan-quick-grid">${FAN_QUICK_MODES.map(([key, text]) => `<button type="button" class="fan-mode" data-action="fan-quick" data-channel="${name}" data-mode="${key}" aria-pressed="${mode === key}" ${disabled ? 'disabled' : ''}>${text}</button>`).join('')}</div><button type="button" class="fan-manual ${mode === 'manual' ? 'is-current' : ''}" data-action="fan-quick" data-channel="${name}" data-mode="manual" aria-pressed="${mode === 'manual'}" ${manualDisabled ? 'disabled' : ''}>手动${mode === 'manual' ? ' · 当前' : ''}</button></div>`;
+    return `<div class="fan-quick-row"><div class="fan-quick-head"><strong>${label}</strong><span>${esc(state)}</span></div><div class="fan-quick-grid">${FAN_QUICK_MODES.map(([key, text]) => `<button type="button" class="fan-mode" data-action="fan-quick" data-channel="${name}" data-mode="${key}" aria-pressed="${mode === key}" ${disabled || (key === 'manual' && !list(item.sources).length) ? 'disabled' : ''}>${text}</button>`).join('')}</div></div>`;
   }
 
   function fanControl(policy) {
@@ -628,7 +615,7 @@
     const available = capability.available === true;
     const failed = Boolean(policy.last_error);
     const status = policy.busy ? '正在应用' : failed ? '应用失败' : policy.pending_changes ? '待应用' : policy.active ? '独立温控' : '原厂管理';
-    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${failed ? 'warn' : policy.active ? '' : 'neutral'}">${esc(status)}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), available, policy.busy)).join('')}<p class="caption">低／中／高档固定为 50／75／100%；手动档使用网页保存的曲线。首次使用前请先在网页选择温度来源与阈值。</p>${failed ? `<p class="caption">${esc(policy.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置风扇</button></article>`;
+    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${failed ? 'warn' : policy.active ? '' : 'neutral'}">${esc(status)}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), available, policy.busy)).join('')}${failed ? `<p class="caption">${esc(policy.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}</article>`;
   }
 
   function hexToHue(value) {
@@ -668,7 +655,7 @@
     const mode = light.active ? '手动已接管' : '手动待应用';
     const failed = Boolean(light.last_error);
     const status = busy ? '正在应用' : failed ? '应用失败' : mode;
-    return `<article class="card light-control"><div class="card-top"><h2>机身灯光</h2><span class="badge ${failed ? 'warn' : light.active ? '' : 'neutral'}">${esc(status)}</span></div><div class="light-preview"><span class="light-swatch" style="background:${lightHueColor(hue)}"></span><div><strong>色相 ${Math.round(hue)}°</strong><p class="caption">拖动色相、亮度后自动应用</p></div></div><label class="control-label" for="light-hue">色相</label><input class="brightness light-hue" id="light-hue" type="range" min="0" max="359" step="1" value="${hue}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-brightness">亮度 <output data-light-brightness>${Math.round(brightness)}%</output></label><input class="brightness" id="light-brightness" type="range" min="0" max="100" step="1" value="${brightness}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-effect">灯光模式</label><select class="control-select" id="light-effect" ${disabled ? 'disabled' : ''}>${[[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']].map(([value, text]) => `<option value="${value}" ${effect === value ? 'selected' : ''}>${text}</option>`).join('')}</select>${failed ? `<p class="caption">${esc(light.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '尚未验证唯一灯控设备')}</p>`}<button type="button" class="action-button" data-view="web">在网页设置灯光</button></article>`;
+    return `<article class="card light-control"><div class="card-top"><h2>机身灯光</h2><span class="badge ${failed ? 'warn' : light.active ? '' : 'neutral'}">${esc(status)}</span></div><div class="light-preview"><span class="light-swatch" style="background:${lightHueColor(hue)}"></span><div><strong>色相 ${Math.round(hue)}°</strong></div></div><label class="control-label" for="light-hue">色相</label><input class="brightness light-hue" id="light-hue" type="range" min="0" max="359" step="1" value="${hue}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-brightness">亮度 <output data-light-brightness>${Math.round(brightness)}%</output></label><input class="brightness" id="light-brightness" type="range" min="0" max="100" step="1" value="${brightness}" ${disabled ? 'disabled' : ''}><label class="control-label" for="light-effect">灯光模式</label><select class="control-select" id="light-effect" ${disabled ? 'disabled' : ''}>${[[0, '关闭'], [1, '常亮'], [2, '彩虹'], [3, '呼吸']].map(([value, text]) => `<option value="${value}" ${effect === value ? 'selected' : ''}>${text}</option>`).join('')}</select>${failed ? `<p class="caption">${esc(light.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '尚未验证唯一灯控设备')}</p>`}</article>`;
   }
 
   function screenControl(toolbox, available) {
@@ -685,10 +672,12 @@
     const caps = obj(toolbox.capabilities);
     const available = obj(caps.screen).available === true;
     const brightness = state.brightness ?? pct(screen.brightness);
-    const policy = fanPolicy();
     const light = lightPolicy();
-    const powerPending = state.powerDeadline !== null;
-    return `<article class="card"><div class="control-heading"><h2 style="font-size:20px;font-weight:400">屏幕亮度</h2><output data-brightness-value for="brightness">${brightness ?? '--'}<small style="font-size:15px;color:var(--dim)"> %</small></output></div><label class="sr-only" for="brightness">屏幕亮度</label><input class="brightness" id="brightness" type="range" min="5" max="100" value="${brightness ?? 50}" ${available && canWrite() ? '' : 'disabled'}><div class="control-hint"><span>暗</span><span>亮</span></div>${screenControl(toolbox, available)}<button type="button" class="action-button" data-action="sleep" style="margin-top:12px" ${available && canWrite() ? '' : 'disabled'}>立即息屏</button>${available ? '' : `<p class="caption" style="margin-top:10px">${esc(obj(caps.screen).reason || '背光能力尚未验证')}</p>`}</article>${fanControl(policy)}${lightControl(light)}${menu('thermal', '温度与风扇详情', policy.active ? '参考温度与来源 · 只读' : '原厂管理 · 只读')}${menu('web', '网页设置', '曲线、联动、登录与配对')}<div class="section-label"><h2>POWER / 电源</h2><span>${powerPending ? '倒计时中' : '需确认'}</span></div><div class="action-stack"><button type="button" class="action-button" data-action="reboot" ${canWrite() && !powerPending ? '' : 'disabled'}>重新启动 NAS</button><button type="button" class="action-button danger" data-action="shutdown" ${canWrite() && !powerPending ? '' : 'disabled'}>关闭 NAS</button></div><p class="info-note">确认后有 5 秒可取消。关机后不会自动开机。</p>`;
+    return `<article class="card"><div class="control-heading"><h2>屏幕亮度</h2><output data-brightness-value for="brightness">${brightness ?? '--'}<small style="font-size:16px;color:var(--dim)"> %</small></output></div><label class="sr-only" for="brightness">屏幕亮度</label><input class="brightness" id="brightness" type="range" min="5" max="100" value="${brightness ?? 50}" ${available && canWrite() ? '' : 'disabled'}>${screenControl(toolbox, available)}<button type="button" class="action-button" data-action="sleep" style="margin-top:12px" ${available && canWrite() ? '' : 'disabled'}>立即息屏</button>${available ? '' : `<p class="caption" style="margin-top:10px">${esc(obj(caps.screen).reason || '背光能力尚未验证')}</p>`}</article>${lightControl(light)}${menu('web', '网页设置')}${menu('power', '电源管理')}`;
+  }
+
+  function power() {
+    return `<article class="card"><div class="section-label" style="margin-top:0"><h2>POWER / 电源管理</h2><span>需确认</span></div><div class="action-stack" style="margin-top:0"><button type="button" class="action-button" data-action="reboot" ${canWrite() ? '' : 'disabled'}>重新启动 NAS</button><button type="button" class="action-button danger" data-action="shutdown" ${canWrite() ? '' : 'disabled'}>关闭 NAS</button></div></article>`;
   }
 
   function web() {
@@ -701,7 +690,7 @@
     return `<div class="detail-lead"><p class="kicker">CONTINUE ON THE WEB</p><h2>大一点的屏幕，<br>更完整的设置。</h2></div><article class="card"><div class="card-top"><h2>网页访问地址</h2><span class="badge neutral">${web.enabled ? '已启用' : '未启用'}</span></div><p class="web-address">${esc(address || '--')}</p><p class="body-copy">${address ? '在同一局域网的手机或电脑上打开。' : '网页服务暂未返回可访问地址。'}</p><div class="divider"></div><p class="caption">网页默认公开只读；修改设置需要一次性配对码或登录口令。</p></article><article class="card"><p class="kicker">PAIRING CODE</p>${pairing ? `<p class="pairing-code">${esc(pairing.code)}</p><p class="caption" style="text-align:center">${remaining} 秒内有效 · 仅可使用一次</p>` : '<p class="body-copy" style="margin:16px 0">需要修改网页设置时，生成五位配对码并在网页输入。</p>'}<button type="button" class="action-button primary" data-action="pairing" ${canWrite() && web.enabled ? '' : 'disabled'}>${pairing ? '重新生成配对码' : '生成一次性配对码'}</button><p class="caption" style="margin-top:12px">代码只显示在本机小屏，不会发送到网络。</p></article><article class="card"><p class="kicker">AVAILABLE ON THE WEB</p><div class="stat-row"><span>风扇温控</span><span class="caption">曲线与来源</span></div><div class="stat-row"><span>机身灯光</span><span class="caption">颜色与联动</span></div><div class="stat-row"><span>登录与配对</span><span class="caption">保护写操作</span></div></article><p class="info-note">局域网 HTTP 未加密，请只在可信网络使用；公开监控与配对共用同一端口。</p>`;
   }
 
-  const views = { overview, metrics, processor, storage, network, apps, containers: containersView, container: containerView, vms: vmsView, thermal, trends, ports, controls, web };
+  const views = { overview, metrics, processor, storage, network, apps, containers: containersView, container: containerView, thermal, trends, ports, controls, power, web };
 
   // ------------------------------------------------------------------ actions
   function openConfirm({ title, message, accept, danger = false, onAccept }) {
@@ -821,21 +810,6 @@
     });
   }
 
-  function vmAction(id, operation) {
-    const item = vms().find(row => row.id === id);
-    if (!item) return;
-    const label = { start: '启动', shutdown: '关机', reboot: '重启' }[operation] || operation;
-    openConfirm({
-      title: label + ' ' + (item.name || '虚拟机') + '？',
-      message: '虚拟机操作需要确认，结果以刷新后的状态为准。',
-      accept: '确认' + label,
-      danger: operation === 'shutdown',
-      onAccept: async () => {
-        await action('vm.action', { id, operation, confirmed: true }, '已提交虚拟机操作');
-      },
-    });
-  }
-
   async function generatePairing() {
     const result = await action('web.pairing', { rotate: true }, null);
     if (!result || !result.web) return;
@@ -907,7 +881,6 @@
     if (act === 'container') { state.containerId = button.dataset.id; navigate('container'); }
     if (act === 'fan-quick') setFanQuick(button.dataset.channel, button.dataset.mode);
     if (act === 'container-act') containerAction(button.dataset.id, button.dataset.operation);
-    if (act === 'vm-act') vmAction(button.dataset.id, button.dataset.operation);
     if (act === 'pairing') generatePairing();
     if (act === 'modal-cancel') closeConfirm();
     if (act === 'modal-accept') {
