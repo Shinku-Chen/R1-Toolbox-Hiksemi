@@ -16,7 +16,7 @@ R1 Toolbox 是海康 HikSemi R1 NAS 的本地工具箱：通过 Docker Compose �
 runtime/           宿主端 Python：ui_service、web_config、toolbox、insights、device_info、histor、
                    fan_policy、fan_native、fan_watchdog、temperature_sources、light_policy、monitoring、
                    fnm_auth、fnm_compat
-ui/index.html      小屏触摸界面（单文件，随镜像展开到宿主 /run）
+ui/index.html      小屏触摸界面入口（随镜像展开到宿主 /run）
 ui/assets/         小屏 CSS/JS 与官方窗口桥
 ui/panel-src/      网页面板源码（fnMonitor，MIT）与 R1 扩展 50-r1.js
 ui/web/            网页面板构建产物 index.html / login.html（不要手改）
