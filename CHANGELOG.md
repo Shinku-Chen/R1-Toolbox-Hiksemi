@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat(design): 新增独立的 376×960 小屏 HTML 原型，包含五标签导航、12 页画板总览、点阵读数、趋势与安全电源演示，并补充离线预览说明和浏览器检查。
 - feat(web): 风扇/灯光配置只保留「保存」按钮，点击并确认后一次完成保存并应用。
 - 初始化项目 AI 说明文件：新增 `AGENTS.md`、`CHANGELOG.md`。
 - feat(web): 网页面板改为直接使用 fnMonitor 2.19.0 框架（源码在 `ui/panel-src/`），新增 `runtime/fnm_compat.py` 数据适配与 `runtime/fnm_auth.py` 可选登录口令；保留五位配对码、只读 `/api/v1/*`、确认流程和数据卷配置（`b906bec`）。
