@@ -423,6 +423,15 @@ class NativeModeTests(unittest.TestCase):
         self.assertTrue(state["active_on_boot"])
         self.assertEqual(self.controller.active_config, value)
 
+    def test_vendor_fixed_grade_is_not_reported_as_automatic(self):
+        state = self.apply(self.native_config("manual", "high"))
+        self.assertNotIn("自动", state["channels"]["system"]["reason"])
+        self.controller.tick()
+        state = self.controller.snapshot()
+        self.assertEqual(state["official"]["mode"], "high")
+        self.assertFalse(state["channels"]["system"]["active"])
+        self.assertNotIn("自动", state["channels"]["system"]["reason"])
+
     def test_official_rpc_waits_until_all_channel_recovery_has_returned_success(self):
         entered, finish = threading.Event(), threading.Event()
         self.adapter.channels = {"cpu", "system"}

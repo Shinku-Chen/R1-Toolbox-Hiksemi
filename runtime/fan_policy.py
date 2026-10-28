@@ -104,7 +104,7 @@ def decide(policy, rows, previous=None):
     """Raise immediately on a fresh sample; reduce with explicit hysteresis."""
     if policy["mode"] == "vendor":
         return {"level": "vendor", "target_percent": None, "reference_c": None,
-                "source_id": None, "source_label": None, "reason": "原厂自动管理"}
+                "source_id": None, "source_label": None, "reason": "原厂策略管理"}
     by_id = {row["id"]: row for row in rows}
     selected = [by_id.get(source) for source in policy["sources"]]
     temperatures = [row for row in selected if row and row["fresh"]
@@ -377,7 +377,7 @@ class FanPolicyController:
                     "active": name in wanted, "level": "failsafe" if name in wanted else "vendor",
                     "target_percent": 100 if name in wanted else None, "target_raw": 255 if name in wanted else None,
                     "applied_monotonic": self.clock() if name in wanted else None,
-                    "reason": "等待第一轮有效温度采样" if name in wanted else "原厂自动管理"} for name in CHANNELS}
+                    "reason": "等待第一轮有效温度采样" if name in wanted else "原厂策略管理"} for name in CHANNELS}
                 self.last_error = self.settings_error = None
         except Exception as error:
             restored = True
