@@ -26,7 +26,6 @@
   let currentDetail = null;
   let navigationStack = [];
   let lastStatus = null;
-  let fanDetailSignature = null;
   let independentFanPolicy = null;
   let lightPolicy = null;
   let requestRunning = false;
@@ -39,8 +38,6 @@
   let actionBusy = false;
   let settingsDirty = false;
   let brightnessDirty = false;
-  let rgbDirty = false;
-  let rgbBrightnessDirty = false;
   let fanSignature = null;
   let appsSignature = null;
   let activeAppPointer = null, pendingAppSnapshot = null, appRefreshTimer = null;
@@ -58,6 +55,7 @@
   let powerDeadline = null;
   let powerOperation = null;
   let webConfig = null;
+  let settingsReturnPage = "overview";
   let webConfigRunning = false;
   let lastWebConfigPoll = 0;
   let pairingDeadline = null;
@@ -244,7 +242,7 @@
       return data;
     } finally { window.clearTimeout(timeout); }
   }
-  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-detail": "风扇通道", "fan-policy-detail": "独立风扇状态", "official-fan": "原厂系统风扇策略", power: "电源", rgb: "灯光", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
+  const detailTitles = { screen: "屏幕", fans: "风扇", "fan-policy-detail": "独立风扇状态", power: "电源", rgb: "灯光", containers: "Docker 容器", vms: "虚拟机", "app-detail": "应用详情", identity: "设备信息", cpu: "处理器", memory: "内存", "physical-disks": "物理磁盘", "volume-detail": "存储空间", "disk-detail": "磁盘详情", interfaces: "网络接口", "interface-detail": "接口详情", gpu: "GPU", processes: "进程", ports: "监听端口", thermal: "温度传感器", "fan-sensors": "风扇传感器", raid: "阵列信息", capabilities: "设备能力", "settings-editor": "面板设置", "network-routes": "默认网关", "network-dns": "DNS 与搜索域", "web-config": "网页配置" };
   function resetControlCenter() {
     controlOrigin=null;document.documentElement.classList.remove("control-center-open");$("control-center-close").hidden=true;text("title-controls","设备控制");$("control-center-toggle").setAttribute("aria-expanded","false");$("control-center-toggle").setAttribute("aria-label","打开控制中心");
   }
@@ -321,13 +319,13 @@
       if (!button.hidden) count++;
       if (name === "rgb") {
         button.dataset.openView = "rgb";
-        button.querySelector("strong").textContent = cap("rgb").available ? "灯光" : "验证灯光接口";
-        button.querySelector("small").textContent = cap("rgb").available ? "颜色与灯效" : "验证通过后开放调色";
+        button.querySelector("strong").textContent = "灯光";
+        button.querySelector("small").textContent = cap("rgb").available ? "当前状态 · 网页配置灯效" : "接口未验证 · 网页查看";
       }
-      if (name === "fans") button.querySelector("small").textContent = independentFanPolicy ? "CPU 与系统风扇 · 各自独立状态" : official && official.control_available ? "原厂系统风扇策略 · 仅系统风扇" : "可用风扇通道";
+      if (name === "fans") button.querySelector("small").textContent = independentFanPolicy ? "CPU 与系统风扇 · 只读状态" : "风扇状态 · 网页配置温控";
     });
     $("control-empty").hidden = count > 0;
-    if (currentDetail && ["screen", "power", "rgb", "fans", "fan-detail", "official-fan"].includes(currentDetail.name)) {
+    if (currentDetail && ["screen", "power", "rgb", "fans"].includes(currentDetail.name)) {
       const type = currentDetail.name.startsWith("rgb") ? "rgb" : currentDetail.name.includes("fan") ? "fans" : currentDetail.name;
       if (!toolboxOnline || !available[type]) { currentDetail = null; navigationStack = []; drawNavigation(); }
     }
@@ -348,8 +346,6 @@
     if (!currentDetail) return;
     const name = currentDetail.name, params = currentDetail.params;
     const device = insights && insights.device || {}, system = insights && insights.system || {};
-    if (name === "fan-detail") renderFanDetail(list(toolbox && toolbox.fans && toolbox.fans.channels).find((channel) => channel.id === params.id));
-    if (name === "official-fan") renderOfficialFan();
     if (name === "fan-policy-detail") renderIndependentFanDetail(params.id);
     if (name === "app-detail") renderAppDetail(params.kind, params.id);
     if (name === "volume-detail") {
@@ -551,7 +547,6 @@
     const executing = Boolean(toolbox && toolbox.power && toolbox.power.executing);
     setAllowed("brightness-save", screenAvailable);
     setAllowed("screen-sleep", screenAvailable && !pending);
-    setAllowed("rgb-save", rgbAvailable && !(lightPolicy && (lightPolicy.active || lightPolicy.busy)));
     setAllowed("web-pairing-generate", Boolean(webConfig && webConfig.enabled));
     setAllowed("power-reboot", powerAvailable && !pending && !executing);
     setAllowed("power-off", powerAvailable && !pending && !executing);
@@ -559,7 +554,6 @@
       node.disabled = !writable || node.dataset.allowed === "false";
     });
     $("brightness").disabled = !writable || !screenAvailable;
-    $("rgb-color").disabled = $("rgb-mode").disabled = $("rgb-brightness").disabled = !writable || !rgbAvailable;
     document.querySelectorAll("#settings-form input, #settings-form select").forEach((node) => { node.disabled = !writable; });
     document.querySelectorAll(".fan-input").forEach((node) => { node.disabled = !writable || !cap("fans").available; });
     $("power-cancel").disabled = $("global-power-cancel").disabled = !writable || !pending || executing;
@@ -714,104 +708,27 @@
   }
   function renderFans(data) {
     const channels = list(data && data.channels), official = data && data.official;
-    const policyOwns = independentFanBlocksLegacy();
-    const signature = JSON.stringify([cap("fans"), data && data.last_error, policyOwns, official, channels.map((item) => [item.id, item.driver, item.owned, item.mode, item.duty_percent])]);
-    if (signature !== fanSignature) {
-      fanSignature = signature; clear($("fan-list"));
-      if (data && data.last_error) $("fan-list").append(element("p", "capability-note fan-error", data.last_error));
-      if (official && official.control_available && !policyOwns) {
-        const readings = [];
-        if (finite(official.cpu_rpm)) readings.push("CPU " + official.cpu_rpm + " RPM");
-        if (finite(official.system_rpm)) readings.push("系统 " + official.system_rpm + " RPM");
-        $("fan-list").append(menuButton("原厂系统风扇策略", readings.length ? "仅系统风扇 · " + readings.join(" · ") : "仅原厂系统风扇 · 转速读数不可用", () => openView("official-fan")));
-      }
-      if (!policyOwns) channels.forEach((channel) => $("fan-list").append(menuButton(channel.label || channel.driver + " · " + channel.id, percentage(channel.duty_percent) + "% PWM · " + (channel.owned ? "Toolbox 接管" : "原控制模式"), () => openView("fan-detail", { id: channel.id }, channel.label || channel.id))));
-      if (!channels.length && !(official && official.control_available && !policyOwns) && !independentFanPolicy) $("fan-list").append(element("p", "capability-note", "此设备当前没有可控制的风扇接口"));
-    }
-    if (currentDetail && currentDetail.name === "fan-detail") renderFanDetail(channels.find((channel) => channel.id === currentDetail.params.id));
-    if (currentDetail && currentDetail.name === "official-fan") renderOfficialFan();
-  }
-  function renderOfficialFan() {
-    const official = toolbox && toolbox.fans && toolbox.fans.official;
-    const modes = { low: "低速", medium: "中速", high: "高速", auto: "自动" };
-    fillDetails("official-fan-readings", official ? [["CPU 风扇", finite(official.cpu_rpm) ? official.cpu_rpm + " RPM" : null], ["系统风扇", finite(official.system_rpm) ? official.system_rpm + " RPM" : null], ["当前系统风扇策略", modes[official.mode] || "未读取到策略"]] : [], "接口当前不可用");
-    text("official-fan-reason", official && !finite(official.cpu_rpm) && !finite(official.system_rpm) ? "系统风扇策略可设，转速读数不可用" : official && official.reason || "该策略会保存到海康配置");
-    clear($("official-fan-modes"));
-    const policyOwns = independentFanBlocksLegacy();
-    text("official-fan-scope", policyOwns ? "此入口仅对应原厂系统风扇。独立温控运行中，请先在网页恢复原厂管理，再设置原厂档位。" : "此入口仅设置原厂系统风扇。CPU 风扇继续由原厂温控管理；物理风扇对应需实机确认。");
-    if (!official || !official.control_available || policyOwns) return;
-    Object.entries(modes).forEach(([mode, label]) => {
-      const button = element("button", "button button-secondary requires-write" + (official.mode === mode ? " is-selected" : ""), label);
-      button.type = "button";
-      button.addEventListener("click", async () => {
-        if (!(await confirmOperation("切换至" + label, "将修改原厂系统风扇策略，并保存到海康配置。\nCPU 风扇继续由原厂温控管理；物理风扇对应需实机确认。", "确认切换"))) return;
-        await action("fan.official", { mode, confirmed: true }, "原厂系统风扇策略已提交");
+    const signature = JSON.stringify([cap("fans"), data && data.last_error, official, channels.map((item) => [item.id, item.driver, item.owned, item.mode, item.duty_percent, item.rpm])]);
+    if (signature === fanSignature) return;
+    fanSignature = signature;
+    clear($("fan-list"));
+    if (data && data.last_error) $("fan-list").append(element("p", "capability-note fan-error", data.last_error));
+    if (channels.length) {
+      channels.forEach((channel) => {
+        const row = element("div", "detail-row");
+        const rpm = finite(channel.rpm) && channel.rpm_verified ? channel.rpm + " RPM" : "转速未确认";
+        row.append(element("strong", "", channel.label || (channel.driver + " · " + channel.id)),
+          element("span", "", percentage(channel.duty_percent) + "% PWM · " + (channel.owned ? "Toolbox 接管" : "原控制模式") + " · " + rpm));
+        $("fan-list").append(row);
       });
-      $("official-fan-modes").append(button);
-    });
-    syncControls();
-  }
-  function renderFanDetail(channel) {
-    if (independentFanBlocksLegacy()) { fanDetailSignature = null; clear($("fan-controls")); $("fan-controls").append(element("p", "capability-note", "独立温控运行中或原厂恢复尚未确认。请先在网页确认两路恢复原厂管理，再使用其他风扇控制。")); return; }
-    const signature = JSON.stringify(channel ? [channel.id, channel.driver, channel.owned, channel.mode, channel.curve, toolbox && toolbox.fans && toolbox.fans.last_error] : null);
-    if (signature === fanDetailSignature) return;
-    fanDetailSignature = signature; clear($("fan-controls"));
-    if (!channel) { $("fan-controls").append(element("p", "capability-note", "此通道当前不可用")); return; }
-    const card = element("article", "card control-card fan-channel");
-    const heading = element("div", "fan-heading");
-    heading.append(element("strong", "", channel.label || channel.driver || channel.id), element("span", "fan-rpm", percentage(channel.duty_percent) + "% PWM"));
-    const note = element("p", "capability-note", channel.id + (channel.owned ? " · 已由 Toolbox 接管" : " · 尚未接管") + (channel.rpm_verified && finite(channel.rpm) ? " · " + channel.rpm + " RPM" : " · 未确认转速对应关系"));
-    if (channel.rpm_reason) note.append(document.createTextNode(" · " + channel.rpm_reason));
-    const consent = element("label", "check-row");
-    const takeover = document.createElement("input"); takeover.type = "checkbox"; takeover.className = "fan-input"; takeover.checked = channel.owned === true;
-    consent.append(takeover, element("span", "", "允许 Toolbox 临时接管此通道"));
-    const slider = document.createElement("input"); slider.type = "range"; slider.min = "50"; slider.max = "100"; slider.step = "5"; slider.value = String(percent(channel.duty_percent) === null ? 80 : Math.max(50, Math.round(channel.duty_percent))); slider.className = "touch-range fan-input";
-    const output = element("output", "", slider.value + "%");
-    const label = element("label", "control-label", "手动 PWM 占空比"); label.append(output);
-    slider.addEventListener("input", () => { output.textContent = slider.value + "%"; });
-    async function setMode(mode, title, curve) {
-      if (!takeover.checked && mode !== "restore") { toast("请先勾选允许接管风扇", true); return; }
-      const message = mode === "restore" ? "恢复此通道接管前的控制模式和 PWM 设置。" : mode === "auto" || mode === "curve" ? "Toolbox 将按温度调整该通道；传感器缺失或过热时使用满速。确认允许接管？" : "将调整 " + channel.id + "，确认允许 Toolbox 接管此通道？";
-      if (!(await confirmOperation(title, message, "确认调整"))) return;
-      if (mode === "restore") await action("fan.restore", { channel: channel.id }, "已请求恢复原风扇控制");
-      else {
-        const payload = { channel: channel.id, mode, value: Number(slider.value), takeover: true };
-        if (curve) payload.curve = curve;
-        await action("fan.set", payload, "风扇控制已提交");
-      }
+    } else if (official) {
+      const readings = [];
+      if (finite(official.cpu_rpm)) readings.push("CPU " + official.cpu_rpm + " RPM");
+      if (finite(official.system_rpm)) readings.push("系统 " + official.system_rpm + " RPM");
+      $("fan-list").append(element("p", "capability-note", "当前由原厂固件管理" + (readings.length ? " · " + readings.join(" · ") : " · 转速读数不可用")));
+    } else {
+      $("fan-list").append(element("p", "capability-note", "当前没有可读取的风扇通道"));
     }
-    const buttons = element("div", "mode-grid");
-    [["低速", "low"], ["中速", "medium"], ["高速", "high"], ["自动温控", "auto"], ["应用手动", "manual"], ["恢复原控制", "restore"]].forEach(([title, mode]) => {
-      const button = element("button", "button button-secondary requires-write", title); button.type = "button"; button.dataset.allowed = String(mode !== "restore" || channel.owned === true);
-      button.addEventListener("click", () => setMode(mode, title)); buttons.append(button);
-    });
-    const curveEditor = element("details", "curve-editor");
-    const summary = element("summary", "check-row", "自定义温控曲线"); curveEditor.append(summary);
-    curveEditor.append(element("p", "capability-note", "5–8 个递增温度点；PWM 最低 50%。超温或温度缺测时使用满速。"));
-    const curveHead = element("div", "curve-heading"); curveHead.append(element("span", "", "温度 °C"), element("span", "", "PWM %"), element("span", "")); curveEditor.append(curveHead);
-    const pointList = element("div", "curve-points");
-    function addPoint(point) {
-      const row = element("div", "curve-row");
-      const temperature = document.createElement("input"); temperature.type = "number"; temperature.min = "0"; temperature.max = "100"; temperature.step = "1"; temperature.value = String(point.temperature); temperature.className = "fan-input"; temperature.setAttribute("aria-label", "曲线温度");
-      const duty = document.createElement("input"); duty.type = "number"; duty.min = "50"; duty.max = "100"; duty.step = "1"; duty.value = String(point.duty); duty.className = "fan-input"; duty.setAttribute("aria-label", "曲线 PWM");
-      const remove = element("button", "button button-secondary curve-remove requires-write", "−"); remove.type = "button"; remove.setAttribute("aria-label", "移除此温度点");
-      remove.addEventListener("click", () => { if (pointList.children.length <= 5) toast("至少保留 5 个温度点", true); else row.remove(); });
-      row.append(temperature, duty, remove); pointList.append(row);
-    }
-    const points = list(channel.curve).length >= 5 ? channel.curve : [{ temperature: 30, duty: 60 }, { temperature: 40, duty: 60 }, { temperature: 50, duty: 75 }, { temperature: 60, duty: 90 }, { temperature: 75, duty: 100 }]; points.forEach(addPoint); curveEditor.append(pointList);
-    const curveButtons = element("div", "button-row");
-    const add = element("button", "button button-secondary requires-write", "添加温度点"); add.type = "button";
-    add.addEventListener("click", () => { if (pointList.children.length >= 8) toast("最多设置 8 个温度点", true); else { const inputs = pointList.lastElementChild.querySelectorAll("input"); addPoint({ temperature: Math.min(100, Number(inputs[0].value) + 5), duty: 100 }); syncControls(); } });
-    const apply = element("button", "button requires-write", "应用曲线"); apply.type = "button";
-    apply.addEventListener("click", () => {
-      const curve = Array.from(pointList.children).map((row) => { const inputs = row.querySelectorAll("input"); return { temperature: Number(inputs[0].value), duty: Number(inputs[1].value) }; });
-      if (curve.length < 5 || curve.length > 8 || curve.some((point, index) => !Number.isInteger(point.temperature) || point.temperature < 0 || point.temperature > 100 || !Number.isInteger(point.duty) || point.duty < 50 || point.duty > 100 || index && point.temperature <= curve[index - 1].temperature)) { toast("请填写 5–8 个递增温度点，PWM 为 50–100%", true); return; }
-      setMode("curve", "应用温控曲线", curve);
-    });
-    curveButtons.append(add, apply); curveEditor.append(curveButtons);
-    card.append(heading, note, consent, label, slider, buttons, curveEditor); $("fan-controls").append(card);
-    if (toolbox && toolbox.fans && toolbox.fans.last_error) $("fan-controls").append(element("p", "capability-note fan-error", toolbox.fans.last_error));
-    syncControls();
   }
 
   function renderPower(power) {
@@ -840,8 +757,8 @@
     toolboxOnline = Boolean(toolbox);
     if (!toolbox) {
       fanSignature = null;
-      clear($("fan-controls"));
-      $("fan-controls").append(element("p", "capability-note", "服务未连接，风扇状态不可用"));
+      clear($("fan-list"));
+      $("fan-list").append(element("p", "capability-note", "服务未连接，风扇状态不可用"));
       text("screen-state", "离线"); text("screen-reason", "服务未连接，亮度与息屏操作已禁用");
       text("rgb-reason", "服务未连接，灯光状态不可用"); text("rgb-state", "离线");
       text("power-reason", "服务未连接，电源操作已禁用");
@@ -857,14 +774,11 @@
     text("screen-reason", cap("screen").available ? "轻触屏幕可唤醒；本页操作不会执行电源关机" : cap("screen").reason);
     setSleeping(screen.asleep);
     const rgb = toolbox.rgb || {};
-    text("rgb-state", cap("rgb").available ? "可控制" : "不可用");
-    text("rgb-reason", cap("rgb").available ? "当前使用已验证的灯光接口" : cap("rgb").reason);
-    text("rgb-save", "应用灯光");
-    if (!rgbBrightnessDirty) {
-      if (percent(rgb.brightness) !== null) $("rgb-brightness").value = rgb.brightness;
-      text("rgb-brightness-value", percentage(rgb.brightness) + "%");
-    }
-    if (!rgbDirty) { if (/^#[0-9a-f]{6}$/i.test(rgb.color || "")) $("rgb-color").value = rgb.color; if (number(rgb.mode) !== null) $("rgb-mode").value = String(rgb.mode); }
+    const rgbLabels = { 0: "关闭", 1: "常亮", 2: "彩虹", 3: "呼吸" };
+    const rgbReady = cap("rgb").available === true;
+    text("rgb-state", rgbReady ? (lightPolicy && lightPolicy.active ? "网页策略接管中" : "可查看") : "不可用");
+    text("rgb-reason", rgbReady ? "灯效、颜色与温度联动请在网页设置" : cap("rgb").reason);
+    fillDetails("rgb-summary", rgbReady ? [["灯效", rgbLabels[rgb.mode] || (number(rgb.mode) !== null ? String(rgb.mode) : null)], ["颜色", rgb.color], ["亮度", percent(rgb.brightness) !== null ? percentage(rgb.brightness) + "%" : null]] : [], "灯光接口尚未验证；请在网页查看");
     applySettings(toolbox.settings);
     renderFans(toolbox.fans);
     renderPower(toolbox.power);
@@ -878,15 +792,6 @@
     if (await confirmOperation("立即息屏", "只关闭屏幕显示，NAS 和应用继续运行。再次轻触屏幕即可唤醒。", "确认息屏")) {
       if (await action("screen.sleep", {}, null)) setSleeping(true);
     }
-  });
-  ["rgb-color", "rgb-mode"].forEach((id) => $(id).addEventListener("input", () => { rgbDirty = true; }));
-  $("rgb-brightness").addEventListener("input", () => { rgbBrightnessDirty = true; text("rgb-brightness-value", $("rgb-brightness").value + "%"); });
-  $("rgb-save").addEventListener("click", async () => {
-    const rgb = toolbox && toolbox.rgb;
-    if (!cap("rgb").available || !rgb) { toast("灯光接口尚未验证", true); return; }
-    const payload = { mode: Number($("rgb-mode").value), color: $("rgb-color").value };
-    if (rgbBrightnessDirty) payload.brightness = Number($("rgb-brightness").value);
-    if (await action("rgb.set", payload, "灯光设置已提交")) { rgbDirty = false; rgbBrightnessDirty = false; }
   });
   async function requestPower(operation) {
     const label = operation === "poweroff" ? "关闭 NAS" : "重启 NAS";
@@ -1111,13 +1016,33 @@
       page.hidden = !active;
       page.classList.toggle("is-active", active);
       const button = document.querySelector(`[data-page="${pageName}"]`);
-      button.classList.toggle("is-active", active);
-      if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+      if (button) {
+        button.classList.toggle("is-active", active);
+        if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+      }
     });
+    const gear = $("settings-open");
+    if (gear) {
+      const gearActive = name === "settings" || name === "system";
+      gear.classList.toggle("is-active", gearActive);
+      if (gearActive) gear.setAttribute("aria-current", "page"); else gear.removeAttribute("aria-current");
+    }
+    $("settings-back").hidden = !(name === "settings" || name === "system");
     const activeButton = document.querySelector(`[data-page="${name}"]`);
     if (activeButton && activeButton.scrollIntoView) activeButton.scrollIntoView({ block: "nearest", inline: "nearest" });
     lastCarousel = Date.now();
   }
+  function openSettings() {
+    if (pages[currentPage] !== "settings" && pages[currentPage] !== "system") settingsReturnPage = pages[currentPage];
+    showPage("settings");
+  }
+  function closeSettings() {
+    if (pages[currentPage] === "system") { showPage("settings"); return; }
+    const target = enabledPages.includes(settingsReturnPage) ? settingsReturnPage : "overview";
+    showPage(target);
+  }
+  $("settings-open").addEventListener("click", openSettings);
+  $("settings-back").addEventListener("click", closeSettings);
   document.querySelectorAll("[data-page]").forEach((button) => button.addEventListener("click", () => showPage(button.dataset.page)));
   const viewport = $("viewport");
   viewport.addEventListener("pointerdown", (event) => {
