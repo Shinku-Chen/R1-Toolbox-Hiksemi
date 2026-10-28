@@ -27,8 +27,7 @@ HELP
       exit 2
     fi
     TASK_CONTAINER=${TASK_CONTAINER:-r1-toolbox}
-    TASK_REVISION=${TASK_REVISION:-1}
-    export TASK_CONTAINER TASK_REVISION
+    export TASK_CONTAINER
     exec /bin/sh /opt/r1-toolbox/runner.sh
     ;;
   *)

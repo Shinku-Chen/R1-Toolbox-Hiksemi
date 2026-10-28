@@ -13,15 +13,12 @@
 
 ```yaml
 environment:
-  TASK_CONTAINER: r1-toolbox
-  TASK_REVISION: '8'
   UI_MODE: image
-  UI_DIR: ''
-  R1_WEB_BIND: '0.0.0.0'
-  R1_WEB_PORT: '18732'
 ```
 
-内置界面保留概览、存储、网络、控制、应用、系统、设置七个入口，通过大卡片/列表进入二级、三级详情，返回按钮随时可用。主页面可左右滑动，详情内容独立滚动，避免在小屏堆满指标与开关。真实数据通过随小屏运行的 Python 服务持续采集，Toolbox 容器结束不影响刷新。未知温度、首次差分和读取失败会显示 `--` 或采集中，不填模拟数据。完整范围见 [功能与支持条件](../../docs/features.md)。
+`UI_MODE=image` 是必需项。`container_name` 默认 `r1-toolbox`；如需改名，同时设置 `TASK_CONTAINER` 为相同名称。`UI_DIR`、`R1_WEB_BIND`、`R1_WEB_PORT` 均有默认值，可按需覆盖。
+
+内置界面保留概览、存储、网络、应用、温度、设置六个入口，通过大卡片/列表进入二级、三级详情，返回按钮随时可用。主页面可左右滑动，详情内容独立滚动，避免在小屏堆满指标与开关。真实数据通过随小屏运行的 Python 服务持续采集，Toolbox 容器结束不影响刷新。未知温度、首次差分和读取失败会显示 `--` 或采集中，不填模拟数据。完整范围见 [功能与支持条件](../../docs/features.md)。
 
 当前固件没有 IT87 hwmon/PWM，但原厂路径不能仅据此否定。同一固件有不同的 rootfs/initrd hikio，前者缺调速、后者实现；两者都缺旧 RPM 查询。用户已读取实际加载模块 GNU note，确认与 initrd 支持版完全一致，原厂 Unix GET 也已返回 b'5'/auto，可在条件满足时开放系统风扇策略；物理效果仍需观察。未知/旧版模块仅只读，文件或 socket 存在不会自动解锁。对照值与识别步骤见 [官方接口审查](../../docs/histor-interfaces.md)。不加载/替换内核模块，不使用 /dev/port。
 
@@ -47,7 +44,7 @@ Compose 中的 `r1-toolbox-data:/data` 是独立命名卷，保存主题、字�
 
 旧 Compose 未设置 `UI_MODE` 时，`UI_DIR` 非空按 directory 处理，否则只诊断。旧 `NEW_HTML` 复制参数已停用，请移除。
 
-改变任务配置时递增 `TASK_REVISION`。更换镜像后，镜像 ID 的变化会自动触发同次开机重新执行，不会因旧成功记录而跳过。
+任务配置指纹由容器按 `TASK_CONTAINER`、`UI_MODE`、`UI_DIR`、`R1_WEB_BIND`、`R1_WEB_PORT` 自动计算；修改环境或更换镜像都会触发同次开机重新执行，不再需要手写版本号。
 
 ## 镜像如何提供 UI
 
@@ -112,7 +109,6 @@ Python 主服务和网页随小屏服务退出；独立监督服务不依赖该�
 将自有界面放在数据盘，例如 `/drives/实际磁盘/R1-Toolbox/ui`，包含 `index.html` 及其引用的 JS、CSS、图片。然后设置：
 
 ```yaml
-TASK_REVISION: '8'
 UI_MODE: directory
 UI_DIR: /drives/实际磁盘/R1-Toolbox/ui
 ```
@@ -123,7 +119,7 @@ UI_DIR: /drives/实际磁盘/R1-Toolbox/ui
 
 ## 依赖、日志与边界
 
-- 宿主需要 `docker`、支持 `--cgroup` 的 `nsenter`、`mountpoint`、`python3`。实际挂载还需要 systemd 233 起的 `BindReadOnlyPaths`、`systemd-run`、`systemctl` 和现有小屏图形环境。以实际预检通过为准。
+- 宿主需要 `docker`、支持 `--cgroup` 的 `nsenter`、`mountpoint`、`sha256sum`、`python3`。实际挂载还需要 systemd 233 起的 `BindReadOnlyPaths`、`systemd-run`、`systemctl` 和现有小屏图形环境。以实际预检通过为准。
 - 容器名与 `TASK_CONTAINER` 保持 `r1-toolbox`。镜像继承 `docker.io/library/debian:bookworm-slim`，保留原宿主访问机制，不联网安装宿主工具。
 - 镜像模式要求 `/run` 为 tmpfs；不满足时在停原小屏前拒绝部署 UI。缺少依赖或包损坏也不会停止原程序。
 - 临时服务名打印在容器日志，宿主可用 `journalctl -u histor-custom-<PID>.service` 查看。失败暂存保留至重启，便于排查。

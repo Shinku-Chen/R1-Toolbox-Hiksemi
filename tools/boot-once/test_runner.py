@@ -5,6 +5,7 @@ Run with: python3 test_runner.py
 This verifies shell behavior, not Linux PID 1 or a NAS/Docker boot sequence.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,6 @@ class BootOnceTests(unittest.TestCase):
             EVENT_FILE=str(self.events),
             RUNNER_PID_FILE=str(self.pid_file),
             TASK_CONTAINER="r1-boot-once-test",
-            TASK_REVISION="1",
             FAKE_IMAGE_ID="sha256:" + "1" * 64,
         )
         self.install_fake_tools()
@@ -108,6 +108,7 @@ time.sleep(0.01)
 ''',
             "mountpoint": "raise SystemExit(0)\n",
             "sync": "raise SystemExit(0)\n",
+            "sha256sum": "import hashlib, sys\nprint(hashlib.sha256(sys.stdin.buffer.read()).hexdigest() + '  -')\n",
         }
         for name, body in scripts.items():
             path = self.bin / name
@@ -129,7 +130,7 @@ time.sleep(0.01)
         )
 
     def start_runner(self, returncode=0, stop_fail=False):
-        runner = (ROOT / "runner.sh.in").read_text().replace(
+        runner = (ROOT / "runner.sh.in").read_text(encoding="utf-8").replace(
             "__HOST_JOB__", self.actions(returncode).rstrip()
         )
         path = self.root / "runner.sh"
@@ -190,17 +191,22 @@ time.sleep(0.01)
         output, _ = process.communicate(timeout=2)
         self.assertEqual(process.returncode, -signal.SIGTERM, output)
 
-    def run_host_job(self, revision="1", returncode=0, image=None, mode=None, ui_dir=None, web_port=None):
+    def fingerprint(self, mode="diagnostic", ui_dir="", bind="0.0.0.0", port="18732"):
+        values = ("r1-boot-once-test", mode, ui_dir, bind, port)
+        end = chr(10)
+        return hashlib.sha256((end.join(values) + end).encode()).hexdigest()
+
+    def run_host_job(self, returncode=0, image=None, mode=None, ui_dir=None, web_port=None):
         # Only these two host paths are redirected in this temporary copy.
         # All real payload operations are replaced by a harmless event append.
-        script = (ROOT / "host-job.sh.in").read_text().replace(
+        script = (ROOT / "host-job.sh.in").read_text(encoding="utf-8").replace(
             "state_dir=/run/r1-toolbox",
             "state_dir=" + shlex.quote(str(self.state_dir)),
         ).replace(
             "cat /proc/sys/kernel/random/boot_id",
             "cat " + shlex.quote(str(self.boot_file)),
         ).replace("__SCREEN_ACTIONS__", self.actions(returncode).rstrip())
-        env = self.env | {"TASK_REVISION": revision}
+        env = self.env.copy()
         if image is not None:
             env["FAKE_IMAGE_ID"] = image
         if mode is not None:
@@ -214,24 +220,24 @@ time.sleep(0.01)
             capture_output=True, text=True, timeout=4,
         )
 
-    def test_same_boot_and_revision_skip_after_success(self):
+    def test_same_boot_and_fingerprint_skip_after_success(self):
         first = self.run_host_job()
         second = self.run_host_job()
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self.actions_read(), ["executed"])
-        self.assertEqual((self.state_dir / "last-success").read_text(),
-                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732\n")
+        expected = f"boot-a:{self.fingerprint()}:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732" + chr(10)
+        self.assertEqual((self.state_dir / "last-success").read_text(), expected)
 
-    def test_revision_change_and_new_boot_run_again(self):
-        results = [self.run_host_job(), self.run_host_job(revision="2")]
-        self.boot_file.write_text("boot-b\n")
-        results.append(self.run_host_job(revision="2"))
-        for result in results:
+    def test_new_boot_runs_again_with_same_fingerprint(self):
+        first = self.run_host_job()
+        self.boot_file.write_text("boot-b" + chr(10))
+        second = self.run_host_job()
+        for result in (first, second):
             self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.actions_read(), ["executed"] * 3)
-        self.assertEqual((self.state_dir / "last-success").read_text(),
-                         "boot-b:2:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732\n")
+        self.assertEqual(self.actions_read(), ["executed"] * 2)
+        expected = f"boot-b:{self.fingerprint()}:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732" + chr(10)
+        self.assertEqual((self.state_dir / "last-success").read_text(), expected)
 
     def test_changed_web_configuration_runs_again_in_the_same_boot(self):
         for port in ("18732", "18733", "0"):
@@ -248,9 +254,9 @@ time.sleep(0.01)
         self.assertEqual(retry.returncode, 0, retry.stderr)
         self.assertEqual(self.actions_read(), ["executed", "executed"])
         self.assertEqual((self.state_dir / "last-success").read_text(),
-                         "boot-a:1:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732\n")
+                         f"boot-a:{self.fingerprint()}:sha256:" + "1" * 64 + ":diagnostic::0.0.0.0:18732" + chr(10))
 
-    def test_new_image_in_the_same_boot_runs_without_revision_change(self):
+    def test_new_image_in_the_same_boot_runs_without_config_change(self):
         first = self.run_host_job()
         second = self.run_host_job(image="sha256:" + "2" * 64)
         third = self.run_host_job(image="sha256:" + "2" * 64)

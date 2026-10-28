@@ -58,6 +58,11 @@ done
 
 state_dir=/run/r1-toolbox
 mkdir -p "$state_dir"
+command -v sha256sum >/dev/null || {
+  echo '[ERROR] 宿主缺少 sha256sum，未执行任务。'
+  exit 1
+}
+TASK_CONTAINER=${TASK_CONTAINER:-r1-toolbox}
 boot_id=$(cat /proc/sys/kernel/random/boot_id)
 ui_mode=${UI_MODE:-}
 if [ -z "$ui_mode" ]; then
@@ -76,7 +81,9 @@ fi
 case "$image_hash" in
   *[!0123456789abcdef]*) echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1 ;;
 esac
-run_key="$boot_id:${TASK_REVISION:-1}:$image_id:$ui_mode:${UI_DIR:-}:${R1_WEB_BIND:-0.0.0.0}:${R1_WEB_PORT:-18732}"
+config_fingerprint=$(printf '%s\n' "$TASK_CONTAINER" "$ui_mode" "${UI_DIR:-}" "${R1_WEB_BIND:-0.0.0.0}" "${R1_WEB_PORT:-18732}" | sha256sum)
+config_fingerprint=${config_fingerprint%% *}
+run_key="$boot_id:$config_fingerprint:$image_id:$ui_mode:${UI_DIR:-}:${R1_WEB_BIND:-0.0.0.0}:${R1_WEB_PORT:-18732}"
 last_key=$(cat "$state_dir/last-success" 2>/dev/null || true)
 if [ "$last_key" = "$run_key" ]; then
   echo '[SKIP] 本次 NAS 启动已经成功执行过当前任务版本。'

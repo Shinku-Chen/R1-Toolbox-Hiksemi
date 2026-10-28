@@ -24,12 +24,7 @@ project = {
             "ipc": "host",
             "network_mode": "host",
             "environment": {
-                "TASK_CONTAINER": "r1-toolbox",
-                "TASK_REVISION": "14",
                 "UI_MODE": "image",
-                "UI_DIR": "",
-                "R1_WEB_BIND": "0.0.0.0",
-                "R1_WEB_PORT": "18732",
             },
             "volumes": [
                 "/:/host",
@@ -49,7 +44,8 @@ compose = (
     "# UI_DIR 仅 directory 模式填写 NAS 前端目录；原版小屏文件保持原样。\n"
     "# 设置保存在独立 Docker 数据卷；UI 和服务仍从 /run 内存目录运行。\n"
     "# 网页配置使用 NAS_IP:18732，在小屏生成一次性配对码；R1_WEB_PORT=0 禁用。\n"
-    "# 修改任务配置后递增 TASK_REVISION；更换镜像会自动重新执行。\n"
+    "# UI_MODE=image 必需；container_name、UI_DIR、R1_WEB_BIND/PORT 可按需覆盖。\n"
+    "# 任务配置指纹自动计算；修改环境或更换镜像都会触发同次开机重新执行。\n"
     "# 可通过 R1_TOOLBOX_IMAGE 指定版本；发布包固定为对应构建的 sha 镜像标签。\n"
     + yaml.safe_dump(project, allow_unicode=True, sort_keys=False, width=100)
 )
