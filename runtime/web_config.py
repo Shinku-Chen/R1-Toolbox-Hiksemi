@@ -143,6 +143,8 @@ _DEV_COMMANDS = {
     'fan_units': ['systemctl', 'list-units', '--all', '--type=service', '--no-pager', '--no-legend', 'r1-fan-*'],
     'boot_log': ['journalctl', '-b', '-n', '300', '--no-pager'],
     'fan_files': ['ls', '-la', '/run/r1-toolbox/fan-control'],
+    'fan_status': ['find', '/run/r1-toolbox/fan-control', '-maxdepth', '2', '-type', 'f',
+                   '-name', 'status.json', '-exec', 'cat', '{}', ';'],
 }
 
 

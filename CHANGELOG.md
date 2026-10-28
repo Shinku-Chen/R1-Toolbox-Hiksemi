@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- fix(fan): 监督进程提前退出时保留其 `status.json` 原因；开发者命令增加只读 `fan_status` 用于查看监督状态。
 - fix(deploy): 将开发者模式开关、IP 白名单、时限和命令开关纳入配置指纹，修改后同次开机也会重新部署宿主服务。
 - feat(dev): `/api/auth/session` 返回服务端实际看到的 `client_ip`，便于核对开发者白名单。
 - feat(dev): 开发者模式新增固定白名单的只读诊断命令接口 `/api/dev/exec`；不接受任意 shell/cmd，仍需开发者 IP、限时、同源和 CSRF。

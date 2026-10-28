@@ -258,7 +258,9 @@ class FanNativeAdapter:
                 deadline = self.clock() + 15
                 while self.clock() < deadline:
                     if self.child.poll() is not None:
-                        raise RuntimeError("独立风扇监督进程未能就绪")
+                        status = self._status() or {}
+                        reason = str(status.get("reason") or "监督进程提前退出")[:160]
+                        raise RuntimeError("独立风扇监督进程未能就绪：" + reason)
                     status = self._status() or {}
                     if status.get("phase") == "active":
                         return
