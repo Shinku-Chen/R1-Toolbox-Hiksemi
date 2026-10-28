@@ -24,7 +24,7 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
     sources = {'frontend/index.html': frontend / 'index.html',
                **{'runtime/' + name: root / 'runtime' / name
                   for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'device_info.py', 'histor.py', 'web_config.py',
-                               'fnm_auth.py', 'fnm_compat.py',
+                               'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py',
                                'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
                                'light_policy.py', 'monitoring.py')}}
     if native_guard is not None:

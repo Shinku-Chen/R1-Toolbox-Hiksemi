@@ -36,7 +36,7 @@ class BundleTests(unittest.TestCase):
         (self.root / 'runtime/histor.py').write_text('class HistorAdapter: pass\n')
         (self.root / 'runtime/web_config.py').write_text('class WebConfigServer: pass\n')
         for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
-                     'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py'):
+                     'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py'):
             (self.root / 'runtime' / name).write_text('# fixture only\n')
         (self.root / 'ui/web').mkdir()
         for name in ('index.html', 'login.html'):
@@ -74,6 +74,7 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(files['frontend/index.html'], b'<p>Own UI</p>')
         self.assertEqual(files['frontend/web/index.html'], b'web fixture')
         self.assertIn('runtime/web_config.py', files)
+        self.assertIn('runtime/fan_diagnostics.py', files)
         self.assertEqual((self.root / 'build/ui-bundle.sha256').read_text(), self.digest + '\n')
 
     def test_archive_digest_and_payload_hash_corruption_are_rejected(self):

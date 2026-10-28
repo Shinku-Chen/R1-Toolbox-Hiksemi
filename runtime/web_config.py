@@ -24,6 +24,7 @@ if _RUNTIME_DIR not in sys.path:
 
 from fnm_auth import AuthStore, COOKIE as AUTH_COOKIE
 from fnm_compat import FnmonitorPanel
+from fan_diagnostics import FanDiagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
                       'saver_brightness', 'saver_content', 'brightness',
@@ -60,7 +61,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/idrac/refresh', '/api/disk_scan/now', '/api/scan_log/clear', '/api/update/install',
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
-    '/api/dev/exec',
+    '/api/dev/exec', '/api/dev/fan',
 ))
 
 
@@ -265,8 +266,9 @@ class WebConfigServer:
             minutes = int(os.environ.get('R1_DEV_MINUTES', '60'))
         except ValueError:
             minutes = 60
-        self.dev_until = time.time() + max(1, min(1440, minutes)) if self.dev_no_pairing and self.dev_allow_ips else 0
+        self.dev_until = time.time() + 60 * max(1, min(1440, minutes)) if self.dev_no_pairing and self.dev_allow_ips else 0
         self.dev_commands = os.environ.get('R1_DEV_ALLOW_COMMANDS') == '1'
+        self.fan_diagnostics = FanDiagnostics(fan_policy, version=version)
 
     def _expire(self):
         now = self.clock()
@@ -698,6 +700,8 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
+        if route == '/api/dev/fan':
+            return self._fan_debug_post(body, headers, ip)
         if route == '/api/dev/exec':
             if not self._dev_authorized(ip) or self.auth.required():
                 return 403, {'ok': False, 'error': '开发者命令接口未授权'}, None
@@ -758,6 +762,73 @@ class WebConfigServer:
             return status, payload, None
         finally:
             self.operation_lock.release()
+
+    def _fan_debug_post(self, body, headers, ip):
+        """Private diagnostics; retry alone may apply the existing saved policy.
+
+        All actions use the HTTP handler's same-origin JSON/CSRF gate. Neither
+        password-only open writes nor a pairing cookie opens this debug API:
+        explicit, unexpired developer IP access and the command flag are needed.
+        """
+        if not self._dev_authorized(ip) or not self.dev_commands:
+            return 403, {'ok': False, 'error': '风扇调试接口未启用或客户端未授权'}, None
+        if self.auth.required() and self.password_session(headers) is None:
+            return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
+        if not isinstance(body, dict):
+            return 400, {'ok': False, 'error': '请求体必须是 JSON 对象'}, None
+        action = body.get('action')
+        fields = {'snapshot': {'action'}, 'result': {'action', 'id'},
+                  'capture': {'action', 'duration_seconds', 'interval_ms'},
+                  'retry': {'action', 'duration_seconds', 'interval_ms', 'confirmed'}}
+        if not isinstance(action, str) or action not in fields or set(body) - fields[action]:
+            return 400, {'ok': False, 'error': '风扇调试操作或参数无效'}, None
+        try:
+            if action == 'snapshot':
+                return 200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}, None
+            if action == 'result':
+                identity = body.get('id')
+                if not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', identity):
+                    raise ValueError('诊断任务 id 无效')
+                return 200, {'ok': True, 'job': self.fan_diagnostics.result(identity)}, None
+            if action == 'retry' and body.get('confirmed') is not True:
+                raise ValueError('重试风扇接管需要明确确认')
+            duration, interval = body.get('duration_seconds', 45), body.get('interval_ms', 250)
+            if action == 'capture':
+                job = self.fan_diagnostics.start(duration_seconds=duration, interval_ms=interval)
+                running = job.get('state') == 'running'
+                return (202 if running else 503), {'ok': running, 'job': job}, None
+            # Capture starts before the existing async apply worker, preserving
+            # both the original owner and a failure followed by vendor recovery.
+            if not self.operation_lock.acquire(blocking=False):
+                return 409, {'ok': False, 'error': '已有设置正在保存或应用，请稍后重试'}, None
+            try:
+                if self.fan_policy is None:
+                    raise ValueError('独立温控未启用')
+                policy = self.fan_policy.snapshot()
+                if policy.get('busy'):
+                    return 409, {'ok': False, 'error': '风扇控制正在切换，请先采集或查询结果'}, None
+                config = policy.get('config')
+                channels = config.get('channels') if isinstance(config, dict) else None
+                if not isinstance(channels, dict) or not any(
+                        isinstance(item, dict) and item.get('mode') in ('manual', 'temperature')
+                        for item in channels.values()):
+                    raise ValueError('已保存的配置没有手动或自定义温控通道，请先保存配置')
+                job = self.fan_diagnostics.start(duration_seconds=duration, interval_ms=interval)
+                if job.get('state') != 'running':
+                    return 503, {'ok': False, 'error': '诊断采集未启动，未重试接管', 'job': job}, None
+                attempt = self.fan_policy.action('fan.policy.update',
+                    {'config': copy.deepcopy(config), 'apply': True, 'confirmed': True})
+                return (202 if attempt.get('ok') else 400), {
+                    'ok': attempt.get('ok') is True, 'job': job,
+                    'attempt': self._policy_result(attempt)}, None
+            finally:
+                self.operation_lock.release()
+        except KeyError:
+            return 404, {'ok': False, 'error': '诊断任务不存在或已被新任务替换'}, None
+        except ValueError as error:
+            return 400, {'ok': False, 'error': str(error)}, None
+        except RuntimeError as error:
+            return 409, {'ok': False, 'error': str(error)}, None
 
     def _auth_cookie(self, sid, clear=False):
         if clear:
@@ -1190,6 +1261,7 @@ class WebConfigServer:
                 self.server = self.thread = None
                 self.sessions.clear()
                 self.pair_hash, self.pair_until = None, 0
+        self.fan_diagnostics.stop()
         if server is not None:
             server.shutdown()
             server.server_close()

@@ -93,7 +93,7 @@ environment:
 
 - `R1_DEV_NO_PAIRING=1` 才启用；未设置或为 `0` 时完全保持五位配对/登录口令。
 - `R1_DEV_ALLOW_IPS` 只接受精确客户端 IP，逗号分隔；不会对整段局域网开放。当前调试机是 `192.168.31.193` 时可填这个地址。
-- 默认 60 分钟后自动失效，最大 1440 分钟；重启宿主服务也会失效。
+- 从宿主服务启动起计时，默认 60 分钟后自动失效，最大 1440 分钟；重启服务会按当前环境配置重新计时。
 - 如果已设置面板登录口令，免配对模式仍要求先登录口令；它只替代一次配对，不替代口令。
 - 不要长期开启或暴露到公网；调试结束后删除这些环境变量并重新部署。
 
@@ -108,6 +108,46 @@ X-FNM-Request: 1
 ```
 
 命令名固定为 `identity`、`uname`、`processes`、`blocks`、`failed_units`、`fan_units`、`boot_log`、`fan_files`、`fan_status`、`fan_process`。接口不接受 `cmd`、`shell` 或参数拼接，不能用它执行任意命令；输出截断到 64 KiB、10 秒超时。需要更多诊断命令时必须修改白名单代码。日志可能包含主机信息，只在调试窗口内使用。
+
+## 风扇接管调试接口
+
+风扇排障使用 `POST /api/dev/fan`，通过同一个接口读取现场、限时采集和查询结果；需要重试时，先启动采集，再复用正常接管流程。不要反复增加少量错误字段、打包、要求用户换镜像猜原因。
+
+该接口要求上一节的开发者总开关、精确 IP 白名单、有效时间窗口和 `R1_DEV_ALLOW_COMMANDS=1` 全部满足。已设置且启用登录口令时，还必须携带正常登录会话；口令会话不能替代开发者开关。所有操作都要求同源 `POST`、JSON 和 `X-FNM-Request: 1`（或有效配对会话的 CSRF 头）。诊断不放进公开监控 API，不接受任意命令、文件路径、环境变量或上传代码。
+
+四种请求体：
+
+```json
+{"action":"snapshot"}
+{"action":"capture","duration_seconds":45,"interval_ms":250}
+{"action":"result","id":"上一次返回的任务 id"}
+{"action":"retry","confirmed":true,"duration_seconds":45,"interval_ms":250}
+```
+
+- `snapshot`：返回完整只读现场，包括服务版本、固件与驱动预检、字符设备、原厂配置、PID／启动时间／可执行文件、信号掩码、guard 映射、监督状态和真实就绪判定日志。缺失字段保持 `null` 并注明读取失败或截断；不调用有副作用的 `get_fan_status`，不读取 SMART。
+- `capture`：只采集，不保存或应用配置。返回 HTTP `202` 和 `job.id`，通过 `result` 查询；默认采集 45 秒、间隔 250 毫秒。首个样本包含完整预检，后续只记录变化，不重复计算二进制哈希。时长限制为 1～60 秒，间隔限制为 100～2000 毫秒，最多 600 个样本；采集数据预算为 4 MiB，其中最终现场最多 1 MiB，截断会明确标注。
+- `result`：返回该任务的采集状态和样本。`completed` 只表示采集结束；接管是否成功必须看实际策略的 `active`、`last_error` 和恢复状态。只保留最新一个任务，重启服务后内存结果消失；旧任务或错误 id 返回 `404`。
+- `retry`：必须明确传入 `confirmed:true`，且已保存配置至少有一路为 `manual` 或 `temperature`。先采集原始状态，再调用现有 `fan.policy.update` 应用已保存配置；接口不接收新配置，不自动选择档位。仍执行全部硬件身份与唯一进程预检、租约、就绪检查和失败恢复。HTTP `202` 表示已发起，后续通过 `result` 读取异步结果；采集启动失败时不会重试接管。
+
+同一时间只运行一个采集任务，重复启动返回 `409`；接管正在切换时，可以采集，但不能重复重试。后台采集只读取有界文件，不获取适配器的长时间控制锁，不启动常驻轮询。停用网页服务会停止采集。
+
+监督进程把真实的就绪判定写入对应 RAM 目录的 `readiness.json`，保留首个、最近和失败事件及有界时间线；恢复原厂时继续追加，不覆盖之前的失败。字段包含判定时的信号掩码、进程身份、guard 路径与匹配结果、读取字节数、稳定窗口和剩余等待时间，避免从被截断的异常字符串猜原因。诊断文件写入失败不改变控制或恢复流程。接口只返回白名单诊断字段，不暴露原厂环境变量值、恢复描述符或租约内容。
+
+例如，在已登录的 NAS 面板开发者控制台中发起一次带采集的重试：
+
+```js
+const request = body => fetch('/api/dev/fan', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json', 'X-FNM-Request': '1'},
+  body: JSON.stringify(body)
+}).then(response => response.json());
+const started = await request({action: 'retry', confirmed: true});
+console.log(started);
+// 稍后重复查询同一任务；不要重复发起 retry。
+console.log(await request({action: 'result', id: started.job.id}));
+```
+
+实机验收：先用 `snapshot` 核对版本与预检，单独 `capture` 确认不改变原厂管理；再按用户授权 `retry`，查询同一任务到采集结束，对照监督端判定和完整 `/proc` 快照定位失败。开发机上的 fixture 测试不会访问 NAS 或修改真实风扇；真实接管效果仍需部署后通过此接口验证。
 
 ## 已知边界
 

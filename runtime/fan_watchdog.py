@@ -24,6 +24,108 @@ from fan_native import (CHANNEL_BITS, DRIVER_NOTE, FIRMWARE_SHA256, atomic_json,
                         SystemdSupervisor)
 
 
+class ReadinessJournal:
+    """Private, bounded observations of the gates actually used by the owner.
+
+    This journal is advisory: an unreadable/full RAM directory must never become
+    a prerequisite for either fan control or recovery. First/last/failure stay
+    available even when the event ring has rolled over or recovery later succeeds.
+    """
+    MAX_BYTES, MAX_EVENTS = 131072, 128
+
+    def __init__(self, path):
+        self.path = Path(path)
+        previous = read_json(self.path)
+        valid_previous = (previous and previous.get("schema_version") == 1
+                          and isinstance(previous.get("events"), list)
+                          and all(isinstance(item, dict) for item in previous["events"])
+                          and all(key in previous for key in ("first", "last", "failure"))
+                          and all(previous.get(key) is None or isinstance(previous[key], dict)
+                                  for key in ("first", "last", "failure"))
+                          and all(type(previous.get(key)) is int and previous[key] >= 0
+                                  for key in ("attempt_count", "event_count", "dropped_events")))
+        self.value = previous if valid_previous else {
+            "schema_version": 1, "first": None, "last": None, "failure": None,
+            "events": [], "attempt_count": 0, "event_count": 0, "dropped_events": 0}
+        self.last_write = None
+
+    @staticmethod
+    def bounded(event):
+        """Bound only diagnostic copies; the actual gate retains its raw input."""
+        result = dict(event)
+        truncated = []
+
+        def text(value, limit, field):
+            if value is None:
+                return None
+            value = str(value)
+            if len(json.dumps(value, ensure_ascii=True)) <= limit:
+                return value
+            low, high = 0, len(value)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if len(json.dumps(value[:middle], ensure_ascii=True)) <= limit:
+                    low = middle
+                else:
+                    high = middle - 1
+            truncated.append(field)
+            return value[:low]
+
+        for key in ("exe", "guard_expected"):
+            result[key] = text(result.get(key), 4096, key)
+        for key in ("sigcgt_raw",):
+            result[key] = text(result.get(key), 256, key)
+        fields = result.get("sigcgt_fields", [])
+        result["sigcgt_fields"] = [text(item, 256, "sigcgt_fields") for item in fields[:4]]
+        if len(fields) > 4:
+            truncated.append("sigcgt_fields")
+        paths, budget = [], 8192
+        raw_paths = result.get("guard_paths", [])
+        for item in raw_paths[:16]:
+            value = text(item, min(4096, budget), "guard_paths")
+            encoded = len(json.dumps(value, ensure_ascii=True))
+            if encoded > budget or budget < 8:
+                break
+            paths.append(value)
+            budget -= encoded
+        result["guard_paths"] = paths
+        result["guard_paths_omitted"] = len(raw_paths) - len(paths)
+        if result["guard_paths_omitted"]:
+            truncated.append("guard_paths")
+        if result.get("error"):
+            result["error"] = {"code": text(result["error"].get("code"), 128, "error.code"),
+                               "message": text(result["error"].get("message"), 1024, "error.message")}
+        result["fields_truncated"] = sorted(set(truncated))
+        return result
+
+    def next_attempt(self):
+        self.value["attempt_count"] += 1
+        return self.value["attempt_count"]
+
+    def record(self, event, *, force=False):
+        event = self.bounded(event)
+        self.value["event_count"] += 1
+        event["sequence"] = self.value["event_count"]
+        self.value["first"] = self.value["first"] or event
+        self.value["last"] = event
+        if event.get("result") in ("timeout", "error"):
+            self.value["failure"] = event
+        events = self.value["events"]
+        events.append(event)
+        while len(events) > self.MAX_EVENTS:
+            events.pop(0)
+            self.value["dropped_events"] += 1
+        # Each diagnostic path/string is bounded above. Even an adversarial
+        # maps file leaves room for the three retained snapshots and one event.
+        while len(json.dumps(self.value, ensure_ascii=True, separators=(",", ":")).encode()) > self.MAX_BYTES:
+            events.pop(0)
+            self.value["dropped_events"] += 1
+        now = event["monotonic"]
+        if force or self.last_write is None or now - self.last_write >= 0.1:
+            atomic_json(self.path, self.value)
+            self.last_write = now
+
+
 class SystemBackend:
     def __init__(self, root="/", guard_path=None, *, clock=None, sleep=None):
         self.root = Path(root).resolve()
@@ -35,6 +137,33 @@ class SystemBackend:
         self._last_ready = {}
         self.children = []
         self.clock, self.sleep = clock or time.monotonic, sleep or time.sleep
+
+    def set_readiness_path(self, path):
+        """Attach private observations without changing fake-backend contracts."""
+        try:
+            self._readiness_journal = ReadinessJournal(path)
+        except Exception:
+            self._readiness_journal = None
+
+    def _observe_ready(self, event, *, force=False):
+        journal = getattr(self, "_readiness_journal", None)
+        if journal is not None:
+            try:
+                journal.record(event, force=force)
+            except Exception:
+                pass  # Diagnostics can never prevent ownership/recovery gates.
+
+    def _readiness_event(self, operation, event, result, snapshot=None, **values):
+        return {**dict.fromkeys(("pid", "starttime", "exe", "alive", "identity_ok", "single_process",
+                                 "sigcgt_raw", "sigcgt", "sigcgt_hex", "required", "required_hex",
+                                 "handlers_ready", "require_guard", "guard_expected", "guard_ok",
+                                 "status_bytes_read", "maps_bytes_read", "sigcgt_read_ok", "sigcgt_parse_ok",
+                                 "maps_read_ok", "ready")), "sigcgt_fields": [], "guard_paths": [],
+                **(snapshot if snapshot is not None else getattr(self, "_last_readiness", {})),
+                "attempt": getattr(self, "_readiness_attempt", 0), "operation": operation,
+                "event": event, "result": result, "monotonic": self.clock(),
+                "elapsed": None, "stable_seconds": None, "stable_elapsed": None,
+                "remaining": None, "error": None, **values}
 
     def _inside(self, path):
         path = Path(path).resolve()
@@ -298,67 +427,161 @@ class SystemBackend:
             raise RuntimeError("检测到原厂温控执行者竞争，已释放自定义控制")
 
     def _ready(self, identity, require_guard):
-        if identity is None or identity.get("exe") != str(self.program) or not self.alive(identity):
-            raise RuntimeError("原厂温控启动身份无法确认")
-        self.assert_single(identity)
-        base = self.proc / str(identity["pid"])
-        raw = read_bytes(base / "status", 65536)
-        fields = [line.split(b":", 1)[1].strip() for line in (raw or b"").splitlines()
-                  if line.startswith(b"SigCgt:")]
-        required = (1 << (signal.SIGUSR1 - 1)) | (1 << (signal.SIGUSR2 - 1))
+        snapshot = {"pid": identity.get("pid") if identity else None,
+                    "starttime": identity.get("starttime") if identity else None,
+                    "exe": identity.get("exe") if identity else None,
+                    "alive": None, "identity_ok": None, "single_process": None,
+                    "sigcgt_raw": None, "sigcgt_fields": [], "sigcgt": None, "sigcgt_hex": None,
+                    "required": None, "required_hex": None, "handlers_ready": None,
+                    "require_guard": require_guard, "guard_expected": None, "guard_paths": [],
+                    "guard_ok": None, "status_bytes_read": None, "maps_bytes_read": None,
+                    "sigcgt_read_ok": None, "sigcgt_parse_ok": None, "maps_read_ok": None,
+                    "ready": None}
+        self._last_readiness = snapshot
+        gate = "identity"
         try:
-            caught = (int(fields[0], 16) if len(fields) == 1 and 1 <= len(fields[0]) <= 16
-                      and all(char in b"0123456789abcdefABCDEF" for char in fields[0]) else 0)
-        except ValueError:
-            caught = 0
-        ready = caught & required == required
-        if require_guard:
-            maps = read_bytes(base / "maps", 1024 * 1024)
-            paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
-            expected = os.fsencode(self.guard_path.resolve())
-            guard_name = os.fsencode(self.guard_path.name)
-            self._last_ready = {'sigcgt': hex(caught), 'required': hex(required), 'exe': identity.get('exe'), 'alive': self.alive(identity),
-                                'guard_expected': os.fsdecode(expected),
-                                'guard_paths': [os.fsdecode(path) for path in paths if b'fan_guard.so' in path]}
-            # A mapped file may show ``(deleted)`` after a RAM bundle refresh, or
-            # resolve through a different absolute path.  The process identity
-            # and the fixed guard filename still prove this is our shim.
-            guard_ok = any(path == expected or path == expected + b" (deleted)"
-                           or path.rsplit(b"/", 1)[-1].removesuffix(b" (deleted)") == guard_name
-                           for path in paths)
-            ready = ready and guard_ok
-            self._last_ready['guard_ok'] = guard_ok
-        else:
-            self._last_ready = {'sigcgt': hex(caught), 'required': hex(required)}
-        if not self.alive(identity):
-            raise RuntimeError("原厂温控启动身份无法确认")
-        return ready
+            if identity is None or identity.get("exe") != str(self.program):
+                snapshot["identity_ok"] = False
+                raise RuntimeError("原厂温控启动身份无法确认")
+            snapshot["alive"] = self.alive(identity)
+            snapshot["identity_ok"] = snapshot["alive"]
+            if not snapshot["alive"]:
+                raise RuntimeError("原厂温控启动身份无法确认")
+            gate = "single_process"
+            try:
+                self.assert_single(identity)
+            except (OSError, ValueError, RuntimeError):
+                snapshot["single_process"] = False
+                raise
+            snapshot["single_process"] = True
+            gate = "signal_handlers"
+            base = self.proc / str(identity["pid"])
+            raw = read_bytes(base / "status", 65536)
+            fields = [line.split(b":", 1)[1].strip() for line in (raw or b"").splitlines()
+                      if line.startswith(b"SigCgt:")]
+            required = (1 << (signal.SIGUSR1 - 1)) | (1 << (signal.SIGUSR2 - 1))
+            parse_ok = (len(fields) == 1 and 1 <= len(fields[0]) <= 16
+                        and all(char in b"0123456789abcdefABCDEF" for char in fields[0]))
+            try:
+                caught = int(fields[0], 16) if parse_ok else 0
+            except ValueError:
+                caught, parse_ok = 0, False
+            ready = caught & required == required
+            snapshot.update(status_bytes_read=len(raw) if raw is not None else None,
+                            sigcgt_read_ok=raw is not None, sigcgt_parse_ok=parse_ok,
+                            sigcgt_raw=fields[0].decode("ascii", "replace") if len(fields) == 1 else None,
+                            sigcgt_fields=[item.decode("ascii", "replace") for item in fields],
+                            sigcgt=caught, sigcgt_hex=hex(caught), required=required, required_hex=hex(required),
+                            handlers_ready=ready)
+            if require_guard:
+                gate = "guard"
+                maps = read_bytes(base / "maps", 1024 * 1024)
+                paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
+                expected = os.fsencode(self.guard_path.resolve())
+                guard_name = os.fsencode(self.guard_path.name)
+                self._last_ready = {'sigcgt': hex(caught), 'required': hex(required), 'exe': identity.get('exe'), 'alive': self.alive(identity),
+                                    'guard_expected': os.fsdecode(expected),
+                                    'guard_paths': [os.fsdecode(path) for path in paths if b'fan_guard.so' in path]}
+                # Observe exactly the existing predicate/input. A successful
+                # read_bytes is one bounded read, not proof of seq_file EOF.
+                guard_ok = any(path == expected or path == expected + b" (deleted)"
+                               or path.rsplit(b"/", 1)[-1].removesuffix(b" (deleted)") == guard_name
+                               for path in paths)
+                ready = ready and guard_ok
+                self._last_ready['guard_ok'] = guard_ok
+                snapshot.update(maps_read_ok=maps is not None, maps_bytes_read=len(maps) if maps is not None else None,
+                                guard_expected=os.fsdecode(expected), guard_ok=guard_ok,
+                                guard_paths=[os.fsdecode(path) for path in paths
+                                             if b"fan_guard.so" in path or path == expected
+                                             or path == expected + b" (deleted)"
+                                             or path.rsplit(b"/", 1)[-1].removesuffix(b" (deleted)") == guard_name])
+            else:
+                self._last_ready = {'sigcgt': hex(caught), 'required': hex(required)}
+            gate = "identity_after_read"
+            snapshot["alive"] = self.alive(identity)
+            if not snapshot["alive"]:
+                snapshot["identity_ok"] = False
+                raise RuntimeError("原厂温控启动身份无法确认")
+            snapshot["ready"] = ready
+            if not getattr(self, "_inside_wait_ready", False):
+                self._observe_ready(self._readiness_event("ready", "state", "ready" if ready else "waiting", snapshot))
+            return ready
+        except (OSError, ValueError, RuntimeError) as error:
+            snapshot["ready"] = False
+            snapshot["error"] = {"code": gate, "message": str(error)}
+            if not getattr(self, "_inside_wait_ready", False):
+                self._observe_ready(self._readiness_event("ready", "error", "error", snapshot,
+                                    error=snapshot["error"]), force=True)
+            raise
 
     def assert_ready(self, identity, *, require_guard=False):
         """Immediate identity/uniqueness/USR-handler gate before a signaling GET."""
         if not self._ready(identity, require_guard):
+            self._observe_ready(self._readiness_event("assert_ready", "error", "error",
+                                error={"code": "not_ready", "message": "原厂温控信号处理器就绪未确认"}), force=True)
             raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
+        self._observe_ready(self._readiness_event("assert_ready", "success", "ready"))
         return identity
 
     def wait_ready(self, identity, *, require_guard=False, deadline=None, stable_seconds=0.15):
         """Bounded startup gate, also used by harmless real-/proc Linux fixtures."""
         deadline = min(self.clock() + 20, deadline) if deadline is not None else self.clock() + 20
         stable_since = None
-        while self.clock() < deadline:
-            ready = self._ready(identity, require_guard)
-            now = self.clock()
-            if ready:
-                stable_since = now if stable_since is None else stable_since
-                if now - stable_since >= stable_seconds:
-                    return identity
-            elif stable_since is not None:
-                # Startup probes can flicker while the vendor process replaces
-                # its signal table.  Do not abort on the first regression; keep
-                # checking until the bounded deadline so a transient sample
-                # cannot make a healthy guarded process look unready.
-                stable_since = None
-            self.sleep(min(0.025, max(0, deadline - now)))
-        raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
+        started = self.clock()
+        journal = getattr(self, "_readiness_journal", None)
+        try:
+            self._readiness_attempt = journal.next_attempt() if journal else 0
+        except Exception:
+            self._readiness_attempt = 0
+        self._observe_ready(self._readiness_event("wait_ready", "start", "waiting",
+                            {"pid": identity.get("pid") if identity else None,
+                             "starttime": identity.get("starttime") if identity else None,
+                             "exe": identity.get("exe") if identity else None,
+                             "require_guard": require_guard}, elapsed=0, stable_seconds=stable_seconds,
+                            stable_elapsed=0, remaining=max(0, deadline - started)), force=True)
+        previous = None
+        failure_recorded = False
+        self._inside_wait_ready = True
+        try:
+            while self.clock() < deadline:
+                ready = self._ready(identity, require_guard)
+                now = self.clock()
+                if ready:
+                    stable_since = now if stable_since is None else stable_since
+                    if now - stable_since >= stable_seconds:
+                        self._observe_ready(self._readiness_event("wait_ready", "success", "ready",
+                                            elapsed=now - started, stable_seconds=stable_seconds,
+                                            stable_elapsed=now - stable_since, remaining=max(0, deadline - now)), force=True)
+                        return identity
+                elif stable_since is not None:
+                    # Preserve the bounded stability policy: a diagnostic hook
+                    # never makes a failing/flickering sample pass its gate.
+                    stable_since = None
+                snapshot = getattr(self, "_last_readiness", {})
+                if snapshot != previous:
+                    self._observe_ready(self._readiness_event("wait_ready", "state", "waiting",
+                                        elapsed=now - started, stable_seconds=stable_seconds,
+                                        stable_elapsed=0 if stable_since is None else now - stable_since,
+                                        remaining=max(0, deadline - now)))
+                    previous = dict(snapshot)
+                self.sleep(min(0.025, max(0, deadline - now)))
+            self._observe_ready(self._readiness_event("wait_ready", "timeout", "timeout",
+                                elapsed=self.clock() - started, stable_seconds=stable_seconds,
+                                stable_elapsed=0 if stable_since is None else self.clock() - stable_since,
+                                remaining=0, error={"code": "deadline", "message": "原厂温控信号处理器就绪未确认"}), force=True)
+            failure_recorded = True
+            raise RuntimeError("原厂温控信号处理器就绪未确认：%s" % json.dumps(self._last_ready, ensure_ascii=True)[:300])
+        except (OSError, ValueError, RuntimeError) as error:
+            snapshot = getattr(self, "_last_readiness", {})
+            if not failure_recorded:
+                self._observe_ready(self._readiness_event("wait_ready", "error", "error",
+                                    elapsed=self.clock() - started, stable_seconds=stable_seconds,
+                                    stable_elapsed=0 if stable_since is None else self.clock() - stable_since,
+                                    remaining=max(0, deadline - self.clock()),
+                                    error=snapshot.get("error") or {"code": "wait_failed", "message": str(error)}), force=True)
+            raise
+        finally:
+            self._inside_wait_ready = False
 
     def _owner_kind(self, identity, lease):
         """Recognize an orphan from this exact lease, not any injected daemon."""
@@ -421,6 +644,12 @@ class FanWatchdog:
         self.last_write_ns = None
         self.stop_requested = False
         self._restored = False
+        attach = getattr(self.backend, "set_readiness_path", None)
+        if attach is not None:
+            try:
+                attach(self.folder / "readiness.json")
+            except Exception:
+                pass  # Optional observations never gate a backend or recovery.
 
     def status(self, phase, reason=None, **values):
         self.phase = phase

@@ -470,6 +470,7 @@ class DeveloperModeTests(unittest.TestCase):
             server = web.WebConfigServer(Controller(), Insights(), host='127.0.0.1', port=0,
                                          asset_dir=ROOT / 'ui/web', state_dir=directory)
             try:
+                self.assertAlmostEqual(server.dev_until - time.time(), 300, delta=2)
                 self.assertEqual(server.panel_authorized({}, peer='192.168.1.50'), 'dev')
                 self.assertEqual(server.auth_status({}, peer='192.168.1.50')['client_ip'], '192.168.1.50')
                 self.assertIsNone(server.panel_authorized({}, peer='192.168.1.51'))
@@ -723,6 +724,132 @@ class HttpTests(unittest.TestCase):
                                     {'X-FNM-Request': '1'})
         self.assertEqual(status, 200)
         self.assertEqual(self.request('GET', '/api/session')[0], 200)
+
+
+class FanDebugHttpTests(unittest.TestCase):
+    """Exercise the real private HTTP gate without any NAS reads or controls."""
+    request = HttpTests.request
+
+    def setUp(self):
+        self.fan = FanPolicy()
+        saved = self.fan.snapshot()
+        saved['config']['channels']['cpu']['mode'] = 'manual'
+        self.fan.snapshot = mock.Mock(return_value=saved)
+        with mock.patch.dict(os.environ, {
+                'R1_WEB_AUTH_MODE': 'password', 'R1_DEV_NO_PAIRING': '1',
+                'R1_DEV_ALLOW_IPS': '127.0.0.1', 'R1_DEV_ALLOW_COMMANDS': '1'}):
+            self.web = web.WebConfigServer(Controller(), fan_policy=self.fan,
+                host='127.0.0.1', port=0, asset_dir=ROOT / 'ui/web',
+                state_dir=Path(tempfile.mkdtemp(prefix='r1-fan-debug-http-'))).start()
+        self.collector = mock.Mock()
+        self.collector.snapshot.return_value = {'private_marker': 'diagnostic-only'}
+        self.collector.start.return_value = {'id': 'fixture-job', 'state': 'running'}
+        self.collector.result.return_value = {'id': 'fixture-job', 'state': 'completed', 'samples': []}
+        self.web.fan_diagnostics = self.collector
+        self.addCleanup(self.web.stop)
+        self.host = '127.0.0.1:' + str(self.web.port)
+        self.origin, self.cookie = 'http://' + self.host, None
+        self.marker = {'X-FNM-Request': '1'}
+
+    def post(self, body):
+        return self.request('POST', '/api/dev/fan', body, self.marker)
+
+    def test_private_endpoint_requires_dev_flag_ip_window_and_command_flag(self):
+        for attribute, value in (('dev_no_pairing', False), ('dev_allow_ips', set()),
+                                 ('dev_until', 0), ('dev_commands', False)):
+            with self.subTest(attribute=attribute), mock.patch.object(self.web, attribute, value):
+                self.assertEqual(self.post({'action': 'snapshot'})[0], 403)
+        self.collector.snapshot.assert_not_called()
+        self.assertEqual(self.fan.calls, [])
+
+    def test_private_endpoint_keeps_origin_json_and_csrf_gates(self):
+        self.assertEqual(self.request('POST', '/api/dev/fan', {'action': 'snapshot'})[0], 403)
+        self.assertEqual(self.request('POST', '/api/dev/fan', {'action': 'snapshot'},
+                                     self.marker, origin=False)[0], 403)
+        self.assertEqual(self.request('POST', '/api/dev/fan', {'action': 'snapshot'},
+                                     self.marker, form=True)[0], 400)
+        self.assertEqual(self.request('POST', '/api/dev/fan', {'action': 'snapshot'},
+            {'X-FNM-Request': '1', 'Origin': 'http://foreign.invalid'}, origin=False)[0], 403)
+        self.collector.snapshot.assert_not_called()
+
+    def test_existing_password_requires_login_and_accepts_its_session(self):
+        session = self.web.auth.setup('fixture-password-1')
+        self.assertTrue(session['ok'])
+        self.assertEqual(self.post({'action': 'snapshot'})[0], 401)
+        self.collector.snapshot.assert_not_called()
+        self.cookie = auth_module.COOKIE + '=' + session['sid']
+        self.assertEqual(self.post({'action': 'snapshot'})[0], 200)
+        # A password session alone does not replace the explicit debug gates.
+        with mock.patch.object(self.web, 'dev_commands', False):
+            self.assertEqual(self.post({'action': 'snapshot'})[0], 403)
+
+    def test_read_only_capture_and_result_never_apply_a_policy(self):
+        self.assertEqual(self.post({'action': 'snapshot'})[2]['snapshot']['private_marker'], 'diagnostic-only')
+        status, _, value = self.post({'action': 'capture', 'duration_seconds': 30, 'interval_ms': 200})
+        self.assertEqual(status, 202)
+        self.assertEqual(value['job']['state'], 'running')
+        self.collector.start.assert_called_once_with(duration_seconds=30, interval_ms=200)
+        self.assertEqual(self.post({'action': 'result', 'id': 'fixture-job'})[2]['job']['state'], 'completed')
+        self.assertEqual(self.fan.calls, [])
+        self.assertNotIn('diagnostic-only', json.dumps(self.request('GET', '/api/r1')[2]))
+
+    def test_retry_requires_confirmation_and_rejects_config_path_or_commands(self):
+        for body in ({'action': 'retry'}, {'action': 'retry', 'confirmed': 1},
+                     {'action': 'retry', 'confirmed': True, 'config': {}},
+                     {'action': 'snapshot', 'path': '/etc/shadow'},
+                     {'action': 'capture', 'cmd': 'id'}, {'action': ['snapshot']},
+                     {'action': 'result', 'id': '../descriptor.json'}, []):
+            with self.subTest(body=body):
+                self.assertEqual(self.post(body)[0], 400)
+        self.collector.start.assert_not_called()
+        self.assertEqual(self.fan.calls, [])
+
+    def test_confirmed_retry_captures_before_reusing_normal_apply_with_saved_config(self):
+        events = []
+        config = copy.deepcopy(self.fan.snapshot()['config'])
+        self.collector.start.side_effect = lambda **kwargs: events.append('capture') or {'id': 'fixture-job', 'state': 'running'}
+        original = self.fan.action
+
+        def action(name, payload):
+            self.assertTrue(self.web.operation_lock._is_owned())
+            events.append('apply')
+            return original(name, payload)
+
+        self.fan.action = action
+        status, _, value = self.post({'action': 'retry', 'confirmed': True})
+        self.assertEqual(status, 202, value)
+        self.assertEqual(events, ['capture', 'apply'])
+        self.assertEqual(self.fan.calls, [('fan.policy.update',
+            {'config': config, 'apply': True, 'confirmed': True})])
+        self.assertTrue(value['attempt']['pending'])
+
+    def test_busy_policy_or_capture_prevents_a_second_retry(self):
+        self.fan.snapshot.return_value['busy'] = True
+        self.assertEqual(self.post({'action': 'retry', 'confirmed': True})[0], 409)
+        self.collector.start.assert_not_called()
+        self.fan.snapshot.return_value['busy'] = False
+        self.collector.start.side_effect = RuntimeError('已有诊断任务正在采集')
+        self.assertEqual(self.post({'action': 'retry', 'confirmed': True})[0], 409)
+        self.assertEqual(self.fan.calls, [])
+
+    def test_retry_never_invents_manual_config_when_both_channels_use_vendor(self):
+        self.fan.snapshot.return_value['config']['channels']['cpu']['mode'] = 'vendor'
+        self.assertEqual(self.post({'action': 'retry', 'confirmed': True})[0], 400)
+        self.collector.start.assert_not_called()
+        self.assertEqual(self.fan.calls, [])
+
+    def test_missing_job_and_bad_capture_are_rejected_without_control(self):
+        self.collector.result.side_effect = KeyError('unknown')
+        self.assertEqual(self.post({'action': 'result', 'id': 'unknown'})[0], 404)
+        self.collector.start.side_effect = ValueError('采集时间超出范围')
+        self.assertEqual(self.post({'action': 'retry', 'confirmed': True, 'duration_seconds': 1000})[0], 400)
+        self.assertEqual(self.fan.calls, [])
+
+    def test_failed_collector_never_retries_hardware_without_diagnostics(self):
+        self.collector.start.return_value = {'id': 'fixture-job', 'state': 'failed', 'error': 'fixture start failure'}
+        self.assertEqual(self.post({'action': 'capture'})[0], 503)
+        self.assertEqual(self.post({'action': 'retry', 'confirmed': True})[0], 503)
+        self.assertEqual(self.fan.calls, [])
 
 
 if __name__ == '__main__':

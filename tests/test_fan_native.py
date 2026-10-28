@@ -699,6 +699,163 @@ class NativeFanTests(unittest.TestCase):
                     else:
                         stop.assert_not_called()
 
+    def test_readiness_journal_keeps_full_flicker_timeout_after_successful_recovery(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            base = backend.proc / "30"
+            maps = f"0000-1000 r-xp 0000 00:01 123 {backend.guard_path.resolve()}\n".encode()
+            (base / "maps").write_bytes(maps)
+            path = self.folder / "readiness.json"
+            backend.set_readiness_path(path)
+
+            def advance(seconds):
+                if seconds >= 0.025:
+                    (base / "status").write_text("SigCgt:\t0\n")
+
+            now = self.fake_startup_clock(backend, advance)
+            with self.assertRaisesRegex(RuntimeError, "信号处理器就绪未确认"):
+                backend.wait_ready(identity, require_guard=True, deadline=0.2)
+            value = native.read_json(path)
+            self.assertEqual(value["schema_version"], 1)
+            self.assertEqual(value["first"]["event"], "start")
+            failed = value["failure"]
+            self.assertEqual(failed["event"], "timeout")
+            self.assertEqual(failed["remaining"], 0)
+            self.assertEqual(failed["pid"], 30)
+            self.assertEqual(failed["starttime"], 300)
+            self.assertEqual(failed["exe"], str(backend.program))
+            self.assertTrue(failed["alive"])
+            self.assertTrue(failed["identity_ok"])
+            self.assertTrue(failed["single_process"])
+            self.assertEqual(failed["sigcgt_raw"], "0")
+            self.assertEqual(failed["sigcgt"], 0)
+            self.assertEqual(failed["required"], 0xa00)
+            self.assertFalse(failed["handlers_ready"])
+            self.assertTrue(failed["require_guard"])
+            self.assertTrue(failed["guard_ok"])
+            self.assertEqual(failed["guard_expected"], str(backend.guard_path.resolve()))
+            self.assertEqual(failed["guard_paths"], [str(backend.guard_path.resolve())])
+            self.assertEqual(failed["maps_bytes_read"], len(maps))
+            self.assertTrue(failed["maps_read_ok"])
+            self.assertEqual([item["ready"] for item in value["events"] if item["event"] == "state"], [True, False])
+            (base / "status").write_text("SigCgt:\ta00\n")
+            backend.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+            self.assertEqual(backend.wait_ready(identity, deadline=now[0] + 0.5), identity)
+            recovered = native.read_json(path)
+            self.assertEqual(recovered["failure"], failed)
+            self.assertEqual(recovered["first"], value["first"])
+            self.assertEqual(recovered["last"]["event"], "success")
+            self.assertEqual(recovered["attempt_count"], 2)
+            self.assertGreater(recovered["last"]["attempt"], failed["attempt"])
+            self.assertIn(failed, recovered["events"])
+
+    def test_readiness_journal_records_flicker_then_stability_without_relaxing_gate(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            base = backend.proc / "30"
+            backend.set_readiness_path(self.folder / "readiness.json")
+
+            def advance(seconds):
+                (base / "status").write_text("SigCgt:\t%s\n" % ("0" if 0.025 <= seconds < 0.075 else "a00"))
+
+            now = self.fake_startup_clock(backend, advance)
+            backend.wait_ready(identity, deadline=0.5)
+            self.assertGreaterEqual(now[0], 0.075 + 0.15 - 1e-9)
+            value = native.read_json(self.folder / "readiness.json")
+            self.assertIsNone(value["failure"])
+            self.assertEqual([item["ready"] for item in value["events"] if item["event"] == "state"], [True, False, True])
+            self.assertGreaterEqual(value["last"]["stable_elapsed"], 0.15)
+
+    def test_readiness_journal_reports_identity_and_competition_at_actual_gate(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            self.fake_startup_clock(backend)
+            for gate in ("identity", "single_process"):
+                with self.subTest(gate=gate):
+                    path = self.folder / (gate + "-readiness.json")
+                    backend.set_readiness_path(path)
+                    candidate = {**identity, "starttime": 301} if gate == "identity" else identity
+                    with patch.object(backend, "assert_single", side_effect=RuntimeError("fixture competing process")):
+                        with self.assertRaises(RuntimeError):
+                            backend.wait_ready(candidate)
+                    failure = native.read_json(path)["failure"]
+                    self.assertEqual(failure["error"]["code"], gate)
+                    self.assertEqual(failure["event"], "error")
+                    self.assertEqual(failure["identity_ok"], gate != "identity")
+                    self.assertEqual(failure["single_process"], False if gate == "single_process" else None)
+                    self.assertIsNone(failure["sigcgt"])
+                    self.assertEqual(failure["remaining"], 20)
+
+    def test_readiness_journal_exposes_single_read_maps_without_claiming_eof(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            base = backend.proc / "30"
+            prefix = b"0000-1000 r-xp 0000 00:01 123 /fixture/unrelated.so\n"
+            complete = prefix + f"1000-2000 r-xp 0000 00:01 124 {backend.guard_path.resolve()}\n".encode()
+            (base / "maps").write_bytes(complete)
+            path = self.folder / "readiness.json"
+            backend.set_readiness_path(path)
+            self.fake_startup_clock(backend)
+            actual_read = watchdog.read_bytes
+
+            def short_read(path, limit):
+                return prefix if Path(path) == base / "maps" else actual_read(path, limit)
+
+            with patch.object(watchdog, "read_bytes", side_effect=short_read):
+                with self.assertRaises(RuntimeError):
+                    backend.wait_ready(identity, require_guard=True, deadline=0.1)
+            failure = native.read_json(path)["failure"]
+            self.assertTrue(failure["handlers_ready"])
+            self.assertFalse(failure["guard_ok"])
+            self.assertEqual(failure["maps_bytes_read"], len(prefix))
+            self.assertTrue(failure["maps_read_ok"])
+            self.assertEqual(failure["guard_paths"], [])
+            self.assertNotIn("maps_complete", failure)
+            self.assertIn(str(backend.guard_path.resolve()).encode(), (base / "maps").read_bytes())
+
+    def test_readiness_journal_io_failure_never_changes_ready_or_restore_gates(self):
+        with self.real_proc_backend() as backend:
+            identity = self.write_proc_identity(backend, 30, 300)
+            (backend.proc / "30/maps").write_bytes(b"")
+            (backend.proc / "30/environ").write_bytes(b"PATH=/fixture\0")
+            backend.set_readiness_path(self.folder / "readiness.json")
+            self.fake_startup_clock(backend)
+            with patch.object(watchdog, "atomic_json", side_effect=OSError("fixture ENOSPC")):
+                self.assertEqual(backend.wait_ready(identity, deadline=0.5), identity)
+                self.assertEqual(backend.restore_daemon({"identity": identity}, None), identity)
+                (backend.proc / "30/status").write_text("SigCgt:\t0\n")
+                with self.assertRaisesRegex(RuntimeError, "信号处理器就绪未确认"):
+                    backend.wait_ready(identity, deadline=backend.clock() + 0.05)
+
+    def test_readiness_journal_is_bounded_and_rate_limited_without_private_fields(self):
+        journal = watchdog.ReadinessJournal(self.folder / "readiness.json")
+        base = {"attempt": 1, "operation": "wait_ready", "event": "state", "result": "waiting",
+                "pid": 30, "starttime": 300, "exe": "/histor/bin/temp_control", "guard_expected": "/run/fan_guard.so",
+                "sigcgt_fields": ["a00"], "guard_paths": ["/run/" + "x" * 6000 + "/fan_guard.so"] * 40}
+        with patch.object(watchdog, "atomic_json", wraps=native.atomic_json) as write:
+            for index in range(400):
+                journal.record({**base, "monotonic": index * 0.001})
+            journal.record({**base, "monotonic": 0.4, "event": "timeout", "result": "timeout"}, force=True)
+            self.assertLessEqual(write.call_count, 6)  # Never write/fsync at the 25ms probe cadence.
+        value = native.read_json(journal.path)
+        self.assertLessEqual(journal.path.stat().st_size, 131072)
+        self.assertLessEqual(len(value["events"]), 128)
+        self.assertGreater(value["dropped_events"], 0)
+        self.assertEqual(value["first"]["sequence"], 1)
+        self.assertEqual(value["last"]["event"], "timeout")
+        self.assertEqual(value["failure"], value["last"])
+        self.assertIn("guard_paths", value["last"]["fields_truncated"])
+        self.assertGreater(value["last"]["guard_paths_omitted"], 0)
+        encoded = journal.path.read_text()
+        for forbidden in ("PRIVATE_TOKEN", "DISK_AUTOSLEEP", "lease.bin", "descriptor", "environ"):
+            self.assertNotIn(forbidden, encoded)
+        resumed = watchdog.ReadinessJournal(journal.path)
+        resumed.record({**base, "monotonic": 0.5, "event": "success", "result": "ready"}, force=True)
+        recovered = native.read_json(journal.path)
+        self.assertEqual(recovered["failure"], value["failure"])
+        self.assertEqual(recovered["first"], value["first"])
+        self.assertEqual(recovered["last"]["result"], "ready")
+
     def test_sync_never_sends_get_until_both_handlers_are_ready(self):
         with self.real_proc_backend() as backend:
             identity = self.write_proc_identity(backend, 30, 300)
