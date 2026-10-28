@@ -180,6 +180,7 @@ def _dev_fan_process():
         rows.append({
             'pid': int(folder.rsplit('/', 1)[-1]),
             'state': fields.get('State', ''),
+            'exe': (lambda: (os.readlink(folder + '/exe') if os.path.exists(folder + '/exe') else None))(),
             'sigcgt': fields.get('SigCgt', ''),
             'sigblk': fields.get('SigBlk', ''),
             'guard_loaded': bool(guard_paths),

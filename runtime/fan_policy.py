@@ -340,7 +340,7 @@ class FanPolicyController:
                 self.adapter.release()
             except Exception:
                 restored = False
-            detail = str(error).strip().replace(chr(10), " ")[:160] if type(error) in (ValueError, RuntimeError) else ""
+            detail = str(error).strip().replace(chr(10), " ")[:500] if type(error) in (ValueError, RuntimeError) else ""
             with self.lock:
                 self.channels = {name: self._vendor_state() for name in CHANNELS}
                 if not restored:

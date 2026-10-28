@@ -317,7 +317,7 @@ class SystemBackend:
             paths = [line.split(None, 5)[-1] for line in (maps or b"").splitlines() if len(line.split(None, 5)) == 6]
             expected = os.fsencode(self.guard_path.resolve())
             guard_name = os.fsencode(self.guard_path.name)
-            self._last_ready = {'sigcgt': hex(caught), 'required': hex(required),
+            self._last_ready = {'sigcgt': hex(caught), 'required': hex(required), 'exe': identity.get('exe'), 'alive': self.alive(identity),
                                 'guard_expected': os.fsdecode(expected),
                                 'guard_paths': [os.fsdecode(path) for path in paths if b'fan_guard.so' in path]}
             # A mapped file may show ``(deleted)`` after a RAM bundle refresh, or
@@ -524,7 +524,7 @@ class FanWatchdog:
             self.status(final_phase,
                         "原厂恢复未能全部确认" if errors else "已恢复原厂温控" if reason != "vendor_policy_changed" else "原厂应用已改变系统风扇策略，自定义控制已释放",
                         restore_ok=not errors, recovery_errors=errors, release_cause=reason,
-                        error_detail=(str(detail)[:160] if detail else None))
+                        error_detail=(str(detail)[:1000] if detail else None))
         except (OSError, ValueError):
             self.phase = final_phase
         # Redact the saved environment after recovery. Keep only safe status.
