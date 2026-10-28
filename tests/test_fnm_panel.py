@@ -476,6 +476,29 @@ class DeveloperModeTests(unittest.TestCase):
             finally:
                 server.stop()
 
+    def test_developer_command_endpoint_is_allowlisted_and_fixed(self):
+        directory = Path(tempfile.mkdtemp(prefix='r1-panel-dev-'))
+        with mock.patch.dict(os.environ, {
+                'R1_DEV_NO_PAIRING': '1',
+                'R1_DEV_ALLOW_IPS': '192.168.1.50',
+                'R1_DEV_MINUTES': '5',
+                'R1_DEV_ALLOW_COMMANDS': '1',
+        }):
+            server = web.WebConfigServer(Controller(), Insights(), host='127.0.0.1', port=0,
+                                         asset_dir=ROOT / 'ui/web', state_dir=directory)
+            try:
+                with mock.patch.object(web, '_run_dev_command', return_value={'ok': True, 'name': 'identity'}) as run:
+                    status, payload, _ = server.panel_post('/api/dev/exec', {'name': 'identity'}, {}, ip='192.168.1.50')
+                    self.assertEqual(status, 200)
+                    self.assertTrue(payload['ok'])
+                    run.assert_called_once_with('identity')
+                status, _, _ = server.panel_post('/api/dev/exec', {'name': 'identity'}, {}, ip='192.168.1.51')
+                self.assertEqual(status, 403)
+                with self.assertRaises(ValueError):
+                    web._run_dev_command('rm')
+            finally:
+                server.stop()
+
     def test_developer_bypass_is_off_without_the_flag(self):
         directory = Path(tempfile.mkdtemp(prefix='r1-panel-dev-'))
         with mock.patch.dict(os.environ, {'R1_DEV_NO_PAIRING': '0', 'R1_DEV_ALLOW_IPS': '192.168.1.50'}, clear=False):

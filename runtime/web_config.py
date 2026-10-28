@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -58,6 +59,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/idrac/refresh', '/api/disk_scan/now', '/api/scan_log/clear', '/api/update/install',
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
+    '/api/dev/exec',
 ))
 
 
@@ -132,6 +134,36 @@ class _Server(http.server.ThreadingHTTPServer):
         pass
 
 
+_DEV_COMMANDS = {
+    'identity': ['id'],
+    'uname': ['uname', '-a'],
+    'processes': ['ps', '-eo', 'pid,ppid,comm,args'],
+    'blocks': ['lsblk', '-J', '-o', 'NAME,MODEL,SERIAL,SIZE,ROTA,MOUNTPOINTS,LABEL,UUID'],
+    'failed_units': ['systemctl', '--failed', '--no-pager', '--no-legend'],
+    'fan_units': ['systemctl', 'list-units', '--all', '--type=service', '--no-pager', '--no-legend', 'r1-fan-*'],
+    'boot_log': ['journalctl', '-b', '-n', '300', '--no-pager'],
+    'fan_files': ['ls', '-la', '/run/r1-toolbox/fan-control'],
+}
+
+
+def _run_dev_command(name):
+    """Run one fixed, read-only diagnostic command; never a shell string."""
+    command = _DEV_COMMANDS.get(name)
+    if command is None:
+        raise ValueError('未知的开发者诊断命令')
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10,
+                                env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'})
+    except (OSError, subprocess.SubprocessError) as error:
+        return {'ok': False, 'name': name, 'error': type(error).__name__}
+    def bounded(value):
+        text = value or ''
+        return text[:65536] + (chr(10) + '… truncated' if len(text) > 65536 else '')
+    return {'ok': True, 'name': name, 'code': result.returncode,
+            'stdout': bounded(result.stdout), 'stderr': bounded(result.stderr),
+            'command': command}
+
+
 class WebConfigServer:
     def __init__(self, controller, insights=None, *, fan_policy=None, light_policy=None, monitoring=None,
                  monitor=None, host='0.0.0.0', port=18732,
@@ -183,6 +215,7 @@ class WebConfigServer:
         except ValueError:
             minutes = 60
         self.dev_until = time.time() + max(1, min(1440, minutes)) if self.dev_no_pairing and self.dev_allow_ips else 0
+        self.dev_commands = os.environ.get('R1_DEV_ALLOW_COMMANDS') == '1'
 
     def _expire(self):
         now = self.clock()
@@ -610,6 +643,17 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
+        if route == '/api/dev/exec':
+            if not self._dev_authorized(ip) or self.auth.required():
+                return 403, {'ok': False, 'error': '开发者命令接口未授权'}, None
+            if not self.dev_commands:
+                return 403, {'ok': False, 'error': '开发者命令接口未启用'}, None
+            if not isinstance(body, dict) or set(body) != {'name'} or not isinstance(body['name'], str):
+                return 400, {'ok': False, 'error': '只需要 name 字段'}, None
+            try:
+                return 200, _run_dev_command(body['name']), None
+            except ValueError as error:
+                return 400, {'ok': False, 'error': str(error)}, None
         if route == '/api/auth/password':
             wait = self.auth.limiter.retry_after(ip)
             if wait:

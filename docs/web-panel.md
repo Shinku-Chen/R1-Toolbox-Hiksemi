@@ -76,13 +76,26 @@ environment:
   R1_DEV_NO_PAIRING: "1"
   R1_DEV_ALLOW_IPS: "192.168.31.193"
   R1_DEV_MINUTES: "60"
+  R1_DEV_ALLOW_COMMANDS: "1"   # 可选：只读诊断命令
 ```
 
 - `R1_DEV_NO_PAIRING=1` 才启用；未设置或为 `0` 时完全保持五位配对/登录口令。
 - `R1_DEV_ALLOW_IPS` 只接受精确客户端 IP，逗号分隔；不会对整段局域网开放。当前调试机是 `192.168.31.193` 时可填这个地址。
 - 默认 60 分钟后自动失效，最大 1440 分钟；重启宿主服务也会失效。
 - 如果已设置面板登录口令，免配对模式仍要求先登录口令；它只替代一次配对，不替代口令。
-- 不要长期开启或暴露到公网；调试结束后删除三项环境变量并重新部署。
+- 不要长期开启或暴露到公网；调试结束后删除这些环境变量并重新部署。
+
+启用 `R1_DEV_ALLOW_COMMANDS=1` 后才开放只读诊断接口：
+
+```http
+POST /api/dev/exec
+Content-Type: application/json
+X-FNM-Request: 1
+
+{"name": "blocks"}
+```
+
+命令名固定为 `identity`、`uname`、`processes`、`blocks`、`failed_units`、`fan_units`、`boot_log`、`fan_files`。接口不接受 `cmd`、`shell` 或参数拼接，不能用它执行任意命令；输出截断到 64 KiB、10 秒超时。需要更多诊断命令时必须修改白名单代码。日志可能包含主机信息，只在调试窗口内使用。
 
 ## 已知边界
 

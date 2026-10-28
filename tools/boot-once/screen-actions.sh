@@ -549,6 +549,11 @@ def main():
                 environment['R1_DEV_NO_PAIRING'] = '1'
                 environment['R1_DEV_ALLOW_IPS'] = ','.join(dev_ips)
                 environment['R1_DEV_MINUTES'] = str(dev_minutes)
+                dev_commands = os.environ.get('R1_DEV_ALLOW_COMMANDS', '')
+                if dev_commands not in ('', '0', '1'):
+                    raise SystemExit('R1_DEV_ALLOW_COMMANDS 只能是 0 或 1')
+                if dev_commands == '1':
+                    environment['R1_DEV_ALLOW_COMMANDS'] = '1'
         old_root = str(pathlib.Path(main_process.exe).parent)
         if 'LD_LIBRARY_PATH' in environment:
             environment['LD_LIBRARY_PATH'] = ':'.join(str(app) + p[len(old_root):] if p == old_root or p.startswith(old_root + '/') else p
