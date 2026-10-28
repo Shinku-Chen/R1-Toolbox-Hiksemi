@@ -105,7 +105,13 @@ int main(int argc, char **argv) {
     call(device, 0x5798, 99, 255)
     renew(mask=3, system=222)
     call(device, 0x5798, 99, 255)  # Wrong lease ownership is never accepted.
-    renew(cpu=127)
+    for target in (26, 127, 128, 255):
+        renew(cpu=target)
+        call(device, 0x5798, 99, target)
+    for target in (0, 25, 256):
+        renew(cpu=target)
+        call(device, 0x5798, 99, 255)
+    renew(cpu=26, delta=-1)
     call(device, 0x5798, 99, 255)
     renew()
     lease.chmod(0o644)
@@ -114,6 +120,9 @@ int main(int argc, char **argv) {
     both = dict(environment, R1_FAN_MASK="3")
     call(device, 0x5798, 99, 180, both)
     call(device, 0x5799, 99, 230, both)
+    renew(mask=3, cpu=26, system=26)
+    call(device, 0x5798, 99, 26, both)
+    call(device, 0x5799, 99, 26, both)
     # Even with the fixture environment present, the production binary rejects
     # a regular file. Nothing can opt into the test profile at runtime.
     production = dict(environment, LD_PRELOAD=str(folder / "guard.so"))

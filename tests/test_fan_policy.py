@@ -128,7 +128,7 @@ class RulesTests(unittest.TestCase):
     def test_all_fields_are_validated_before_any_control(self):
         value = config()
         self.assertEqual(policy.validate_config(value), value)
-        for changes in ({"normal_at": 40}, {"quiet_percent": 49}, {"normal_percent": 54},
+        for changes in ({"normal_at": 40}, {"quiet_percent": 9}, {"normal_percent": 54},
                         {"manual_percent": True}, {"sources": []}, {"sources": ["x", "x"]},
                         {"full_at": float("nan")}, {"command": "anything"}):
             candidate = copy.deepcopy(value)
@@ -149,6 +149,30 @@ class RulesTests(unittest.TestCase):
             candidate["channels"][channel]["vendor_mode"] = mode
             with self.subTest(channel=channel, mode=mode), self.assertRaises(ValueError):
                 policy.validate_config(candidate)
+
+    def test_requested_output_accepts_ten_and_hundred_percent_but_rejects_nine_and_101(self):
+        for percent in (10, 100):
+            value = config()
+            for channel in policy.CHANNELS:
+                for field in ("quiet_percent", "normal_percent", "manual_percent"):
+                    value["channels"][channel][field] = percent
+            self.assertEqual(policy.validate_config(value), value)
+        for percent in (9, 101):
+            for channel in policy.CHANNELS:
+                for field in ("quiet_percent", "normal_percent", "manual_percent"):
+                    value = config()
+                    value["channels"][channel][field] = percent
+                    with self.subTest(percent=percent, channel=channel, field=field), self.assertRaises(ValueError):
+                        policy.validate_config(value)
+
+    def test_ten_percent_quiet_and_twenty_percent_normal_keep_full_and_missing_cpu_protection(self):
+        settings = config()["channels"]["cpu"]
+        settings.update(quiet_percent=10, normal_percent=20)
+        for temperature, expected in ((35, 10), (60, 20), (70, 100), (80, 100)):
+            result = self.decide(settings, [source("cpu", temperature), source("disk1", 30, "disk")])
+            self.assertEqual(result["target_percent"], expected)
+        missing = self.decide(settings, [source("disk1", 30, "disk")])
+        self.assertEqual((missing["level"], missing["target_percent"]), ("failsafe", 100))
 
 
 class ControllerTests(unittest.TestCase):
@@ -241,13 +265,13 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(state["channels"]["cpu"]["rpm"])
         self.assertTrue(state["active_on_boot"])
 
-    def test_cpu_only_keeps_system_vendor_and_percent_never_under_raw_128(self):
+    def test_cpu_only_keeps_system_vendor_and_ten_percent_reaches_raw_26(self):
         value = config()
         value["channels"]["system"]["mode"] = "vendor"
-        value["channels"]["cpu"].update(mode="manual", manual_percent=50)
+        value["channels"]["cpu"].update(mode="manual", manual_percent=10)
         self.apply(value)
         self.controller.tick()
-        self.assertEqual(self.adapter.calls[-1], ("write", {"cpu": 128}))
+        self.assertEqual(self.adapter.calls[-1], ("write", {"cpu": 26}))
         self.assertFalse(self.controller.snapshot()["channels"]["system"]["active"])
 
     def test_saved_pending_rules_do_not_change_running_or_resume_policy(self):
@@ -454,6 +478,43 @@ class NativeModeTests(unittest.TestCase):
             self.adapter.calls.clear()
         self.histor.set_mode.assert_not_called()
         self.assertGreaterEqual(self.histor.verified_mode.call_count, 4)
+
+    def test_same_mask_ten_percent_writes_raw_26_without_restart_and_keeps_hot_cpu_full(self):
+        value = self.native_config("manual", "low")
+        value["channels"]["cpu"]["manual_percent"] = 75
+        self.apply(value)
+        self.adapter.calls.clear()
+        value["channels"]["cpu"]["manual_percent"] = 10
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 26})])
+        self.assertEqual((state["channels"]["cpu"]["target_percent"], state["channels"]["cpu"]["target_raw"]), (10, 26))
+        self.adapter.calls.clear()
+        self.controller.sources.snapshot.return_value = [source("cpu", 80)]
+        state = self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 255})])
+        self.assertEqual(state["channels"]["cpu"]["level"], "failsafe")
+        self.adapter.calls.clear()
+        self.controller.sources.snapshot.return_value = []
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 255})])
+        self.histor.set_mode.assert_not_called()
+
+    def test_live_curve_ten_twenty_percent_reaches_native_targets_26_and_51(self):
+        value = self.native_config("manual", "low")
+        self.apply(value)
+        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], quiet_below=45,
+                                          normal_at=55, full_at=70, quiet_percent=10, normal_percent=20)
+        self.adapter.calls.clear()
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 26})])
+        self.controller.sources.snapshot.return_value = [source("cpu", 60)]
+        self.adapter.calls.clear()
+        self.apply(value)
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 51})])
+        self.controller.sources.snapshot.return_value = [source("cpu", 70)]
+        self.adapter.calls.clear()
+        self.controller.tick()
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 255})])
 
     def test_same_mask_curve_edits_apply_fresh_decision_without_full_spike(self):
         value = self.native_config("manual", "low")

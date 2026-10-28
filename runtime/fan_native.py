@@ -22,6 +22,8 @@ LEASE = struct.Struct("<8sQIIII")
 MAGIC = b"R1FAN01\0"
 CHANNEL_BITS = {"cpu": 1, "system": 2}
 LEASE_NS = 5_000_000_000
+# Ten percent requested output maps to raw 26. This is not measured fan RPM.
+MIN_TARGET_RAW = 26
 PREFLIGHT_REASONS = frozenset((
     "独立风扇接管尚未启用", "独立风扇控制仅在 Linux 宿主 root 服务中启用",
     "独立恢复需要宿主 systemd-run", "已加载的风扇驱动身份已经改变或未验证",
@@ -115,9 +117,9 @@ def valid_channels(channels):
 def encode_lease(channels, targets, sequence, now_ns):
     mask = valid_channels(channels)
     if (not isinstance(targets, dict) or set(targets) != set(channels)
-            or any(type(value) is not int or not 128 <= value <= 255 for value in targets.values())
+            or any(type(value) is not int or not MIN_TARGET_RAW <= value <= 255 for value in targets.values())
             or type(sequence) is not int or not 1 <= sequence <= 0xffffffff):
-        raise ValueError("风扇目标必须完整提供接管通道且为 128–255 的整数")
+        raise ValueError("风扇目标必须完整提供接管通道且为 26–255 的整数")
     return LEASE.pack(MAGIC, now_ns + LEASE_NS, mask, targets.get("cpu", 0), targets.get("system", 0), sequence)
 
 
@@ -128,7 +130,7 @@ def decode_lease(raw, now_ns, expected_mask):
     if magic != MAGIC or mask != expected_mask or not sequence or not now_ns < until <= now_ns + LEASE_NS:
         raise ValueError("风扇租约已过期或身份错误")
     values = {name: value for name, value in (("cpu", cpu), ("system", system)) if mask & CHANNEL_BITS[name]}
-    if any(not 128 <= value <= 255 for value in values.values()):
+    if any(not MIN_TARGET_RAW <= value <= 255 for value in values.values()):
         raise ValueError("风扇租约目标超出安全范围")
     return {"until_ns": until, "sequence": sequence, "targets": values}
 

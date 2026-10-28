@@ -69,11 +69,12 @@ def controller(folder):
     return value
 
 board_stale = False
+cpu_stale = False
 class Sources:
     def snapshot(self):
         now = time.monotonic()
         return [{'id': name, 'label': label, 'kind': kind, 'temperature_c': temperature, 'status': 'ok',
-                 'sampled_monotonic': now - (30 if name == 'board' and board_stale else 0),
+                 'sampled_monotonic': now - (30 if (name == 'board' and board_stale) or (name == 'cpu' and cpu_stale) else 0),
                  'max_age_seconds': 10, 'critical_celsius': 95 if kind == 'cpu' else None}
                 for name, label, kind, temperature in [('cpu', 'CPU Package', 'cpu', 62), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]]
 class Adapter:
@@ -93,7 +94,7 @@ class Adapter:
     def snapshot(self):
         return {'phase': 'active' if self.channels else 'released', 'active_channels': sorted(self.channels)}
     def write(self, targets):
-        assert set(targets) <= self.channels and all(type(value) is int and 128 <= value <= 255 for value in targets.values())
+        assert set(targets) <= self.channels and all(type(value) is int and 26 <= value <= 255 for value in targets.values())
         self.targets = dict(targets)
     def release(self):
         if self.fail_release:
@@ -214,6 +215,12 @@ try:
             board_stale = True
         elif operation == 'fresh_board':
             board_stale = False
+        elif operation == 'stale_cpu':
+            cpu_stale = True
+            primary.fan_policy.tick()
+        elif operation == 'fresh_cpu':
+            cpu_stale = False
+            primary.fan_policy.tick()
         elif operation == 'fail_release':
             primary.fan_policy.adapter.fail_release = True
         elif operation == 'allow_release':
@@ -226,6 +233,9 @@ try:
             with primary.fan_policy.lock:
                 primary.fan_policy.config['channels']['cpu'].update(mode='manual', manual_percent=55)
                 primary.fan_policy.config['channels']['system'].update(mode='manual', manual_percent=73)
+        elif operation == 'fan_legacy_ten':
+            with primary.fan_policy.lock:
+                primary.fan_policy.config['channels']['cpu'].update(mode='manual', manual_percent=10)
         elif operation == 'unsupported_official_unknown':
             unsupported.fan_policy.histor.mode = None
             with unsupported.fan_policy.lock:
@@ -615,6 +625,49 @@ finally:
     check('从固定档切换手动直接进入已保留的曲线', await cpuEditor.locator('select').count() === 1 && await cpuEditor.locator('.r1-curve').count() === 1 && await cpuEditor.locator('.r1-ms-row input:checked').count() === 1);
     const restoredManual = await saveFanDirect('手动曲线');
     check('曲线重新生效且系统仍用原厂中档', restoredManual.config.channels.cpu.mode === 'temperature' && restoredManual.channels.cpu.active === true && restoredManual.config.channels.system.mode === 'vendor' && restoredManual.official.mode === 'medium', JSON.stringify({ config: restoredManual.config, channels: restoredManual.channels, official: restoredManual.official, last_error: restoredManual.last_error, request: fanResponses[fanResponses.length - 1]?.request }));
+    const beforeMinimum = (await fixtureCall('fan_calls')).fan_calls;
+    await fixtureCall('fan_legacy_ten');
+    await reloadFanSettings(page);
+    check('合法旧固定 10% 显示独立兼容项而非 CPU 低档', await cpuModes.inputValue() === 'legacy:10' && await cpuEditor.locator('.r1-fixed').textContent() === '10%' && await cpuEditor.locator('select').count() === 1 && await cpuEditor.locator('input[type="number"]').count() === 0);
+    const legacyMinimum = await saveFanDirect('旧固定10%');
+    check('旧固定 10% 实际映射 raw26', legacyMinimum.channels.cpu.target_percent === 10 && legacyMinimum.channels.cpu.target_raw === 26);
+    await cpuModes.selectOption('manual');
+    const quietOutput = cpuEditor.locator('input[aria-label="静音输出"]');
+    const normalOutput = cpuEditor.locator('input[aria-label="普通输出"]');
+    const fullOutput = cpuEditor.locator('input[aria-label="全速输出"]');
+    check('曲线静音输出范围为 10 到 100', await quietOutput.getAttribute('min') === '10' && await quietOutput.getAttribute('max') === '100');
+    await quietOutput.fill('9');
+    await quietOutput.dispatchEvent('change');
+    check('静音输出低于 10 时约束为 10', await quietOutput.inputValue() === '10');
+    await quietOutput.fill('100');
+    await quietOutput.dispatchEvent('change');
+    check('100% 合法且普通输出不低于静音', await quietOutput.inputValue() === '100' && await normalOutput.inputValue() === '100' && await normalOutput.getAttribute('min') === '100');
+    check('100% 曲线绘制到纵轴顶端', (await cpuEditor.locator('.r1-curve-line').getAttribute('d')).startsWith('M8 8.0'));
+    await quietOutput.fill('10');
+    await quietOutput.dispatchEvent('change');
+    await normalOutput.fill('9');
+    await normalOutput.dispatchEvent('change');
+    check('普通输出同时遵守 10% 下限和静音下限', await normalOutput.inputValue() === '10' && await normalOutput.getAttribute('min') === '10');
+    await normalOutput.fill('20');
+    await normalOutput.dispatchEvent('change');
+    check('全速输出固定禁用且保持 100%', await fullOutput.isDisabled() && await fullOutput.inputValue() === '100');
+    check('10% 和 20% 按完整 10 到 100 纵轴绘图', (await cpuEditor.locator('.r1-curve-line').getAttribute('d')).startsWith('M8 82.0') && (await cpuEditor.locator('.r1-curve-line').getAttribute('d')).includes('V73.8'));
+    for (const [label, value] of [['全速℃', '85'], ['普通℃', '75'], ['静音℃', '70']]) {
+      const input = cpuEditor.locator('input[aria-label="' + label + '"]');
+      await input.fill(value);
+      await input.dispatchEvent('change');
+    }
+    const minimumCurve = await saveFanDirect('10%温控曲线');
+    check('曲线保存静音10普通20并实际输出 raw26', minimumCurve.config.channels.cpu.quiet_percent === 10 && minimumCurve.config.channels.cpu.normal_percent === 20 && minimumCurve.channels.cpu.level === 'quiet' && minimumCurve.channels.cpu.target_percent === 10 && minimumCurve.channels.cpu.target_raw === 26, JSON.stringify(minimumCurve.channels.cpu));
+    await fixtureCall('stale_cpu');
+    const protectedMinimum = (await api('/api/r1')).body.fan;
+    check('10% 曲线仍在 CPU 读数过期时保护全速', protectedMinimum.channels.cpu.target_percent === 100 && protectedMinimum.channels.cpu.target_raw === 255, JSON.stringify(protectedMinimum.channels.cpu));
+    await fixtureCall('fresh_cpu');
+    const freshMinimum = (await api('/api/r1')).body.fan;
+    check('读数恢复后按曲线重新输出 10%', freshMinimum.channels.cpu.target_percent === 10 && freshMinimum.channels.cpu.target_raw === 26);
+    const afterMinimum = (await fixtureCall('fan_calls')).fan_calls;
+    check('10% 调速与保护恢复沿用接管且无需复位', JSON.stringify(afterMinimum) === JSON.stringify(beforeMinimum), JSON.stringify({ before: beforeMinimum, after: afterMinimum }));
+    await reloadFanSettings(page);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });
       await noOverflow('风扇设置 ' + width);

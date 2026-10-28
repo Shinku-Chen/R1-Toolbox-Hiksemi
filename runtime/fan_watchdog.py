@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 
-from fan_native import (CHANNEL_BITS, DRIVER_NOTE, FIRMWARE_SHA256, atomic_json,
+from fan_native import (CHANNEL_BITS, DRIVER_NOTE, FIRMWARE_SHA256, MIN_TARGET_RAW, atomic_json,
                         decode_lease, process_identity, read_bytes, read_json, valid_channels,
                         SystemdSupervisor)
 
@@ -350,7 +350,9 @@ class SystemBackend:
         return after
 
     def write(self, targets):
-        return self._write(targets, minimum=128)
+        # Independent targets use the requested 10% floor. The vendor-policy
+        # restore path deliberately retains its separately verified raw 120.
+        return self._write(targets, minimum=MIN_TARGET_RAW)
 
     def _write(self, targets, minimum):
         self.verify_live()

@@ -444,10 +444,10 @@ function fanCurveEditor(item, touch) {
   </div>`);
   const line = box.querySelector('[data-ref="line"]'), dots = box.querySelector('[data-ref="dots"]'), rows = box.querySelector('[data-ref="rows"]');
   const x = t => 8 + (clamp(t, 15, 85) - 15) / 70 * 224;
-  const y = p => 82 - (clamp(p, 50, 100) - 50) / 50 * 74;
+  const y = p => 82 - (clamp(p, 10, 100) - 10) / 90 * 74;
   const paint = () => {
     const qb = clamp(item.quiet_below, 15, 85), na = clamp(item.normal_at, 15, 85), fa = clamp(item.full_at, 15, 85);
-    const q = clamp(item.quiet_percent, 50, 100), n = Math.max(q, clamp(item.normal_percent, 50, 100));
+    const q = clamp(item.quiet_percent, 10, 100), n = Math.max(q, clamp(item.normal_percent, 10, 100));
     line.setAttribute('d', `M8 ${y(q).toFixed(1)}H${x(qb).toFixed(1)}V${y(n).toFixed(1)}H${x(na).toFixed(1)}V${y(100).toFixed(1)}H232`);
     dots.innerHTML = [[qb, q], [na, n], [fa, 100]].map(([t, p]) => `<circle cx="${x(t).toFixed(1)}" cy="${y(p).toFixed(1)}" r="3.4"></circle>`).join('');
   };
@@ -465,14 +465,25 @@ function fanCurveEditor(item, touch) {
   addRow('普通', 'normal_at', 15, 85, '℃');
   addRow('全速', 'full_at', 15, 85, '℃');
   const duty = mount(`<div class="r1-curve-rows" data-ref="duty"></div>`);
+  const dutyInputs = {};
   const addDuty = (label, key, fixed) => {
-    const row = mount(`<div class="r1-curve-row"><span class="r1-curve-name">${esc(label)}</span><input class="r1-curve-input" type="number" inputmode="numeric" min="50" max="100" step="1" value="${fixed == null ? item[key] : 100}" aria-label="${esc(label + '输出')}" ${fixed == null ? '' : 'disabled'}><span class="r1-curve-unit">%</span></div>`);
-    if (fixed == null) row.querySelector('input').addEventListener('change', event => {
-      const value = clamp(Math.round(Number(event.target.value) || item[key]), 50, 100);
-      event.target.value = value;
-      item[key] = value;
-      touch(); paint();
-    });
+    const row = mount(`<div class="r1-curve-row"><span class="r1-curve-name">${esc(label)}</span><input class="r1-curve-input" type="number" inputmode="numeric" min="${key === 'normal_percent' ? item.quiet_percent : 10}" max="100" step="1" value="${fixed == null ? item[key] : 100}" aria-label="${esc(label)}" ${fixed == null ? '' : 'disabled'}><span class="r1-curve-unit">%</span></div>`);
+    if (fixed == null) {
+      dutyInputs[key] = row.querySelector('input');
+      dutyInputs[key].addEventListener('change', event => {
+        const entered = Number(event.target.value);
+        const low = key === 'normal_percent' ? item.quiet_percent : 10;
+        const value = clamp(Math.round(Number.isFinite(entered) ? entered : item[key]), low, 100);
+        event.target.value = value;
+        item[key] = value;
+        if (key === 'quiet_percent') {
+          item.normal_percent = Math.max(value, item.normal_percent);
+          dutyInputs.normal_percent.value = item.normal_percent;
+          dutyInputs.normal_percent.min = value;
+        }
+        touch(); paint();
+      });
+    }
     duty.append(row);
   };
   addDuty('静音输出', 'quiet_percent');
@@ -541,13 +552,13 @@ function r1FanSettings(card) {
         : '自动／高／中／低：原厂系统档位。手动：按温度曲线独立调速。'));
       if (item.mode === 'temperature') {
         form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, item.sources, value => { item.sources = value; touch(); }), '点开下拉多选；只使用新鲜读数，取所选设备的最高温度。'));
-        form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '升温到节点后下一轮升档；降温 3°C 才降档；全速固定 100%，不会停转。'));
+        form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '输出范围 10–100%，普通不低于静音，全速固定 100%。升温到节点后下一轮升档；降温 3°C 才降档。'));
       }
       if (item.mode === 'manual') {
         const legacy = mode.startsWith('legacy:');
         form.append(r1Field(legacy ? '兼容配置' : '固定输出', mount(`<span class="r1-fixed">${item.manual_percent}%</span>`), legacy
           ? '保留原有固定输出；选择新档位后才会替换此配置。'
-          : '请求输出不是实测转速，温度保护优先，不会停转。'));
+          : '请求输出不是实测转速，温度保护优先。'));
       }
       if (item.mode === 'vendor') {
         form.append(r1Field('当前运行', mount(`<span class="sub r1-native-current">${esc(fanRunningMode(name))}</span>`), name === 'system'

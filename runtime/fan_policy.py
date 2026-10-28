@@ -16,6 +16,9 @@ import time
 
 CHANNELS = ("cpu", "system")
 VENDOR_MODES = ("auto", "low", "medium", "high")
+MIN_OUTPUT_PERCENT = 10
+# Requested output scale only; the driver does not supply measured RPM.
+MIN_TARGET_RAW = 26  # round(255 * 10 / 100), never a zero/stop command.
 QUICK_PERCENT = {"low": 50, "medium": 75, "high": 100}
 FIELDS = {"mode", "sources", "quiet_below", "normal_at", "full_at",
           "quiet_percent", "normal_percent", "manual_percent"}
@@ -64,7 +67,7 @@ def validate_config(value):
             _require(type(item[key]) is int and 15 <= item[key] <= 85, "温度阈值需要为 15–85°C 整数")
         _require(item["quiet_below"] < item["normal_at"] < item["full_at"], "静音、普通、全速温度必须递增")
         for key in ("quiet_percent", "normal_percent", "manual_percent"):
-            _require(type(item[key]) is int and 50 <= item[key] <= 100, "目标输出需要为 50–100% 整数")
+            _require(type(item[key]) is int and MIN_OUTPUT_PERCENT <= item[key] <= 100, "目标输出需要为 10–100% 整数")
         _require(item["quiet_percent"] <= item["normal_percent"], "普通档输出不能低于静音档")
     return result
 
@@ -330,7 +333,7 @@ class FanPolicyController:
             policy = settings["channels"][name]
             decision = decide(policy, catalog, previous[name])
             enabled = policy["mode"] != "vendor"
-            raw = max(128, min(255, round(decision["target_percent"] * 255 / 100))) if enabled else None
+            raw = max(MIN_TARGET_RAW, min(255, round(decision["target_percent"] * 255 / 100))) if enabled else None
             states[name] = {**decision, "mode": policy["mode"], "active": enabled, "target_raw": raw, "rpm": None}
             if enabled:
                 targets[name] = raw

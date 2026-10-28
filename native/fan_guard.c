@@ -13,6 +13,9 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Ten percent requested output; never interpreted as a measured RPM or stop. */
+#define MIN_TARGET_RAW 26UL
+
 static unsigned int owned_mask;
 static char lease_path[1024];
 static int (*next_ioctl)(int, unsigned long, ...);
@@ -76,7 +79,7 @@ static unsigned long target_value(unsigned int bit) {
         uint64_t until = le64(bytes+8);
         uint32_t mask = le32(bytes+16), value = le32(bytes+(bit == 1 ? 20 : 24));
         if (mask == owned_mask && until > tick && until-tick <= 5000000000ULL
-                && value >= 128 && value <= 255 && le32(bytes+28) != 0)
+                && value >= MIN_TARGET_RAW && value <= 255 && le32(bytes+28) != 0)
             result = value;
     }
     close(fd);

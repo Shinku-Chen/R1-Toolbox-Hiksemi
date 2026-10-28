@@ -129,11 +129,11 @@ class NativeFanTests(unittest.TestCase):
             set(channels), targets or {name: 255 for name in channels}, sequence, self.now))
 
     def test_lease_exact_abi_raw_values_and_zero_bool_unknown_channels_rejected(self):
-        value = native.encode_lease({"cpu", "system"}, {"cpu": 128, "system": 255}, 7, self.now)
+        value = native.encode_lease({"cpu", "system"}, {"cpu": 26, "system": 255}, 7, self.now)
         self.assertEqual(len(value), 32)
-        self.assertEqual(struct.unpack("<8sQIIII", value), (native.MAGIC, self.now + 5_000_000_000, 3, 128, 255, 7))
-        self.assertEqual(native.decode_lease(value, self.now, 3)["targets"], {"cpu": 128, "system": 255})
-        for targets in ({"cpu": 0}, {"cpu": True}, {"cpu": 127}, {"cpu": 256}, {}, {"cpu": 200, "system": 200}):
+        self.assertEqual(struct.unpack("<8sQIIII", value), (native.MAGIC, self.now + 5_000_000_000, 3, 26, 255, 7))
+        self.assertEqual(native.decode_lease(value, self.now, 3)["targets"], {"cpu": 26, "system": 255})
+        for targets in ({"cpu": 0}, {"cpu": True}, {"cpu": 25}, {"cpu": 256}, {}, {"cpu": 200, "system": 200}):
             with self.subTest(targets=targets), self.assertRaises(ValueError):
                 native.encode_lease({"cpu"}, targets, 1, self.now)
         for channels in (set(), {"other"}, ["cpu"]):
@@ -190,6 +190,21 @@ class NativeFanTests(unittest.TestCase):
         self.assertEqual(len([item for item in self.backend.events if item[0] == "write"]), writes + 1)
         self.assertEqual(len([item for item in self.backend.events if item[0] == "spawn"]), 1)
         self.assertEqual(native.read_json(self.folder / "status.json")["applied_sequence"], 4)
+
+    def test_ten_percent_lease_reaches_watchdog_then_expiry_recovers_full(self):
+        owner = self.make({"cpu", "system"})
+        owner.begin()
+        self.backend.events.clear()
+        self.renew({"cpu", "system"}, {"cpu": 26, "system": 26}, 2)
+        owner.tick()
+        self.assertEqual(self.backend.events, [("write", {"cpu": 26, "system": 26})])
+        self.assertEqual(native.read_json(self.folder / "status.json")["applied_sequence"], 2)
+        self.now += 5_000_000_001
+        with self.assertRaises(ValueError):
+            owner.tick()
+        self.backend.events.clear()
+        self.assertTrue(owner.restore("lease_or_identity_failed"))
+        self.assertEqual(self.backend.events[0], ("write", {"cpu": 255, "system": 255}))
 
     def test_expired_lease_recovers_high_before_daemon_and_policy(self):
         owner = self.make({"cpu", "system"})
@@ -431,12 +446,26 @@ class NativeFanTests(unittest.TestCase):
         backend._device = (info.st_dev, info.st_ino, info.st_rdev)
         with patch.object(backend, "verify_live"), patch.object(watchdog.stat, "S_ISCHR", return_value=True), \
                 patch.object(watchdog.fcntl, "ioctl", return_value=0) as ioctl:
-            backend.write({"cpu": 128, "system": 240})
-        self.assertEqual([(call.args[1], call.args[2]) for call in ioctl.call_args_list], [(0x5798, 128), (0x5799, 240)])
+            backend.write({"cpu": 26, "system": 240})
+        self.assertEqual([(call.args[1], call.args[2]) for call in ioctl.call_args_list], [(0x5798, 26), (0x5799, 240)])
         with patch.object(backend, "verify_live"), patch.object(watchdog.stat, "S_ISCHR", return_value=True), \
                 patch.object(watchdog.fcntl, "ioctl", return_value=-1):
             with self.assertRaises(ValueError):
                 backend.write({"cpu": 180})
+
+    def test_backend_rejects_raw_25_zero_and_256_before_any_ioctl(self):
+        device = self.folder / "dev/hikio"
+        device.parent.mkdir()
+        device.write_bytes(b"fixture-only")
+        info = device.stat()
+        backend = watchdog.SystemBackend(root=self.folder)
+        backend._device = (info.st_dev, info.st_ino, info.st_rdev)
+        with patch.object(backend, "verify_live"), patch.object(watchdog.stat, "S_ISCHR", return_value=True), \
+                patch.object(watchdog.fcntl, "ioctl", return_value=0) as ioctl:
+            for value in (0, 25, 256, True):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    backend.write({"cpu": value})
+            ioctl.assert_not_called()
 
     def test_backend_immutable_firmware_and_exact_loaded_note_gate(self):
         program = self.folder / "histor/bin/temp_control"
