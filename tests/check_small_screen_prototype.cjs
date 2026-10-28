@@ -226,7 +226,14 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('.fan-quick-row').count(), 2);
       await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').tap();
       assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true');
-      assert.match(await inside('.fan-quick-row').first().locator('.fan-quick-head span').textContent(), /低档/);
+      assert.match(await inside('.fan-quick-row').first().locator('.fan-quick-head span').textContent(), /低/);
+      assert.equal(await inside('.fan-quick-row').first().locator('.fan-mode').count(), 5);
+      const fanBoxes = await inside('.fan-quick-row').first().locator('.fan-mode').evaluateAll(nodes => nodes.map(node => {
+        const rect = node.getBoundingClientRect();
+        return { x: Math.round(rect.x), y: Math.round(rect.y), width: rect.width };
+      }));
+      assert.equal(new Set(fanBoxes.map(box => box.y)).size, 1, 'five fan modes share one row');
+      assert.ok(fanBoxes.every(box => box.width >= 56), JSON.stringify(fanBoxes));
       await tab('overview');
       await tab('thermal');
       assert.equal(await inside('[data-fan-channel="cpu"][data-fan-mode="low"]').getAttribute('aria-pressed'), 'true',
