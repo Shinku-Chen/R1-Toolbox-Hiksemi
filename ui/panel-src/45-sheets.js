@@ -169,6 +169,7 @@ const SHEETS = {
         <div class="sheet-stack" data-ref="notes"></div>
         ${sl ? '' : `${sec('实时读写', '<span class="faint">近 5 分钟</span>')}<div class="card chart-card"><div class="chart-head"><div class="chart-title">读写速率</div><div class="chart-legend"><span><span class="lk"><i class="k0" style="--k:var(--e-blue)"></i>读取</span><span class="lv" data-ref="rv">--</span></span><span><span class="lk"><i class="k1" style="--k:var(--e-coral)"></i>写入</span><span class="lv" data-ref="wv">--</span></span></div></div><div style="height:64px" data-ref="sp"></div></div>`}
         ${sec('SMART')}<div class="card pad" style="padding-top:14px;padding-bottom:6px"><table class="tbl"><thead><tr><th>属性</th><th class="r">值</th><th class="r">状态</th></tr></thead><tbody data-ref="smart"></tbody></table></div>
+        ${sec('全部 SMART 属性', '<span class="faint">来自后台缓存</span>')}<div class="card pad" style="padding-top:14px;padding-bottom:6px;max-height:520px;overflow:auto"><table class="tbl"><thead><tr><th>属性</th><th class="r">值 / 最差</th><th class="r">状态</th></tr></thead><tbody data-ref="smartAll"></tbody></table></div>
         ${sec('信息')}<div data-ref="info"></div>`;
       const x = collect(b);
       if (x.sp) x.sp.append(makeSpark());
@@ -209,6 +210,19 @@ const SHEETS = {
         }
         setHTML(x.smart, rows.map(([k, v, s]) => `<tr><td>${k}</td><td class="r tnum ${s === 'warn' || s === 'crit' ? 'st-' + s + ' smart-flag' : ''}">${v}</td><td class="r">${slp && k !== '整体评估' ? '<span class="faint">休眠前</span>' : s === true ? `<span class="st-ok">${ic('check', 'i-sm')}</span>` : s ? `<span class="pill ${s}">${s === 'crit' ? '严重' : '留意'}</span>` : '<span class="faint">—</span>'}</td></tr>`).join('')
           + (hint ? `<tr><td colspan="3" class="faint" style="font-size:12px">${hint}</td></tr>` : ''));
+        // Full table: every ATA attribute and every NVMe health-log field the
+        // cached smartctl JSON contains. Unknown fields stay visible by key.
+        const attrs = (sd && sd.attributes) || [], nvmeRows = (sd && sd.nvme_rows) || [];
+        const allRows = attrs.map(a => {
+          const failed = a.when_failed && !/^(?:-|never)$/i.test(a.when_failed);
+          const low = !failed && a.value != null && a.threshold != null && a.value <= a.threshold;
+          const raw = [a.raw_text, a.raw_value != null ? a.raw_value : ''].filter(v => v !== '' && v != null).join(' · ');
+          return [`${a.id != null ? a.id + ' · ' : ''}${a.name || '—'}`,
+            `${a.value != null ? a.value : '—'} / ${a.worst != null ? a.worst : '—'}${raw ? `<div class="sub">${esc(raw)}</div>` : ''}`,
+            failed ? 'crit' : low ? 'warn' : null];
+        }).concat(nvmeRows.map(a => [a.label || a.key, esc(String(a.value)), null]));
+        setHTML(x.smartAll, allRows.length ? allRows.map(([k, v, st]) => `<tr><td>${esc(k)}</td><td class="r tnum ${st ? 'st-' + st : ''}">${v}</td><td class="r">${st === 'crit' ? '<span class="pill crit">异常</span>' : st === 'warn' ? '<span class="pill warn">偏低</span>' : '<span class="faint">—</span>'}</td></tr>`).join('')
+          : `<tr><td colspan="3" class="faint" style="font-size:12px">${slp ? '休眠中，完整属性待硬盘唤醒后读取' : (sd && sd.error ? 'SMART 明细读取失败：' + esc(sd.error) : '后台缓存没有返回完整 SMART 属性')}</td></tr>`);
         const extra = [];
         if (sas && sd.manufactured) extra.push(['生产周期', esc(sd.manufactured)]);
         /* 实际硬盘位 = iDRAC 物理盘列表里的「插槽编号」，靠序列号对齐到 /dev/sdX。

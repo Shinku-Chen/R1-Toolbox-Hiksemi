@@ -540,6 +540,11 @@ class InsightsCollector:
                 data = json.loads(output)
                 if not isinstance(data, dict):
                     raise ValueError("invalid SMART response")
+                # Keep the complete smartctl JSON in the cache for the on-demand
+                # disk detail endpoint.  It is deliberately not copied into the
+                # frequent overview snapshot; smart() reads this cached copy and
+                # never launches another probe.
+                result["smart_data"] = copy.deepcopy(data)
                 messages = data.get("smartctl", {}).get("messages", [])
                 notes = " ".join(str(entry.get("string", "")) for entry in messages if isinstance(entry, dict))
                 power = str(data.get("power_mode", {}).get("string", ""))
@@ -589,6 +594,11 @@ class InsightsCollector:
         result['smart_sampled_monotonic'] = self.clock()
         self._smart_cache[name] = (result['smart_sampled_monotonic'], copy.deepcopy(result), identity)
         return result
+
+    def smart_cached(self, name):
+        """Return only the last background SMART result; never probe on request."""
+        cached = self._smart_cache.get(name)
+        return copy.deepcopy(cached[1]) if cached else None
 
     def _disks(self):
         rows, active = [], set()

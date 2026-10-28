@@ -33,7 +33,7 @@ NAS 的 `panel-ui.json`，换设备或清缓存后自动恢复。
 | `/api/docker`、`/api/ports`、`/api/processes` | 应用、容器与端口采集 |
 | `/api/history`、`/api/export`、`/api/report` | 本地 SQLite 历史与报告 |
 | `/api/traffic`、`/api/power`、`/api/power_stats` | 计数器差值、RAPL 实测（不估算整机功耗） |
-| `/api/hardware`、`/api/gpu`、`/api/disk_health`、`/api/smart` | 设备库存与后台 SMART 缓存 |
+| `/api/hardware`、`/api/gpu`、`/api/disk_health`、`/api/smart` | 设备库存、后台 SMART 缓存；`/api/smart` 返回缓存中的完整属性与原始 JSON，不额外探测 |
 | `/api/weather` | Open-Meteo 当前天气；自动定位或用户设置的城市／坐标，不经过 fnOS 天气服务 |
 | `/api/r1` 及 `/api/r1/*` | 双路风扇、灯光、屏幕、电源、统计、登录口令 |
 

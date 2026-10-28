@@ -262,6 +262,24 @@ class InsightsTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.calls[0], (["/fixture/bin/smartctl", *args], 3))
 
+    def test_smart_cached_keeps_full_json_for_detail_endpoint(self):
+        self.block()
+        self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], {
+            'smart_status': {'passed': True},
+            'ata_smart_attributes': {'table': [{
+                'id': 5, 'name': 'Reallocated_Sector_Ct', 'value': 100,
+                'worst': 100, 'thresh': 10, 'when_failed': '-',
+                'raw': {'value': 0, 'string': '0'},
+            }]},
+            'power_on_time': {'hours': 123},
+        })
+        self.collector._disks()
+        cached = self.collector.smart_cached('sda')
+        self.assertIn('ata_smart_attributes', cached['smart_data'])
+        self.assertEqual(cached['smart_data']['power_on_time']['hours'], 123)
+        cached['smart_data']['power_on_time']['hours'] = 999
+        self.assertEqual(self.collector.smart_cached('sda')['smart_data']['power_on_time']['hours'], 123)
+
     def test_smart_failed_health_is_kept_even_with_nonzero_exit_status(self):
         self.block()
         self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], {"smart_status": {"passed": False}, "temperature": {"current": 48}}, 8)

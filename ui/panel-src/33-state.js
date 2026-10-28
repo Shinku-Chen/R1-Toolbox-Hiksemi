@@ -116,7 +116,8 @@ const volLabel = d => (d && d.volume_label) || volumeName(d) || '未挂载';
 /** 盘位排序：优先按卷名，未挂载的排最后。 */
 const byVol = (a, b) => {
   const va = volumeName(a), vb = volumeName(b);
-  if (va !== vb) return (va || '~').localeCompare(vb || '~');
+  if (!va !== !vb) return va ? -1 : 1;
+  if (va !== vb) return va.localeCompare(vb, undefined, { numeric: true });
   return String(a.name).localeCompare(String(b.name));
 };
 /** 存储卡副标题里「隐藏本次提醒」的本地记录键（签名变了会自动重新出现） */

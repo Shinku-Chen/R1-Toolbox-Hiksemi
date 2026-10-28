@@ -124,6 +124,9 @@ class Insights:
                   'gpu':{'available':False,'reason':'fixture: no GPU','devices':[]},
                   'history':[{'cpu_usage_percent':v,'memory_usage_percent':37.5} for v in [18,22,28,21,24.5]]}
     def snapshot(self):return copy.deepcopy(self.data)
+    def smart_cached(self,name):
+        if name!='sda':return None
+        return {'smart_data':{'ata_smart_attributes':{'table':[{'id':5,'name':'Reallocated_Sector_Ct','value':100,'worst':100,'thresh':10,'when_failed':'-','raw':{'value':0,'string':'0'}}]},'power_on_time':{'hours':123},'power_cycle_count':4,'rotation_rate':7200}}
     def action(self,name,payload):
         assert name=='container.action' and payload.get('confirmed') is True
         item=next(n for n in self.data['containers']['items'] if n['id']==payload['id'])
@@ -327,7 +330,10 @@ finally:
     await page.waitForFunction(() => /FixtureVolume/.test(document.querySelector('#layout-storage')?.textContent || ''), null, { timeout: 10000 }).catch(() => {});
     check('存储页显示卷名而不是未挂载', /FixtureVolume/.test(await page.locator('#layout-storage').textContent()), await page.locator('#layout-storage').textContent());
     await page.locator('#layout-storage section[data-mod="storage"] .bay').first().click();
-    await page.waitForTimeout(200);
+    await page.waitForSelector('#sheetBody', { timeout: 8000 });
+    await page.waitForTimeout(1000);
+    await page.waitForFunction(() => /Reallocated_Sector_Ct/.test(document.querySelector('#sheetBody')?.textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    check('硬盘详情显示完整 SMART 属性', /Reallocated_Sector_Ct/.test(await page.locator('#sheetBody').textContent()));
     await page.locator('#sheetClose').click();
     await page.locator('#pageSeg button[data-page="overview"]').click();
     await page.locator('#btnSearch').click();

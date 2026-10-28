@@ -328,6 +328,63 @@ def fetch_weather(city_override=''):
         return {'ok': False, 'error': '天气服务暂时不可用：%s' % str(exc)[:120]}
 
 
+_NVME_LABELS = {
+    'critical_warning': '严重警告', 'temperature': '温度 (K)', 'available_spare': '可用备用块',
+    'available_spare_threshold': '备用块阈值', 'percentage_used': '已用寿命', 'data_units_read': '读取数据单元',
+    'data_units_written': '写入数据单元', 'host_read_commands': '主机读取命令', 'host_write_commands': '主机写入命令',
+    'controller_busy_time': '控制器忙碌时间', 'power_cycles': '通电次数', 'power_on_hours': '通电时间',
+    'unsafe_shutdowns': '异常断电', 'media_errors': '介质错误', 'num_err_log_entries': '错误日志条数',
+}
+
+
+def _smart_rows(raw):
+    """Normalize the cached smartctl JSON for the detail table.
+
+    No command is executed here.  The raw JSON remains available for clients
+    that need a field the table does not label yet.
+    """
+    raw = _dict(raw)
+    attributes = []
+    table = _list(_dict(raw.get('ata_smart_attributes')).get('table'), 256)
+    for item in table:
+        if not isinstance(item, dict):
+            continue
+        value = item.get('raw') if isinstance(item.get('raw'), dict) else {}
+        attributes.append({
+            'id': _number(item.get('id'), 0, 999999),
+            'name': _text(item.get('name'), 120) or '—',
+            'value': _number(item.get('value'), 0, 1000),
+            'worst': _number(item.get('worst'), 0, 1000),
+            'threshold': _number(item.get('thresh'), 0, 1000),
+            'raw_value': _number(value.get('value'), 0, 2 ** 63 - 1),
+            'raw_text': _text(value.get('string'), 160),
+            'when_failed': _text(item.get('when_failed'), 80),
+        })
+    nvme = _dict(raw.get('nvme_smart_health_information_log'))
+    nvme_rows = []
+    for key, value in sorted(nvme.items()):
+        if type(value) is not int and not (isinstance(value, str) and value.strip()):
+            continue
+        nvme_rows.append({'key': key, 'label': _NVME_LABELS.get(key, key), 'value': value if type(value) is int else _text(value, 160)})
+    power = _dict(raw.get('power_on_time'))
+    scsi_log = _dict(raw.get('scsi_error_counter_log'))
+    return {
+        'attributes': attributes,
+        'nvme_rows': nvme_rows,
+        'power_on_hours': _number(power.get('hours'), 0),
+        'power_cycle_count': _number(raw.get('power_cycle_count'), 0),
+        'rotation_rate': _number(raw.get('rotation_rate'), 0),
+        'grown_defects': _number(raw.get('scsi_grown_defect_list'), 0),
+        'scsi_pending_defects': _number(raw.get('scsi_pending_defects'), 0),
+        'scsi_uncorrected': _number(_dict(scsi_log.get('read')).get('total_uncorrected_errors'), 0),
+        'scsi_ecc': _number(_dict(scsi_log.get('read')).get('total_corrected_errors'), 0),
+        'scsi_rereads': _number(_dict(scsi_log.get('read')).get('total_rereads'), 0),
+        'scsi': bool(scsi_log),
+        'manufactured': _text(raw.get('manufactured'), 80),
+        'raw': raw,
+    }
+
+
 THRESHOLD_SPEC = {
     'cpuWarn': (85, 30, 100), 'cpuCrit': (95, 30, 100),
     'memWarn': (85, 30, 100), 'memCrit': (95, 30, 100),
@@ -1109,13 +1166,34 @@ class FnmonitorPanel:
             raise ValueError('设备标识无效')
         for disk in self._disks():
             if disk['name'] == device:
+                cached = None
+                getter = getattr(self.insights, 'smart_cached', None)
+                if callable(getter):
+                    try:
+                        cached = getter(device)
+                    except Exception:
+                        cached = None
+                detail = _smart_rows(_dict(cached).get('smart_data') if isinstance(cached, dict) else {})
                 return {'ok': True, 'dev': device, 'model': disk.get('model'),
                         'serial': disk.get('serial'), 'size': disk.get('size'),
                         'temp': disk.get('temp'), 'health': disk.get('health'),
                         'standby': disk.get('standby'),
                         'reason': disk.get('health_reason'),
-                        'source': 'background_smartctl', 'attributes': [],
-                        'note': '页面读取后台 SMART 缓存，不会为打开详情而启动磁盘或自检'}
+                        'source': 'background_smartctl',
+                        'attributes': detail['attributes'],
+                        'nvme_rows': detail['nvme_rows'],
+                        'power_on_hours': detail['power_on_hours'],
+                        'power_cycle_count': detail['power_cycle_count'],
+                        'rotation_rate': detail['rotation_rate'],
+                        'grown_defects': detail['grown_defects'],
+                        'scsi_pending_defects': detail['scsi_pending_defects'],
+                        'scsi_uncorrected': detail['scsi_uncorrected'],
+                        'scsi_ecc': detail['scsi_ecc'],
+                        'scsi_rereads': detail['scsi_rereads'],
+                        'scsi': detail['scsi'],
+                        'manufactured': detail['manufactured'],
+                        'raw': detail['raw'],
+                        'note': '页面读取后台 SMART 缓存；完整属性不会为了打开详情而重新探测或唤醒磁盘'}
         return {'ok': False, 'dev': device, 'error': '未找到该硬盘的 SMART 观测'}
 
     def disk_health(self):

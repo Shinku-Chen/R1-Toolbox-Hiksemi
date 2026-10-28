@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat(storage): 硬盘详情新增缓存中的完整 ATA／NVMe SMART 属性表，并在 `/api/smart` 返回原始 smartctl JSON；休眠盘仍不探测、不唤醒。
 - fix(web): 存储盘位优先显示文件系统卷标，其次显示 `/drives` 挂载目录名；有挂载的磁盘不再误显示“未挂载”。
 - test(storage): 覆盖休眠盘 `smart_available=false` 仍保留盘位、显示休眠且不触发 SMART 读取；明确休眠状态不作为未巡检或故障。
 - feat(web): 移除网页与小屏的 CPU 封装功耗、显卡和能耗展示；保留后端原始读数，不伪造不可用数据。

@@ -375,6 +375,26 @@ class MappingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.panel.smart('../etc/passwd')
 
+    def test_smart_detail_returns_cached_full_attributes(self):
+        self.panel.insights.smart_cached = lambda name: {
+            'smart_data': {
+                'ata_smart_attributes': {'table': [{
+                    'id': 5, 'name': 'Reallocated_Sector_Ct', 'value': 100, 'worst': 100,
+                    'thresh': 10, 'when_failed': '-', 'raw': {'value': 0, 'string': '0'},
+                }]},
+                'power_on_time': {'hours': 123},
+                'power_cycle_count': 4,
+                'rotation_rate': 7200,
+            },
+        } if name == 'sda' else None
+        detail = self.panel.smart('sda')
+        self.assertEqual(detail['attributes'][0]['name'], 'Reallocated_Sector_Ct')
+        self.assertEqual(detail['attributes'][0]['raw_text'], '0')
+        self.assertEqual(detail['power_on_hours'], 123)
+        self.assertEqual(detail['power_cycle_count'], 4)
+        self.assertEqual(detail['rotation_rate'], 7200)
+        self.assertIn('ata_smart_attributes', detail['raw'])
+
     def test_unsupported_integrations_report_unavailable(self):
         self.assertFalse(self.panel.weather()['ok'])
         self.assertEqual(self.panel.notify()['enabled'], 0)
