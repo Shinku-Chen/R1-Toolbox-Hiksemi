@@ -14,6 +14,29 @@
 
 对实机公开主包的只读交叉核对也确认了 `api` 基址、`/endpoints`、`/stacks`、`/system` 和由环境 ID 构造的 `/docker/` 代理路径。该主包声明了同名 `.js.map`，本轮未进一步请求映射。以上是当前前端能力证据，仍不等于业务 API 已授权调用成功。
 
+## 云代理请求实际访问的内部服务
+
+`space_manage` 的 HTTP REST 处理者是 **`/histor/bin/emhistor`**。该主后台进程内嵌 Appweb 服务，正常 HTTP 为 `80`，HTTPS 为 `20443`。本条代理业务通道在 NAS 上由 **`/histor/bin/network/proxyDaemon`** 转发到 **`127.0.0.1:80`**：
+
+```text
+海康云代理入口 + PROXY_TARGET
+  → NAS 的 proxyDaemon
+  → 127.0.0.1:80
+  → emhistor 内置 Appweb /rest/ 分发
+  → /rest/1.2/config → space_manage
+```
+
+确定的固件调用证据：
+
+- `proxy_connect_real_server@0x2d854`：在 `0x2d897` 传入端口 `0x50`，在 `0x2d89c` 取得 `127.0.0.1`，于 `0x2d8a3` 调用 `tcp_connect`。
+- `emhistor` 的 `startHttpServer@0x97a8f6` 配置 HTTP／HTTPS 回调并启动服务；HTTP 回调 `0x97a079` 返回 `80`，HTTPS 回调 `0x97a74d` 返回 `20443`。
+- `rest_srv_init@0x17812b` 于 `0x178212` 把 `rest_CGI_proc@0x174ec6` 注册到 `/rest/`；请求随后进入 v1.2 config 分发器 `0x162dbd` 和 `rest_space_manage_v1@0x26f41d`。
+- 固件启动链为 `/etc/init.d/starthistor` → `/histor/init.sh` → `/histor/bin/init.sh` → `restart_emhistor.sh`，后者循环执行 `/histor/bin/emhistor`。
+
+2026-10-29 的既有监控缓存同时看到 `emhistor`，PID 为 `2036`，以及 TCP6 `::` 上的 `80`、`20443` 监听。进程与监听的这次观测没有额外做 FD inode 归属互证；服务处理链的具体归属依据上面的二进制注册、启动和连接代码。PID 和 inode 仅是当次现场，不用于运行时硬编码。
+
+`disk_space` 是另一个原厂存储服务，提供 `/var/tmp/disk` 缓存接口；Portainer 提供 `9000` 的 Docker 管理界面。两者均不承担这里的 `/rest/1.2/config` HTTP 路由。`emclient` 另有云连接相关职责，本轮不把它推定为该 REST 监听者。
+
 ## `openinfo/get_ip_info` 的额外限制
 
 该 action 在固件中注册为 `/rest/1.1/openinfo` 的 `get_ip_info`，handler 为 `0x390ae9`。handler 在 `0x390bf6` 读取连接 peer，于 `0x390c00–0x390c25` 比较 `127.0.0.1`；非回环返回通用 `code:-1`。成功返回的 `ip_list` 含 `ipaddr`、`ifname` 和字面端口 `80`，另有 `nginx_installed` 字符串。它是受限查询，不是网页 HTML 入口；外部拒绝不能解释成端口错误。
