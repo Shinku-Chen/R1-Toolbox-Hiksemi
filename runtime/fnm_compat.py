@@ -487,6 +487,7 @@ class FnmonitorPanel:
         self.dev_root = Path(dev_root)
         self.udev_root = Path(udev_root)
         self._mount_cache = (0.0, {})
+        self._mount_devices = {}
         self._label_cache = (0.0, {})
         self._weather_fetcher = weather_fetcher or fetch_weather
         self._weather_cache = None
@@ -610,7 +611,7 @@ class FnmonitorPanel:
         stamp, cached = self._mount_cache
         if now - stamp < 30:
             return cached
-        result = {}
+        result, devices = {}, {}
         try:
             text = (self.proc_root / 'self/mountinfo').read_text(encoding='utf-8', errors='replace')[:262144]
         except OSError:
@@ -630,7 +631,10 @@ class FnmonitorPanel:
             if not match or extra[0] in ('tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'proc', 'sysfs'):
                 continue
             result.setdefault(match[1], []).append(mount)
+            if re.fullmatch(r'[0-9]+:[0-9]+', fields[2]):
+                devices[mount] = fields[2]
         self._mount_cache = (now, result)
+        self._mount_devices = devices
         return result
 
     # ------------------------------------------------------------------
@@ -665,7 +669,8 @@ class FnmonitorPanel:
         swap_total = _number(memory.get('swap_total_bytes'), 0)
         swap_used = _number(memory.get('swap_used_bytes'), 0)
         return {
-            'total': total, 'used': used, 'available': available, 'free': available,
+            'total': total, 'used': used, 'available': available,
+            'free': _number(memory.get('free_bytes'), 0),
             'percent': percent, 'cached': None, 'buffers': None,
             'swap_total': swap_total, 'swap_used': swap_used,
             'swap_free': swap_total - swap_used if swap_total is not None and swap_used is not None else None,
@@ -717,12 +722,18 @@ class FnmonitorPanel:
             volume_label = self._volume_labels().get(name) or _text(item.get('volume_label'), 120)
             total = used = 0
             measured = False
+            measured_devices = set()
             for mount in disk_mounts:
                 entry = _dict(basic.get(mount))
+                filesystem = self._mount_devices.get(mount)
+                if filesystem is not None and filesystem in measured_devices:
+                    continue
                 if _number(entry.get('total_bytes')) is not None and _number(entry.get('used_bytes')) is not None:
                     total += entry['total_bytes']
                     used += entry['used_bytes']
                     measured = True
+                    if filesystem is not None:
+                        measured_devices.add(filesystem)
             size = _number(item.get('size_bytes'), 0) or _number(physical.get('bytes'), 0)
             rpm = physical.get('rotational')
             media = ('HDD' if rpm == 1 else 'SSD' if rpm == 0 else '')
@@ -747,38 +758,61 @@ class FnmonitorPanel:
                 'health': 'PASS' if passed is True else 'FAIL' if passed is False else None,
                 'health_reason': _text(health.get('reason'), 160),
                 'smart_available': bool(item.get('smart_available')),
-                'standby': bool(item.get('standby')),
+                'standby': item.get('standby') if type(item.get('standby')) is bool else None,
                 'smart_status': item.get('smart_status'),
                 'temperature_critical_c': _number(item.get('temperature_critical_c'), 0, 200),
             })
         return rows
 
     def _disk_summary(self):
-        """Total data-disk usage straight from the sampler's deduplicated mounts."""
+        """Count each confirmed block filesystem once, excluding FUSE aliases.
+
+        The sampler deduplicates mount major/minor values, but the factory's
+        public/private FUSE views have distinct values for the same backing
+        storage. Match its cached usage only to actual block-backed mounts;
+        never guess aliases from matching sizes or names and never stat a disk.
+        """
         total = used = 0
         measured = False
+        mounts = {mount for rows in self._mounts().values() for mount in rows}
+        if not mounts:
+            return None, None, None
+        seen = set()
         for entry in _list(self._basic().get('disks'), 128):
             if not isinstance(entry, dict):
                 continue
+            mount = entry.get('mount')
+            if mount not in mounts:
+                continue
+            identity = self._mount_devices.get(mount) or mount
+            if not isinstance(identity, str) or identity in seen:
+                continue
             size = _number(entry.get('total_bytes'), 1)
             taken = _number(entry.get('used_bytes'), 0)
-            if size is not None and taken is not None:
+            if size is not None and taken is not None and taken <= size:
                 total += size
                 used += taken
                 measured = True
+                seen.add(identity)
         if not measured or total <= 0:
             return None, None, None
         return total, used, used / total * 100
 
     def _net(self):
         insight, device = self._insights(), self._device()
-        links = {row.get('name'): row for row in _list(_dict(device.get('network')).get('interfaces'), 128)
+        network = device.get('network')
+        # DeviceInfo uses a list; retain the older embedded mapping shape.
+        network = network if isinstance(network, list) else _dict(network).get('interfaces')
+        links = {row.get('name'): row for row in _list(network, 128)
                  if isinstance(row, dict) and isinstance(row.get('name'), str)}
         rows = []
         for item in _list(insight.get('interfaces'), 128):
             if not isinstance(item, dict) or not isinstance(item.get('name'), str):
                 continue
             name = item['name']
+            # sysfs exposes this bonding control file beside interface dirs.
+            if name == 'bonding_masters':
+                continue
             link = _dict(links.get(name))
             ipv6 = [row.get('address') for row in _list(link.get('ipv6_addresses'), 32)
                     if isinstance(row, dict) and isinstance(row.get('address'), str)]
@@ -802,6 +836,24 @@ class FnmonitorPanel:
                 'gateway': gateway_rows[0].get('gateway') if gateway_rows else None,
             })
         return rows
+
+    def _network_aggregate(self, snapshot=None):
+        """Cached accounting totals, separate from the real interface inventory."""
+        monitoring = self._monitoring() if snapshot is None else snapshot
+        current = _dict(monitoring.get('current'))
+        if not isinstance(current.get('metrics'), list):
+            return None
+        result = {'schema_version': 1, 'source': 'monitoring_filtered_counters',
+                  'rx_rate': None, 'tx_rate': None,
+                  'sampled_at': _number(current.get('sampled_at'), 0),
+                  'exclude_virtual': _dict(monitoring.get('settings')).get('traffic_exclude_virtual')}
+        for identifier, field in (('rx_bytes_per_sec', 'rx_rate'), ('tx_bytes_per_sec', 'tx_rate')):
+            values = [row.get('value') for row in _list(current['metrics'], 512)
+                      if isinstance(row, dict) and row.get('id') == identifier]
+            result[field] = _number(values[0], 0) if len(values) == 1 else None
+        if type(result['exclude_virtual']) is not bool:
+            result['exclude_virtual'] = None
+        return result
 
     def _sensors(self):
         device = self._device()
@@ -837,15 +889,21 @@ class FnmonitorPanel:
             state = _dict(self._fan().get('channels', {}).get(channel))
             if _number(state.get('rpm'), 0, 1000000) is None:
                 continue
-            if any(row.get('rpm') is not None for row in fans):
+            if any(row.get('rpm') is not None and (row.get('channel') == channel
+                   or row.get('name') == name) for row in fans):
                 continue
-            fans.append({'name': name, 'label': name, 'rpm': state['rpm'], 'source': 'fan-policy'})
+            fans.append({'name': name, 'label': name, 'channel': channel,
+                         'rpm': state['rpm'], 'source': 'fan-policy'})
         return {'temps': temps, 'fans': fans, 'volts': [],
                 'available': bool(temps or fans),
                 'fans_source': 'hwmon / fan-policy' if fans else ''}
 
     def _power(self):
-        power = _dict(self._monitoring().get('power'))
+        monitoring = self._monitoring()
+        power = monitoring.get('power')
+        if not isinstance(power, dict):
+            power = _dict(monitoring.get('current')).get('power')
+        power = _dict(power)
         package = _number(power.get('cpu_package_w'), 0, 2000)
         ok = bool(power.get('available')) and package is not None
         return {'ok': ok, 'total': package if ok else None,
@@ -886,12 +944,19 @@ class FnmonitorPanel:
 
     def _gpu(self):
         rows = []
-        pci_names = {row.get('address'): row for row in _list(self._identity().get('pci'), 256)
-                     if isinstance(row, dict)}
+        pci_rows = [row for row in _list(self._identity().get('pci'), 256) if isinstance(row, dict)]
         for item in _list(_dict(self._insights().get('gpu')).get('devices'), 32):
             if not isinstance(item, dict):
                 continue
             vendor = str(item.get('vendor') or '').lower().replace('0x', '')
+            device_id = str(item.get('device') or '').lower().replace('0x', '')
+            matches = [row for row in pci_rows
+                       if str(row.get('class', '')).lower().startswith('0x03')
+                       and str(row.get('vendor') or '').lower().replace('0x', '') == vendor
+                       and str(row.get('device') or '').lower().replace('0x', '') == device_id]
+            # sysfs DRM and PCI inventory are cached independently. Only an
+            # unambiguous vendor/device match supplies missing display names.
+            pci = matches[0] if vendor and device_id and len(matches) == 1 else {}
             used = _number(item.get('vram_used_bytes'), 0)
             total = _number(item.get('vram_total_bytes'), 0)
             name = _text(item.get('name'), 80) or 'GPU'
@@ -904,8 +969,9 @@ class FnmonitorPanel:
                 'mem_total': total, 'mem_used': used,
                 'mem_pct': used / total * 100 if used is not None and total else None,
                 'shared_memory': bool(total in (None, 0)),
-                'pci': item.get('pci'), 'driver': item.get('driver'),
-                'model': _text(item.get('model'), 120),
+                'pci': _text(item.get('pci') or pci.get('address'), 64),
+                'driver': _text(item.get('driver') or pci.get('driver'), 64),
+                'model': _text(item.get('model') or pci.get('device_name'), 120),
             })
         return rows
 
@@ -930,7 +996,7 @@ class FnmonitorPanel:
                     'threads': _number(cpu.get('logical_cores'), 1, 8192),
                     'sockets': _number(cpu.get('sockets'), 1), 'arch': _text(cpu.get('architecture'), 32)},
             'board': board,
-            'gpu': [row.get('name') for row in self._gpu()],
+            'gpu': [row.get('model') or row.get('name') for row in self._gpu()],
             'net': [row.get('iface') for row in self._net() if row.get('mac')],
             'pci': _list(identity.get('pci'), 256),
         }
@@ -1079,6 +1145,7 @@ class FnmonitorPanel:
             'disks_detail': disks,
             'idrac_slot_state': 'off',
             'net': self._net(),
+            'net_aggregate': self._network_aggregate(),
             'diskio': self._disk_io(),
             'temp': self._temperature(disks),
             'power': self._power(),
@@ -1161,9 +1228,18 @@ class FnmonitorPanel:
         today = _dict(totals_from.get('today'))
         month = _dict(totals_from.get('month'))
         net = self._net()
+        aggregate = self._network_aggregate(snapshot)
+        # The shared sampler already applies the chosen bridge/bond/VLAN
+        # accounting policy. Do not add its logical interfaces a second time.
+        selected = [row for row in net if not (settings.get('traffic_exclude_virtual') and
+                    re.match(r'^(?:lo$|docker|veth|br-|br[0-9]+$|virbr|bond[0-9]+$|team[0-9]+$|tun|tap|vnet|lxc|kube|wg|vxlan)', row['name']))]
+        def rate(field):
+            if aggregate is not None:
+                return aggregate[field]
+            values = [row.get(field) for row in selected]
+            return sum(values) if values and all(value is not None for value in values) else None
         return {
-            'realtime': {'rx_rate': sum(row.get('rx_rate') or 0 for row in net),
-                         'tx_rate': sum(row.get('tx_rate') or 0 for row in net)},
+            'realtime': {'rx_rate': rate('rx_rate'), 'tx_rate': rate('tx_rate')},
             'ifaces': rows,
             'totals': {'boot_rx': None, 'boot_tx': None,
                        'today_rx': _number(today.get('rx_bytes'), 0),

@@ -87,8 +87,8 @@ const push = (a, v, n = BUF_N) => { a.push(v); if (a.length > n) a.shift(); };
 /* ---- 派生数据（只用后端真实字段） ---- */
 const VIRT = /^(lo|docker|veth|br-|virbr|tun|tap|vnet|lxc|kube|wg|vxlan)/;
 const nets = o => (o && o.net || []).filter(n => !VIRT.test(n.iface || ''));
-const sumRx = o => nets(o).reduce((a, n) => a + (+n.rx_rate || 0), 0);
-const sumTx = o => nets(o).reduce((a, n) => a + (+n.tx_rate || 0), 0);
+const sumRx = o => { const v = typeof window.panelNetworkAggregate === 'function' ? window.panelNetworkAggregate(o, 'rx_rate') : undefined; return v === undefined ? nets(o).reduce((a, n) => a + (+n.rx_rate || 0), 0) : v; };
+const sumTx = o => { const v = typeof window.panelNetworkAggregate === 'function' ? window.panelNetworkAggregate(o, 'tx_rate') : undefined; return v === undefined ? nets(o).reduce((a, n) => a + (+n.tx_rate || 0), 0) : v; };
 const disksOf = o => (o && o.disks_detail) || [];
 const ioOf = (o, name) => ((o && o.diskio) || []).find(z => z.name === name) || null;
 const isSleep = d => !!(d && (d.standby || d.state === 'standby'));

@@ -137,6 +137,20 @@
 }
 
 /* API 管理只按需打开；长地址、密钥与记录在窄屏内换行。 */
+.r1-api-home { padding: 18px 20px; min-width: 0; }
+.r1-api-home .r1-api-intro { padding: 0; }
+.r1-api-home > .sub { margin: 12px 0; line-height: 1.6; }
+.r1-api-inline-switch { display: flex; align-items: center; gap: 10px; flex-shrink: 0; min-height: 44px; font-size: 14px; cursor: pointer; }
+.r1-api-inline-switch input { width: 22px; height: 22px; accent-color: var(--ink-1); }
+.r1-api-entrypoints, .r1-api-pages { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.r1-api-entrypoints .btn, .r1-api-pages .btn { white-space: normal; min-height: 44px; }
+.r1-api-pages { margin: 18px 0; }
+.r1-api-pages [aria-current="page"] { color: var(--ink-1); border-color: var(--ink-1); font-weight: 600; }
+.r1-api-state-line { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 12px 0; }
+.r1-api-capabilities { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.r1-api-capability { display: grid; align-content: start; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.r1-api-capability p { margin: 0; }
+.r1-api-dialog [data-api-page][hidden] { display: none; }
 .r1-api-intro, .r1-api-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .r1-api-intro { padding: 18px 20px; }
 .r1-api-intro .hint { margin-top: 6px; color: var(--ink-3); font-size: 13px; }
@@ -204,6 +218,11 @@
 .r1-business-row { display: grid; gap: 5px; padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; font-size: 13px; }
 @media (max-width: 900px) { .r1-business-grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 560px) {
+  .r1-api-home { padding: 16px; }
+  .r1-api-entrypoints { grid-template-columns: minmax(0, 1fr); }
+  .r1-api-capabilities { grid-template-columns: minmax(0, 1fr); }
+  .r1-api-pages { gap: 5px; }
+  .r1-api-pages .btn { padding: 8px 5px; font-size: 12px; }
   .r1-api-intro { flex-direction: column; align-items: stretch; }
   .r1-api-dialog.fm-card { padding: 20px 16px; max-height: calc(100dvh - 20px); }
   .r1-api-scopes > div { grid-template-columns: minmax(0, 1fr); }

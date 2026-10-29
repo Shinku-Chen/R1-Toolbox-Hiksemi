@@ -46,7 +46,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const rotatedSecret = 'r1-fixture-rotated-ONLY-ONCE-<svg onload=x>';
   const unsafeName = '<img src=x onerror="window.apiNameInjected=1">客厅 AI';
   const calls = [];
-  let reads = 0, contractReads = 0, projectReads = 0, failContracts = false, failCreate = false, failRead = false, failManage = false;
+  let reads = 0, contractReads = 0, projectReads = 0, serviceReads = 0, failServiceRead = true, failServiceWrite = false, releaseServiceWrite = null, holdServiceWrite = false, failContracts = false, failCreate = false, failRead = false, failManage = false;
   const fixtureTools = [
     ['get_nas_status', 'read', 'readonly'], ['get_media_status', 'media', 'readwrite'],
     ['set_fan_policy', 'fan', 'readwrite'], ['release_fan', 'fan', 'readwrite'],
@@ -55,6 +55,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     ['request_power', 'power', 'admin'], ['cancel_power', 'power', 'admin'],
     ['list_file_roots', 'files', 'readonly'], ['list_docker_projects', 'docker', 'readonly'],
     ['get_docker_project_status', 'docker', 'readonly'], ['get_docker_project_summary', 'docker', 'readonly'],
+    ['get_app_status', 'apps', 'readonly'], ['get_download_status', 'downloads', 'readonly'],
+    ['get_movie_status', 'movie', 'readonly'], ['get_album_status', 'albums', 'readonly'], ['get_share_status', 'sharing', 'readonly'],
   ].map(([name, scope, min_role]) => ({ name, title: name, scope, min_role }));
   const projectId = 'project_' + '3'.repeat(24), candidateId = 'candidate_' + '4'.repeat(24);
   const unsafeProject = '<svg onload="window.apiProjectInjected=1">片库';
@@ -74,7 +76,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       { id: 'media', label: '媒体状态', description: '查询原厂媒体任务', min_role: 'readwrite', implemented: true },
       ...[['files', '文件管理'], ['docker', 'Docker 部署'], ['apps', '应用市场'], ['downloads', '下载器'],
         ['movie', '影视墙'], ['albums', '相册'], ['sharing', '分享'], ['backup', '备份'], ['system', '系统管理']]
-        .map(([id, label]) => ({ id, label, description: '分领域授权', min_role: 'readonly', implemented: ['files', 'docker'].includes(id) })),
+        .map(([id, label]) => ({ id, label, description: '分领域授权', min_role: 'readonly', implemented: ['files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing'].includes(id) })),
       { id: 'unrecognized', label: '未知功能不可伪造', implemented: true },
     ],
     file_root_catalog: { available: true, status: 'ok', reason: null, roots: [
@@ -102,6 +104,18 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       const request = route.request(), url = new URL(request.url());
       if (url.origin !== origin && url.protocol !== 'data:') return route.abort('blockedbyclient');
       const reply = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      if (url.pathname === '/api/services' && request.method() === 'GET') {
+        serviceReads += 1;
+        if (failServiceRead === 'pair') return reply(403, { error: 'need_pairing' });
+        return failServiceRead ? reply(503, { error: 'fixture：服务状态不可读' }) : reply(200, { ok: true, mcp: { enabled: state.enabled } });
+      }
+      if (url.pathname === '/api/services/mcp' && request.method() === 'POST') {
+        const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
+        if (holdServiceWrite) await new Promise(resolve => { releaseServiceWrite = resolve; });
+        if (failServiceWrite) return reply(503, { error: 'fixture：MCP 开关保存失败' });
+        state.enabled = body.enabled;
+        return reply(200, { ok: true, services: { mcp: { enabled: state.enabled } } });
+      }
       if (url.pathname.startsWith('/api/docker/projects')) {
         if (request.method() === 'GET') {
           projectReads += 1;
@@ -173,22 +187,57 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await page.waitForSelector('#set-r1-api');
     check('设置中有 API 管理入口', await page.locator('#setNav [data-g="r1-api"]').count() === 1);
     check('构建设置不自动获取密钥列表', reads === 0);
-    await page.locator('#set-r1-api [data-ref="open"]').click();
+    const home = page.locator('#set-r1-api');
+    await home.locator('[data-ref="error"]').filter({ hasText: '服务状态不可读' }).waitFor();
+    check('服务状态读取失败不猜测开启状态', await home.locator('[data-ref="enabled"]').isDisabled() && await home.locator('[data-ref="retry"]').isVisible());
+    failServiceRead = 'pair';
+    await home.locator('[data-ref="retry"]').click();
+    await home.locator('[data-ref="error"]').filter({ hasText: '需要先解锁网页管理' }).waitFor();
+    check('兼容配对未授权只就地提示且不阻断监控页面', await page.locator('#blocked').count() === 0 && await page.locator('.fullmask').count() === 0 && await home.locator('[data-ref="enabled"]').isDisabled());
+    failServiceRead = false;
+    await home.locator('[data-ref="retry"]').click();
+    await home.locator('[data-ref="serviceStatus"]').filter({ hasText: '已关闭' }).waitFor();
+    check('设置卡片具有直接开关和三个独立入口', await home.locator('[role="switch"]').count() === 1 && await home.locator('.r1-api-entrypoints button').allTextContents().then(labels => JSON.stringify(labels) === '["添加 Token","Token 管理","Token 操作"]'));
+    failServiceWrite = true;
+    await home.locator('[data-ref="enabled"]').click();
+    await home.locator('[data-ref="error"]').filter({ hasText: 'MCP 开关保存失败' }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('#set-r1-api [data-ref="enabled"]').disabled);
+    check('开关失败恢复服务端状态并且不弹窗', !(await home.locator('[data-ref="enabled"]').isChecked()) && await page.locator('.fullmask').count() === 0 && calls.length === 1 && serviceReads === 4);
+    failServiceWrite = false; holdServiceWrite = true;
+    await home.locator('[data-ref="enabled"]').click();
+    await page.waitForFunction(() => document.querySelector('#set-r1-api [data-ref="enabled"]').disabled);
+    await home.locator('[data-ref="enabled"]').evaluate(input => input.click());
+    check('开关保存期间禁止重复提交且无确认弹窗', calls.length === 2 && await page.locator('.fullmask').count() === 0);
+    releaseServiceWrite(); holdServiceWrite = false;
+    await home.locator('[data-ref="serviceStatus"]').filter({ hasText: '已开启' }).waitFor();
+    check('开关直接保存JSON与CSRF请求头', calls.at(-1).path === '/api/services/mcp' && calls.at(-1).body.enabled === true && calls.at(-1).headers['x-fnm-request'] === '1' && calls.at(-1).headers['content-type'] === 'application/json');
+    await home.locator('[data-ref="enabled"]').click();
+    await home.locator('[data-ref="serviceStatus"]').filter({ hasText: '已关闭' }).waitFor();
+    const serviceWrites = calls.length;
+    await home.locator('[data-ref="add"]').click();
     const manager = page.locator('#r1ApiManager');
+    const view = async name => { await manager.locator('[data-api-nav="' + name + '"]').click(); await manager.locator('[data-api-page="' + name + '"]:not([hidden])').waitFor(); };
     await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
-    check('服务默认关闭', !(await manager.locator('[data-ref="enabled"]').isChecked()));
+    check('添加页独立展示且不混入管理和记录', await manager.locator('[data-api-page="create"]').isVisible() && await manager.locator('[data-ref="keys"]').isHidden() && await manager.locator('[data-ref="audit"]').isHidden() && await manager.locator('[data-ref="serviceStatus"]').innerText() === '已关闭');
     check('默认仅勾选读取状态', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
     check('默认只读角色与三级选项', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('select[data-ref="role"] option').evaluateAll(options => options.map(option => option.value))) === '["readonly","readwrite","admin"]');
     check('十五项功能只显示已知领域', await manager.locator('[data-ref="scopes"] input').count() === 15 && await manager.locator('[data-ref="scopes"] input[value="unrecognized"]').count() === 0);
-    check('文件与项目元数据已接入但真实文件操作仍待接入', (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('浏览、属性、上传和下载仍待接入') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('已接入'));
-    check('具体工具仅显示真实14项且默认仅状态读取', await manager.locator('[data-ref="toolOptions"] input').count() === 14 && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
+    check('文件边界明确Users且按真实工具能力授权', (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('已接入'));
+    check('具体工具按真实目录展示且默认仅状态读取', await manager.locator('[data-ref="toolOptions"] input').count() === fixtureTools.length && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
     check('角色不足或未选功能的工具不可选', await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isDisabled() && await manager.locator('[data-ref="toolOptions"] input[value="list_file_roots"]').isDisabled());
+    await manager.locator('[data-ref="scopes"] input[value="apps"]').check();
+    check('新增只读业务工具按功能启用而不自动勾选', !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isDisabled()) && !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isChecked()));
+    await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').check();
+    await manager.locator('[data-ref="scopes"] input[value="apps"]').uncheck();
+    check('取消业务功能同时移除对应工具授权', !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isChecked()) && await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isDisabled());
     check('项目候选和登记不自动轮询', projectReads === 0);
     check('未选择文件功能时隐藏范围', await manager.locator('[data-ref="fileRoots"]').isHidden());
     await manager.locator('select[data-ref="role"]').selectOption('admin');
     check('管理员角色不自动新增功能授权', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
     await manager.locator('select[data-ref="role"]').selectOption('readonly');
     check('默认有效期 90 天', await manager.locator('[data-ref="expiry"]').inputValue() === '90');
+    await view('operations');
+    check('Token操作页隔离表单列表且没有机器调用代理', await manager.locator('[data-ref="form"]').isHidden() && await manager.locator('[data-ref="keys"]').isHidden() && await manager.locator('[data-ref="audit"]').isVisible() && await manager.locator('[data-ref="capabilities"] .r1-api-capability').count() === fixtureTools.length && await manager.locator('[data-api-page="operations"] input:not([readonly]), [data-api-page="operations"] button[data-call]').count() === 0);
     check('MCP 地址与当前设备一致', await manager.locator('[data-ref="mcp"]').inputValue() === origin + '/mcp');
     check('能力目录地址与当前设备一致', await manager.locator('[data-ref="restCapabilities"]').inputValue() === origin + '/api/integration/capabilities');
     check('安全调用记录可见', (await manager.locator('[data-ref="audit"]').innerText()).includes('192.168.31.100') && (await manager.locator('[data-ref="audit"]').innerText()).includes('get_status'));
@@ -210,17 +259,13 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 20);
     const definition = JSON.parse(await manager.locator('[data-ref="contractDefinition"]').inputValue());
     check('真实服务返回20项定义并区分4项已接入与16项待接入', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.filter(tool => tool.implemented === true).length === 4 && definition.tools.filter(tool => tool.implemented === false).length === 16 && definition.tools.every(tool => tool.inputSchema && tool.outputSchema));
-    check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === 0);
+    check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === serviceWrites);
     await page.setViewportSize({ width: 320, height: 960 });
     check('320宽度接口定义无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
     await page.setViewportSize({ width: 1280, height: 1000 });
     await manager.locator('[data-ref="contracts"] summary').click();
 
-    await manager.locator('[data-ref="enabled"]').click();
-    await page.locator('.fullmask [data-yes]').click();
-    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="serviceStatus"]').textContent === '已开启');
-    check('启用服务保持 JSON 与 CSRF 请求头', calls[0].body.enabled === true && calls[0].headers['x-fnm-request'] === '1' && calls[0].headers['content-type'] === 'application/json');
-
+    await view('create');
     await manager.locator('input[data-ref="name"]').fill(unsafeName);
     await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
     check('低角色保留功能选择但说明工具不可调用', (await manager.locator('[data-ref="roleStatus"]').innerText()).includes('当前角色不可调用') && await manager.locator('[data-ref="scopes"] input[value="fan"]').isChecked());
@@ -302,8 +347,10 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('轮换窗口关闭后清除Token且不写浏览器存储', await rotatedField.inputValue() === ''
       && !(await manager.innerText()).includes(rotatedSecret)
       && !(await page.evaluate(() => JSON.stringify(window.__apiStorageWrites))).includes(rotatedSecret));
+    await view('create');
     await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
 
+    await view('manage');
     await manager.locator('.r1-api-item [data-ref="revoke"]').click();
     await page.locator('.fullmask [data-yes]').click();
     await manager.locator('.r1-api-item [data-ref="status"]').filter({ hasText: '已撤销' }).waitFor();
@@ -312,6 +359,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       && await manager.locator('.r1-api-item [data-ref="toggle"]').isHidden() && await manager.locator('.r1-api-item [data-ref="rotate"]').isHidden());
 
     failCreate = true;
+    await view('create');
     await manager.locator('input[data-ref="name"]').fill('失败测试');
     await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '密钥创建失败' }).waitFor();
@@ -324,7 +372,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
 
     await manager.locator('input[data-ref="name"]').fill('文件范围 AI');
     await manager.locator('[data-ref="scopes"] input[value="files"]').check();
-    check('文件功能显示真实根与待接入说明', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 2 && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('待接入，当前仅保存范围授权'));
+    check('文件功能显示真实根与Users授权边界', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 2 && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/'));
     const writesBeforeFiles = calls.length;
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '请至少勾选一个' }).waitFor();
@@ -369,7 +417,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       { id: 'root_' + '1'.repeat(24), path: '电影/2026', access: 'readwrite' },
       { id: 'root_' + '2'.repeat(24), path: '', access: 'readonly' },
     ]) && !JSON.stringify(fileRequest).includes('/drives'));
-    check('列表展示角色和范围预授权', (await manager.locator('.r1-api-item').last().innerText()).includes('读写') && (await manager.locator('.r1-api-item').last().innerText()).includes('电影/2026') && (await manager.locator('.r1-api-item').last().innerText()).includes('待接入'));
+    check('列表展示角色范围及实际工具边界', (await manager.locator('.r1-api-item').last().innerText()).includes('读写') && (await manager.locator('.r1-api-item').last().innerText()).includes('电影/2026') && (await manager.locator('.r1-api-item').last().innerText()).includes('已授权的接入工具'));
 
     await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
     const sameRoot = manager.locator('.r1-api-file-root').first();
@@ -402,6 +450,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     state.file_root_catalog.roots[0].read_only = false;
     await manager.locator('[data-ref="refresh"]').click();
     await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    await view('create');
     await manager.locator('[data-ref="scopes"] input[value="files"]').check();
 
     const rootsBeforeUnavailable = state.file_root_catalog;
@@ -415,6 +464,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('挂载恢复不自动重新勾选文件范围', await manager.locator('[data-root-check]:checked').count() === 0);
     await manager.locator('[data-ref="scopes"] input[value="files"]').uncheck();
 
+    await view('manage');
     state.keys.push({ id: 'fixture-legacy', name: '旧权限密钥', scopes: ['read', 'power'], allowed_ips: [], created_at: 1793240000,
       expires_at: null, revoked_at: null, last_used_at: null, status: 'active' });
     await manager.locator('[data-ref="refresh"]').click();
@@ -437,12 +487,13 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       && !Object.hasOwn(legacyEdit, 'role') && !Object.hasOwn(legacyEdit, 'scopes') && !Object.hasOwn(legacyEdit, 'expires_days') && !Object.hasOwn(legacyEdit, 'tool_grants') && !Object.hasOwn(legacyEdit, 'docker_projects'));
     await legacy.locator('[data-ref="edit"]').click();
     await manager.locator('[data-ref="upgradePolicy"]').check();
-    check('旧键仅显式升级后启用逐工具且新4工具不自动授权', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
+    check('旧键仅显式升级后启用逐工具且新增工具不自动授权', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
     await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
     const upgraded = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
     check('显式升级准确提交工具权限而非全部scope工具', upgraded.id === 'fixture-legacy' && JSON.stringify(upgraded.tool_grants) === '["get_nas_status"]' && state.keys.find(key => key.id === 'fixture-legacy').policy_version === 3);
 
+    await view('create');
     await manager.locator('input[data-ref="name"]').fill('项目读取 AI');
     await manager.locator('[data-ref="scopes"] input[value="docker"]').check();
     const beforeProjectKey = calls.length;
@@ -463,6 +514,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await page.locator('#r1ApiSecret').waitFor(); await page.locator('#r1ApiSecret [data-ref="close"]').click();
     const projectKey = calls.filter(call => call.path === '/api/access/keys').at(-1).body;
     check('项目键只发送已登记inspect和显式读取工具', JSON.stringify(projectKey.docker_projects) === JSON.stringify([{ id: projectId, operations: ['inspect'] }]) && JSON.stringify(projectKey.tool_grants) === '["get_nas_status","get_docker_project_status"]');
+    await view('create');
     await manager.locator('[data-ref="registeredProjects"] [data-project-label]').fill('片库新标签');
     await manager.locator('[data-ref="registeredProjects"] [data-update]').click(); await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-ref="registeredProjects"] strong').filter({ hasText: '片库新标签' }).waitFor();
@@ -491,15 +543,31 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('管理员创建仍只携带明确勾选功能且不带未选文件授权', calls.filter(call => call.path === '/api/access/keys').at(-1).body.role === 'admin' && JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.scopes) === '["read","fan","power"]' && JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.file_roots) === '[]');
 
     await page.setViewportSize({ width: 320, height: 740 });
+    await view('create');
     await manager.locator('[data-ref="scopes"] input[value="files"]').check();
     await manager.locator('.r1-api-file-root [data-root-check]').first().check();
     check('320px 管理页面和文件范围不横向溢出', await manager.evaluate(element => [...element.querySelectorAll('.r1-api-dialog, .r1-api-item, input, textarea, select, fieldset')].every(node => node.getBoundingClientRect().right <= 321 && node.getBoundingClientRect().left >= -1)));
-    await manager.locator('[data-ref="enabled"]').click();
-    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="serviceStatus"]').textContent === '已关闭');
-    check('关闭服务可立即提交', calls.at(-1).path === '/api/access/settings' && calls.at(-1).body.enabled === false);
+    await view('operations');
+    check('320px工具能力与记录不横向溢出', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await view('manage');
+    check('320pxToken列表不横向溢出', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
     state.scope_catalog = state.scope_catalog.filter(scope => scope.id !== 'docker');
     await manager.locator('[data-ref="close"]').click();
-    await page.locator('#set-r1-api [data-ref="open"]').click();
+    check('320pxAPI设置入口不横向溢出', await home.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await home.locator('[data-ref="enabled"]').click();
+    await home.locator('[data-ref="serviceStatus"]').filter({ hasText: '已开启' }).waitFor();
+    await home.locator('[data-ref="enabled"]').click();
+    await home.locator('[data-ref="serviceStatus"]').filter({ hasText: '已关闭' }).waitFor();
+    check('关闭服务可立即提交且保留Token', calls.at(-1).path === '/api/services/mcp' && calls.at(-1).body.enabled === false && state.keys.length > 0 && await page.locator('.fullmask').count() === 0);
+    await home.locator('[data-ref="manage"]').click();
+    await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
+    check('Token管理入口只展示管理页', await manager.locator('[data-ref="keys"]').isVisible() && await manager.locator('[data-ref="form"]').isHidden() && await manager.locator('[data-ref="audit"]').isHidden());
+    await manager.locator('[data-ref="close"]').click();
+    await home.locator('[data-ref="operations"]').click();
+    await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
+    check('Token操作入口只展示能力和记录', await manager.locator('[data-ref="audit"]').isVisible() && await manager.locator('[data-ref="form"]').isHidden() && await manager.locator('[data-ref="keys"]').isHidden());
+    await manager.locator('[data-ref="close"]').click();
+    await home.locator('[data-ref="add"]').click();
     await page.locator('#r1ApiManager [data-ref="content"]:not([hidden])').waitFor();
     check('重新打开只返回元数据', await page.locator('#r1ApiSecret').count() === 0 && !(await page.locator('#r1ApiManager').innerText()).includes(secret));
     check('缺少领域元数据时不虚构授权选项', await page.locator('#r1ApiManager [data-ref="scopes"] input[value="docker"]').count() === 0);

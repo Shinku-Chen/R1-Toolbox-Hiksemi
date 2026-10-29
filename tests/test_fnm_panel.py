@@ -101,8 +101,8 @@ class Monitoring:
 
     def snapshot(self):
         return {'available': True, 'settings': copy.deepcopy(self.settings),
-                'power': {'available': True, 'cpu_package_w': 12.5, 'domains': [], 'scope': 'cpu_package'},
-                'disk_io': [{'name': 'sda', 'read_bytes_per_sec': 1048576.0, 'write_bytes_per_sec': 0.0}],
+                'current': {'power': {'available': True, 'cpu_package_w': 12.5, 'domains': [], 'scope': 'cpu_package'},
+                            'disk_io': [{'name': 'sda', 'read_bytes_per_sec': 1048576.0, 'write_bytes_per_sec': 0.0}]},
                 'summary': {}}
 
     def history(self, span):
@@ -181,10 +181,10 @@ class Insights:
                        'storage': {'devices': [{'name': 'sda', 'model': 'Fixture Drive', 'vendor': 'Fixture',
                                                 'serial': 'SN1', 'bytes': 4 * 10 ** 12, 'rotational': 1}],
                                    'raid': []},
-                       'network': {'interfaces': [{'name': 'eth0', 'mac': '00:11:22:33:44:55', 'state': 'up',
+                        'network': [{'name': 'eth0', 'mac': '00:11:22:33:44:55', 'state': 'up',
                                                    'carrier': 1, 'speed_mbps': 2500, 'mtu': 1500,
                                                    'ipv6_addresses': [{'address': '2001:db8::1'}],
-                                                   'default_gateways': {'ipv4': [{'gateway': '192.168.1.1'}]}}]}},
+                                                    'default_gateways': {'ipv4': [{'gateway': '192.168.1.1'}]}}]},
         }
 
     def action(self, name, payload):
@@ -202,10 +202,14 @@ class Monitor:
 
 
 def panel_for(state_dir, *, fan=None, light=None, web_ref=None, weather_fetcher=None, insights=None, proc_root=None, dev_root=None, sys_root=None, udev_root=None):
+    proc = Path(proc_root or tempfile.mkdtemp(prefix='r1-panel-proc-'))
+    if proc_root is None:
+        (proc / 'self').mkdir()
+        (proc / 'self/mountinfo').write_text('100 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n', encoding='utf-8')
     return compat.FnmonitorPanel(Controller(), insights or Insights(), Monitoring(), fan or FanPolicy(),
                                  light or LightPolicy(), Monitor(), state_dir=state_dir,
                                  version='test', web=web_ref,
-                                 proc_root=Path(proc_root or tempfile.mkdtemp(prefix='r1-panel-proc-')),
+                                  proc_root=proc,
                                  sys_root=Path(sys_root or tempfile.mkdtemp(prefix='r1-panel-sys-')),
                                  dev_root=Path(dev_root or tempfile.mkdtemp(prefix='r1-panel-dev-')),
                                  udev_root=Path(udev_root or tempfile.mkdtemp(prefix='r1-panel-udev-')),
@@ -306,6 +310,11 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(data['power']['total'], 12.5)
         self.assertEqual(data['power']['source'], 'rapl')
         self.assertEqual(data['net'][0]['rx_rate'], 1250.0)
+        self.assertEqual(data['net'][0]['speed_mbps'], 2500)
+        self.assertEqual(data['net'][0]['carrier'], 1)
+        self.assertEqual(data['net'][0]['mtu'], 1500)
+        self.assertEqual(data['net'][0]['ipv6'], ['2001:db8::1'])
+        self.assertEqual(data['net'][0]['gateway'], '192.168.1.1')
         self.assertEqual(data['sensors']['fans'][0]['rpm'], 1200)
         self.assertEqual(data['docker']['containers'][0]['mem_usage'], '128 MiB')
         self.assertEqual(data['ports']['listeners'][0]['port'], 18731)
@@ -322,6 +331,95 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(overview['disks_detail'], [])
         self.assertFalse(overview['docker']['available'])
         self.assertIsNone(overview['power']['total'])
+
+    def test_unknown_memory_free_and_disk_standby_are_not_guessed(self):
+        data = self.panel.overview()
+        self.assertEqual(data['mem']['available'], 5 * 1024 ** 3)
+        self.assertIsNone(data['mem']['free'])
+        cached = Insights().snapshot()
+        cached['disks']['items'][0]['standby'] = None
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        self.assertIsNone(self.panel._disks()[0]['standby'])
+        self.assertFalse(self.panel._disks()[1]['standby'])
+
+    def test_network_legacy_shape_and_bond_control_file(self):
+        cached = Insights().snapshot()
+        cached['device']['network'] = {'interfaces': cached['device']['network']}
+        cached['interfaces'].append({'name': 'bonding_masters', 'rx_bytes': None, 'tx_bytes': None})
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        links = self.panel._net()
+        self.assertEqual([row['name'] for row in links], ['eth0'])
+        self.assertEqual(links[0]['speed_mbps'], 2500)
+
+    def test_nested_rapl_missing_keeps_actual_reason_and_flat_compatibility(self):
+        self.panel.monitoring.snapshot = lambda: {'current': {'power': {'available': False,
+            'cpu_package_w': None, 'reason': 'fixture：RAPL 计数器不可读'}}}
+        self.assertEqual(self.panel._power()['reason'], 'fixture：RAPL 计数器不可读')
+        self.assertIsNone(self.panel._power()['total'])
+        self.panel.monitoring.snapshot = lambda: {'power': {'available': True, 'cpu_package_w': 0.0}}
+        self.assertEqual(self.panel._power()['total'], 0.0)
+
+    def test_capacity_counts_block_backing_once_and_excludes_private_fuse_views(self):
+        (self.panel.proc_root / 'self').mkdir(parents=True, exist_ok=True)
+        (self.panel.proc_root / 'self/mountinfo').write_text(
+            '100 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n'
+            '101 1 8:1 / /drives/data-bind rw - ext4 /dev/sda1 rw\n'
+            '102 1 0:4 / /drives/data_private rw - fuse.histor histor rw\n'
+            '103 1 8:17 / /drives/second rw - ext4 /dev/sdb1 rw\n'
+            '104 1 0:5 / /drives/upgrade rw - fuse.histor histor rw\n', encoding='utf-8')
+        rows = [{'mount': mount, 'total_bytes': size, 'used_bytes': used} for mount, size, used in [
+            ('/drives/data', 1000, 400), ('/drives/data-bind', 1000, 400),
+            ('/drives/data_private', 1000, 400), ('/drives/second', 2000, 500),
+            ('/drives/upgrade', 500, 20)]]
+        self.panel.monitor.snapshot = lambda: {'disks': rows}
+        self.assertEqual(self.panel._disk_summary(), (3000, 900, 30.0))
+        self.assertEqual([(row['name'], row['total']) for row in self.panel._disks()], [('sda', 1000), ('sdb', 2000)])
+        # Equal-sized independent filesystems must not be merged by capacity.
+        rows[3].update(total_bytes=1000, used_bytes=400)
+        self.assertEqual(self.panel._disk_summary(), (2000, 800, 40.0))
+
+    def test_capacity_without_confirmed_block_mounts_stays_unknown(self):
+        (self.panel.proc_root / 'self/mountinfo').unlink()
+        self.assertEqual(self.panel._disk_summary(), (None, None, None))
+
+    def test_fan_policy_rpm_keeps_both_verified_channels(self):
+        cached = Insights().snapshot()
+        cached['device']['fans'] = []
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        self.panel.fan_policy.snapshot = lambda: {'channels': {'cpu': {'rpm': 1200}, 'system': {'rpm': 1500}}}
+        self.assertEqual([(row['channel'], row['rpm']) for row in self.panel._sensors()['fans']], [('cpu', 1200), ('system', 1500)])
+
+    def test_traffic_uses_shared_filtered_metrics_and_keeps_unknown_null(self):
+        self.panel.monitoring.snapshot = lambda: {'settings': {'traffic_exclude_virtual': True},
+            'current': {'metrics': [{'id': 'rx_bytes_per_sec', 'value': 2000.0},
+                                    {'id': 'tx_bytes_per_sec', 'value': None}]}}
+        self.assertEqual(self.panel.traffic()['realtime'], {'rx_rate': 2000.0, 'tx_rate': None})
+        aggregate = self.panel.overview()['net_aggregate']
+        self.assertEqual(aggregate['source'], 'monitoring_filtered_counters')
+        self.assertEqual(aggregate['rx_rate'], 2000.0)
+        self.assertIsNone(aggregate['tx_rate'])
+        cached = Insights().snapshot()
+        cached['interfaces'].append({**cached['interfaces'][0], 'name': 'bond0'})
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        self.panel.monitoring.snapshot = lambda: {'settings': {'traffic_exclude_virtual': True}}
+        self.assertEqual(self.panel.traffic()['realtime'], {'rx_rate': 1250.0, 'tx_rate': 480.0})
+        self.panel.insights.snapshot = lambda: {}
+        self.assertEqual(self.panel.traffic()['realtime'], {'rx_rate': None, 'tx_rate': None})
+        self.assertIsNone(self.panel.overview()['net_aggregate'])
+
+    def test_gpu_cached_pci_name_requires_unique_matching_device(self):
+        cached = Insights().snapshot()
+        cached['gpu'] = {'devices': [{'name': 'card0', 'vendor': '0x8086', 'device': '0x46d1'}]}
+        pci = {'address': '0000:00:02.0', 'vendor': '0x8086', 'device': '0x46d1',
+               'class': '0x030000', 'device_name': 'Alder Lake-N [UHD Graphics]', 'driver': 'i915'}
+        cached['device']['identity']['pci'] = [pci]
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        gpu = self.panel._gpu()[0]
+        self.assertEqual((gpu['model'], gpu['pci'], gpu['driver']), ('Alder Lake-N [UHD Graphics]', '0000:00:02.0', 'i915'))
+        self.assertEqual(self.panel._hardware()['gpu'], ['Alder Lake-N [UHD Graphics]'])
+        cached['device']['identity']['pci'].append({**pci, 'address': '0000:01:00.0'})
+        self.assertIsNone(self.panel._gpu()[0]['model'])
+        self.assertIsNone(self.panel._gpu()[0]['pci'])
 
     def test_disk_volume_comes_from_drives_mount(self):
         proc = Path(tempfile.mkdtemp(prefix='r1-panel-proc-'))

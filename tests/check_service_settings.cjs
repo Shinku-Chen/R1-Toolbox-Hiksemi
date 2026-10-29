@@ -102,7 +102,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       && (await page.locator('#set-r1-services').innerText()).includes('小屏默认开启')
       && (await page.locator('#set-r1-services').innerText()).includes('MCP 默认关闭')
       && (await page.locator('#set-r1-services').innerText()).includes('首次使用无需网页口令'));
-    check('普通设置渲染不读取服务管理或密钥', serviceReads === 0 && accessReads === 0);
+    await page.locator('#set-r1-api [data-ref="serviceStatus"]').filter({ hasText: '已关闭' }).waitFor();
+    check('API直接开关只读一次服务状态而不取密钥', serviceReads === 1 && accessReads === 0);
     await page.locator('#set-r1-services [data-ref="open"]').click();
     const manager = page.locator('#r1ServiceManager');
     await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
@@ -167,6 +168,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="mcpEnabled"]').click();
     await manager.locator('[data-ref="mcpState"]').filter({ hasText: '已开启' }).waitFor();
     check('MCP独立开启且仍说明Token授权', state.mcp.enabled === true && (await manager.locator('[data-ref="mcpState"]').innerText()).includes('独立 Token'));
+    check('服务页开启同步API卡片真实状态', await page.locator('#set-r1-api [data-ref="enabled"]').isChecked());
     await manager.locator('[data-ref="mcpEnabled"]').click();
     await manager.locator('[data-ref="mcpState"]').filter({ hasText: '已有密钥保留' }).waitFor();
     check('MCP关闭使用单独服务接口且不删除密钥', calls.filter(call => call.path === '/api/services/mcp').length === 2 && accessReads === 0);

@@ -457,6 +457,58 @@ finally:
     check('硬盘温度映射', !!overview.body && !!overview.body.disks_detail && !!overview.body.disks_detail[0] && overview.body.disks_detail[0].temp === 39);
     check('温度来自 hwmon', !!overview.body && !!overview.body.temp && overview.body.temp.cpu === 62);
     check('封装功耗缺失时不伪造', !!overview.body && !!overview.body.power && overview.body.power.ok === false && overview.body.power.total === null);
+    // The production panel wraps internal const helpers in an IIFE. Exercise
+    // their exact source with the real installed R1 provider, without exporting
+    // production internals or copying the aggregate implementation into tests.
+    const stateSource = fs.readFileSync(path.join(root, 'ui/panel-src/33-state.js'), 'utf8');
+    const networkHelpers = ['VIRT', 'nets', 'sumRx', 'sumTx'].map(name => {
+      const line = stateSource.split(/\r?\n/).find(value => value.startsWith('const ' + name + ' = '));
+      assert.ok(line, '实际面板缺少网络派生函数：' + name); return line;
+    }).join('\n');
+    const networkMapping = await page.evaluate(helpers => {
+      const derive = new Function('o', helpers + '\nreturn {rx: sumRx(o), tx: sumTx(o)};');
+      const net = [{ iface: 'bond0', rx_rate: 1000, tx_rate: 80 },
+        { iface: 'eth0', rx_rate: 600, tx_rate: 30 }, { iface: 'eth1', rx_rate: 400, tx_rate: 50 }];
+      const aggregate = { schema_version: 1, source: 'monitoring_filtered_counters', rx_rate: 1000, tx_rate: 80 };
+      return { ...derive({ net, net_aggregate: aggregate }),
+        unknown: derive({ net, net_aggregate: { ...aggregate, rx_rate: null } }).rx,
+        invalid: derive({ net, net_aggregate: { ...aggregate, tx_rate: -1 } }).tx,
+        legacy: derive({ net }).rx, unrelated: derive({ net, net_aggregate: { ...aggregate, source: 'other' } }).rx,
+        rows: net.map(row => [row.iface, row.rx_rate, row.tx_rate]) };
+    }, networkHelpers);
+    check('R1网络汇总不重复相加bond和物理网口', networkMapping.rx === 1000 && networkMapping.tx === 80);
+    check('网络未知汇总保持缺测而不是假零', networkMapping.unknown === null && networkMapping.invalid === null);
+    check('无R1元数据的上游页面保留原汇总方式', networkMapping.legacy === 2000 && networkMapping.unrelated === 2000);
+    check('汇总适配保留真实接口标识和各自读数', JSON.stringify(networkMapping.rows) === '[["bond0",1000,80],["eth0",600,30],["eth1",400,50]]');
+    const networkPage = await context.newPage();
+    const networkAggregate = { schema_version: 1, source: 'monitoring_filtered_counters', rx_rate: 1048576, tx_rate: 2097152 };
+    try {
+      await networkPage.route('**/api/overview', route => route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ...overview.body,
+          net: [{ iface: 'bond0', rx_rate: 1048576, tx_rate: 2097152 },
+                { iface: 'eth0', rx_rate: 524288, tx_rate: 1048576 },
+                { iface: 'eth1', rx_rate: 524288, tx_rate: 1048576 }],
+          net_aggregate: networkAggregate }) }));
+      await networkPage.goto(origin + '/#/overview');
+      await networkPage.locator('[data-mod="metrics"] [data-ref="rxV"][aria-label="1.0"]').waitFor();
+      await networkPage.locator('[data-mod="metrics"] [data-ref="txV"][aria-label="2.0"]').waitFor();
+      check('真实网络指标卡显示独立汇总而不是bond与slave双倍值',
+        await networkPage.locator('[data-mod="metrics"] [data-ref="rxU"]').innerText() === 'MB/s'
+        && await networkPage.locator('[data-mod="metrics"] [data-ref="txU"]').innerText() === 'MB/s');
+      networkAggregate.rx_rate = null; networkAggregate.tx_rate = null;
+      await networkPage.reload();
+      await networkPage.locator('[data-mod="metrics"] [data-ref="rxV"][aria-label="--"]').waitFor();
+      await networkPage.locator('[data-mod="metrics"] [data-ref="txV"][aria-label="--"]').waitFor();
+      check('真实网络指标卡缺测显示未知而非假空闲',
+        await networkPage.locator('[data-mod="metrics"] [data-ref="netSt"]').innerText() === '未知');
+      networkAggregate.rx_rate = 0; networkAggregate.tx_rate = 0;
+      await networkPage.reload();
+      await networkPage.locator('[data-mod="metrics"] [data-ref="rxV"][aria-label="0"]').waitFor();
+      await networkPage.locator('[data-mod="metrics"] [data-ref="txV"][aria-label="0"]').waitFor();
+      check('真实零流量仍显示空闲并与缺测分开',
+        await networkPage.locator('[data-mod="metrics"] [data-ref="netSt"]').innerText() === '空闲'
+        && await networkPage.locator('[data-mod="metrics"] [data-ref="rxU"]').innerText() === 'B/s');
+    } finally { await networkPage.close(); }
     const system = await api('/api/system');
     check('固件版本来自官方元数据', !!system.body && system.body.fnos_version === 'V6.3.3_Build_260907');
     const sensors = await api('/api/sensors');

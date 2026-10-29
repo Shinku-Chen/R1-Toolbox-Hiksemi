@@ -19,6 +19,15 @@ const R1_NATIVE_FAN_TXT = { auto: '自动', low: '低档', medium: '中档', hig
 const R1_LEVEL_TXT = { quiet: '静音', normal: '普通', full: '全速' };
 const R1_EFFECT_TXT = { 0: '关闭', 1: '常亮', 2: '彩虹', 3: '呼吸' };
 
+/** Keep bond/slave interface rows intact; only trusted R1 totals replace sums. */
+window.panelNetworkAggregate = (overview, field) => {
+  const aggregate = overview && overview.net_aggregate;
+  if (!aggregate || aggregate.schema_version !== 1 || aggregate.source !== 'monitoring_filtered_counters'
+      || !['rx_rate', 'tx_rate'].includes(field)) return undefined;
+  const value = aggregate[field];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+};
+
 const R1 = {
   st: null, loading: false,
   async load() {
@@ -965,6 +974,7 @@ function r1OpenServiceManager() {
       : screen.active === true ? '实际状态：Toolbox 小屏已接管。'
       : screen.active === false ? '实际状态：官方界面；Toolbox 小屏未接管。' : '实际显示状态尚未确认，请刷新核对。');
     setText(x.mcpState, state.mcp.enabled === true ? '已开启，仍需要独立 Token 与对应权限。' : '已关闭，已有密钥保留。');
+    r1SyncMcpService(state.mcp.enabled);
     setText(x.developerState, developer.active === true
       ? '开发窗口有效，截止时间：' + r1ApiTime(developer.expires_at) + '。每次请求仍须命中来源白名单。'
       : (developer.enabled === true ? '已保存开启意图，开发窗口尚未生效。' : '当前已关闭。') + (developer.reason ? ' ' + String(developer.reason) : ''));
@@ -1021,11 +1031,49 @@ function r1OpenServiceManager() {
   refresh().catch(fail).finally(() => { if (!closed) pending(false); });
 }
 
-/** API metadata is loaded only when its manager opens, never by the status poll. */
+/** Share verified service results across the two owner settings entrances. */
+function r1SyncMcpService(enabled) {
+  const card = document.querySelector('#set-r1-api > .card');
+  if (card && card._setMcpEnabled && typeof enabled === 'boolean') card._setMcpEnabled(enabled);
+}
+
+/** The service switch reads no keys; Token metadata is loaded only on demand. */
 function r1ApiSettings(card) {
-  card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">管理 MCP 与 REST 的独立 Token、角色、功能和文件范围、IP／网段限制。默认关闭；Token 仅在创建或轮换时显示一次。</p></div><button class="btn" type="button" data-ref="open">打开 API 管理</button></div>`;
-  card._r = collect(card);
-  card._r.open.onclick = r1OpenApiManager;
+  card.innerHTML = `<div class="r1-api-home"><div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">独立 Token 控制 MCP 与 REST 的角色、具体工具、文件和项目范围。Token 仅在创建或轮换时显示一次。</p></div><label class="r1-api-inline-switch"><span>启用 MCP／API</span><input type="checkbox" role="switch" data-ref="enabled" aria-label="启用 MCP 与 REST API" disabled></label></div><p class="sub" data-ref="serviceStatus" role="status">正在读取服务状态…</p><p class="st-crit" data-ref="error" role="alert" hidden></p><button class="btn" type="button" data-ref="retry" hidden>重试读取服务状态</button><div class="r1-api-entrypoints"><button class="btn primary" type="button" data-ref="add">添加 Token</button><button class="btn" type="button" data-ref="manage">Token 管理</button><button class="btn" type="button" data-ref="operations">Token 操作</button></div><p class="sub">开关即时保存；关闭后已有 Token 保留并停止访问。Token 操作用于查看连接地址、工具能力与调用记录。</p></div>`;
+  const x = collect(card); card._r = x;
+  let enabled = null, busy = false, revision = 0;
+  const draw = () => {
+    x.enabled.checked = enabled === true; x.enabled.disabled = busy || enabled === null;
+    x.enabled.setAttribute('aria-busy', String(busy));
+    setText(x.serviceStatus, busy ? '正在保存服务开关…' : enabled === null ? '服务状态尚未确认，请重试。' : enabled ? '已开启，客户端仍须使用独立 Token 和已授予的权限。' : '已关闭，已有 Token 保留。');
+  };
+  card._setMcpEnabled = value => { if (!busy) { revision += 1; enabled = value; draw(); } };
+  const read = async () => {
+    const requestedRevision = revision;
+    // A missing owner session is local to this optional control. Explicit GET
+    // keeps the upstream API wrapper from treating it as a domain-wide block.
+    const result = await API.req('/api/services', { method: 'GET' });
+    if (!result || result.ok !== true || !result.mcp || typeof result.mcp.enabled !== 'boolean') throw new Error('未读取到 MCP 服务状态。');
+    if (requestedRevision === revision) { enabled = result.mcp.enabled; draw(); }
+  };
+  const fail = error => {
+    const message = String(error && error.message || '请求未完成');
+    setText(x.error, 'MCP 服务设置失败：' + (/need_pairing/.test(message) ? '需要先解锁网页管理，请完成配对后重试。' : message.slice(0, 160)));
+    x.error.hidden = false; x.retry.hidden = false;
+  };
+  x.enabled.onchange = async () => {
+    if (busy || enabled === null) return;
+    const requested = x.enabled.checked; revision += 1; busy = true; x.error.hidden = true; x.retry.hidden = true; draw();
+    try {
+      const result = await R1.post('/api/services/mcp', { enabled: requested });
+      if (!result || result.ok !== true || !result.services || !result.services.mcp || typeof result.services.mcp.enabled !== 'boolean') throw new Error(result && result.error || '服务开关未保存。');
+      enabled = result.services.mcp.enabled;
+    } catch (error) { fail(error); try { await read(); } catch (_) { /* Retain the last verified state, never replay a write. */ } }
+    finally { busy = false; draw(); }
+  };
+  x.retry.onclick = async () => { if (busy) return; busy = true; x.retry.disabled = true; try { await read(); x.error.hidden = true; x.retry.hidden = true; } catch (error) { fail(error); } finally { busy = false; x.retry.disabled = false; draw(); } };
+  x.add.onclick = () => r1OpenApiManager('create'); x.manage.onclick = () => r1OpenApiManager('manage'); x.operations.onclick = () => r1OpenApiManager('operations');
+  read().catch(error => { fail(error); draw(); });
 }
 
 function r1ApiTime(value) {
@@ -1068,7 +1116,7 @@ function r1ShowApiSecret(value) {
     secret = ''; x.token.value = ''; x.config.value = '';
     x.copyToken.onclick = null; x.copyConfig.onclick = null; x.close.onclick = null;
     document.removeEventListener('keydown', onKey, true); el.remove();
-    const opener = document.querySelector('#r1ApiManager [data-ref="create"]'); if (opener) opener.focus();
+    const opener = document.querySelector('#r1ApiManager [data-api-nav][aria-current="page"]'); if (opener) opener.focus();
   };
   const onKey = event => { if (event.key === 'Escape') { event.stopImmediatePropagation(); close(); } };
   x.copyToken.onclick = () => r1ApiCopy(x.token, x.copyStatus);
@@ -1078,14 +1126,16 @@ function r1ShowApiSecret(value) {
   document.body.append(el); x.close.focus();
 }
 
-function r1OpenApiManager() {
+function r1OpenApiManager(initialPage = 'manage') {
   if ($('#r1ApiManager')) return;
   const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dialog" aria-modal="true" aria-labelledby="r1ApiTitle"><div class="card fm-card r1-api-dialog">
-    <div class="r1-api-head"><h2 id="r1ApiTitle">API 管理</h2><button class="btn" type="button" data-ref="close" aria-label="关闭 API 管理">关闭</button></div>
-    <p>仅允许持密钥的局域网客户端读取或操作 NAS。角色限定操作等级，功能和文件范围分别授权，可随时撤销。</p>
+    <div class="r1-api-head"><h2 id="r1ApiTitle" data-ref="title">Token 管理</h2><button class="btn" type="button" data-ref="close" aria-label="关闭 API 管理">关闭</button></div>
+    <p class="sub" data-ref="pageDescription"></p>
+    <nav class="r1-api-pages" aria-label="Token 页面"><button class="btn" type="button" data-api-nav="create">添加 Token</button><button class="btn" type="button" data-api-nav="manage">Token 管理</button><button class="btn" type="button" data-api-nav="operations">Token 操作</button></nav>
     <p class="sub" data-ref="status" role="status">正在读取 API 设置…</p><p class="st-crit" data-ref="error" role="alert" hidden></p>
     <div data-ref="content" hidden>
-      <div class="r1-api-service"><label class="check"><input type="checkbox" data-ref="enabled">启用局域网 API 服务</label><span class="sub" data-ref="serviceStatus"></span></div>
+      <div class="r1-api-state-line"><span class="pill" data-ref="serviceStatus"></span><button class="btn" type="button" data-ref="refresh">刷新当前数据</button></div>
+      <section data-api-page="operations" hidden><h3>连接地址</h3><p class="sub">使用创建或轮换时保存的 Token 连接客户端。此页不代替 Token 发起 NAS 操作，也不接收旧 Token。</p>
       <div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label><label>功能能力目录<input class="textfield mono" data-ref="restCapabilities" readonly aria-label="功能能力目录地址"></label></div>
       <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
         <p class="sub">只读、读写、管理员按工具和资源分别授权。定义分别标明已接入与待接入；查看定义不会启用工具或修改密钥。</p>
@@ -1094,6 +1144,9 @@ function r1OpenApiManager() {
         <label class="r1-api-input" data-ref="contractJson" hidden>接口定义 JSON<textarea class="textfield mono" data-ref="contractDefinition" rows="10" readonly spellcheck="false" aria-label="接口定义 JSON"></textarea></label>
         <button class="btn" type="button" data-ref="copyContracts" hidden>复制接口定义</button>
       </details>
+      <h3>已接入的工具能力</h3><p class="sub">下列能力来自当前服务；客户端只能看到其 Token 实际获准的工具。角色、功能、具体工具与资源范围共同限制调用。</p><div class="r1-api-capabilities" data-ref="capabilities"></div>
+      <h3>最近调用记录</h3><p class="sub">仅显示时间、密钥标识、来源、功能和结果，不记录令牌或请求内容。</p><div class="r1-api-list" data-ref="audit"></div></section>
+      <section data-api-page="create" hidden>
       <h3 data-ref="formTitle">创建访问密钥</h3><form data-ref="form" class="r1-api-create">
         <label class="r1-api-input">密钥名称<input class="textfield" data-ref="name" aria-label="密钥名称" placeholder="例如：客厅 AI" maxlength="64" required autocomplete="off"></label>
         <label class="r1-api-input">操作角色<select class="textfield" data-ref="role" aria-label="操作角色"></select><span class="sub" data-ref="roleDescription"></span></label>
@@ -1101,21 +1154,30 @@ function r1OpenApiManager() {
         <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
         <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
         <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
-        <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">目前仅接入根规划元数据；浏览、属性、上传和下载仍待接入，当前仅保存范围授权。多个范围按允许范围的并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+        <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/ 下的已核验目录；下面只保存明确勾选的根与相对子目录授权。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
         <fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许读取的已登记 Docker 项目</legend><p class="sub">仅授权读取身份已核验的项目；不会部署、更新或启停容器。角色不替代具体工具和项目范围。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
         <label class="r1-api-input">允许的来源 IP／网段（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="192.168.31.0/24&#10;fd00::/64"></textarea><span class="sub">支持 IPv4／IPv6、CIDR 与 IPv4 点分掩码。留空允许持密钥的局域网客户端；不接受域名、通配符或公网全放行。</span></label>
         <label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="keep" data-ref="keepExpiry" hidden>保持当前有效期</option><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
         <div class="r1-api-actions"><button class="btn primary" type="submit" data-ref="create">创建密钥</button><button class="btn" type="button" data-ref="cancelEdit" hidden>取消编辑</button></div>
       </form>
       <details data-ref="projectManager"><summary>登记 Docker 项目（仅管理元数据）</summary><p class="sub">登记、改标签或撤销只修改 Toolbox 的授权登记，不创建、更新、停止或删除 Docker 项目。</p><button class="btn" type="button" data-ref="loadProjects">读取项目候选与登记</button><p class="sub" data-ref="projectStatus" role="status"></p><div class="r1-api-list" data-ref="projectCandidates"></div><div class="r1-api-list" data-ref="registeredProjects"></div></details>
-      <div class="r1-api-head"><h3>访问密钥</h3><button class="btn" type="button" data-ref="refresh">刷新列表</button></div><div class="r1-api-list" data-ref="keys"></div>
-      <h3>最近调用记录</h3><p class="sub">仅显示时间、密钥标识、来源、功能和结果，不记录令牌或请求内容。</p><div class="r1-api-list" data-ref="audit"></div>
+      </section><section data-api-page="manage" hidden><h3>访问密钥</h3><p class="sub" data-ref="keySummary"></p><div class="r1-api-list" data-ref="keys"></div></section>
     </div></div></div>`);
   const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media', 'files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing', 'backup', 'system'];
   const roleLevel = { readonly: 0, readwrite: 1, admin: 2 }, roleLabels = { readonly: '只读', readwrite: '读写', admin: '管理员' };
   const defaultMinRole = { read: 'readonly', fan: 'readwrite', light: 'readwrite', screen: 'readwrite', power: 'admin', media: 'readwrite' };
   const legacyTools = new Set(['get_nas_status', 'get_media_status', 'set_fan_policy', 'release_fan', 'set_light_policy', 'set_rgb', 'set_screen', 'update_screen_settings', 'request_power', 'cancel_power']);
-  let state = null, busy = false, closed = false, editing = null, contractsBusy = false, projectsBusy = false;
+  let state = null, busy = false, closed = false, editing = null, contractsBusy = false, projectsBusy = false, activePage = '';
+  const showPage = page => {
+    if (!['create', 'manage', 'operations'].includes(page)) page = 'manage';
+    activePage = page;
+    el.querySelectorAll('[data-api-page]').forEach(section => { section.hidden = section.dataset.apiPage !== page; });
+    el.querySelectorAll('[data-api-nav]').forEach(button => { button.setAttribute('aria-current', button.dataset.apiNav === page ? 'page' : 'false'); });
+    setText(x.title, page === 'create' ? editing ? '编辑 Token' : '添加 Token' : page === 'manage' ? 'Token 管理' : 'Token 操作');
+    setText(x.pageDescription, ({ create: '选择角色、功能、具体工具与资源范围，再创建独立访问密钥。', manage: '查看授权与使用情况，编辑、停用、启用、轮换或撤销已有 Token。', operations: '查看客户端连接方式、真实工具能力、接口定义和调用结果。' })[page]);
+    x.error.hidden = true;
+  };
+  el.querySelectorAll('[data-api-nav]').forEach(button => { button.onclick = () => { if (!busy) showPage(button.dataset.apiNav); }; });
   let dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
   const policyDirty = () => Object.values(dirty).some(Boolean);
   const exactPolicy = () => !editing || editing.policy_version === 3 || x.upgradePolicy.checked;
@@ -1138,7 +1200,7 @@ function r1OpenApiManager() {
   };
   const pending = value => {
     busy = value; el.setAttribute('aria-busy', String(value));
-    x.enabled.disabled = value || !state || state.storage_ok !== true;
+    el.querySelectorAll('[data-api-nav]').forEach(button => { button.disabled = value; });
     x.create.disabled = value || !state || state.storage_ok !== true || (filesSelected() && !fileRoots().length && (!editing || dirty.files));
     x.cancelEdit.disabled = value;
     x.refresh.disabled = value;
@@ -1198,7 +1260,7 @@ function r1OpenApiManager() {
       }
       item.querySelector('[data-root-fields]').hidden = !checked;
       setText(item.querySelector('[data-root-note]'), item.dataset.readOnly === 'true' ? '此存储根为只读挂载，只能授权读取。'
-        : item.dataset.available === 'false' ? '原范围当前失效；元数据编辑仍保留绑定，不按名称换盘。' : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '仅对勾选的根与子目录保存授权；真实文件操作仍待接入。');
+        : item.dataset.available === 'false' ? '原范围当前失效；元数据编辑仍保留绑定，不按名称换盘。' : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '授权仅限 Users 目录内已勾选的根与子目录；仍须选择已接入的具体工具。');
     }
     x.dockerProjects.hidden = !selected.has('docker');
     x.dockerProjectOptions.querySelectorAll('input').forEach(input => { input.disabled = !exactPolicy() || input.dataset.available !== 'true'; });
@@ -1269,7 +1331,7 @@ function r1OpenApiManager() {
   };
   const draw = () => {
     const labels = names();
-    x.content.hidden = false; x.enabled.checked = state.enabled === true;
+    x.content.hidden = false; r1SyncMcpService(state.enabled);
     setText(x.status, state.storage_ok === true ? 'Token 仅在创建或轮换时显示。关闭服务后，所有 MCP 与 REST 密钥立即停止访问；已有密钥保留。' : '访问配置存储不可用，暂不能启用服务或管理密钥。');
     setText(x.serviceStatus, state.enabled === true ? '已开启' : '已关闭');
     x.mcp.value = location.origin + '/mcp'; x.restStatus.value = location.origin + '/api/integration/status'; x.restAction.value = location.origin + '/api/integration/action'; x.restCapabilities.value = location.origin + '/api/integration/capabilities';
@@ -1299,6 +1361,7 @@ function r1OpenApiManager() {
       x.scopes.append(label);
     }
     const keys = Array.isArray(state.keys) ? state.keys : [];
+    setText(x.keySummary, `${keys.length} 个 Token；${keys.filter(key => key.status === 'active').length} 个状态有效。服务关闭时所有 Token 均不能访问。`);
     x.keys.replaceChildren();
     if (!keys.length) x.keys.append(mount('<p class="sub">尚未创建访问密钥。</p>'));
     for (const key of keys) {
@@ -1311,7 +1374,7 @@ function r1OpenApiManager() {
       setText(k.projects, (Array.isArray(key.docker_projects) ? key.docker_projects : []).map(grant => `${(projectRows().find(project => project.id === grant.id) || {}).label || grant.id}（${(grant.operations || []).join('、')}）`).join('；') || '未授予项目范围');
       const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
       if (!grants.length) setText(k.files, '未授予文件范围');
-      else k.files.append(mount('<p class="sub">仅根规划元数据已接入；真实文件读写待接入。</p>'));
+      else k.files.append(mount('<p class="sub">仅限已核验的 Users 目录；具体操作以已授权的接入工具为准。</p>'));
       for (const grant of grants) {
         const root = fileRoots().find(item => item.id === grant.id), row = document.createElement('p');
         setText(row, `${root ? root.label : '当前未确认的存储根（' + String(grant.id || '未知') + '）'} · ${grant.path ? '子目录：' + String(grant.path) : '整个已选根'} · ${({ readonly: '只读', readwrite: '读写' })[grant.access] || '权限未知'}`);
@@ -1334,6 +1397,16 @@ function r1OpenApiManager() {
       };
       x.keys.append(item);
     }
+    x.capabilities.replaceChildren();
+    for (const tool of currentTools()) {
+      const row = mount('<article class="r1-api-capability"><strong></strong><span class="mono" data-capability-name></span><span class="sub" data-capability-role></span><p class="sub" data-capability-description></p></article>');
+      setText(row.querySelector('strong'), tool.title || tool.name);
+      setText(row.querySelector('[data-capability-name]'), tool.name);
+      setText(row.querySelector('[data-capability-role]'), `${names().get(tool.scope) || tool.scope} · 最低角色：${roleLabels[tool.min_role]}`);
+      setText(row.querySelector('[data-capability-description]'), tool.description || '调用仍须满足当前 Token 的具体工具与资源授权。');
+      x.capabilities.append(row);
+    }
+    if (!x.capabilities.children.length) x.capabilities.append(mount('<p class="sub">暂未获得可调用能力，请刷新重试。</p>'));
     x.audit.replaceChildren();
     const audit = Array.isArray(state.audit) ? state.audit : [];
     if (!audit.length) x.audit.append(mount('<p class="sub">尚无调用记录。</p>'));
@@ -1361,6 +1434,7 @@ function r1OpenApiManager() {
   };
   const beginEdit = key => {
     editing = key; x.upgradePolicy.checked = false; x.upgradePolicyLabel.hidden = key.policy_version === 3; draw();
+    showPage('create');
     setText(x.formTitle, '编辑访问密钥'); setText(x.create, '保存修改');
     x.cancelEdit.hidden = false; x.keepExpiry.hidden = false; x.expiry.value = 'keep';
     x.name.value = String(key.name || ''); x.ips.value = Array.isArray(key.allowed_ips) ? key.allowed_ips.join('\n') : '';
@@ -1394,7 +1468,9 @@ function r1OpenApiManager() {
         result.token = '';
       }
       if (url === '/api/access/keys/update' || (url === '/api/access/keys/revoke' && editing && editing.id === body.id)) endEdit();
-      await refresh(); return result;
+      await refresh();
+      if (!closed && ['/api/access/keys', '/api/access/keys/update'].includes(url)) showPage('manage');
+      return result;
     } catch (error) { fail(error); return null; }
     finally { if (!closed) pending(false); }
   };
@@ -1493,12 +1569,6 @@ function r1OpenApiManager() {
     finally { contractsBusy = false; if (!closed) x.loadContracts.disabled = false; }
   };
   x.copyContracts.onclick = () => r1ApiCopy(x.contractDefinition, x.contractStatus);
-  x.enabled.onchange = async () => {
-    if (busy || !state) return;
-    const enabled = x.enabled.checked; x.enabled.checked = state.enabled === true;
-    if (enabled && !(await R1.ask('开启局域网 API 服务？', '已创建的有效密钥将能按授权功能访问 NAS。请将密钥仅交给可信客户端。'))) return;
-    await mutate('/api/access/settings', { enabled });
-  };
   x.form.onsubmit = async event => {
     event.preventDefault(); if (busy) return;
     const name = x.name.value.trim(), role = x.role.value, scopes = [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
@@ -1543,7 +1613,7 @@ function r1OpenApiManager() {
       if (!tool || !scopes.includes(tool.scope) || roleLevel[role] < roleLevel[tool.min_role]) { fail(new Error('具体工具不满足当前角色和功能权限，请重新选择。')); return; }
     }
     const labels = names(), grant = scopes.map(id => labels.get(id) || id).join('、');
-    const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root ? root.label : item.id) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。真实文件读写待接入，当前仅保存范围授权。` : '';
+    const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root ? root.label : item.id) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。边界仅限已核验的 Users 目录，具体操作还须有对应工具授权。` : '';
     const body = { name, allowed_ips };
     if (!editing || dirty.role || upgrade) body.role = role;
     if (!editing || dirty.scopes || upgrade) body.scopes = scopes;
@@ -1577,9 +1647,9 @@ function r1OpenApiManager() {
     }
     updatePermissions();
   };
-  x.cancelEdit.onclick = endEdit;
+  x.cancelEdit.onclick = () => { endEdit(); showPage('manage'); };
   x.close.onclick = close; document.addEventListener('keydown', onKey);
-  document.body.append(el); pending(true);
+  document.body.append(el); showPage(initialPage); pending(true);
   refresh().catch(fail).finally(() => { if (!closed) pending(false); });
 }
 
@@ -1700,7 +1770,9 @@ function r1BusinessApplications(source) {
   const attemptNote = attempted ? `<p class="sub">最近尝试：${esc(r1BusinessTime(attempted))}</p>` : '';
   if (!source.available || !data) return `<p class="sub">${esc((source.reason || '尚未读取应用列表，请按需采集。') + failed)}</p>` + attemptNote;
   const rows = Array.isArray(data.apps) ? data.apps : [];
-  return `<p class="sub">采集时间：${esc(r1BusinessTime(data.cache_modified_at))}。${esc((source.reason || '列表不代表应用实时运行状态。') + failed)}</p>` + attemptNote
+  const partial = data.partial === true || source.status === 'cached_partial';
+  const partialNote = partial ? `<p class="st-warn" role="status">部分结果：已隔离 ${esc(r1BusinessNumber(data.rejected_entries))} 条无效条目。当前仅展示 ${rows.length} 条有效缓存，不代表全部已安装应用。</p>` : '';
+  return partialNote + `<p class="sub">采集时间：${esc(r1BusinessTime(data.cache_modified_at))}。${esc((source.reason || '列表不代表应用实时运行状态。') + failed)}</p>` + attemptNote
     + (rows.length ? rows.map(row => `<div class="r1-business-row"><strong>${esc(row.name || '名称未知')}</strong><span>版本 ${esc(row.version || '--')} · 安装状态码 ${esc(r1BusinessNumber(row.installation_status_code))}</span></div>`).join('') : '<p class="sub">本次返回的列表为空。</p>');
 }
 function r1BusinessDownloads(source) {
@@ -1735,7 +1807,8 @@ defineModule({
           const result = await R1.post('/api/r1/business/refresh', { source });
           if (!result || result.ok !== true) throw new Error(result && result.error || '采集未完成');
           const saved = result.cache && result.cache.stored === true;
-          toast(!saved ? '查询已结束，但快照未保存，请核对来源状态' : result.result && result.result.available ? '采集结果已保存' : '已保存本次结果，来源暂不可用', { icon: saved ? 'check' : 'alert' });
+          const partial = result.result && (result.result.status === 'partial' || result.result.data && result.result.data.partial === true);
+          toast(!saved ? '查询已结束，但快照未保存，请核对来源状态' : partial ? '已保存部分结果，无效条目已隔离' : result.result && result.result.available ? '采集结果已保存' : '已保存本次结果，来源暂不可用', { icon: saved && !partial && result.result && result.result.available ? 'check' : 'alert' });
           await R1_BUSINESS.load(true); renderNow();
         } catch (error) { toast('采集未确认：' + String(error.message || error), { icon: 'alert' }); }
         finally { button.disabled = false; setText(button, oldText); }

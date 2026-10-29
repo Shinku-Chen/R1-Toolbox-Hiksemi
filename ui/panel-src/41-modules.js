@@ -110,7 +110,7 @@ defineModule({
     // NET
     const rx = sumRx(o), tx = sumTx(o), ni = nets(o);
     dnumU(x.rxV, x.rxU, ni.length ? rx : null, F.rate); dnumU(x.txV, x.txU, ni.length ? tx : null, F.rate);
-    st('net', '', !ni.length ? '无网卡' : rx + tx < 10240 ? '空闲' : '活跃');
+    st('net', '', !ni.length ? '无网卡' : ok(rx) && ok(tx) ? (rx + tx < 10240 ? '空闲' : '活跃') : '未知');
     const tt = S.traffic && S.traffic.totals;
     setText(x.netSub, tt ? `今日 ↓ ${F.bytesStr(tt.today_rx)} · ↑ ${F.bytesStr(tt.today_tx)}` : `${ni.length} 个网口`);
     m.sp.net.set([{ values: vals(S.live.rx) }, { values: vals(S.live.tx) }], { min: 0 });

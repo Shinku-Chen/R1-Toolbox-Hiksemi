@@ -37,7 +37,8 @@ const fixtureCode = match[1].replaceAll("asset_dir=repo / 'ui/web'", 'asset_dir=
   const check = (name, value) => { assert.ok(value, name); checks.push(name); };
   const stamp = '2026-10-29T01:02:03.000+00:00';
   const state = { ok: true, snapshot: { sampled_at: stamp, categories: {
-    applications: { available: true, reason: '历史快照，不代表运行状态', data: { cache_modified_at: stamp,
+    applications: { available: true, status: 'cached_partial', reason: '历史快照，不代表运行状态', data: { cache_modified_at: stamp,
+      partial: true, rejected_entries: 2, rejections: [{ code: 'unsupported_application_label', count: 2 }],
       apps: [{ name: '<img src=x onerror=alert(1)>', version: '1.0', installation_status_code: null }] } },
     downloads: { available: true, data: { engines: [
       { engine: 'aria2', available: false, reason: '固定监听未就绪' },
@@ -80,6 +81,9 @@ const fixtureCode = match[1].replaceAll("asset_dir=repo / 'ui/web'", 'asset_dir=
     check('应用名称作为文字安全显示', (await panel.locator('[data-ref="applications"]').innerText()).includes('<img src=x')
       && await panel.locator('[data-ref="applications"] img').count() === 0);
     check('未知安装状态显示缺测', (await panel.locator('[data-ref="applications"]').innerText()).includes('状态码 --'));
+    check('应用部分结果明确隔离数量且不冒充总安装量', (await panel.locator('[data-ref="applications"] .st-warn').innerText()).includes('已隔离 2 条')
+      && (await panel.locator('[data-ref="applications"] .st-warn').innerText()).includes('1 条有效缓存')
+      && (await panel.locator('[data-ref="applications"] .st-warn').innerText()).includes('不代表全部已安装应用'));
     const downloadText = await panel.locator('[data-ref="downloads"]').innerText();
     check('两个下载来源独立报告成功与失败', downloadText.includes('固定监听未就绪') && downloadText.includes('3 个任务'));
     check('真零速率与未知速率分开', downloadText.includes('下载 0') && downloadText.includes('上传 --'));
