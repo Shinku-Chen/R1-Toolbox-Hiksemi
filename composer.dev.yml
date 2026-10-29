@@ -2,36 +2,71 @@
 # 启动前必须提供 R1_DEV_ALLOW_IPS，仅填写你授权的实际客户端 IP 或局域网 CIDR。
 # 开发授权的环境变量只用于首次初始化；网页已保存的设置优先。
 # R1 Toolbox 常驻服务：Web 一直运行，小屏与 MCP 分别管理开关。
-# UI_MODE: image 使用镜像内置界面；diagnostic 不接管小屏；directory 使用 UI_DIR。
-# UI_DIR 仅 directory 模式填写 NAS 前端目录；原版小屏文件保持原样。
 # 设置保存在独立 Docker 数据卷；UI 和服务仍从 /run 内存目录运行。
 # 网页使用 NAS_IP:18732；首次不设密码，小屏默认开，MCP 默认关。
-# UI_MODE=image 必需；container_name、UI_DIR、R1_WEB_BIND/PORT 可按需覆盖。
 # 小屏／开发开关保存在原数据卷；停止容器会停止服务并恢复官方窗口。
-# 可通过 R1_TOOLBOX_IMAGE 指定版本；发布包固定为对应构建的 sha 镜像标签。
+# 以下注释占位列出全部公开部署 ENV；按需取消对应行注释并填写，其他项保持默认。
+# MCP 开关／Token、网页口令、风扇／灯光策略均在网页管理，不通过部署 ENV 配置。
 services:
   r1-toolbox:
+    # R1_TOOLBOX_IMAGE 是此 image 行使用的外部 Compose 变量，不是容器 environment。
+    # 默认 preview（开发预览）；可改用 latest（主分支）或 sha-提交哈希（固定版本）。
     image: ${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}
+    # 默认容器名 r1-toolbox；若修改，请同步设置下方 TASK_CONTAINER。
     container_name: r1-toolbox
+    # always 随 Docker 启动并在异常退出后重启容器；服务与容器生命周期绑定。
     restart: always
+    # 停止宽限期 3 分钟，等待官方小屏与风扇恢复后再结束容器。
     stop_grace_period: 3m
+    # 宿主设备与硬件控制所需的特权模式，请保留。
     privileged: true
+    # 共享宿主进程空间，用于识别原厂进程与管理唯一运行实例。
     pid: host
+    # 共享宿主 IPC，供原厂界面与本地服务通信。
     ipc: host
+    # 直接使用宿主网卡；无需再增加 ports 端口映射。
     network_mode: host
     environment:
+      # 界面来源：默认 image 使用镜像内置界面；directory 使用下方 UI_DIR；diagnostic 不接管小屏。
       UI_MODE: image
+      # 仅 UI_MODE=directory 时填写宿主绝对目录，须含非空 index.html，且与官方 dist 目录独立。
+      # 默认不设置；image 模式不能同时设置 UI_DIR。
+      # UI_DIR: /填写已有前端目录
+      # 宿主定位部署容器的名称或 ID，默认 r1-toolbox；修改 container_name 时必须同步修改。
+      # TASK_CONTAINER: r1-toolbox
+      # Web 监听地址：默认 0.0.0.0 供局域网访问；仅支持 0.0.0.0 或 127.0.0.1。
+      # R1_WEB_BIND: 0.0.0.0
+      # Web 端口：默认 18732，范围 1024–65535；常驻服务不支持 0。
+      # 18731 是本机只读 API 的保留端口，不能作为 Web 端口。
+      # R1_WEB_PORT: '18732'
+      # 网页写操作认证：默认 password；首次未设口令可直接进入，登录口令在网页设置。
+      # pair 仅用于旧版配对兼容；此项不启用 MCP，也不创建 API 密钥。
       R1_WEB_AUTH_MODE: password
+      # 小屏接管首次默认值：0 关闭、1 开启，默认 1；网页已保存的设置优先。
+      # R1_SMALL_SCREEN_ENABLED: '1'
+      # 开发模式首次默认关闭（0）；此处 1 是开启示例，须同时填写下方白名单。
+      # 仅用于首次初始化；网页已保存的开发设置优先，不替代 MCP 独立密钥。
       R1_DEV_NO_PAIRING: '1'
+      # 开发白名单默认不设置；开启开发模式时必填实际客户端 IP、局域网 CIDR 或点分掩码网段。
+      # 多个地址以逗号分隔；按实际客户端 IP 校验，不读取代理转发头；网页已保存的设置优先。
       R1_DEV_ALLOW_IPS: ${R1_DEV_ALLOW_IPS:?请设置开发者白名单IP或CIDR}
+      # 开发窗口首次有效时长，单位分钟：默认 60，范围 1–1440；网页已保存的设置优先。
       R1_DEV_MINUTES: '1440'
+      # 开发固定诊断命令首次默认关闭（0）；1 仅开放固定白名单命令，不提供任意 Shell。
+      # 仅在开发模式与白名单窗口内有效；网页已保存的设置优先。
       R1_DEV_ALLOW_COMMANDS: '1'
     volumes:
+    # 宿主根目录，用于宿主命名空间与路径身份校验。
     - /:/host
+    # 宿主设备节点，供屏幕与硬件控制访问。
     - /dev:/host/dev
+    # 宿主进程信息，用于运行状态与进程身份校验。
     - /proc:/host/proc
+    # 宿主硬件与内核状态，供监控和硬件身份校验。
     - /sys:/host/sys
+    # 宿主 RAM 运行目录，存放展开的界面与运行时文件。
     - /run:/host/run
+    # 持久化设置与授权，升级必须保留原数据卷；不要删除卷或使用 down -v。
     - r1-toolbox-data:/data
 volumes:
   r1-toolbox-data: {}
