@@ -270,6 +270,7 @@ class QbHarness:
                         FakeSocket(frame(tasks if tasks is not None else [qb_task()]))]
         self.owners = owners or [OWNER] * 4
         self.owner_calls, self.calls = [], []
+        self.auth_state = download.QbAuthState()
 
     def connect(self, address, timeout):
         self.calls.append((address, timeout))
@@ -280,6 +281,8 @@ class QbHarness:
         return self.owners[min(len(self.owner_calls) - 1, len(self.owners) - 1)]
 
     def collect(self, **kwargs):
+        kwargs.setdefault('auth_state', self.auth_state)
+        kwargs.setdefault('credentials', ('fixture-user', 'fixture-password'))
         return download.collect_qbittorrent(root="/fixture", ownership_check=self.owner,
                                            socket_factory=self.connect, **kwargs)
 
@@ -314,16 +317,19 @@ class QbittorrentDiagnosticsTests(unittest.TestCase):
         for secret in ("PRIVATE-FILE", "/private", "magnet:", "http://private", "private-token", "a" * 40):
             self.assertNotIn(secret, rendered)
 
-    def test_auth_rejection_does_not_login_retry_or_read_credentials(self):
+    def test_auth_rejection_attempts_once_without_reading_config_or_exposing_vendor_text(self):
         for index in range(3):
             for status in (401, 403):
                 harness = QbHarness()
                 harness.sockets[index].response = frame(b"PRIVATE-ERROR", status=status)
-                value = harness.collect()
+                harness.sockets.insert(index + 1, FakeSocket(frame(b'Fails.')))
+                with patch('builtins.open', side_effect=AssertionError('No config or credential file')):
+                    value = harness.collect()
                 self.assertFalse(value["available"])
-                self.assertEqual(value["status"], "auth_required")
+                self.assertEqual(value["status"], "auth_rejected")
                 self.assertIsNone(value["data"])
-                self.assertEqual(len(harness.calls), index + 1)
+                self.assertEqual(len(harness.calls), index + 2)
+                self.assertTrue(harness.sockets[index + 1].sent.startswith(b'POST /api/v2/auth/login HTTP/1.1\r\n'))
                 self.assertNotIn("PRIVATE-ERROR", json.dumps(value))
 
     def test_verified_ipv6_listener_uses_fixed_loopback_and_bracketed_same_origin(self):
@@ -422,11 +428,12 @@ class QbittorrentDiagnosticsTests(unittest.TestCase):
         def owner(**kwargs):
             value = original(**kwargs)
             if len(harness.owner_calls) == 3:
-                now[0] = 2.1
+                now[0] = 4.1
             return value
 
         value = download.collect_qbittorrent(ownership_check=owner, socket_factory=harness.connect,
-                                             monotonic=lambda: now[0])
+                                             monotonic=lambda: now[0], auth_state=harness.auth_state,
+                                             credentials=('fixture-user', 'fixture-password'))
         self.assertEqual(value["status"], "timeout")
         self.assertEqual(len(harness.calls), 2)
 
@@ -457,7 +464,9 @@ class QbittorrentDiagnosticsTests(unittest.TestCase):
             def connect(address, timeout):
                 self.assertEqual(address, ('127.0.0.1', 8181))
                 return socket.create_connection(server.server_address, timeout=timeout)
-            value = download.collect_qbittorrent(ownership_check=lambda **_: OWNER, socket_factory=connect)
+            value = download.collect_qbittorrent(ownership_check=lambda **_: OWNER, socket_factory=connect,
+                                                 auth_state=download.QbAuthState(),
+                                                 credentials=('fixture-user', 'fixture-password'))
             self.assertTrue(value['available'], value)
             self.assertEqual([path for path, _, _ in requests], list(download.QB_PATHS))
             self.assertTrue(all(referer == 'http://127.0.0.1:8181/' and cookie is None

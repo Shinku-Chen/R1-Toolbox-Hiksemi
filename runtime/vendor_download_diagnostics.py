@@ -1,13 +1,17 @@
 """Read existing download queues through fixed, verified loopback endpoints.
 
 This deliberately avoids factory REST getters: their lazy initialization can
-launch/recover download clients or refresh authentication. No secret is read.
+launch/recover download clients. qB authentication uses only the explicitly
+configured code defaults and identity-bound in-memory SID; no file is scanned.
 """
+import hashlib
 import json
 import math
 import re
 import socket
+import threading
 import time
+from urllib.parse import urlencode
 
 HOST = "127.0.0.1"
 PORT = 6800
@@ -20,6 +24,12 @@ KEYS = ("gid", "status", "totalLength", "completedLength", "downloadSpeed", "upl
 SOURCE = "aria2_loopback_rpc"
 QB_PORT = 8181
 QB_SOURCE = "qbittorrent_loopback_webapi"
+QB_NETWORK_SECONDS = 4.0
+QB_AUTH_BACKOFF_SECONDS = 300.0
+QB_LOGIN_PATH = "/api/v2/auth/login"
+# User-authorized device credentials, not upstream defaults or HTTP input.
+QB_DEFAULT_CREDENTIALS = ("admin", "Ab123456")
+_QB_SID = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 QB_PATHS = ("/api/v2/app/version", "/api/v2/transfer/info",
             "/api/v2/torrents/info?filter=all&sort=hash&limit=129&offset=0")
 QB_STATES = frozenset(("error", "missingFiles", "uploading", "pausedUP", "queuedUP",
@@ -34,7 +44,12 @@ REASONS = {
     "owner_unverified": "下载监听无法关联到该引擎唯一且已核验的进程。",
     "ambiguous": "下载监听存在多个执行者，无法确认来源。",
     "identity_changed": "查询期间下载进程或监听身份发生变化。",
-    "auth_required": "下载接口需要授权；未登录、读取口令或刷新令牌。",
+    "auth_required": "下载 RPC 需要原厂授权；未读取或刷新令牌。",
+    "auth_rejected": "qB 认证未通过；本轮不再登录，至少等待五分钟后才允许再次登录。",
+    "auth_banned": "qB 登录被拒绝，可能触发来源封禁；至少等待五分钟后才允许再次登录。",
+    "auth_backoff": "qB 仍需要认证，新的登录尝试处于五分钟退避；已允许既有只读访问检查。",
+    "auth_busy": "qB 正在进行另一项只读采集或认证，请稍后读取。",
+    "auth_config_invalid": "qB 内部认证配置无法确认；未发送账号口令。",
     "rpc_error": "原厂下载 RPC 返回错误；未执行登录、恢复或重试。",
     "invalid_response": "下载 RPC 的返回格式不符合受限只读协议。",
     "limit_exceeded": "下载快照超过诊断大小或条目上限，未返回不完整数据。",
@@ -46,8 +61,39 @@ REASONS = {
 
 
 class _Failure(Exception):
-    def __init__(self, status):
+    def __init__(self, status, *, http_status=None):
         self.status = status
+        self.http_status = http_status
+
+
+class QbAuthState:
+    """One private SID and login cooldown, never persisted or represented."""
+
+    __slots__ = ("_lock", "_identity", "_credential_key", "_sid", "_retry_at")
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._identity = self._credential_key = self._sid = None
+        self._retry_at = 0.0
+
+    def __repr__(self):
+        return "QbAuthState()"
+
+    def _bind(self, identity, credential_key):
+        if self._identity != identity or self._credential_key != credential_key:
+            self._identity, self._credential_key = identity, credential_key
+            self._sid, self._retry_at = None, 0.0
+
+    def _forget(self):
+        # Retain the failed identity's cooldown key, never its usable session.
+        self._sid = None
+
+    def _backoff(self, now):
+        self._sid = None
+        self._retry_at = max(self._retry_at, now + QB_AUTH_BACKOFF_SECONDS)
+
+
+_QB_AUTH_STATE = QbAuthState()
 
 
 def _remaining(deadline, clock):
@@ -70,7 +116,7 @@ def _invalid_constant(_value):
     raise _Failure("invalid_response")
 
 
-def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, host=HOST):
+def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, host=HOST, return_headers=False):
     """Fixed caller-built requests; reject redirects, compression and streaming.
 
     A monotonic deadline applies before every socket operation, so a server
@@ -97,10 +143,6 @@ def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, h
         if not match or len(lines) > 65:
             raise _Failure("invalid_response")
         status = int(match.group(1))
-        if status in (401, 403):
-            raise _Failure("auth_required")
-        if status != 200:
-            raise _Failure("invalid_response")
         headers = {}
         for line in lines[1:]:
             if b":" not in line:
@@ -108,10 +150,14 @@ def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, h
             key, value = line.split(b":", 1)
             if not re.fullmatch(rb"[A-Za-z0-9-]+", key):
                 raise _Failure("invalid_response")
-            key, value = key.lower(), value.strip()
-            if key in headers:
+            key, value = key.lower(), value.strip(b' \t')
+            if key in headers or any(byte < 32 or byte == 127 for byte in value):
                 raise _Failure("invalid_response")
             headers[key] = value
+        if status in (401, 403):
+            raise _Failure("auth_required", http_status=status)
+        if status != 200:
+            raise _Failure("invalid_response")
         if b"transfer-encoding" in headers or headers.get(b"content-encoding", b"identity").lower() != b"identity":
             raise _Failure("invalid_response")
         length = headers.get(b"content-length", b"")
@@ -129,7 +175,7 @@ def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, h
         if len(content) != length:
             raise _Failure("invalid_response")
         _remaining(deadline, clock)
-        return content
+        return (content, headers) if return_headers else content
     finally:
         sock.close()
 
@@ -151,16 +197,90 @@ def _http_rpc(payload, deadline, clock, socket_factory):
     return _json(_http_exchange(request, PORT, ceiling, deadline, clock, socket_factory))
 
 
-def _qb_get(path, deadline, clock, socket_factory, *, host=HOST):
+def _qb_get(path, deadline, clock, socket_factory, *, host=HOST, sid=None):
     if path not in QB_PATHS or host not in (HOST, '::1'):
         raise ValueError("仅允许固定的 qB 只读查询")
     authority = ('[::1]' if host == '::1' else HOST) + ':' + str(QB_PORT)
+    if sid is not None and (not isinstance(sid, str) or not _QB_SID.fullmatch(sid)):
+        raise _Failure("invalid_response")
+    cookie = f"Cookie: SID={sid}\r\n" if sid is not None else ""
     request = (f"GET {path} HTTP/1.1\r\nHost: {authority}\r\n"
                f"Referer: http://{authority}/\r\n"
+               f"Origin: http://{authority}\r\n{cookie}"
                "Accept: application/json, text/plain\r\nAccept-Encoding: identity\r\n"
                "Connection: close\r\n\r\n").encode("ascii")
     return _http_exchange(request, QB_PORT, 4096 if path == QB_PATHS[0] else MAX_BODY,
                           deadline, clock, socket_factory, host=host)
+
+
+def _qb_credentials(value):
+    value = QB_DEFAULT_CREDENTIALS if value is None else value
+    try:
+        valid = (isinstance(value, tuple) and len(value) == 2
+                 and all(isinstance(part, str) and part and len(part.encode('utf8')) <= 1024 for part in value))
+    except UnicodeError:
+        valid = False
+    if not valid:
+        raise _Failure('auth_config_invalid')
+    key = hashlib.sha256(json.dumps(value, ensure_ascii=True).encode('ascii')).digest()
+    return value, key
+
+
+def _qb_sid(headers):
+    raw = headers.get(b'set-cookie')
+    if not isinstance(raw, bytes):
+        raise _Failure('auth_rejected')
+    fields = raw.split(b';')
+    try:
+        first = fields[0].strip().decode('ascii')
+    except UnicodeError:
+        raise _Failure('auth_rejected') from None
+    if not first.startswith('SID=') or not _QB_SID.fullmatch(first[4:]):
+        raise _Failure('auth_rejected')
+    seen = set()
+    for field in fields[1:]:
+        key, separator, value = field.strip().partition(b'=')
+        key = key.lower()
+        if key in seen:
+            raise _Failure('auth_rejected')
+        seen.add(key)
+        if key == b'path':
+            valid = separator and value == b'/'
+        elif key in (b'httponly', b'secure'):
+            valid = not separator
+        elif key == b'samesite':
+            valid = separator and value.lower() in (b'lax', b'strict', b'none')
+        elif key == b'max-age':
+            valid = separator and re.fullmatch(rb'[0-9]{1,10}', value)
+        elif key == b'expires':
+            valid = separator and re.fullmatch(rb'[A-Za-z0-9,: -]{1,64}', value)
+        else:
+            valid = False
+        if not valid:
+            raise _Failure('auth_rejected')
+    return first[4:]
+
+
+def _qb_login(credentials, deadline, clock, socket_factory, *, host):
+    if host not in (HOST, '::1'):
+        raise _Failure('owner_unverified')
+    authority = ('[::1]' if host == '::1' else HOST) + ':' + str(QB_PORT)
+    body = urlencode({'username': credentials[0], 'password': credentials[1]}).encode('ascii')
+    request = (f"POST {QB_LOGIN_PATH} HTTP/1.1\r\nHost: {authority}\r\n"
+               f"Origin: http://{authority}\r\nReferer: http://{authority}/\r\n"
+               "Content-Type: application/x-www-form-urlencoded\r\n"
+               "Accept: text/plain\r\nAccept-Encoding: identity\r\nConnection: close\r\n"
+               f"Content-Length: {len(body)}\r\n\r\n").encode('ascii') + body
+    try:
+        content, headers = _http_exchange(request, QB_PORT, 4096, deadline, clock,
+                                          socket_factory, host=host, return_headers=True)
+    except _Failure as error:
+        if error.status == 'auth_required':
+            raise _Failure('auth_banned' if error.http_status == 403 else 'auth_rejected') from None
+        raise
+    if content != b'Ok.':
+        raise _Failure('auth_rejected')
+    return _qb_sid(headers)
 
 
 def _rpc_error(value):
@@ -332,45 +452,107 @@ def _project_qb(transfer, rows, version):
             and connection in ("connected", "firewalled", "disconnected") else None}
 
 
-def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, monotonic=None):
-    """Query the verified fixed WebUI without logging in or loading a password.
+def _qb_snapshot(identity, sid, verify, deadline, clock, socket_factory):
+    version = _qb_get(QB_PATHS[0], deadline, clock, socket_factory, host=identity[3], sid=sid)
+    verify()
+    try:
+        version = version.decode("ascii").strip()
+    except UnicodeError:
+        raise _Failure("invalid_response") from None
+    if not re.fullmatch(r"v[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?(?:[A-Za-z0-9.+_-]{0,24})", version):
+        raise _Failure("invalid_response")
+    transfer = _qb_get(QB_PATHS[1], deadline, clock, socket_factory, host=identity[3], sid=sid)
+    verify()
+    transfer = _json(transfer)
+    tasks = _qb_get(QB_PATHS[2], deadline, clock, socket_factory, host=identity[3], sid=sid)
+    verify()
+    return _project_qb(transfer, _json(tasks), version)
 
-    This succeeds only if its existing localhost/anonymous policy permits the
-    requests. Authentication rejection is terminal; no session is created.
+
+def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, monotonic=None,
+                        auth_state=None, credentials=None):
+    """Read the fixed verified WebUI; authenticate at most once if rejected.
+
+    The private state binds SID and login backoff to the kernel identity and
+    configured credentials. Injection is Python-only, never an HTTP option.
+    Existing access is tried even during backoff; no login renews an arbitrary
+    local TTL, and no setting, process or download task is changed.
     """
     if ownership_check is None:
         from vendor_runtime import require_one_listener
         ownership_check = require_one_listener
     socket_factory = socket_factory or socket.create_connection
     clock = monotonic or time.monotonic
+    state = _QB_AUTH_STATE if auth_state is None else auth_state
+    if not isinstance(state, QbAuthState):
+        return {"available": False, "status": "auth_config_invalid", "reason": REASONS['auth_config_invalid'],
+                "source": QB_SOURCE, "data": None}
+    if not state._lock.acquire(blocking=False):
+        return {"available": False, "status": "auth_busy", "reason": REASONS['auth_busy'],
+                "source": QB_SOURCE, "data": None}
+    login_attempted, authenticated, completed = False, False, False
+    status = 'transport_error'
     try:
+        credentials, credential_key = _qb_credentials(credentials)
         identity = _identity(ownership_check, root, port=QB_PORT, comm="qbittorrent-nox")
-        deadline = clock() + NETWORK_SECONDS
-        version = _qb_get(QB_PATHS[0], deadline, clock, socket_factory, host=identity[3])
+        state._bind(identity, credential_key)
+        deadline = clock() + QB_NETWORK_SECONDS
+
+        def verify():
+            try:
+                current = _identity(ownership_check, root, port=QB_PORT, comm="qbittorrent-nox")
+            except _Failure:
+                state._forget()
+                raise
+            if current != identity:
+                state._forget()
+                raise _Failure('identity_changed')
+
         try:
-            version = version.decode("ascii").strip()
-        except UnicodeError:
-            raise _Failure("invalid_response") from None
-        if not re.fullmatch(r"v[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?(?:[A-Za-z0-9.+_-]{0,24})", version):
-            raise _Failure("invalid_response")
-        if _identity(ownership_check, root, port=QB_PORT, comm="qbittorrent-nox") != identity:
-            raise _Failure("identity_changed")
-        transfer = _json(_qb_get(QB_PATHS[1], deadline, clock, socket_factory, host=identity[3]))
-        if _identity(ownership_check, root, port=QB_PORT, comm="qbittorrent-nox") != identity:
-            raise _Failure("identity_changed")
-        tasks = _json(_qb_get(QB_PATHS[2], deadline, clock, socket_factory, host=identity[3]))
-        data = _project_qb(transfer, tasks, version)
-        if _identity(ownership_check, root, port=QB_PORT, comm="qbittorrent-nox") != identity:
-            raise _Failure("identity_changed")
+            data = _qb_snapshot(identity, state._sid, verify, deadline, clock, socket_factory)
+        except _Failure as error:
+            if error.status != 'auth_required':
+                raise
+            state._sid = None
+            # Recheck immediately before handing credentials to this socket.
+            verify()
+            if clock() < state._retry_at:
+                raise _Failure('auth_backoff')
+            _remaining(deadline, clock)
+            login_attempted = True
+            try:
+                sid = _qb_login(credentials, deadline, clock, socket_factory, host=identity[3])
+            except (_Failure, OSError):
+                verify()
+                raise
+            verify()
+            state._sid = sid
+            authenticated = True
+            try:
+                data = _qb_snapshot(identity, sid, verify, deadline, clock, socket_factory)
+            except _Failure as repeat:
+                if repeat.status == 'auth_required':
+                    verify()
+                    raise _Failure('auth_rejected') from None
+                raise
+        completed = True
         return {"available": True, "status": "ok", "reason": None, "source": QB_SOURCE, "data": data}
     except _Failure as error:
         status = error.status
+        if status in ('proc_unavailable', 'proc_partial', 'not_listening', 'owner_unverified', 'ambiguous', 'identity_changed'):
+            state._forget()
     except (TimeoutError, socket.timeout):
         status = "timeout"
     except ConnectionRefusedError:
         status = "service_unavailable"
     except OSError:
         status = "transport_error"
+    finally:
+        if login_attempted and not completed and (not authenticated or status in (
+                'auth_rejected', 'identity_changed', 'proc_unavailable', 'proc_partial',
+                'not_listening', 'owner_unverified', 'ambiguous')):
+            state._backoff(clock())
+        state._lock.release()
     return {"available": False, "status": status, "reason": REASONS[status], "source": QB_SOURCE, "data": None}
 
 
