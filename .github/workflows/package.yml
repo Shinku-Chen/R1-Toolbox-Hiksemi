@@ -25,7 +25,7 @@ jobs:
       - name: Check generated files
         run: |
           python tools/boot-once/build-compose.py
-          git diff --exit-code -- composer.yml tools/boot-once/compose.yaml tools/boot-once/runner.sh
+          git diff --exit-code -- composer.yml composer.dev.yml tools/boot-once/compose.yaml tools/boot-once/runner.sh
       - name: Check shell syntax
         run: |
           for script in tools/boot-once/*.sh tools/boot-once/*.sh.in docker/*.sh scripts/*.sh; do
@@ -55,8 +55,11 @@ jobs:
       - name: Check native fan adapter without NAS devices
         run: python tests/check_fan_guard_linux.py
       - name: Validate Compose configuration
+        env:
+          R1_DEV_ALLOW_IPS: '127.0.0.1'
         run: |
           docker compose -f composer.yml config --quiet
+          docker compose -f composer.dev.yml config --quiet
           docker compose -f tools/boot-once/compose.yaml config --quiet
       - name: Check the simulated boot-once lifecycle
         run: python tools/boot-once/test_runner.py

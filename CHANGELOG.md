@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs(deploy): 将通用 `composer.yml` 明确为部署 demo，新增完整开发者 `composer.dev.yml` 示例，强制填写来源 IP／CIDR，保留原项目、数据卷与三分钟停机宽限；同步生成检查、Compose 校验及已保存网页设置优先的说明，不将个人开发 IP 写入仓库。
 - fix(web): 小屏暂不可用时仍允许关闭接管偏好或显式重试，避免图形环境恢复后开关被旧能力状态锁住；切换过程继续防止重复提交，并按实际接管状态报告结果。
 - fix(runtime): 启动脚本导入已验证的 RAM 运行时前禁写 Python 字节码，避免首次运行生成 `__pycache__` 导致后续重启被完整性校验拒绝；保留缓存的严格文件集合校验，并补重复导入／启动回归。
 - test(runtime): 镜像首次免口令验收改用网页实际的 `/api/auth/session`，同时核对 `auth_required`、授权与模式；旧 `/api/session` 继续仅用于配对，不为测试放宽授权。

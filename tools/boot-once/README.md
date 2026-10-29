@@ -2,6 +2,8 @@
 
 ## 常驻部署与默认服务
 
+仓库 [composer.yml](../../composer.yml) 是通用 demo；[composer.dev.yml](../../composer.dev.yml) 是完整开发者示例，默认使用 `preview`、1440 分钟初始化窗口及受限命令诊断，必须填写 `R1_DEV_ALLOW_IPS` 的局域网 IP／CIDR。两份配置复用相同容器和数据卷，选择一份更新原项目即可。若已从网页保存“服务与开发”，开发开关、白名单及到期时间应在网页修改，环境变量不覆盖保存值。
+
 1. 从 Actions 下载成功构建的部署文件，或使用提供的 `composer.yml`。
 2. 在 NAS Docker 市场更新原项目配置或创建项目，然后启动。
 3. 默认 `UI_MODE: image`、`UI_DIR: ''`：无需上传任何 HTML 或前端目录。
