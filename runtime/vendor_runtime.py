@@ -97,8 +97,10 @@ def _listener_table(proc, name, deadline=None):
         return [], False
     result = []
     lines = raw.splitlines()
+    # Linux tcp4_seq_show and tcp6_seq_show use different remote column names.
+    remote_column = b'remote_address' if name == 'tcp6' else b'rem_address'
     if (not lines or len(lines) > 16384 or not raw.endswith(b'\n')
-            or lines[0].split()[:4] != [b'sl', b'local_address', b'rem_address', b'st']):
+            or lines[0].split()[:4] != [b'sl', b'local_address', remote_column, b'st']):
         return [], False
     complete = True
     for line in lines[1:]:

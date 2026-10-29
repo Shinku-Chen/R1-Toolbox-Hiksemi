@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -17,10 +18,15 @@ SPEC = importlib.util.spec_from_file_location('vendor_runtime_under_test', ROOT 
 runtime = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runtime)
 HEADER = '  sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n'
+HEADER6 = '  sl local_address remote_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n'
 
 
 def tcp(inode='12345', address='0100007F', port=6800, state='0A', slot=0):
     return f' {slot}: {address}:{port:04X} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000 0 0 {inode} 1 0000000000000000\n'
+
+
+def tcp6(inode='12345', address='0' * 32, port=8181, state='0A', slot=0):
+    return tcp(inode, address, port, state, slot).replace(' 00000000:0000 ', ' ' + '0' * 32 + ':0000 ')
 
 
 def process_stat(pid=123, comm='aria2c-nox', start=100):
@@ -132,7 +138,7 @@ class VendorRuntimeTests(unittest.TestCase):
         self.process(pid=456, comm='qbittorrent-nox', inodes=('12345',))
         self.links[self.proc / '123/fd/0'] = 'socket:[54321]'
         for address in ('0' * 32, '00000000000000000000000001000000'):
-            (self.proc / 'net/tcp6').write_bytes((HEADER + tcp(address=address, port=8181)).encode('ascii'))
+            (self.proc / 'net/tcp6').write_bytes((HEADER6 + tcp6(address=address)).encode('ascii'))
             result = runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')
             self.assertTrue(result['available'], result)
             self.assertEqual(result['pid'], 456)
@@ -142,7 +148,7 @@ class VendorRuntimeTests(unittest.TestCase):
 
     def test_ipv4_ipv6_conflicting_fixed_listeners_are_ambiguous(self):
         self.table(HEADER + tcp(port=8181))
-        (self.proc / 'net/tcp6').write_bytes((HEADER + tcp('67890', address='0' * 32, port=8181)).encode('ascii'))
+        (self.proc / 'net/tcp6').write_bytes((HEADER6 + tcp6('67890')).encode('ascii'))
         self.process(pid=456, comm='qbittorrent-nox', inodes=('67890',))
         # Even one process owning both candidates does not erase ambiguity.
         for inodes in (('67890',), ('12345', '67890')):
@@ -153,11 +159,32 @@ class VendorRuntimeTests(unittest.TestCase):
     def test_ipv6_external_bind_and_malformed_table_do_not_authorize_qb(self):
         self.table(HEADER)
         self.process(pid=456, comm='qbittorrent-nox', inodes=('12345',))
-        (self.proc / 'net/tcp6').write_bytes((HEADER + tcp(address='20010DB8' + '0' * 24, port=8181)).encode('ascii'))
+        (self.proc / 'net/tcp6').write_bytes((HEADER6 + tcp6(address='20010DB8' + '0' * 24)).encode('ascii'))
         self.assertEqual(runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')['status'],
                          'not_listening')
         (self.proc / 'net/tcp6').write_bytes(b'malformed\n')
         self.assert_partial()
+
+    def test_protocol_specific_remote_header_is_required(self):
+        for name, header, wrong_header, row in (
+                ('tcp', HEADER, HEADER6, tcp()), ('tcp6', HEADER6, HEADER, tcp6())):
+            with self.subTest(protocol=name):
+                path = self.proc / 'net' / name
+                path.write_bytes((header + row).encode('ascii'))
+                listeners, complete = runtime._listener_table(self.proc, name)
+                self.assertTrue(complete)
+                self.assertEqual(len(listeners), 1)
+                path.write_bytes((wrong_header + row).encode('ascii'))
+                self.assertEqual(runtime._listener_table(self.proc, name), ([], False))
+
+    def test_ipv4_header_on_ipv6_table_is_partial_not_an_empty_verified_inventory(self):
+        self.table(HEADER)
+        self.process(pid=456, comm='qbittorrent-nox', inodes=('12345',))
+        (self.proc / 'net/tcp6').write_bytes((HEADER + tcp6()).encode('ascii'))
+        result = runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')
+        self.assertFalse(result['available'])
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertIsNone(result['pid'])
 
     def test_unavailable_proc_and_partial_inventory_are_distinct(self):
         with mock.patch.object(runtime, 'collect_runtime', return_value={
@@ -432,6 +459,30 @@ class VendorRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(runtime.os, 'fstat', side_effect=directory):
             self.assert_partial()
+
+
+@unittest.skipUnless(sys.platform.startswith('linux'), '需要 Linux 原生 /proc 网络表头')
+class NativeProcHeaderTests(unittest.TestCase):
+    def test_native_kernel_headers_parse_with_synthetic_fixed_listeners(self):
+        # Read only the header, not this host's connection rows or process FDs.
+        with tempfile.TemporaryDirectory(prefix='r1-native-proc-header-') as folder:
+            proc = Path(folder) / 'proc'
+            (proc / 'net').mkdir(parents=True)
+            for name, remote, row in (('tcp', b'rem_address', tcp()),
+                                       ('tcp6', b'remote_address', tcp6())):
+                try:
+                    with Path('/proc/net', name).open('rb') as stream:
+                        header = stream.readline(4097)
+                except (FileNotFoundError, PermissionError) as error:
+                    if name == 'tcp6':
+                        self.skipTest('宿主 IPv6 网络表不可读取：' + type(error).__name__)
+                    raise
+                self.assertLessEqual(len(header), 4096)
+                self.assertEqual(header.split()[:4], [b'sl', b'local_address', remote, b'st'])
+                (proc / 'net' / name).write_bytes(header + row.encode('ascii'))
+                listeners, complete = runtime._listener_table(proc, name)
+                self.assertTrue(complete, name)
+                self.assertEqual(len(listeners), 1, name)
 
 
 if __name__ == '__main__':
