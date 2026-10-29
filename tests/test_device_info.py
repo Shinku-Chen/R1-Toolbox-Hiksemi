@@ -79,6 +79,20 @@ class DeviceInfoTests(unittest.TestCase):
         self.assertEqual(data["dmi"]["product_serial"], "LOCAL-ONLY-123")
         self.assertNotIn("never", json.dumps(data))
 
+    def test_vendor_display_name_is_separate_from_hostname_and_projects_no_secrets(self):
+        self.write(self.proc / "sys/kernel/hostname", "HikSemi-fixture")
+        self.write(self.root / "tmp/nand_config/config.txt", json.dumps({
+            "dev_info": {"dev_name": "测试设备昵称", "serial_number": "never-return-this"},
+            "account": {"password": "never-return-this"}}, ensure_ascii=False))
+        with patch("subprocess.run", side_effect=AssertionError("不能运行命令")), \
+                patch("socket.socket", side_effect=AssertionError("不能建立连接")), \
+                patch.object(device_info.os, "O_NONBLOCK", 0, create=True):
+            data = self.collect()["identity"]
+        self.assertEqual(data["name"], "测试设备昵称")
+        self.assertEqual(data["hostname"], "HikSemi-fixture")
+        self.assertEqual(data["name_source"], "histor.dev_info.dev_name")
+        self.assertNotIn("never-return-this", json.dumps(data))
+
     def test_release_symlink_and_sysfs_class_links_inside_fixture_work(self):
         target = self.root / "usr/lib/os-release"
         self.write(target, 'PRETTY_NAME="Linked Fixture"\nID=fixture')

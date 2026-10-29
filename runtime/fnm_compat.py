@@ -914,6 +914,8 @@ class FnmonitorPanel:
                 'ipv6': row.get('ipv6') or []} for row in rows]
         uptime = _number(basic.get('uptime_seconds'), 0) or _number(_dict(self._insights().get('system')).get('uptime_seconds'), 0)
         return {
+            'device_name': _text(identity.get('name'), 128),
+            'device_name_source': _text(identity.get('name_source'), 64),
             'hostname': _text(basic.get('hostname') or identity.get('hostname'), 120),
             'kernel': _text(identity.get('kernel'), 120),
             'kernel_version': _text(identity.get('kernel'), 120),
@@ -1470,7 +1472,9 @@ class FnmonitorPanel:
                         'settings': settings},
             'monitoring': {'settings': monitoring_settings,
                            'available': bool(_dict(self._monitoring()).get('available'))},
-            'device': {'hostname': self._system().get('hostname'),
+            'device': {'name': self._system().get('device_name'),
+                       'name_source': self._system().get('device_name_source'),
+                       'hostname': self._system().get('hostname'),
                        'model': self._hardware()['board'].get('product_name'),
                        'firmware': self._system().get('fnos_version'),
                        'kernel': self._system().get('kernel')},

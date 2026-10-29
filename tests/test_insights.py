@@ -280,6 +280,170 @@ class InsightsTests(unittest.TestCase):
         cached['smart_data']['power_on_time']['hours'] = 999
         self.assertEqual(self.collector.smart_cached('sda')['smart_data']['power_on_time']['hours'], 123)
 
+    def storage_names_fixture(self, serial="SERIAL-A"):
+        data = {"available": True, "reason": None, "source": "hiksemi_storage_socket",
+                "disks": [{"disk_name": "sda", "disk_port": 1, "disk_serial": serial}],
+                "spaces": [{"space_name": "家庭照片", "space_disk_id": serial,
+                            "is_raid": 0, "port": 1,
+                            "member": [{"port": 1, "disk_name": "sda2", "root_name": "sda", "disk_id": serial}]}]}
+        client = mock.Mock()
+        client.snapshot.return_value = data
+        self.collector.storage_client = client
+        return client
+
+    def identity_smart_fixture(self, serial="SERIAL-A", standby=False):
+        data = {"serial_number": serial, "smart_status": {"passed": True},
+                "wwn": {"naa": 5, "oui": 123, "id": 456}, "temperature": {"current": 38}}
+        if standby:
+            data = {"power_mode": {"string": "STANDBY"}}
+            if serial is not None:
+                data["serial_number"] = serial
+        self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], data, 2 if standby else 0)
+
+    def test_disk_names_reuse_current_smart_serial_with_no_sysfs_serial_or_new_probe(self):
+        self.block()
+        client = self.storage_names_fixture()
+        self.identity_smart_fixture()
+        row = self.collector._disks()["items"][0]
+        self.assertEqual(row["user_name"], "家庭照片")
+        self.assertEqual(row["name_source"], "hiksemi_storage_socket")
+        self.assertNotIn("serial_number", row)
+        self.assertNotIn("smart_data", row)
+        self.assertNotIn("serial", row)
+        before = list(self.calls)
+        diagnostic = self.collector.storage_name_diagnostics()
+        self.assertEqual(self.calls, before, "诊断不能新增 SMART 或硬件命令")
+        client.snapshot.assert_has_calls([mock.call(), mock.call()])
+        self.assertEqual(diagnostic["items"][0]["user_name"], "家庭照片")
+        self.assertEqual(diagnostic["items"][0]["serial_status"], "ok")
+        self.assertIn("smart_cache", diagnostic["items"][0]["serial_sources"])
+        self.assertNotIn("SERIAL-A", json.dumps(diagnostic))
+        self.assertNotIn("disk_serial", json.dumps(diagnostic))
+        self.assertEqual(diagnostic["items"][0]["serial_hash"], diagnostic["vendor"]["disks"][0]["serial_hash"])
+
+    def test_smart_serial_never_overrides_sysfs_udev_conflicts(self):
+        folder = self.block()
+        self.write(folder / "device/serial", "SERIAL-A")
+        self.write(folder / "dev", "8:0")
+        self.write(self.collector.run_root / "udev/data/b8:0", "E:ID_SERIAL_SHORT=OTHER\n")
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.assertIsNone(self.collector._disks()["items"][0]["user_name"])
+        result = self.collector.storage_name_diagnostics()["items"][0]
+        self.assertEqual(result["serial_status"], "conflict")
+        self.assertFalse(result["matched"])
+        self.assertEqual(self.collector._disk_serial_cache, {})
+
+    def test_standby_without_serial_keeps_only_verified_identity_not_temperature(self):
+        self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.assertEqual(self.collector._disks()["items"][0]["user_name"], "家庭照片")
+        self.now += 31
+        self.identity_smart_fixture(None, standby=True)
+        row = self.collector._disks()["items"][0]
+        self.assertEqual(row["user_name"], "家庭照片")
+        self.assertTrue(row["standby"])
+        self.assertIsNone(row["temp_c"])
+        self.assertIsNone(row["smart_temperature_c"])
+        self.assertIsNone(row["health"]["passed"])
+        self.assertNotIn("serial_number", self.collector.smart_cached("sda")["smart_data"])
+        before = len(self.calls)
+        item = self.collector.storage_name_diagnostics()["items"][0]
+        self.assertEqual(item["serial_sources"], ["smart_identity_cache"])
+        self.assertEqual(item["user_name"], "家庭照片")
+        self.assertEqual(len(self.calls), before)
+
+    def test_hot_replacement_invalidates_names_and_serial_cache_even_at_same_sd_name(self):
+        folder = self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        folder.rename(self.temporary / "removed-disk")
+        self.block()
+        calls = list(self.calls)
+        item = self.collector.storage_name_diagnostics()["items"][0]
+        self.assertEqual(item["serial_status"], "identity_changed")
+        self.assertIsNone(item["user_name"])
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(self.collector._disk_serial_cache, {})
+        self.identity_smart_fixture(None, standby=True)
+        row = self.collector._disks()["items"][0]
+        self.assertIsNone(row["user_name"])
+        self.assertNotIn("sda", self.collector._disk_serial_cache)
+        self.assertEqual(len(self.calls), len(calls) + 1, "原有后台采集因新 sysfs lifetime 失效，名称不额外探测")
+
+    def test_identity_change_during_getters_discards_otherwise_matching_names(self):
+        folder = self.block()
+        client = self.storage_names_fixture()
+        data = client.snapshot.return_value
+        self.identity_smart_fixture()
+
+        def replace_during_getter():
+            folder.rename(self.temporary / "removed-during-getter")
+            self.block()
+            return data
+
+        client.snapshot.side_effect = replace_during_getter
+        self.assertIsNone(self.collector._disks()["items"][0]["user_name"])
+        self.assertEqual(self.collector._disk_serial_cache, {})
+
+    def test_diagnostic_final_identity_check_rejects_change_after_serial_read(self):
+        folder = self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        original = self.collector._disk_serial_info
+
+        def replace_after_read(*args, **kwargs):
+            result = original(*args, **kwargs)
+            folder.rename(self.temporary / "removed-after-serial")
+            self.block()
+            return result
+
+        with mock.patch.object(self.collector, "_disk_serial_info", side_effect=replace_after_read):
+            result = self.collector.storage_name_diagnostics()["items"][0]
+        self.assertEqual(result["serial_status"], "identity_changed")
+        self.assertIsNone(result["user_name"])
+        self.assertIsNone(result["serial_hash"])
+
+    def test_stable_wwid_change_and_new_smart_serial_cannot_reuse_old_identity(self):
+        folder = self.block()
+        self.write(folder / "wwid", "wwn-OLD")
+        client = self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        self.write(folder / "wwid", "wwn-NEW")
+        self.identity_smart_fixture("SERIAL-B")
+        client.snapshot.return_value = {
+            "available": True, "disks": [{"disk_name": "sda", "disk_port": 1, "disk_serial": "SERIAL-B"}],
+            "spaces": [{"space_name": "新盘", "is_raid": 0, "port": 1,
+                        "member": [{"disk_name": "sda2", "root_name": "sda", "port": 1, "disk_id": "SERIAL-B"}]}]}
+        self.assertEqual(self.collector._disks()["items"][0]["user_name"], "新盘")
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.collector._disk_serial_cache["sda"]["serial"], "SERIAL-B")
+
+    def test_smart_identity_conflict_invalidates_retained_standby_serial(self):
+        self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        self.now += 31
+        self.identity_smart_fixture("OTHER")
+        self.assertIsNone(self.collector._disks()["items"][0]["user_name"])
+        self.assertEqual(self.collector._disk_serial_cache, {})
+
+    def test_nvme_controller_and_usb_bridge_disagreement_remain_unknown(self):
+        folder = self.block("nvme0n1")
+        self.write(self.sys / "class/nvme/nvme0/serial", "NVME-SERIAL")
+        self.assertEqual(self.collector._disk_serial("nvme0n1", folder), "NVME-SERIAL")
+        self.write(folder / "dev", "259:0")
+        self.write(self.collector.run_root / "udev/data/b259:0", "E:ID_SERIAL_SHORT=OTHER\n")
+        self.assertIsNone(self.collector._disk_serial("nvme0n1", folder))
+        usb = self.block("sdb")
+        self.write(usb / "device/serial", "BRIDGE-SERIAL")
+        self.assertIsNone(self.collector._disk_serial("sdb", usb, {"smart_data": {"serial_number": "DRIVE-SERIAL"}}))
+
     def test_smart_failed_health_is_kept_even_with_nonzero_exit_status(self):
         self.block()
         self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], {"smart_status": {"passed": False}, "temperature": {"current": 48}}, 8)

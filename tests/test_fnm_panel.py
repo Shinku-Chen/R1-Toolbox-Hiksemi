@@ -167,7 +167,8 @@ class Insights:
             'processes': [{'pid': 101, 'name': 'fixture-monitor', 'cpu_percent': 1.2,
                            'memory_bytes': 40000000}],
             'gpu': {'available': False, 'reason': '无 GPU', 'devices': []},
-            'device': {'identity': {'hostname': 'R1-Fixture', 'kernel': '6.1-fixture',
+            'device': {'identity': {'name': '测试设备昵称', 'name_source': 'histor.dev_info.dev_name',
+                                    'hostname': 'R1-Fixture', 'kernel': '6.1-fixture',
                                     'os': {'PRETTY_NAME': 'Fixture Linux', 'ID': 'debian'},
                                     'firmware': {'version': 'V6.3.3_Build_260907'}, 'pci': [],
                                     'dmi': {'product_name': 'HikSemi R1', 'sys_vendor': 'HikSemi'}},
@@ -309,6 +310,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(data['docker']['containers'][0]['mem_usage'], '128 MiB')
         self.assertEqual(data['ports']['listeners'][0]['port'], 18731)
         self.assertEqual(data['system']['hostname'], 'R1-Fixture')
+        self.assertEqual(data['system']['device_name'], '测试设备昵称')
         self.assertEqual(data['system']['fnos_version'], 'V6.3.3_Build_260907')
         self.assertEqual(data['memory'], [])
         self.assertEqual(data['raidcard']['type'], 'none')
@@ -476,6 +478,8 @@ class MappingTests(unittest.TestCase):
         self.assertTrue(state['auth']['authorized'])
         self.assertIn('pairing', state['auth'])
         self.assertEqual(state['device']['model'], 'HikSemi R1')
+        self.assertEqual(state['device']['name'], '测试设备昵称')
+        self.assertEqual(state['device']['hostname'], 'R1-Fixture')
 
 
 class DeveloperModeTests(unittest.TestCase):

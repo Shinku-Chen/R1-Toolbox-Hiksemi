@@ -549,7 +549,7 @@
   // ------------------------------------------------------------------ views
   function clockBlock() {
     const status = obj(state.data.status);
-    const host = status.hostname || 'R1-NAS';
+    const host = obj(obj(obj(state.data.insights).device).identity).name || status.hostname || 'R1-NAS';
     return `<div class="clock-block"><div class="clock-topline"><span class="clock-date" data-clock-date></span><span class="clock-live"><span class="dot"></span>${state.online ? 'LOCAL HOST' : 'OFFLINE'}</span></div><div class="clock-line"><span data-clock-digits>${dotNumber('--:--', 'clock-digits')}</span><span class="clock-seconds" data-clock-seconds>--</span></div><p class="clock-device">${esc(host)} <span style="padding:0 5px">/</span> ${status.uptime_seconds != null ? '已运行 ' + esc(duration(status.uptime_seconds)) : '等待采样'}</p></div>`;
   }
 

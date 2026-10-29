@@ -282,6 +282,23 @@ class TemperatureTests(unittest.TestCase):
         self.assertIsNone(row['temperature_c'])
         self.assertEqual(row['sampled_monotonic'], 100)
 
+    def test_disk_user_name_updates_label_without_changing_source_or_probing(self):
+        item = {'stable_identity': 'serial:' + 'a' * 24, 'model': 'Fixture HDD',
+                'device': '/dev/sda', 'user_name': '测试自定义磁盘',
+                'smart_temperature_c': 35, 'smart_sampled_monotonic': self.now,
+                'smart_status': 'ok'}
+        self.collector._state['disks'] = {'available': True, 'items': [item]}
+        first = self.sources.snapshot()[0]
+        self.assertEqual(first['label'], '磁盘 · 测试自定义磁盘 · /dev/sda')
+        item['user_name'] = '重命名测试盘'
+        second = self.sources.snapshot()[0]
+        self.assertEqual(second['id'], first['id'])
+        self.assertEqual(second['temperature_c'], 35)
+        self.assertIn('重命名测试盘', second['label'])
+        item['user_name'] = None
+        self.assertIn('Fixture HDD', self.sources.snapshot()[0]['label'])
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,7 +2,17 @@
 
 Build_260907 的当前用户名称应从原厂 `disk_space` 进程的实时空间列表读取。文件系统卷标、`/drives` 目录名及旧 SQLite 数据库不能代替该来源。
 
-2026-10-29 复核纠正了此前的判断：`disk_space.db` 是旧格式迁移入口；迁移后变成 `disk_space_cache.db`，后者不随用户后续改名更新。当前 Toolbox 仍读取旧数据库，实机尚未成功取得海康自定义名称；本文记录的是已确认的正确读取入口，适配器尚未接入。
+2026-10-29 复核纠正了此前的判断：`disk_space.db` 是旧格式迁移入口；迁移后变成 `disk_space_cache.db`，后者不随用户后续改名更新。当前实现已改为固定只读 socket 查询，并与已有 SMART 缓存核对物理身份；是否取得正确名称必须以部署后的实机结果为准。
+
+## 设备昵称与主机名
+
+海康设置的设备昵称来自 `/tmp/nand_config/config.txt` 的 `dev_info.dev_name`。原厂 `json_conf_get_dev_name`（`0x936200`）调用 `json_conf_load("dev_info")` 后读取该字段；REST 注册动作 `get_dev_name`（handler `0x27fc71`）也把它作为 `name` 返回。它与 `/proc/sys/kernel/hostname` 是两个独立字段。
+
+`runtime/vendor_device.py` 只读这个固定配置文件，只返回名称，不回传设备序列号、账号或整份配置。文件须为受限大小的普通文件，拒绝符号链接、重复 JSON 键、读取期间替换和无效名称；未知时保留 `null`。该读取随原有后台设备采集刷新，网页和小屏请求只使用缓存。
+
+- `/api/r1.device.name`、`/api/overview.system.device_name`：原厂设备昵称。
+- 对应 `hostname`：保留真实 Linux 主机名，不用昵称覆盖。
+- 小屏首页优先显示昵称，网页“关于”分别展示昵称与主机名。
 
 ## 当前名称的只读入口
 
@@ -27,8 +37,8 @@ Build_260907 的当前用户名称应从原厂 `disk_space` 进程的实时空�
       "member": [
         {
           "port": 1,
-          "disk_name": "sda",
-          "root_name": "原厂分区名称",
+          "disk_name": "sda2",
+          "root_name": "sda",
           "disk_id": "物理盘序列号"
         }
       ]
@@ -46,17 +56,22 @@ Build_260907 的当前用户名称应从原厂 `disk_space` 进程的实时空�
 | 字段 | 已确认语义 |
 |---|---|
 | `space.member[].disk_id` | 物理盘序列号，来自原厂物理盘结构 `+0x16c` |
+| `space.member[].disk_name` | 分区／zone 名称，来自 zone 结构 `+0x90`，不是整盘名 |
+| `space.member[].root_name` | 物理盘名称，来自物理盘结构 `+0x24` |
 | `disk_list.info[].disk_serial` | 同一个物理盘序列号字段 |
+| `disk_list.info[].disk_name` | 物理盘名称，来自同一个 `+0x24` 字段 |
 | `disk_list.info[].disk_id` | 另一字段，来自物理盘结构 `+0x64`，不能当序列号 |
 | `space.space_name` | 用户设置的存储空间名称 |
 
 `create_space_node`（`0x3ab47`）在基本盘、RAID 及其他构造分支将物理盘 `+0x16c` 复制到成员 `+0x94`；`rest_get_space_list` 随后把它序列化为成员的 `disk_id`。
 
-接入时先核验成员的 `disk_id == disk_list.disk_serial`，并检查盘名、端口对应一致，再按真实序列号严格唯一匹配已有 SMART 缓存。不能按 `sdX` 顺序、型号、卷标或端口号猜匹配；同名字段也不能直接互相连接。缺失、重复或冲突保持未知。
+接入时先核验成员的 `disk_id == disk_list.disk_serial`、`root_name == disk_list.disk_name == 当前物理盘名`，以及端口对应一致，再按真实序列号严格唯一匹配已有 SMART 缓存。`member.disk_name` 是分区／zone 名，不能与整盘名直接比较；这个含义由 `printf_disk_list`（`0x30a6a`）和 `get_disk_list`（`0x42f81`）对 zone 结构同一字段的访问确认。不能按 `sdX` 顺序、型号、卷标或端口号猜匹配，也不能只靠剥离分区后缀替代真实身份。缺失、重复或冲突保持未知。
 
-已有 SMART 缓存的 `serial_number` 可参与严格一致性核验，不为名称额外运行 SMART。当前 `InsightsCollector._disk_serial` 仅读取 sysfs／udev；需要在接入时合并候选并保留冲突状态，不能用简单的 `sysfs值 or SMART值` 掩盖冲突，也不能跨硬件更换复用无法确认身份的旧缓存。
+已有 SMART 缓存的 `serial_number` 参与严格一致性核验，不为名称额外运行 SMART。`InsightsCollector` 合并 sysfs／udev／缓存 SMART 候选，保留冲突状态；不使用简单的 `sysfs值 or SMART值` 掩盖冲突。缓存必须与当前 sysfs 设备生命周期和物理身份相符，采集前后再次核对，不能跨硬件更换复用同名设备的旧缓存。
 
-适配器应沿用 `runtime/histor.py` 已有的私有具名客户端、`0700` 权限目录、超时、返回大小与 NUL 校验及仅清理自己 inode 的约束，单独固定上述两个 getter。现有风扇 RPC 白名单不得放开。
+已真实取得的序列号还会进入独立身份缓存，绑定同一 sysfs 生命周期；休眠响应不再含序列号时可以继续显示名称。这不延长温度、健康或原始 SMART 的时效。多源冲突、移除或替换后立即丢弃；sysfs 目录身份或修改时间发生变化也会保守失效，不能把无法确认连续性的旧值认作当前磁盘。
+
+适配器沿用 `runtime/histor.py` 的私有具名客户端、`0700` 权限目录、超时、返回大小与 NUL 校验及仅清理自己 inode 的约束，单独固定上述两个 getter。现有风扇 RPC 白名单没有放开。名称会同步用于存储列表、磁盘详情以及温控／屏保测点标签；重命名不会改变温度测点的物理标识。
 
 ## 旧数据库为什么不存在
 
@@ -89,6 +104,31 @@ Build_260907 的当前用户名称应从原厂 `disk_space` 进程的实时空�
 - 四盘 sysfs／udev 采集的序列号为空，已有后台 SMART 原始缓存则都含真实 `serial_number`。
 - 原厂 `disk_space` 正在运行，R1 确实使用 `restart_disk_space_v1.sh`。
 
-当前已有受限调试接口尚不能发送这两个存储 getter，本轮未在 NAS 上直接调用它们，也未读取或写入私有磁盘元数据。因此已确认正确的固件读取入口和字段关联，但实际返回名称仍需通过固定只读适配器取样，再与海康管理页逐盘核对；不能把静态分析或旧数据库测试宣称为实机名称已通过。
+上述结果来自改动前的 `9c2495b`。该版本没有存储 getter 调试入口，不能通过它上传或执行任意代码；当前也没有这台 NAS 的已配置 SSH 通道。不能把静态分析或本地 fixture 测试宣称为实机名称已通过。
+
+用户提供的验收参考为设备昵称“小可爱NAS”和四个存储名称“SSD、视频资源、主磁盘、备份磁盘”。它们只用于对照，不写入采集器、不用于推导名称与 `sdX` 的对应关系。部署新实现后必须以真实序列号匹配结果核对各盘。
+
+## 固定只读诊断与实机验收
+
+新增 `POST /api/dev/storage`，唯一允许的 JSON 为 `{"action":"snapshot"}`。沿用开发者总开关、精确客户端 IP、有效时间窗口、`R1_DEV_ALLOW_COMMANDS=1`、正常登录口令会话、同源与 CSRF 校验；它不是公开监控接口，不接受路径、命令、序列号覆盖或上传代码。
+
+```javascript
+const response = await fetch('/api/dev/storage', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json', 'X-FNM-Request': '1'},
+  body: JSON.stringify({action: 'snapshot'})
+});
+console.log(await response.json());
+```
+
+诊断只读原厂两份当前列表，以及已有 SMART 缓存和 sysfs／udev 身份。不会调用 `_smart`、触发 `_disks` 刷新或额外运行 `smartctl`。响应仅保留名称、物理盘／分区标识、端口和关联状态，不回传挂载路径或其他无关字段，序列号仅返回哈希；同时列出来源、候选是否冲突、是否匹配及不可用原因。一次只允许一个诊断请求，避免并发占用原厂 IPC。
+
+验收应核对：
+
+1. `device.name` 为实际海康昵称，`device.hostname` 仍是 Linux 主机名。
+2. 四块数据盘通过唯一序列号、原厂盘名和端口交叉核验；`user_name` 与海康管理页一致，系统 eMMC 不被误命名。
+3. 网页、小屏、温度选择和屏保测点使用同一名称；缺失或冲突回退为未知，不使用卷标猜昵称。
+4. 诊断前后没有额外 SMART 命令、主动自检、原厂改名或磁盘私有元数据读写。
+5. 未授权 IP、过期窗口、缺口令会话和跨站请求被拒绝；请求不能指定其他原厂命令。
 
 以上函数地址均为用户提供 Build_260907 固件 PIE ELF 的链接地址，运行时需另加装载基址。分析只读取解包文件，没有执行厂商 ELF 或脚本。

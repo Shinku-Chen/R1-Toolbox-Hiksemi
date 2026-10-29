@@ -1,0 +1,4083 @@
+{
+  "schema_version": 1,
+  "firmware": "R1_X01_GML_STD_V6.3.3_Build_260907",
+  "audit_date": "2026-10-29",
+  "method": "Static ELF string xrefs, pointer/handler arrays, unwind function boundaries and local scripts/configs; vendor code never executed.",
+  "address_basis": "ELF virtual addresses. Add runtime load bias for PIE; ET_EXEC images may already use fixed linked virtual addresses. Never hardcode these addresses into production.",
+  "coverage": {
+    "candidate_scan_elf_count": 355,
+    "candidate_scan_roots": [
+      "/histor/bin",
+      "/histor/basis",
+      "/usr/local",
+      "/opt"
+    ],
+    "excluded_from_this_registry": [
+      "emhistor RPC and REST: separate vendor-emhistor-interfaces.json",
+      "All arbitrary third-party app/container interfaces",
+      "Live NAS socket/process ownership",
+      "Screen partition application contents not present in the extracted histor/rootfs sample"
+    ],
+    "complete_fixed_tables": {
+      "disk_space": 22,
+      "disk_space_part_opt_subbranches": 8,
+      "ipc_manager": 54,
+      "image_gps": 2,
+      "appcenter_primary_dispatch": 6
+    },
+    "partial_dispatches": [
+      "emclient",
+      "proxyDaemon",
+      "bonjour_tool",
+      "local media TCP services"
+    ],
+    "not_a_claim": "This is not a claim to enumerate every compiled branch, every HTTP route, every D-Bus method or every live endpoint in the complete device firmware."
+  },
+  "recommendation_legend": {
+    "A_passive_candidate": "静态已确认无业务写入的候选；仍须核对活跃服务身份、协议、超时、大小、旧值和真实能力，不能仅凭注册表自动启用。",
+    "B_review_before_use": "来源、协议、运行可用性或副作用不完整，禁止默认调用。",
+    "C_explicit_user_action_only": "仅能作为明确用户操作的候选，需沿用鉴权、确认、身份预检等现有安全边界；本文不实现。",
+    "D_do_not_integrate": "破坏性、通用执行、已知唤盘、隐私／云账户操作或空桩；禁止默认接入，不提供调用模板。"
+  },
+  "binaries": [
+    {
+      "name": "disk_space",
+      "path": "/histor/bin/disk_space",
+      "sha256": "fc94f5e2da23dbd297375ebfa08bac6ee55c0f3f7af6511f7f807da21079ffc7",
+      "size": 2277624
+    },
+    {
+      "name": "ipc_manager",
+      "path": "/histor/bin/ipc_manager",
+      "sha256": "0a9bfab2bc365f134d58d2e2ecb2dd6595122d6b8fd6e6fcfbc2ad2a999a92dd",
+      "size": 13211448
+    },
+    {
+      "name": "appcenter",
+      "path": "/histor/bin/appcenter",
+      "sha256": "7068c69d95737b20cb4bc31007230648a27e1e79a7ab1a08c74aebd411923a0c",
+      "size": 191192
+    },
+    {
+      "name": "proxyDaemon",
+      "path": "/histor/bin/network/proxyDaemon",
+      "sha256": "3f710f7e4765c9e8c4ec3f4878fd0fb6eb91132b97526fd1b02ec865375daae2",
+      "size": 2199992
+    },
+    {
+      "name": "image_gps",
+      "path": "/histor/bin/image_gps",
+      "sha256": "0beda3a2307df4649a7c758b2086772d3195b7bc5809e089d35dc79f672ce288",
+      "size": 1456616
+    },
+    {
+      "name": "unix_sock_system",
+      "path": "/histor/bin/unix_sock_system",
+      "sha256": "f52c4a73c82132cea03919ee8b0adc1174427693464de4f781614fc3a444648d",
+      "size": 84128
+    },
+    {
+      "name": "tr_video_daemon",
+      "path": "/histor/bin/tr_video_daemon",
+      "sha256": "06bae1459bdef920706d9e5bacfe90a88949def28255ea5c78252c00c55cd8ef",
+      "size": 13656
+    },
+    {
+      "name": "emclient",
+      "path": "/histor/bin/emclient",
+      "sha256": "ef57c62ac751764e8813cc49de821adcfe73b35a63a8e75a3d3183f868e914f3",
+      "size": 4915584
+    },
+    {
+      "name": "bonjour_tool",
+      "path": "/histor/bin/bonjour_tool",
+      "sha256": "e91ff365540dd2b4c6359fc5dcaa9dad493ffaab53a4555a79ccc85c06c77018",
+      "size": 2328344
+    },
+    {
+      "name": "temp_control",
+      "path": "/histor/bin/temp_control",
+      "sha256": "745cd85d96fdcd1655455c652850abc49290dba5326b7f93ef2c5710e0de1719",
+      "size": 2006264
+    }
+  ],
+  "interfaces": [
+    {
+      "id": "disk_space.get_space_list",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_space_list",
+      "parameters": null,
+      "handler": "0x49ca0 -> rest_get_space_list@0x42123",
+      "capability": "当前存储空间名称、成员和状态；含 space_name、space_disk_id、member。",
+      "access": "read",
+      "side_effects": [
+        "复制已建成的全局空间链表后序列化；未发现请求路径发起 SMART、挂载或写盘。"
+      ],
+      "recommendation": "A_passive_candidate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2231a0",
+          "handler_va": "0x49ca0"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.get_disk_list",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_disk_list",
+      "parameters": null,
+      "handler": "0x49ee0 -> rest_get_disk_list@0x429f3",
+      "capability": "物理盘、分区、RAID 的已采集状态；含真实序列号与盘名关联。",
+      "access": "read",
+      "side_effects": [
+        "复制内存盘链表并序列化；容量、RAID 进度等是原厂后台缓存，时效仍需验证。"
+      ],
+      "recommendation": "A_passive_candidate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2231b0",
+          "handler_va": "0x49ee0"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.create_zhcc_part",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "create_zhcc_part",
+      "parameters": [
+        "port"
+      ],
+      "handler": "0x4a1b1 -> rest_create_zhcc_part@0x4359c",
+      "capability": "创建厂商私有分区。",
+      "access": "write",
+      "side_effects": [
+        "修改分区布局，可能破坏数据或唤醒硬盘。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2231c0",
+          "handler_va": "0x4a1b1"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.get_hide_path",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_hide_path",
+      "parameters": [
+        "原始请求文本；完整语法未追踪"
+      ],
+      "handler": "0x4a306 -> rest_get_space_hide_path@0x43800",
+      "capability": "从已有空间链表查找内部隐藏目录。",
+      "access": "read",
+      "side_effects": [
+        "内存查找；返回内部路径，不应作为公开监控字段直接发布。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2231d0",
+          "handler_va": "0x4a306"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.format_disk",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "format_disk",
+      "parameters": [
+        "port"
+      ],
+      "handler": "0x4a61c -> rest_format_disk@0x444c7",
+      "capability": "清理 RAID 元数据并格式化整盘。",
+      "access": "write",
+      "side_effects": [
+        "破坏性分区／文件系统操作。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2231e0",
+          "handler_va": "0x4a61c"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.mount_disk",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "mount_disk",
+      "parameters": [
+        "port",
+        "flag"
+      ],
+      "handler": "0x4a771 -> rest_mount_disk@0x4478b",
+      "capability": "按端口挂载磁盘，支持只读／读写标志。",
+      "access": "write",
+      "side_effects": [
+        "改变挂载状态，可能启动日志重放并唤醒磁盘。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2231f0",
+          "handler_va": "0x4a771"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.umount_disk",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "umount_disk",
+      "parameters": [
+        "port"
+      ],
+      "handler": "0x4a8c6 -> rest_unmount_disk@0x44a48",
+      "capability": "按端口卸载磁盘。",
+      "access": "write",
+      "side_effects": [
+        "中断文件访问并改变挂载状态。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223200",
+          "handler_va": "0x4a8c6"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.basic_expan_done",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "basic_expan_done",
+      "parameters": [
+        "s_port",
+        "d_port"
+      ],
+      "handler": "0x4a9dc -> rest_basic_expan_done@0x44cac",
+      "capability": "完成基本盘扩容后的内部状态迁移。",
+      "access": "write",
+      "side_effects": [
+        "更新私有元数据和空间列表。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223210",
+          "handler_va": "0x4a9dc"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.basic_mig_done",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "basic_mig_done",
+      "parameters": [
+        "s_port",
+        "d_port"
+      ],
+      "handler": "0x4aaf2 -> rest_basic_mig_done@0x451f5",
+      "capability": "完成基本盘迁移后的内部状态调整。",
+      "access": "write",
+      "side_effects": [
+        "更新元数据与盘成员，不能独立调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223220",
+          "handler_va": "0x4aaf2"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt",
+      "parameters": [
+        "opt_type",
+        "is_raid",
+        "flag",
+        "zone_name",
+        "md_zone",
+        "md_uuid"
+      ],
+      "handler": "0x4ac08 -> u_part_opt@0x4ac08",
+      "capability": "分区／RAID 操作多路入口，opt_type 共 0–7。",
+      "access": "write",
+      "side_effects": [
+        "包含格式化、挂载、卸载、修复和 RAID 增删成员／迁移。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223230",
+          "handler_va": "0x4ac08"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.refresh_info",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "refresh_info",
+      "parameters": [
+        "member",
+        "id",
+        "level",
+        "space_index",
+        "group",
+        "type",
+        "name",
+        "disk_id",
+        "is_main"
+      ],
+      "handler": "0x4b1fb -> rest_refresh_info@0x45e46",
+      "capability": "按传入空间信息重写内部元数据。",
+      "access": "write",
+      "side_effects": [
+        "名称虽含 refresh，仍会调用 disk_dev_inner_info_refresh 写盘。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223240",
+          "handler_va": "0x4b1fb"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.clean_inner_space",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "clean_inner_space",
+      "parameters": [
+        "group",
+        "port",
+        "is_raid"
+      ],
+      "handler": "0x4b311 -> rest_clean_inner_space@0x46cfe",
+      "capability": "清除指定基本盘／RAID 的私有空间信息。",
+      "access": "write",
+      "side_effects": [
+        "清除元数据，可能导致空间失联。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223250",
+          "handler_va": "0x4b311"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.zone_create_raid",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "zone_create_raid",
+      "parameters": [
+        "opt_type",
+        "count",
+        "size",
+        "degrade",
+        "c_zone_name",
+        "md_uuid"
+      ],
+      "handler": "0x4b427 -> rest_create_raid_space@0x471f6",
+      "capability": "创建 RAID 空间。",
+      "access": "write",
+      "side_effects": [
+        "改变阵列与磁盘数据布局。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223260",
+          "handler_va": "0x4b427"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.space_rename_new",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "space_rename_new",
+      "parameters": [
+        "space_id",
+        "new_name"
+      ],
+      "handler": "0x4b53d -> rest_rename_space@0x47d24 -> space_rename@0x3ddea",
+      "capability": "修改用户设置的存储空间名称。",
+      "access": "write",
+      "side_effects": [
+        "通过 disk_dev_inner_info_refresh@0x33ad0 写私有元数据，并更新内存空间名称；可能唤盘。"
+      ],
+      "recommendation": "C_explicit_user_action_only",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223270",
+          "handler_va": "0x4b53d"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.space_fix",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "space_fix",
+      "parameters": [
+        "space_id"
+      ],
+      "handler": "0x4b653 -> rest_space_repair@0x414cb",
+      "capability": "修复指定存储空间。",
+      "access": "write",
+      "side_effects": [
+        "文件系统／磁盘修复，不属于监控。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223280",
+          "handler_va": "0x4b653"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.refresh_space_list",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "refresh_space_list",
+      "parameters": null,
+      "handler": "0x4b769 -> rest_refresh_list@0x48fff",
+      "capability": "清除后重建原厂全局空间列表。",
+      "access": "write",
+      "side_effects": [
+        "修改原厂内存状态；不应为取得一份快照而调用刷新命令。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x223290",
+          "handler_va": "0x4b769"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.inner_info_writeback",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "inner_info_writeback",
+      "parameters": null,
+      "handler": "0x4b8b6 -> rest_inner_info_writeback@0x490bb",
+      "capability": "把内部盘信息写回磁盘。",
+      "access": "write",
+      "side_effects": [
+        "显式写盘并刷新挂载信息。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2232a0",
+          "handler_va": "0x4b8b6"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.get_smart_info",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_smart_info",
+      "parameters": [
+        "port"
+      ],
+      "handler": "0x4b9fe -> rest_get_smart_info@0x492f9 -> disk_dev_smart_get@0x23bab",
+      "capability": "保留的 SMART 查询入口，本版实现是空桩。",
+      "access": "unsupported",
+      "side_effects": [
+        "末端函数仅 19 字节，直接返回 0，不填写输出；不能当作原厂 SMART 缓存，也不能把成功码变成虚构读数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2232b0",
+          "handler_va": "0x4b9fe"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.get_fix_status",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_fix_status",
+      "parameters": null,
+      "handler": "0x49dc0 -> rest_get_fix_status@0x41210",
+      "capability": "读取当前修复任务缓存的 id／status。",
+      "access": "read",
+      "side_effects": [
+        "从全局变量构造 JSON；不会启动修复。"
+      ],
+      "recommendation": "A_passive_candidate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2232c0",
+          "handler_va": "0x49dc0"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.start_self_test",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "start_self_test",
+      "parameters": [
+        "port",
+        "type"
+      ],
+      "handler": "0x4bb26 -> rest_start_self_test@0x49543 -> 0x240b5 / 0x23fd3",
+      "capability": "启动 SMART 短／长自检。",
+      "access": "write",
+      "side_effects": [
+        "执行 smartctl -t short/long，启动自检并可能唤盘。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2232d0",
+          "handler_va": "0x4bb26"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.get_self_test_status",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_self_test_status",
+      "parameters": [
+        "port"
+      ],
+      "handler": "0x4bc3c -> rest_get_self_test_statue@0x49901 -> disk_get_self_test_status@0x24842",
+      "capability": "取得自检状态及坏扇区计数。",
+      "access": "read_with_io",
+      "side_effects": [
+        "同步 popen smartctl -a /dev/%s，没有 -n standby，可能唤醒休眠盘；不符合 Toolbox 后台采集边界。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2232e0",
+          "handler_va": "0x4bc3c"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.format_usb",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "format_usb",
+      "parameters": [
+        "block 或 uuid"
+      ],
+      "handler": "0x4a4c7 -> rest_format_usb@0x43a14",
+      "capability": "创建／格式化／挂载 USB 分区。",
+      "access": "write",
+      "side_effects": [
+        "破坏性分区和文件系统操作，还会处理设备符号链接。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "table_file_offset": "0x2232f0",
+          "handler_va": "0x4a4c7"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=0",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=0",
+      "parameters": [
+        "opt_type=0"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_format_part@0x45743",
+      "capability": "格式化分区。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x45743"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=1",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=1",
+      "parameters": [
+        "opt_type=1"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_mount_part@0x45b7d",
+      "capability": "挂载分区。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x45b7d"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=2",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=2",
+      "parameters": [
+        "opt_type=2"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_umount_part@0x4590f",
+      "capability": "卸载分区。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x4590f"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=3",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=3",
+      "parameters": [
+        "opt_type=3"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_raid_add_zone@0x481e8",
+      "capability": "添加 RAID 成员。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x481e8"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=4",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=4",
+      "parameters": [
+        "opt_type=4"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_raid_rm_zone@0x48bbc",
+      "capability": "删除 RAID 成员。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x48bbc"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=5",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=5",
+      "parameters": [
+        "opt_type=5"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_fix_zone@0x48d94",
+      "capability": "修复分区。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x48d94"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=6",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=6",
+      "parameters": [
+        "opt_type=6"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_raid_add_zone；md_uuid 参数置空@0x481e8",
+      "capability": "添加 RAID 成员的另一分支。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x481e8"
+        }
+      ]
+    },
+    {
+      "id": "disk_space.part_opt.opt_type=7",
+      "service": "disk_space",
+      "endpoint": "/var/tmp/disk",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "part_opt.opt_type=7",
+      "parameters": [
+        "opt_type=7"
+      ],
+      "handler": "u_part_opt@0x4ac08 -> rest_raid_mig_zone@0x486d9",
+      "capability": "迁移 RAID 成员。",
+      "access": "write",
+      "side_effects": [
+        "分区／RAID 管理分支，只作静态登记，禁止后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "dispatch_va": "0x4af52..0x4b0a4",
+          "handler_va": "0x486d9"
+        }
+      ]
+    },
+    {
+      "id": "appcenter.get_apply_list",
+      "service": "appcenter",
+      "endpoint": "127.0.0.1:8888",
+      "transport": "HTTP on loopback TCP",
+      "command": "get_apply_list",
+      "parameters": [
+        "原始 URI action；完整路由与鉴权未逐项追踪"
+      ],
+      "handler": "0x3200",
+      "capability": "获取／同步应用列表。",
+      "access": "unknown",
+      "side_effects": [
+        "get_apply_list、get_install_progress 路径会同步插件数据、更新 /tmp/nand_config/app_center.conf 或请求原厂更新列表；不能因 get 前缀认定纯读。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/appcenter",
+          "table_file_offset": "0x2e020",
+          "handler_va": "0x3200"
+        },
+        {
+          "file": "/histor/bin/appcenter",
+          "listener_va": "0x8ab8",
+          "bind_va": "0x8856",
+          "constant_va": "0x8ad3",
+          "port_constant": "0x22b8"
+        }
+      ]
+    },
+    {
+      "id": "appcenter.install_apply",
+      "service": "appcenter",
+      "endpoint": "127.0.0.1:8888",
+      "transport": "HTTP on loopback TCP",
+      "command": "install_apply",
+      "parameters": [
+        "原始 URI action；完整路由与鉴权未逐项追踪"
+      ],
+      "handler": "0x3543",
+      "capability": "安装／更新应用。",
+      "access": "write",
+      "side_effects": [
+        "改变原厂应用、任务或安装状态，可能访问磁盘／网络。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/appcenter",
+          "table_file_offset": "0x2e030",
+          "handler_va": "0x3543"
+        },
+        {
+          "file": "/histor/bin/appcenter",
+          "listener_va": "0x8ab8",
+          "bind_va": "0x8856",
+          "constant_va": "0x8ad3",
+          "port_constant": "0x22b8"
+        }
+      ]
+    },
+    {
+      "id": "appcenter.get_install_progress",
+      "service": "appcenter",
+      "endpoint": "127.0.0.1:8888",
+      "transport": "HTTP on loopback TCP",
+      "command": "get_install_progress",
+      "parameters": [
+        "原始 URI action；完整路由与鉴权未逐项追踪"
+      ],
+      "handler": "0x4aff",
+      "capability": "查询安装进度，并可能更新应用状态。",
+      "access": "unknown",
+      "side_effects": [
+        "get_apply_list、get_install_progress 路径会同步插件数据、更新 /tmp/nand_config/app_center.conf 或请求原厂更新列表；不能因 get 前缀认定纯读。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/appcenter",
+          "table_file_offset": "0x2e040",
+          "handler_va": "0x4aff"
+        },
+        {
+          "file": "/histor/bin/appcenter",
+          "listener_va": "0x8ab8",
+          "bind_va": "0x8856",
+          "constant_va": "0x8ad3",
+          "port_constant": "0x22b8"
+        }
+      ]
+    },
+    {
+      "id": "appcenter.remove_apply",
+      "service": "appcenter",
+      "endpoint": "127.0.0.1:8888",
+      "transport": "HTTP on loopback TCP",
+      "command": "remove_apply",
+      "parameters": [
+        "原始 URI action；完整路由与鉴权未逐项追踪"
+      ],
+      "handler": "0x64bb",
+      "capability": "卸载应用。",
+      "access": "write",
+      "side_effects": [
+        "改变原厂应用、任务或安装状态，可能访问磁盘／网络。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/appcenter",
+          "table_file_offset": "0x2e050",
+          "handler_va": "0x64bb"
+        },
+        {
+          "file": "/histor/bin/appcenter",
+          "listener_va": "0x8ab8",
+          "bind_va": "0x8856",
+          "constant_va": "0x8ad3",
+          "port_constant": "0x22b8"
+        }
+      ]
+    },
+    {
+      "id": "appcenter.cancel_apply_task",
+      "service": "appcenter",
+      "endpoint": "127.0.0.1:8888",
+      "transport": "HTTP on loopback TCP",
+      "command": "cancel_apply_task",
+      "parameters": [
+        "原始 URI action；完整路由与鉴权未逐项追踪"
+      ],
+      "handler": "0x74d8",
+      "capability": "取消应用任务。",
+      "access": "write",
+      "side_effects": [
+        "改变原厂应用、任务或安装状态，可能访问磁盘／网络。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/appcenter",
+          "table_file_offset": "0x2e060",
+          "handler_va": "0x74d8"
+        },
+        {
+          "file": "/histor/bin/appcenter",
+          "listener_va": "0x8ab8",
+          "bind_va": "0x8856",
+          "constant_va": "0x8ad3",
+          "port_constant": "0x22b8"
+        }
+      ]
+    },
+    {
+      "id": "appcenter.get_modulize_table",
+      "service": "appcenter",
+      "endpoint": "127.0.0.1:8888",
+      "transport": "HTTP on loopback TCP",
+      "command": "get_modulize_table",
+      "parameters": [
+        "原始 URI action；完整路由与鉴权未逐项追踪"
+      ],
+      "handler": "0x74e3",
+      "capability": "取得模块表；下游副作用未完全追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "get_apply_list、get_install_progress 路径会同步插件数据、更新 /tmp/nand_config/app_center.conf 或请求原厂更新列表；不能因 get 前缀认定纯读。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/appcenter",
+          "table_file_offset": "0x2e070",
+          "handler_va": "0x74e3"
+        },
+        {
+          "file": "/histor/bin/appcenter",
+          "listener_va": "0x8ab8",
+          "bind_va": "0x8856",
+          "constant_va": "0x8ad3",
+          "port_constant": "0x22b8"
+        }
+      ]
+    },
+    {
+      "id": "image_gps.get_gps_address",
+      "service": "image_gps",
+      "endpoint": "/var/tmp/image_gps",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_gps_address",
+      "parameters": null,
+      "handler": "0x1ae14",
+      "capability": "查询图片 GPS 地址。",
+      "access": "read_with_io",
+      "side_effects": [
+        "getter 会进入 gps_db_get_gps_info@0x18d74，包含本地数据库和外部地图查询路径，非内存纯读。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/image_gps",
+          "table_file_offset": "0x1600e0",
+          "handler_va": "0x1ae14",
+          "server_init_va": "0x1b1dd"
+        }
+      ]
+    },
+    {
+      "id": "image_gps.set_gps_status",
+      "service": "image_gps",
+      "endpoint": "/var/tmp/image_gps",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "set_gps_status",
+      "parameters": null,
+      "handler": "0x1af48",
+      "capability": "改变 GPS 服务启用状态。",
+      "access": "write",
+      "side_effects": [
+        "改变服务状态。"
+      ],
+      "recommendation": "C_explicit_user_action_only",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/image_gps",
+          "table_file_offset": "0x1600f0",
+          "handler_va": "0x1af48",
+          "server_init_va": "0x1b1dd"
+        }
+      ]
+    },
+    {
+      "id": "proxyDaemon.create_dataconn",
+      "service": "proxyDaemon",
+      "endpoint": "/var/tmp/proxydaemon",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "create_dataconn",
+      "parameters": [
+        "分号分隔的内部协议；不提供调用模板"
+      ],
+      "handler": "proxy_daemon_comm_usock_action@0x1c4e8 -> 0x1cb0e",
+      "capability": "创建云端数据连接。",
+      "access": "write",
+      "side_effects": [
+        "改变原厂云连接与传输状态，不是网络状态只读接口。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/network/proxyDaemon",
+          "server_init_va": "0x1c46a",
+          "dispatch_va": "0x1c4e8",
+          "implementation_va": "0x1cb0e"
+        }
+      ]
+    },
+    {
+      "id": "proxyDaemon.remove_dataconn",
+      "service": "proxyDaemon",
+      "endpoint": "/var/tmp/proxydaemon",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "remove_dataconn",
+      "parameters": [
+        "分号分隔的内部协议；不提供调用模板"
+      ],
+      "handler": "proxy_daemon_comm_usock_action@0x1c4e8 -> 0x1ccb4",
+      "capability": "移除云端数据连接。",
+      "access": "write",
+      "side_effects": [
+        "改变原厂云连接与传输状态，不是网络状态只读接口。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/network/proxyDaemon",
+          "server_init_va": "0x1c46a",
+          "dispatch_va": "0x1c4e8",
+          "implementation_va": "0x1ccb4"
+        }
+      ]
+    },
+    {
+      "id": "proxyDaemon.create_fileconn",
+      "service": "proxyDaemon",
+      "endpoint": "/var/tmp/proxydaemon",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "create_fileconn",
+      "parameters": [
+        "分号分隔的内部协议；不提供调用模板"
+      ],
+      "handler": "proxy_daemon_comm_usock_action@0x1c4e8 -> 0x1cb9c",
+      "capability": "创建云端文件连接。",
+      "access": "write",
+      "side_effects": [
+        "改变原厂云连接与传输状态，不是网络状态只读接口。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/network/proxyDaemon",
+          "server_init_va": "0x1c46a",
+          "dispatch_va": "0x1c4e8",
+          "implementation_va": "0x1cb9c"
+        }
+      ]
+    },
+    {
+      "id": "unix_sock_system.<received_command>",
+      "service": "unix_sock_system",
+      "endpoint": "/var/tmp/system_master",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "<received command>",
+      "parameters": null,
+      "handler": "main@0x34fc -> worker@0x33af -> run_sys_cmd_@0x330a",
+      "capability": "原厂通用 shell 执行服务。",
+      "access": "write",
+      "side_effects": [
+        "收到的命令最终直接交给 system()；不得成为网页或调试接口的任意命令转发后门。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/unix_sock_system",
+          "listener_va": "0x3521",
+          "system_call_va": "0x331d"
+        }
+      ]
+    },
+    {
+      "id": "tr_video_daemon.STOP",
+      "service": "tr_video_daemon",
+      "endpoint": "/tmp/tr_video_sock",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "STOP",
+      "parameters": null,
+      "handler": "main@0x10e0 -> stop@0xd7a",
+      "capability": "停止原厂转码进程。",
+      "access": "write",
+      "side_effects": [
+        "kill 既有进程，可能中断用户播放／转码。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/tr_video_daemon",
+          "compare_va": "0x1322",
+          "implementation_va": "0xd7a"
+        }
+      ]
+    },
+    {
+      "id": "tr_video_daemon.START_<opaque_command>",
+      "service": "tr_video_daemon",
+      "endpoint": "/tmp/tr_video_sock",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "START:<opaque command>",
+      "parameters": null,
+      "handler": "main@0x10e0 -> executor@0xdf2",
+      "capability": "启动原厂转码任务。",
+      "access": "write",
+      "side_effects": [
+        "执行器使用 execl /bin/sh -c；禁止将用户文本或任意命令透传。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/tr_video_daemon",
+          "compare_va": "0x136e",
+          "implementation_va": "0xdf2"
+        }
+      ]
+    },
+    {
+      "id": "bonjour_tool.ba",
+      "service": "bonjour_tool",
+      "endpoint": "/var/tmp/net",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ba",
+      "parameters": null,
+      "handler": "active_cb@0xee1a -> init@0xf20e",
+      "capability": "触发 Bonjour／网络发现初始化。",
+      "access": "write",
+      "side_effects": [
+        "callback 只识别 b、a 两字节分支并执行初始化；不是网卡状态 getter。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/bonjour_tool",
+          "server_init_va": "0xf71e",
+          "dispatch_va": "0xee1a"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.set_userid",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "set_userid",
+      "parameters": null,
+      "handler": "0x481635",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。 涉及用户身份或摄像机账户。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f00",
+          "handler_va": "0x481635",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_userid",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_userid",
+      "parameters": null,
+      "handler": "0x4816f0",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。 涉及用户身份或摄像机账户。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f10",
+          "handler_va": "0x4816f0",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.add_ipc",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "add_ipc",
+      "parameters": null,
+      "handler": "0x4817ef",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f20",
+          "handler_va": "0x4817ef",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.delete_ipc",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "delete_ipc",
+      "parameters": null,
+      "handler": "0x481a6b",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f30",
+          "handler_va": "0x481a6b",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.delete_all_ipc",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "delete_all_ipc",
+      "parameters": null,
+      "handler": "0x481c1c",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f40",
+          "handler_va": "0x481c1c",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_add_vn",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_add_vn",
+      "parameters": null,
+      "handler": "0x481c7b",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f50",
+          "handler_va": "0x481c7b",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.set_space",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "set_space",
+      "parameters": null,
+      "handler": "0x482e92",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f60",
+          "handler_va": "0x482e92",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.set_day",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "set_day",
+      "parameters": null,
+      "handler": "0x48322c",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f70",
+          "handler_va": "0x48322c",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.switch_ipc_plug",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "switch_ipc_plug",
+      "parameters": null,
+      "handler": "0x483e4e",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f80",
+          "handler_va": "0x483e4e",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_list_get",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_list_get",
+      "parameters": null,
+      "handler": "0x48442b",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87f90",
+          "handler_va": "0x48442b",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_unbind_list_get",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_unbind_list_get",
+      "parameters": null,
+      "handler": "0x484e7f",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87fa0",
+          "handler_va": "0x484e7f",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.search_record",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "search_record",
+      "parameters": null,
+      "handler": "0x4860a0",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87fb0",
+          "handler_va": "0x4860a0",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.search_record_by_algtupe",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "search_record_by_algtupe",
+      "parameters": null,
+      "handler": "0x4865c8",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87fc0",
+          "handler_va": "0x4865c8",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_record",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_record",
+      "parameters": null,
+      "handler": "0x486b8f",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87fd0",
+          "handler_va": "0x486b8f",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_hik_header",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_hik_header",
+      "parameters": null,
+      "handler": "0x4800dc",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87fe0",
+          "handler_va": "0x4800dc",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_dev_cover",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_dev_cover",
+      "parameters": null,
+      "handler": "0x48a56d",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc87ff0",
+          "handler_va": "0x48a56d",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipcm_exit",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipcm_exit",
+      "parameters": null,
+      "handler": "0x48a768",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88000",
+          "handler_va": "0x48a768",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_ipc",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_ipc",
+      "parameters": null,
+      "handler": "0x48542f",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88010",
+          "handler_va": "0x48542f",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_set_default_account",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_set_default_account",
+      "parameters": null,
+      "handler": "0x48a85a",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。 涉及用户身份或摄像机账户。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88020",
+          "handler_va": "0x48a85a",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_set_account",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_set_account",
+      "parameters": null,
+      "handler": "0x48aa77",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。 涉及用户身份或摄像机账户。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88030",
+          "handler_va": "0x48aa77",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_set_channel_name",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_set_channel_name",
+      "parameters": null,
+      "handler": "0x48ae6b",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88040",
+          "handler_va": "0x48ae6b",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_set_dev_name",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_set_dev_name",
+      "parameters": null,
+      "handler": "0x48b295",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88050",
+          "handler_va": "0x48b295",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_default_account_is_exist",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_default_account_is_exist",
+      "parameters": null,
+      "handler": "0x48b5b7",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。 涉及用户身份或摄像机账户。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88060",
+          "handler_va": "0x48b5b7",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.set_detect_opts",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "set_detect_opts",
+      "parameters": null,
+      "handler": "0x48b792",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88070",
+          "handler_va": "0x48b792",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.batch_relate_ipc",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "batch_relate_ipc",
+      "parameters": null,
+      "handler": "0x48bad1",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88080",
+          "handler_va": "0x48bad1",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.delete_unbind_dev",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "delete_unbind_dev",
+      "parameters": null,
+      "handler": "0x48d7fb",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88090",
+          "handler_va": "0x48d7fb",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_video_list",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_video_list",
+      "parameters": null,
+      "handler": "0x48e3ba",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc880a0",
+          "handler_va": "0x48e3ba",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_ipc_cap",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_ipc_cap",
+      "parameters": null,
+      "handler": "0x48e7cb",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc880b0",
+          "handler_va": "0x48e7cb",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_ipc_info",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_ipc_info",
+      "parameters": null,
+      "handler": "0x486eae",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc880c0",
+          "handler_va": "0x486eae",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_ipc_info_one",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_ipc_info_one",
+      "parameters": null,
+      "handler": "0x486f7c",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc880d0",
+          "handler_va": "0x486f7c",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_onvif_dev_list",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_onvif_dev_list",
+      "parameters": null,
+      "handler": "0x48736c",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc880e0",
+          "handler_va": "0x48736c",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_dvr_ch_info",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_dvr_ch_info",
+      "parameters": null,
+      "handler": "0x488fcd",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc880f0",
+          "handler_va": "0x488fcd",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.add_ip_chan",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "add_ip_chan",
+      "parameters": null,
+      "handler": "0x48960b",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88100",
+          "handler_va": "0x48960b",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_default_account",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_default_account",
+      "parameters": null,
+      "handler": "0x48a322",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。 涉及用户身份或摄像机账户。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88110",
+          "handler_va": "0x48a322",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.check_ipc_vn",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "check_ipc_vn",
+      "parameters": null,
+      "handler": "0x48ed89",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88120",
+          "handler_va": "0x48ed89",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.check_ipc_count",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "check_ipc_count",
+      "parameters": null,
+      "handler": "0x48f1e9",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88130",
+          "handler_va": "0x48f1e9",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_chanel_bysn",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_chanel_bysn",
+      "parameters": null,
+      "handler": "0x48f324",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88140",
+          "handler_va": "0x48f324",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_space",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_space",
+      "parameters": null,
+      "handler": "0x48270e",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88150",
+          "handler_va": "0x48270e",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.search_record_month_ezviz",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "search_record_month_ezviz",
+      "parameters": null,
+      "handler": "0x485867",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88160",
+          "handler_va": "0x485867",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_ezlink_dev",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_ezlink_dev",
+      "parameters": null,
+      "handler": "0x48f5b6",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88170",
+          "handler_va": "0x48f5b6",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_survillence_cover",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_survillence_cover",
+      "parameters": null,
+      "handler": "0x48dd0b",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88180",
+          "handler_va": "0x48dd0b",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.start_hiksub",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "start_hiksub",
+      "parameters": null,
+      "handler": "0x4903e5",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88190",
+          "handler_va": "0x4903e5",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.stop_hiksub",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "stop_hiksub",
+      "parameters": null,
+      "handler": "0x490627",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc881a0",
+          "handler_va": "0x490627",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_stream_info",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_stream_info",
+      "parameters": null,
+      "handler": "0x490869",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc881b0",
+          "handler_va": "0x490869",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_disk_hotplug",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_disk_hotplug",
+      "parameters": null,
+      "handler": "0x48362c",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc881c0",
+          "handler_va": "0x48362c",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_get_dev_chaninfo",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_get_dev_chaninfo",
+      "parameters": null,
+      "handler": "0x490b84",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc881d0",
+          "handler_va": "0x490b84",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.gb28181_option",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "gb28181_option",
+      "parameters": null,
+      "handler": "0x48f82f",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc881e0",
+          "handler_va": "0x48f82f",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_gb28181_config",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_gb28181_config",
+      "parameters": null,
+      "handler": "0x48fb62",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc881f0",
+          "handler_va": "0x48fb62",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.set_gb28181_config",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "set_gb28181_config",
+      "parameters": null,
+      "handler": "0x48fde6",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88200",
+          "handler_va": "0x48fde6",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ptz_continue_move",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ptz_continue_move",
+      "parameters": null,
+      "handler": "0x483b2d",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88210",
+          "handler_va": "0x483b2d",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ptz_stop_move",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ptz_stop_move",
+      "parameters": null,
+      "handler": "0x483ccb",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88220",
+          "handler_va": "0x483ccb",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.ipc_get_dev_name",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "ipc_get_dev_name",
+      "parameters": null,
+      "handler": "0x49140f",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88230",
+          "handler_va": "0x49140f",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.get_ipc_save_path",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_ipc_save_path",
+      "parameters": null,
+      "handler": "0x482494",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "unknown",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88240",
+          "handler_va": "0x482494",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "ipc_manager.report_ipc_alg_resul",
+      "service": "ipc_manager",
+      "endpoint": "/var/tmp/ipcm",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "report_ipc_alg_resul",
+      "parameters": null,
+      "handler": "0x491086",
+      "capability": "摄像机／录像管理固定命令；完整参数、鉴权和下游行为未逐项追踪。",
+      "access": "write",
+      "side_effects": [
+        "可能访问录像磁盘、摄像机网络或账户数据；get/search 名称不保证无副作用，禁止默认后台调用。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "registered_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/ipc_manager",
+          "table_file_offset": "0xc88250",
+          "handler_va": "0x491086",
+          "server_init_va": "0x491e09"
+        }
+      ]
+    },
+    {
+      "id": "emclient.xrk",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "xrk",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.xrg",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "xrg",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.xrn",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "xrn",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.xrd",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "xrd",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.xrl",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "xrl",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.xre",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "xre",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.install_front",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "install_front",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.install_back",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "install_back",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.checkpack",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "checkpack",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.download",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "download",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.download_release",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "download_release",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.download_dbg",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "download_dbg",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.download_gray",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "download_gray",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.download_bugfix",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "download_bugfix",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.checkmod",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "checkmod",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.get_user_id",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "get_user_id",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.testdl",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "testdl",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.add_channel",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "add_channel",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.del_channel",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "del_channel",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "emclient.upd_channel",
+      "service": "emclient",
+      "endpoint": "/var/tmp/ezviz",
+      "transport": "AF_UNIX/SOCK_STREAM",
+      "command": "upd_channel",
+      "parameters": null,
+      "handler": "comm_usock_ezviz_modulize_action@0x45313f",
+      "capability": "云客户端模块／下载／摄像机通道内部协议分支。",
+      "access": "unknown",
+      "side_effects": [
+        "可能下载、安装模块、访问账户或修改云通道；仅确认分支字面量及 handler，未完整还原所有参数。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "dispatch_literal_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/emclient",
+          "server_init_va": "0x454c9b",
+          "dispatch_va": "0x45313f"
+        }
+      ]
+    },
+    {
+      "id": "image_convert.127.0.0.1_7769",
+      "service": "image_convert",
+      "endpoint": "127.0.0.1:7769",
+      "transport": "TCP custom protocol; framing not fully audited",
+      "command": null,
+      "parameters": null,
+      "handler": "server_init@0x10f93",
+      "capability": "图片转换服务；回调注册项未完整枚举。",
+      "access": "unknown",
+      "side_effects": [
+        "仅静态确认地址与指定调用点；未证明当前运行可用或不会唤盘。文件名含 zmq 不能单独证明 ZeroMQ wire protocol。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "listener_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/image_convert",
+          "server_init_va": "0x10f93"
+        }
+      ]
+    },
+    {
+      "id": "image_ocr.127.0.0.1_7778",
+      "service": "image_ocr",
+      "endpoint": "127.0.0.1:7778",
+      "transport": "TCP custom protocol; framing not fully audited",
+      "command": null,
+      "parameters": null,
+      "handler": "ocr_server_init@0x8e1e",
+      "capability": "OCR 服务；图片输入／算法处理可能访问文件。",
+      "access": "unknown",
+      "side_effects": [
+        "仅静态确认地址与指定调用点；未证明当前运行可用或不会唤盘。文件名含 zmq 不能单独证明 ZeroMQ wire protocol。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "listener_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/image_ocr",
+          "server_init_va": "0x8e1e"
+        }
+      ]
+    },
+    {
+      "id": "image_similar.127.0.0.1_7799",
+      "service": "image_similar",
+      "endpoint": "127.0.0.1:7799",
+      "transport": "TCP custom protocol; framing not fully audited",
+      "command": null,
+      "parameters": null,
+      "handler": "image_similar_sevrer_init@0x29d5f",
+      "capability": "相似图片服务；回调注册项未完整枚举。",
+      "access": "unknown",
+      "side_effects": [
+        "仅静态确认地址与指定调用点；未证明当前运行可用或不会唤盘。文件名含 zmq 不能单独证明 ZeroMQ wire protocol。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "listener_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/image_similar",
+          "server_init_va": "0x29d5f"
+        }
+      ]
+    },
+    {
+      "id": "media_endpoint_7788.127.0.0.1_7788",
+      "service": "media_endpoint_7788",
+      "endpoint": "127.0.0.1:7788",
+      "transport": "TCP custom protocol; framing not fully audited",
+      "command": null,
+      "parameters": null,
+      "handler": "clients: image_convert@0xc014; zmq_cli@0x39c1",
+      "capability": "可见客户端请求包含 is_disk_sleep、spin_jpeg_pic、upload_cover_info；服务归属与这些动作完整行为未确认。",
+      "access": "unknown",
+      "side_effects": [
+        "仅静态确认地址与指定调用点；未证明当前运行可用或不会唤盘。文件名含 zmq 不能单独证明 ZeroMQ wire protocol。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "client_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/zmq_cli",
+          "client_va": "0x39c1"
+        }
+      ]
+    },
+    {
+      "id": "media_endpoint_7766.127.0.0.1_7766",
+      "service": "media_endpoint_7766",
+      "endpoint": "127.0.0.1:7766",
+      "transport": "TCP custom protocol; framing not fully audited",
+      "command": null,
+      "parameters": null,
+      "handler": "client: zmq_cli@0x39c1",
+      "capability": "可见 set_debug_level／module_exit 客户端字面量；服务归属未确认。",
+      "access": "unknown",
+      "side_effects": [
+        "仅静态确认地址与指定调用点；未证明当前运行可用或不会唤盘。文件名含 zmq 不能单独证明 ZeroMQ wire protocol。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "client_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/zmq_cli",
+          "client_va": "0x39c1"
+        }
+      ]
+    },
+    {
+      "id": "media_endpoint_7786.127.0.0.1_7786",
+      "service": "media_endpoint_7786",
+      "endpoint": "127.0.0.1:7786",
+      "transport": "TCP custom protocol; framing not fully audited",
+      "command": null,
+      "parameters": null,
+      "handler": "client: image_ocr@0x9bd3",
+      "capability": "OCR 结果传输候选；服务归属未确认。",
+      "access": "unknown",
+      "side_effects": [
+        "仅静态确认地址与指定调用点；未证明当前运行可用或不会唤盘。文件名含 zmq 不能单独证明 ZeroMQ wire protocol。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "client_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/image_ocr",
+          "client_va": "0x9bd3"
+        }
+      ]
+    },
+    {
+      "id": "nut_ups.upsc_hikups_ups.status",
+      "service": "nut_ups",
+      "endpoint": "127.0.0.1:3493; [::1]:3493",
+      "transport": "NUT on loopback TCP",
+      "command": "upsc hikups ups.status",
+      "parameters": null,
+      "handler": "/etc/nut/ups-notice.sh",
+      "capability": "UPS 在线／电池状态；原厂脚本查询缓存守护进程。",
+      "access": "read",
+      "side_effects": [
+        "不访问 NAS 磁盘；需先确认 NUT 进程、UPS 实例名和现有监听。包内配置不证明设备已接入。"
+      ],
+      "recommendation": "A_passive_candidate",
+      "default_enabled": false,
+      "confidence": "script_confirmed",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/etc/nut/upsd.conf",
+          "lines": "5–6"
+        },
+        {
+          "file": "/etc/nut/ups-notice.sh",
+          "lines": "4、18"
+        }
+      ]
+    },
+    {
+      "id": "nut_ups.upsc_hikups",
+      "service": "nut_ups",
+      "endpoint": "127.0.0.1:3493; [::1]:3493",
+      "transport": "NUT on loopback TCP",
+      "command": "upsc hikups",
+      "parameters": null,
+      "handler": "/etc/nut/ups-notice.sh",
+      "capability": "UPS 已采集变量；原厂脚本读取 battery.charge。",
+      "access": "read",
+      "side_effects": [
+        "只适合读取已连接设备的守护进程变量；不能为发现设备而运行 nut-scanner 或重启 UPS 服务。"
+      ],
+      "recommendation": "A_passive_candidate",
+      "default_enabled": false,
+      "confidence": "script_confirmed",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/etc/nut/ups-notice.sh",
+          "lines": "10"
+        },
+        {
+          "file": "/etc/nut/startups.sh",
+          "note": "存在扫描并重写 ups.conf 的脚本；不得用于探测。"
+        }
+      ]
+    },
+    {
+      "id": "nut_ups.upscmd___upsdrvctl___upsmon_control",
+      "service": "nut_ups",
+      "endpoint": "127.0.0.1:3493; [::1]:3493",
+      "transport": "NUT / local CLI",
+      "command": "upscmd / upsdrvctl / upsmon control",
+      "parameters": null,
+      "handler": "/etc/nut/ups-guard.sh; /etc/nut/ups-poweroff.sh",
+      "capability": "UPS 蜂鸣器、驱动和供电关机控制。",
+      "access": "write",
+      "side_effects": [
+        "可能修改蜂鸣器、终止监控、断电；不读取或输出 upsd.users 等凭据。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "script_confirmed",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/etc/nut/ups-guard.sh",
+          "lines": "28–38"
+        },
+        {
+          "file": "/etc/nut/ups-poweroff.sh",
+          "lines": "44–46"
+        }
+      ]
+    },
+    {
+      "id": "vendor_storage_files.disk_space.db",
+      "service": "vendor_storage_files",
+      "endpoint": "/tmp/nand_config/disk_space.db",
+      "transport": "SQLite / JSON file",
+      "command": "disk_space.db",
+      "parameters": null,
+      "handler": "init_inner_disk_info@0x3cbc3; rename@0x3da71..0x3da7f",
+      "capability": "旧存储空间数据库迁移输入；非本版持续维护的权威名称。",
+      "access": "read",
+      "side_effects": [
+        "启动时转换为磁盘私有元数据，然后 rename 为 disk_space_cache.db；读取历史缓存不能替代实时 get_space_list。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "note": "init_inner_disk_info@0x3cbc3; rename@0x3da71..0x3da7f"
+        }
+      ]
+    },
+    {
+      "id": "vendor_storage_files.disk_space_cache.db",
+      "service": "vendor_storage_files",
+      "endpoint": "/tmp/nand_config/disk_space_cache.db",
+      "transport": "SQLite / JSON file",
+      "command": "disk_space_cache.db",
+      "parameters": null,
+      "handler": "space_rename@0x3ddea -> disk_dev_inner_info_refresh@0x33ad0",
+      "capability": "迁移后的旧格式快照。",
+      "access": "read",
+      "side_effects": [
+        "当前改名经 space_rename@0x3ddea 写私有元数据；未更新该快照，可能陈旧。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "note": "space_rename@0x3ddea -> disk_dev_inner_info_refresh@0x33ad0"
+        }
+      ]
+    },
+    {
+      "id": "vendor_storage_files.config.txt_disk_nickname",
+      "service": "vendor_storage_files",
+      "endpoint": "/tmp/nand_config/config.txt",
+      "transport": "SQLite / JSON file",
+      "command": "config.txt:disk_nickname",
+      "parameters": null,
+      "handler": "旧 emhistor 配置机制，详见 disk-names.md；本注册表不重复枚举 emhistor。",
+      "capability": "旧版昵称数组：userid／diskuuid／nickname。",
+      "access": "read",
+      "side_effects": [
+        "当前改名链路已切换，不保证旧数组反映现状；涉及用户配置，不公开整份文件。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/disk_space",
+          "note": "旧 emhistor 配置机制，详见 disk-names.md；本注册表不重复枚举 emhistor。"
+        }
+      ]
+    },
+    {
+      "id": "temp_control.SIGUSR1___SIGUSR2",
+      "service": "temp_control",
+      "endpoint": "<no dedicated local request endpoint confirmed>",
+      "transport": "POSIX signal",
+      "command": "SIGUSR1 / SIGUSR2",
+      "parameters": null,
+      "handler": "temp_control signal handlers; see histor-interfaces.md",
+      "capability": "原厂系统风扇手动／自动标志同步。",
+      "access": "write",
+      "side_effects": [
+        "改变系统风扇控制；同时存在 CPU 温控及磁盘休眠线程，不能终止整个进程来关闭某一路。"
+      ],
+      "recommendation": "C_explicit_user_action_only",
+      "default_enabled": false,
+      "confidence": "existing_identity_review",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/temp_control",
+          "cpu_thread_main_va": "0xfb7c",
+          "disk_autosleep_va": "0xf2d7"
+        }
+      ]
+    },
+    {
+      "id": "temp_control.vendor_disk_sleep_notification_file",
+      "service": "temp_control",
+      "endpoint": "/tmp/PORT%d_SUBDISK",
+      "transport": "File / process notification",
+      "command": "vendor disk sleep notification file",
+      "parameters": null,
+      "handler": "util_disk_notice_stat@0x21c20",
+      "capability": "原厂按端口发出的磁盘休眠状态通知。",
+      "access": "unknown",
+      "side_effects": [
+        "生产者会写状态文件并通知 disk_monitor；端口号不是 sdX，格式、原子性和新鲜度未做读取契约审计，不能盲接。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "handler_checked",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/temp_control",
+          "producer_va": "0x21c20"
+        }
+      ]
+    },
+    {
+      "id": "standby_trace.standby_check_tool.sh_<mode>",
+      "service": "standby_trace",
+      "endpoint": "/proc/hikio/hikioproc",
+      "transport": "proc write",
+      "command": "standby_check_tool.sh <mode>",
+      "parameters": null,
+      "handler": "/histor/bin/standby_check_tool.sh",
+      "capability": "休眠诊断跟踪开关。",
+      "access": "write",
+      "side_effects": [
+        "向 proc 节点写跟踪模式，改变内核诊断状态；不是读温度或休眠状态的接口。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "script_confirmed",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/standby_check_tool.sh",
+          "lines": "33–40"
+        }
+      ]
+    },
+    {
+      "id": "screen.check_screen.sh",
+      "service": "screen",
+      "endpoint": "DISPLAY=:0; /screen",
+      "transport": "X11 / mounted screen partition",
+      "command": "check_screen.sh",
+      "parameters": null,
+      "handler": "/histor/bin/check_screen.sh",
+      "capability": "查询触摸设备是否包含 CST0836；无小屏控制 API 注册表。",
+      "access": "read",
+      "side_effects": [
+        "只有 X11 xinput 查询脚本和屏幕分区启动链；/screen 实际应用不在本轮已解包 histor/rootfs 覆盖中，不能推断存在控制接口。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "script_confirmed",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/check_screen.sh"
+        },
+        {
+          "file": "/etc/init.d/starthistor",
+          "lines": "33–37"
+        }
+      ]
+    },
+    {
+      "id": "power.reboot.sh",
+      "service": "power",
+      "endpoint": "/histor/bin/reboot.sh",
+      "transport": "Local shell script",
+      "command": "reboot.sh",
+      "parameters": null,
+      "handler": "/histor/bin/reboot.sh",
+      "capability": "脚本名为 reboot，实际最后调用 poweroff -f。",
+      "access": "write",
+      "side_effects": [
+        "先 kill -9 emhistor，再强制关机；不能按文件名当作重启命令，更不能用于监控探测。"
+      ],
+      "recommendation": "D_do_not_integrate",
+      "default_enabled": false,
+      "confidence": "script_confirmed",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/histor/bin/reboot.sh",
+          "note": "仅读取脚本。"
+        }
+      ]
+    },
+    {
+      "id": "dbus_activation.org.a11y.atspi.Registry",
+      "service": "dbus_activation",
+      "endpoint": "org.a11y.atspi.Registry",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/accessibility-services/org.a11y.atspi.Registry.service"
+        }
+      ],
+      "scope": "session"
+    },
+    {
+      "id": "dbus_activation.ca.desrt.dconf",
+      "service": "dbus_activation",
+      "endpoint": "ca.desrt.dconf",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/services/ca.desrt.dconf.service"
+        }
+      ],
+      "scope": "session"
+    },
+    {
+      "id": "dbus_activation.org.a11y.Bus",
+      "service": "dbus_activation",
+      "endpoint": "org.a11y.Bus",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/services/org.a11y.Bus.service"
+        }
+      ],
+      "scope": "session"
+    },
+    {
+      "id": "dbus_activation.fi.w1.wpa_supplicant1",
+      "service": "dbus_activation",
+      "endpoint": "fi.w1.wpa_supplicant1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/fi.w1.wpa_supplicant1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.hostname1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.hostname1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.hostname1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.locale1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.locale1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.locale1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.login1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.login1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.login1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.ModemManager1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.ModemManager1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.ModemManager1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.network1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.network1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.network1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.nm_dispatcher",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.nm_dispatcher",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.nm_dispatcher.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.nm_priv_helper",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.nm_priv_helper",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.nm_priv_helper.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.PolicyKit1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.PolicyKit1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.RealtimeKit1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.RealtimeKit1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.RealtimeKit1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.systemd1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.systemd1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.systemd1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.timedate1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.timedate1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.timedate1.service"
+        }
+      ],
+      "scope": "system"
+    },
+    {
+      "id": "dbus_activation.org.freedesktop.timesync1",
+      "service": "dbus_activation",
+      "endpoint": "org.freedesktop.timesync1",
+      "transport": "D-Bus activation metadata",
+      "command": null,
+      "parameters": null,
+      "handler": null,
+      "capability": "固件提供的标准 D-Bus 激活声明；未发现经确认的海康专用风扇／灯效／存储名字总线 API。",
+      "access": "unknown",
+      "side_effects": [
+        "按总线名字发请求可能触发服务自动启动；只做文件登记，不自动激活、调用控制方法或把存在声明等同于当前活跃。"
+      ],
+      "recommendation": "B_review_before_use",
+      "default_enabled": false,
+      "confidence": "activation_file_only",
+      "runtime_verified_in_this_audit": false,
+      "evidence": [
+        {
+          "file": "/usr/share/dbus-1/system-services/org.freedesktop.timesync1.service"
+        }
+      ],
+      "scope": "system"
+    }
+  ]
+}

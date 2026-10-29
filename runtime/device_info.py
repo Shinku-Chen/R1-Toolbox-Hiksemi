@@ -13,6 +13,12 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
+
+_RUNTIME_DIR = str(Path(__file__).resolve().parent)
+if _RUNTIME_DIR not in sys.path:
+    sys.path.insert(0, _RUNTIME_DIR)
+from vendor_device import collect_vendor_device_name
 
 
 _ITEM_LIMIT = 256
@@ -143,6 +149,8 @@ def _official_firmware(reader, etc):
 
 
 def _identity(reader, proc, sys, etc):
+    # The vendor's user-facing name is independent of the kernel hostname.
+    vendor_name = collect_vendor_device_name(etc.parent)
     release = _key_values(reader.text(etc / "os-release", 16384)
                           or reader.text(etc.parent / "usr/lib/os-release", 16384))
     dmi = {name: value for name in _DMI_FIELDS
@@ -155,6 +163,8 @@ def _identity(reader, proc, sys, etc):
             firmware[name] = value
     firmware.update(_official_firmware(reader, etc))
     return {
+        "name": vendor_name["name"], "name_source": vendor_name["source"],
+        "name_reason": vendor_name["reason"],
         "hostname": reader.text(proc / "sys/kernel/hostname", 256) or reader.text(etc / "hostname", 256),
         "kernel": reader.text(proc / "sys/kernel/osrelease", 256),
         "os": release, "firmware": firmware, "dmi": dmi,

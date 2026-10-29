@@ -156,7 +156,11 @@ class TemperatureSources:
                 temperature = None
             device = item.get('device', '')
             suffix = ' · ' + device if isinstance(device, str) and re.fullmatch(r'/dev/(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', device) else ''
-            row = self._row(identity, '磁盘 · ' + (model or '存储设备')[:120] + suffix, 'disk', temperature,
+            user_name = item.get('user_name')
+            if not isinstance(user_name, str) or not 0 < len(user_name) <= 128 or any(
+                    ord(char) < 32 or ord(char) == 127 for char in user_name):
+                user_name = None
+            row = self._row(identity, '磁盘 · ' + (user_name or model or '存储设备')[:128] + suffix, 'disk', temperature,
                             sampled if type(sampled) in (int, float) and 0 <= sampled <= now and math.isfinite(sampled) else None,
                             SMART_MAX_AGE, _number(item.get('temperature_critical_c'), minimum=40), status)
             rows.append(row)

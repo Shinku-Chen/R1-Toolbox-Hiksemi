@@ -26,7 +26,7 @@ import time
 import uuid
 
 from device_info import collect_device_info
-from disk_names import read_disk_names
+from disk_names import VendorStorageClient, read_disk_names
 
 try:
     import fcntl
@@ -197,7 +197,7 @@ class InsightsCollector:
                  command_finder=None, clock=None, sample_interval=2.0,
                  slow_interval=30.0, history_limit=120, ipv4_provider=None,
                  page_size=None, clock_ticks=None, etc_root=None, run_root=None,
-                 disk_config_root=None):
+                 disk_config_root=None, storage_client=None):
         self.proc_root, self.sys_root = Path(proc_root), Path(sys_root)
         self.runner = runner or _command
         self.command_finder = command_finder or shutil.which
@@ -215,6 +215,11 @@ class InsightsCollector:
         self.disk_config_root = Path(disk_config_root) if disk_config_root is not None else (
             Path("/tmp/nand_config") if self.proc_root == Path("/proc") and self.sys_root == Path("/sys")
             else self.proc_root.parent / "tmp/nand_config")
+        # The old config-root argument remains accepted for fixture callers;
+        # migration databases are no longer a source of current user names.
+        host_root = Path("/") if self.proc_root == Path("/proc") and self.sys_root == Path("/sys") else self.proc_root.parent
+        self.storage_client = storage_client or VendorStorageClient(
+            root=host_root, runtime_dir=self.run_root / "r1-toolbox/storage")
         self._lock = threading.RLock()
         self._action_lock = threading.Lock()
         self._stop = threading.Event()
@@ -225,6 +230,11 @@ class InsightsCollector:
         self._previous_network = {}
         self._previous_process = {}
         self._smart_cache = {}
+        self._disk_name_context = {}
+        # Serial identity survives a standby-only SMART response, independently
+        # of all temperature/health/raw-data expiry. It never survives a changed
+        # sysfs lifetime or disagreement with a current identity source.
+        self._disk_serial_cache = {}
         self._state = {
             "schema_version": 1, "timestamp": None, "system": {}, "interfaces": [],
             "disks": _capability(), "containers": _capability(), "vms": _capability(),
@@ -605,30 +615,61 @@ class InsightsCollector:
         cached = self._smart_cache.get(name)
         return copy.deepcopy(cached[1]) if cached else None
 
-    def _disk_serial(self, name, folder):
-        """Use existing sysfs/udev metadata; never issue an identity probe."""
+    @staticmethod
+    def _disk_generation(folder):
+        """Bind cached identity to this sysfs device lifetime, not its sdX name."""
+        try:
+            link, target = folder.lstat(), folder.stat()
+            return (str(folder.resolve()), link.st_dev, link.st_ino, link.st_ctime_ns,
+                    target.st_dev, target.st_ino, target.st_ctime_ns)
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    def _disk_serial_info(self, name, folder, smart=None, identity_serial=None):
+        """Merge bounded existing metadata, preserving disagreement as unknown."""
+        candidates = {}
+        invalid = False
+
+        def candidate(source, value):
+            nonlocal invalid
+            if value is None or value == "":
+                return
+            if (not isinstance(value, str) or not 0 < len(value.strip()) <= 512
+                    or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in value.strip())):
+                invalid = True
+                return
+            candidates[source] = value.strip()
+
         paths = [folder / "device/serial", folder / "serial"]
         if name.startswith("nvme"):
             controller = re.match(r"nvme\d+", name)[0]
             paths.append(self.sys_root / "class/nvme" / controller / "serial")
-        values = set()
-        for path in paths:
-            value = (_text(path, 513) or "").strip()
-            if 0 < len(value) <= 512:
-                values.add(value)
+        for index, path in enumerate(paths):
+            candidate("sysfs:" + str(index), _text(path, 513))
         dev = (_text(folder / "dev", 32) or "").strip()
         if re.fullmatch(r"\d{1,6}:\d{1,6}", dev):
             metadata = _text(self.run_root / "udev/data" / ("b" + dev), 65537) or ""
             if len(metadata) <= 65536:
                 for line in metadata.splitlines():
                     if line.startswith("E:ID_SERIAL_SHORT="):
-                        value = line.partition("=")[2].strip()
-                        if 0 < len(value) <= 512:
-                            values.add(value)
-        return next(iter(values)) if len(values) == 1 else None
+                        candidate("udev:" + str(len(candidates)), line.partition("=")[2])
+        data = smart.get("smart_data") if isinstance(smart, dict) else None
+        if isinstance(data, dict):
+            candidate("smart_cache", data.get("serial_number"))
+        candidate("smart_identity_cache", identity_serial)
+        values = set(candidates.values())
+        status = "invalid" if invalid else "conflict" if len(values) > 1 else "ok" if values else "missing"
+        return {"serial": next(iter(values)) if status == "ok" else None,
+                "status": status, "sources": sorted(candidates)}
+
+    def _disk_serial(self, name, folder, smart=None):
+        """Use existing sysfs/udev and a caller-verified SMART cache; no probes."""
+        return self._disk_serial_info(name, folder, smart)["serial"]
 
     def _disks(self):
-        rows, active, serials = [], set(), {}
+        rows, active, serials, contexts = [], set(), {}, {}
+        with self._lock:
+            identity_cache = copy.deepcopy(self._disk_serial_cache)
         for folder in sorted((self.sys_root / "block").glob("*"))[:128]:
             if self._stop.is_set():
                 break
@@ -636,13 +677,14 @@ class InsightsCollector:
             if not re.fullmatch(r"(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)", name):
                 continue
             active.add(name)
-            serials[name] = self._disk_serial(name, folder)
             sectors = _integer(folder / "size")
             rotational = _integer(folder / "queue/rotational")
             media = "NVMe SSD" if name.startswith("nvme") else "eMMC" if name.startswith("mmcblk") else "HDD" if rotational == 1 else "SSD" if rotational == 0 else None
             temperature = self._disk_temperature(name, folder)
             identity = self._disk_identity(name, folder)
-            smart = self._smart(name, identity) if not name.startswith("mmcblk") else {
+            generation = self._disk_generation(folder)
+            cache_key = (identity, generation)
+            smart = self._smart(name, cache_key) if not name.startswith("mmcblk") else {
                 "smart_available": False, "standby": None, "temp_c": None,
                 "health": {"passed": None, "reason": "eMMC 不提供通用 SMART 状态"}}
             entry = {"id": name, "device": "/dev/" + name,
@@ -656,12 +698,94 @@ class InsightsCollector:
                      "smart_status": smart.get('smart_status', 'unavailable'),
                      "temperature_critical_c": smart.get('temperature_critical_c')}
             rows.append(entry)
+            consistent = (generation is not None and generation == self._disk_generation(folder)
+                          and identity == self._disk_identity(name, folder))
+            prior = identity_cache.get(name, {})
+            prior_serial = prior.get("serial") if prior.get("cache_key") == cache_key else None
+            detail = self._disk_serial_info(name, folder, smart, prior_serial) if consistent else {"serial": None, "status": "identity_changed", "sources": []}
+            serials[name] = detail["serial"]
+            if detail["status"] == "ok" and any(source in detail["sources"] for source in ("smart_cache", "smart_identity_cache")):
+                identity_cache[name] = {"cache_key": cache_key, "serial": detail["serial"]}
+            else:
+                identity_cache.pop(name, None)
+            contexts[name] = {"generation": generation, "identity": identity,
+                              "cache_key": cache_key, "row": copy.deepcopy(entry), "consistent": consistent}
         self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
-        names = read_disk_names(serials, self.disk_config_root)
+        names = read_disk_names(serials, client=self.storage_client)
+        # The two vendor getters may overlap a hot unplug. Check the same sysfs
+        # lifetime again before publishing an otherwise valid serial/name join.
         for row in rows:
-            row.update(names["items"][row["id"]])
+            name, context = row["id"], contexts[row["id"]]
+            current = (context["consistent"] and context["generation"] == self._disk_generation(self.sys_root / "block" / name)
+                       and context["identity"] == self._disk_identity(name, self.sys_root / "block" / name))
+            row.update(names["items"][name] if current else {"user_name": None, "space_names": [], "name_source": None})
+            context["consistent"] = current
+            if not current:
+                identity_cache.pop(name, None)
+        with self._lock:
+            self._disk_name_context = contexts
+            self._disk_serial_cache = {name: value for name, value in identity_cache.items() if name in active}
         return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows,
                 "names": {"available": names["available"], "reason": names["reason"]}}
+
+    def storage_name_diagnostics(self):
+        """Sample fixed vendor lists with existing identity caches, never SMART.
+
+        Only names, device IDs, consistency and one-way serial hashes leave this
+        method. A cache from a different sysfs lifetime cannot name a new disk.
+        """
+        snapshot = self.storage_client.snapshot()
+        with self._lock:
+            contexts = copy.deepcopy(self._disk_name_context)
+            identity_cache = copy.deepcopy(self._disk_serial_cache)
+        serials, details = {}, {}
+        for name, context in contexts.items():
+            folder = self.sys_root / "block" / name
+            current = (context["consistent"] and context["generation"] == self._disk_generation(folder)
+                       and context["identity"] == self._disk_identity(name, folder))
+            cached = self._smart_cache.get(name)
+            # Validate and copy the same tuple. A second dictionary lookup could
+            # race a background sample for a newly inserted disk at this name.
+            smart = copy.deepcopy(cached[1]) if current and cached and len(cached) == 3 and cached[2] == context["cache_key"] else None
+            prior = identity_cache.get(name, {})
+            prior_serial = prior.get("serial") if prior.get("cache_key") == context["cache_key"] else None
+            detail = self._disk_serial_info(name, folder, smart, prior_serial) if current else {"serial": None, "status": "identity_changed", "sources": []}
+            serials[name], details[name] = detail["serial"], detail
+        names = read_disk_names(serials, snapshot)
+
+        def serial_hash(value):
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24] if isinstance(value, str) and value else None
+
+        items = []
+        for name, context in contexts.items():
+            detail, result = details[name], names["items"][name]
+            folder = self.sys_root / "block" / name
+            unchanged = (context["consistent"] and context["generation"] == self._disk_generation(folder)
+                         and context["identity"] == self._disk_identity(name, folder))
+            if not unchanged:
+                detail = {"serial": None, "status": "identity_changed", "sources": []}
+                result = {"user_name": None, "space_names": [], "name_source": None}
+            if detail["status"] in ("conflict", "invalid", "identity_changed"):
+                with self._lock:
+                    if self._disk_serial_cache.get(name, {}).get("cache_key") == context["cache_key"]:
+                        self._disk_serial_cache.pop(name, None)
+            items.append({"id": name, "device": context["row"].get("device"),
+                          "model": context["row"].get("model"), **result,
+                          "matched": bool(result["user_name"] or result["space_names"]),
+                          "serial_status": detail["status"], "serial_sources": detail["sources"],
+                          "serial_hash": serial_hash(detail["serial"])})
+        vendor = {"disks": [{"disk_name": row.get("disk_name"), "disk_port": row.get("disk_port"),
+                              "serial_hash": serial_hash(row.get("disk_serial"))} for row in snapshot.get("disks", [])],
+                  "spaces": [{"space_name": row.get("space_name"), "is_raid": row.get("is_raid"), "port": row.get("port"),
+                               "member": [{"disk_name": member.get("disk_name"), "root_name": member.get("root_name"),
+                                           "port": member.get("port"),
+                                           "serial_hash": serial_hash(member.get("disk_id"))} for member in row.get("member") or []]}
+                              for row in snapshot.get("spaces", [])]}
+        return {"available": names["available"], "reason": names["reason"],
+                "error_code": snapshot.get("error_code"),
+                "failed_getter": snapshot.get("failed_getter"),
+                "source": snapshot.get("source"), "items": items, "vendor": vendor,
+                "commands": ["get_disk_list;", "get_space_list;"]}
 
     def _container_listing(self, timeout=DOCKER_READ_TIMEOUT):
         command, error = self._run("docker", ["ps", "--all", "--no-trunc", "--format", "{{json .}}"], timeout=timeout)

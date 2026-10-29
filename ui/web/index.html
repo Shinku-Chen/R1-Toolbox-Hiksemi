@@ -5790,13 +5790,19 @@ card._sync();
 function r1About(card) {
 card.innerHTML = `<div class="about"><div class="brand-mark">${ic('logo')}</div><h4>R1 Toolbox</h4>
 <p>海康 HikSemi R1 NAS 的本地监控与控制面板 · <span data-ref="v">v--</span></p>
+<p>设备名称：<span data-ref="deviceName">--</span> · 主机名：<span data-ref="hostname">--</span></p>
 <p class="faint" style="margin-top:2px">面板框架与视觉来自 fnMonitor（MIT）· 本机采集、鉴权与控制代码独立实现</p>
 <p class="faint">监控读数只来自本机真实来源；没有可信来源的模块会隐藏或标注原因。</p>
 <div style="display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap">
 <a class="btn" href="https://github.com/MisiteQ/fnmonitor" target="_blank" rel="noopener noreferrer">${ic('ext')}fnMonitor（面板框架）</a>
 <button class="btn" type="button" data-sheet="keys">${ic('key')}快捷键</button></div></div>`;
 const x = collect(card);
-card._sync = () => setText(x.v, (S.cfg && S.cfg.version) || (R1.st && R1.st.version) || '--');
+card._sync = () => {
+const device = (R1.st && R1.st.device) || {};
+setText(x.v, (S.cfg && S.cfg.version) || (R1.st && R1.st.version) || '--');
+setText(x.deviceName, device.name || '--');
+setText(x.hostname, device.hostname || '--');
+};
 card._sync();
 }
 SET_SCHEMA.length = 0;
