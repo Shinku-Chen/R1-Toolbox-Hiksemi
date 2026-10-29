@@ -52,7 +52,8 @@ set -eu
 # Runs in the host namespaces/root. UI is private to the new screen service.
 set -eu
 command -v python3 >/dev/null || { echo '宿主缺少 python3，未修改小屏'; exit 1; }
-exec python3 - <<'PY'
+# Bootstrap imports verified RAM modules before exec; never add bytecode there.
+exec python3 -B - <<'PY'
 import collections, hashlib, ipaddress, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time, unicodedata
 
 app = pathlib.Path('/screen/squashfs-root')

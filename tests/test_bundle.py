@@ -5,8 +5,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shlex
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -166,6 +169,54 @@ class BundleTests(unittest.TestCase):
         manifest['files']['frontend/index.html'] = hashlib.sha256(b'changed').hexdigest()
         (cache / 'manifest.json').write_text(json.dumps(manifest))
         with self.assertRaises(ValueError):
+            self.runtime.verify_cache(cache, self.digest)
+
+    def test_real_bootstrap_imports_do_not_pollute_verified_cache_across_restarts(self):
+        # Model the bootstrap imports and one transitive companion using real
+        # interpreter processes. No NAS locks, migration or hardware run here.
+        (self.root / 'runtime/ui_service.py').write_text(
+            'import toolbox\nfrom screen_manager import migrate_legacy_runtime\n'
+            'def acquire_runtime_lock(): return None\n', encoding='utf-8')
+        (self.root / 'runtime/screen_manager.py').write_text(
+            'import toolbox\ndef migrate_legacy_runtime(): return None\n', encoding='utf-8')
+        self.digest = builder.build_bundle(self.root)
+        _, files = self.read()
+        stage = self.runtime.runtime_root / 'stage'
+        stage.mkdir()
+        cache = self.runtime.write_cache(stage, files, self.archive, self.digest)
+        original = {path.relative_to(cache).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in cache.rglob('*') if path.is_file()}
+        shell = (ROOT / 'tools/boot-once/screen-actions.sh').read_text(encoding='utf-8')
+        entry = next(line for line in shell.splitlines() if line.startswith('exec python3 '))
+        # Use the shipped entrypoint's flags, rather than hard-coding -B in the
+        # test. Removing it recreates the failed second-start CI behavior.
+        arguments = shlex.split(entry.split('<<', 1)[0])[2:]
+        self.assertEqual(arguments[-1], '-')
+        environment = os.environ.copy()
+        environment.pop('PYTHONDONTWRITEBYTECODE', None)
+        environment.pop('PYTHONPYCACHEPREFIX', None)
+        source = ('import sys\nsys.path.insert(0, sys.argv[1])\n'
+                  'from ui_service import acquire_runtime_lock\n'
+                  'from screen_manager import migrate_legacy_runtime\n'
+                  'assert sys.dont_write_bytecode is True\n')
+        for restart in range(2):
+            with self.subTest(restart=restart):
+                result = subprocess.run([sys.executable, *arguments, str(cache / 'runtime')],
+                    input=source, capture_output=True, text=True, env=environment, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(list(cache.rglob('__pycache__')))
+                self.runtime.verify_cache(cache, self.digest)
+                current = {path.relative_to(cache).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                           for path in cache.rglob('*') if path.is_file()}
+                self.assertEqual(current, original)
+
+    def test_verified_cache_still_rejects_an_unexpected_bytecode_directory(self):
+        _, files = self.read()
+        stage = self.runtime.runtime_root / 'stage'
+        stage.mkdir()
+        cache = self.runtime.write_cache(stage, files, self.archive, self.digest)
+        (cache / 'runtime/__pycache__').mkdir()
+        with self.assertRaisesRegex(ValueError, '意外目录'):
             self.runtime.verify_cache(cache, self.digest)
 
     def test_cache_rejects_extra_files_and_source_symlinks(self):
