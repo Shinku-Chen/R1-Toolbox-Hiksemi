@@ -26,6 +26,7 @@ from fnm_auth import AuthStore, COOKIE as AUTH_COOKIE
 from fnm_compat import FnmonitorPanel
 from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
+from vendor_media_probe import collect_media_probe
 from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
@@ -64,6 +65,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
+    '/api/dev/media',
 ))
 
 
@@ -232,6 +234,7 @@ class WebConfigServer:
         self.storage_diagnostic_lock = threading.Lock()
         self.business_diagnostic_lock = threading.Lock()
         self.diagnostic_lock = threading.Lock()
+        self.media_probe_lock = threading.Lock()
         self.server = self.thread = None
         self.reason = None
         self.pair_hash, self.pair_until = None, 0
@@ -707,6 +710,8 @@ class WebConfigServer:
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route == '/api/dev/diagnostics':
             return self._diagnostic_post(body, ip)
+        if route == '/api/dev/media':
+            return self._media_debug_post(body, ip)
         if route == '/api/dev/business':
             return self._business_debug_post(body, headers, ip)
         if route == '/api/dev/storage':
@@ -773,6 +778,25 @@ class WebConfigServer:
             return status, payload, None
         finally:
             self.operation_lock.release()
+
+    def _media_debug_post(self, body, ip):
+        """Explicit media probe; credentials stay on the host, never in the API.
+
+        Unlike passive diagnostics this invokes one native status query, whose
+        completion branch may update vendor state. It is never auto-polled.
+        """
+        if not self._dev_authorized(ip):
+            return 403, {'ok': False, 'error': '媒体测试未启用、已过期或客户端不在白名单'}, None
+        if not isinstance(body, dict) or body != {'action': 'probe'}:
+            return 400, {'ok': False, 'error': '仅支持固定媒体 probe 测试，不接受账号、令牌或路径参数'}, None
+        if not self.media_probe_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有媒体测试正在进行'}, None
+        try:
+            return 200, {'ok': True, 'probe': collect_media_probe()}, None
+        except Exception:
+            return 503, {'ok': False, 'error': '媒体测试暂不可确认'}, None
+        finally:
+            self.media_probe_lock.release()
 
     def _diagnostic_post(self, body, ip):
         """Explicit developer IP access grants passive checks without a login.
@@ -1282,7 +1306,7 @@ class WebConfigServer:
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if route == '/api/dev/diagnostics' and (parsed.query or parsed.fragment):
+                    if route in ('/api/dev/diagnostics', '/api/dev/media') and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '开发者检测不接受 URL 参数'})
                         return
                     try:
