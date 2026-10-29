@@ -22,14 +22,14 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(set(value), {'schema_version', 'read_only', 'checks'})
         self.assertEqual(value['schema_version'], 1)
         self.assertIs(value['read_only'], True)
-        self.assertEqual(tuple(row['id'] for row in value['checks']), diagnostics.CHECKS)
+        self.assertEqual(tuple(row['id'] for row in value['checks']), diagnostics.ALLOWED_CHECKS)
         for row in value['checks']:
             self.assertEqual(set(row), {'id', 'label', 'description'})
             self.assertTrue(row['label'])
             self.assertTrue(row['description'])
         value['checks'][0]['label'] = 'changed'
         value['checks'].clear()
-        self.assertEqual(len(diagnostics.catalog()['checks']), 4)
+        self.assertEqual(len(diagnostics.catalog()['checks']), 5)
         self.assertNotEqual(diagnostics.catalog()['checks'][0]['label'], 'changed')
 
     def test_valid_actions_and_requested_order_leave_request_unchanged(self):
@@ -40,6 +40,22 @@ class RequestTests(unittest.TestCase):
         before = copy.deepcopy(body)
         self.assertEqual(diagnostics.parse_request(body), ('snapshot', ('fan', 'device')))
         self.assertEqual(body, before)
+
+    def test_storage_identity_is_explicit_only_and_does_not_expand_the_default(self):
+        self.assertNotIn('storage_identity', diagnostics.parse_request({'action': 'snapshot'})[1])
+        self.assertEqual(diagnostics.parse_request({'action': 'snapshot', 'checks': ['storage_identity']}),
+                         ('snapshot', ('storage_identity',)))
+        self.assertEqual(diagnostics.parse_request({'action': 'snapshot', 'checks': ['storage_identity', 'storage']}),
+                         ('snapshot', ('storage_identity', 'storage')))
+        provider = Mock(return_value=(200, {'ok': True, 'storage': {'serial': 'fixture-full-serial'}}))
+        collectors = {name: lambda: (200, {'ok': True}) for name in diagnostics.CHECKS}
+        collectors['storage_identity'] = provider
+        default = diagnostics.collect(diagnostics.CHECKS, collectors)
+        self.assertNotIn('fixture-full-serial', json.dumps(default))
+        provider.assert_not_called()
+        explicit = diagnostics.collect(('storage_identity',), collectors)
+        self.assertEqual(explicit['checks']['storage_identity']['data']['storage']['serial'], 'fixture-full-serial')
+        provider.assert_called_once_with()
 
     def test_rejects_every_nonfixed_action_and_parameter_shape(self):
         invalid = [None, [], 'snapshot', True, {}, {'action': None}, {'action': []},

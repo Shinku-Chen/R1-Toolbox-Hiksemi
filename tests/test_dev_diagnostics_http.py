@@ -40,6 +40,12 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.insights.snapshot.side_effect = lambda: copy.deepcopy(self.cached)
         self.insights.storage_name_diagnostics.return_value = {
             'available': True, 'source': 'fixture-storage', 'items': [], 'vendor': {}}
+        self.insights.storage_identity_diagnostics.return_value = {
+            'available': True, 'source': 'insights_cache+hiksemi_storage_socket', 'items': [
+                {'id': 'sda', 'device': '/dev/sda', 'user_name': '测试盘名', 'space_names': [],
+                 'name_source': 'hiksemi_storage_socket', 'serial': 'fixture-full-disk-serial',
+                 'serial_status': 'ok', 'serial_sources': ['smart_cache', 'hiksemi_storage_socket'],
+                 'matched': True}]}
         environment = {'R1_WEB_AUTH_MODE': 'password', 'R1_DEV_NO_PAIRING': '1',
                        'R1_DEV_ALLOW_IPS': '127.0.0.1', 'R1_DEV_MINUTES': '60',
                        'R1_DEV_ALLOW_COMMANDS': '0'}
@@ -94,6 +100,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
     def assert_no_sources(self):
         self.insights.snapshot.assert_not_called()
         self.insights.storage_name_diagnostics.assert_not_called()
+        self.insights.storage_identity_diagnostics.assert_not_called()
         self.business.assert_not_called()
         self.fan.snapshot.assert_not_called()
         self.assert_no_controls()
@@ -117,7 +124,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertLessEqual(value['access']['expires_in'], 3600)
         self.assertEqual(value['catalog']['schema_version'], 1)
         self.assertIs(value['catalog']['read_only'], True)
-        self.assertEqual({row['id'] for row in value['catalog']['checks']}, CHECKS)
+        self.assertEqual({row['id'] for row in value['catalog']['checks']}, CHECKS | {'storage_identity'})
         self.assertNotIn('set-cookie', headers)
         self.assert_no_sources()
 
@@ -136,6 +143,8 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
             self.assertIsInstance(result['data'], dict)
             self.assertIsNone(result['error'])
         self.insights.storage_name_diagnostics.assert_called_once_with()
+        self.insights.storage_identity_diagnostics.assert_not_called()
+        self.assertNotIn('fixture-full-disk-serial', json.dumps(value))
         self.business.assert_called_once_with(state_dir=self.server.state_dir)
         self.fan.snapshot.assert_called_once_with()
         self.assertNotIn('set-cookie', headers)
@@ -158,6 +167,104 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
                 self.assertEqual(self.business.call_count, int(selected == 'business'))
                 self.assertEqual(self.fan.snapshot.call_count, int(selected == 'fan'))
                 self.assert_no_controls()
+
+    def test_explicit_storage_identity_uses_its_fixed_cache_projection_only(self):
+        body = {'action': 'snapshot', 'checks': ['storage_identity']}
+        status, _, value = self.request(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(set(value['snapshot']['checks']), {'storage_identity'})
+        result = value['snapshot']['checks']['storage_identity']
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['data']['storage']['items'][0]['serial'], 'fixture-full-disk-serial')
+        self.assertEqual(result['data']['device']['name'], '测试设备昵称')
+        self.assertNotIn('private-', json.dumps(value))
+        self.insights.storage_identity_diagnostics.assert_called_once_with()
+        self.insights.storage_name_diagnostics.assert_not_called()
+        self.business.assert_not_called()
+        self.fan.snapshot.assert_not_called()
+        self.assert_no_controls()
+        self.insights.reset_mock()
+        default = self.request()[2]
+        self.assertNotIn('fixture-full-disk-serial', json.dumps(default))
+        self.assertNotIn('storage_identity', default['snapshot']['checks'])
+        self.insights.storage_identity_diagnostics.assert_not_called()
+
+    def test_storage_identity_retains_actual_peer_window_and_fixed_request_security(self):
+        body = {'action': 'snapshot', 'checks': ['storage_identity']}
+        with mock.patch.object(self.server, 'dev_allow_ips', {ipaddress.ip_address('192.168.31.9')}):
+            self.assertEqual(self.request(body, headers={
+                'Cookie': self.cookie, 'X-Forwarded-For': '192.168.31.9',
+                'Authorization': 'Bearer fixture-token'})[0], 403)
+        with mock.patch.object(self.server, 'dev_until', time.time() - 1):
+            self.assertEqual(self.request(body)[0], 403)
+        with mock.patch.object(self.server, 'dev_no_pairing', False):
+            self.assertEqual(self.request(body)[0], 403)
+        for remove in (('Origin',), ('X-FNM-Request',)):
+            self.assertEqual(self.request(body, remove=remove)[0], 403)
+        for field, argument in (('serial', 'override'), ('path', '/dev/sda'),
+                                ('cmd', 'smartctl'), ('refresh', True)):
+            self.assertEqual(self.request({**body, field: argument})[0], 400)
+        self.assertEqual(self.request(body, path=ROUTE + '?checks=storage_identity')[0], 400)
+        self.assert_no_sources()
+
+    def test_storage_identity_http_reuses_real_collector_cache_and_never_runs_another_probe(self):
+        from insights import InsightsCollector
+
+        temporary = tempfile.TemporaryDirectory(prefix='r1-diagnostic-identity-cache-')
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        folder = root / 'sys/block/sda'
+        (folder / 'device').mkdir(parents=True)
+        (folder / 'queue').mkdir()
+        (folder / 'size').write_text('1000000', encoding='utf8')
+        (folder / 'device/model').write_text('Fixture drive', encoding='utf8')
+        (folder / 'queue/rotational').write_text('1', encoding='utf8')
+        serial = 'fixture-full-cached-identity'
+        vendor = mock.Mock()
+        vendor.snapshot.return_value = {
+            'available': True, 'source': 'hiksemi_storage_socket',
+            'disks': [{'disk_name': 'sda', 'disk_port': 1, 'disk_serial': serial}],
+            'spaces': [{'space_name': '测试盘名', 'is_raid': 0, 'port': 1,
+                        'member': [{'root_name': 'sda', 'disk_name': 'sda2', 'port': 1, 'disk_id': serial}]}]}
+        runner = mock.Mock(return_value=mock.Mock(returncode=0, stderr='', stdout=json.dumps({
+            'serial_number': serial, 'smart_status': {'passed': True}})))
+        collector = InsightsCollector(root / 'proc', root / 'sys', runner=runner,
+            command_finder=lambda name: '/fixture/' + name, clock=lambda: 10,
+            page_size=4096, clock_ticks=100, storage_client=vendor)
+        self.addCleanup(collector.stop)
+        collector._state['disks'] = collector._disks()
+        collector._state['device'] = copy.deepcopy(self.cached['device'])
+        runner.assert_called_once()
+        self.server.insights = collector
+        with mock.patch.object(collector, '_run', side_effect=AssertionError('no extra command')), \
+                mock.patch.object(collector, '_disks', side_effect=AssertionError('no disk refresh')):
+            explicit = self.request({'action': 'snapshot', 'checks': ['storage_identity']})
+            self.assertEqual(explicit[0], 200)
+            row = explicit[2]['snapshot']['checks']['storage_identity']['data']['storage']['items'][0]
+            self.assertEqual(row['serial'], serial)
+            self.assertEqual(row['user_name'], '测试盘名')
+            self.assertTrue(row['matched'])
+            default = self.request()[2]
+            self.assertNotIn(serial, json.dumps(default))
+            self.assertNotIn('storage_identity', default['snapshot']['checks'])
+        runner.assert_called_once()
+
+    def test_storage_identity_shares_storage_lock_and_sanitizes_failures(self):
+        body = {'action': 'snapshot', 'checks': ['storage_identity']}
+        with self.server.storage_diagnostic_lock:
+            result = self.request(body)[2]['snapshot']['checks']['storage_identity']
+        self.assertEqual(result['http_status'], 409)
+        self.assertIsNone(result['data'])
+        self.insights.storage_identity_diagnostics.assert_not_called()
+        self.insights.storage_identity_diagnostics.side_effect = OSError('fixture-full-disk-serial /private/path')
+        value = self.request(body)[2]
+        result = value['snapshot']['checks']['storage_identity']
+        self.assertEqual(result['http_status'], 503)
+        self.assertIsNone(result['data'])
+        self.assertNotIn('fixture-full-disk-serial', json.dumps(value))
+        self.assertNotIn('/private', json.dumps(value))
+        self.assertFalse(self.server.storage_diagnostic_lock.locked())
+        self.assertFalse(self.server.diagnostic_lock.locked())
 
     def test_flag_ip_and_expiry_are_checked_before_catalog_or_snapshot(self):
         for attribute, denied in (('dev_no_pairing', False), ('dev_allow_ips', set()),

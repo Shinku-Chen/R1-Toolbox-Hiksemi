@@ -8,11 +8,15 @@ from datetime import datetime, timezone
 
 
 CHECKS = ('device', 'storage', 'business', 'fan')
+# Identity serials require an explicit selection; the default snapshot remains
+# the original four checks even as the discovery catalog grows.
+ALLOWED_CHECKS = CHECKS + ('storage_identity',)
 _CHECK_DETAILS = {
     'device': ('设备信息', '只读现有监控中的设备身份缓存。'),
     'storage': ('存储信息', '固定名称查询与现有身份缓存，不运行 SMART 或唤醒磁盘。'),
     'business': ('业务状态', '采集业务只读证据，并保留不可用类别的原因。'),
     'fan': ('风扇现场', '采集风扇预检、进程和监督端现场，不重试接管。'),
+    'storage_identity': ('硬盘完整身份', '仅显式选择时交叉核对现有缓存与原厂列表，返回完整序列号；不运行 SMART 或唤盘。'),
 }
 _INVALID_REQUEST = '诊断操作或参数无效。'
 _INVALID_CHECKS = '诊断项目必须是非空且不重复的固定项目列表。'
@@ -29,16 +33,16 @@ def catalog():
     """返回固定检查目录；调用方修改结果不会影响后续请求。"""
     return {'schema_version': 1, 'read_only': True,
             'checks': [{'id': check, 'label': _CHECK_DETAILS[check][0],
-                        'description': _CHECK_DETAILS[check][1]} for check in CHECKS]}
+                        'description': _CHECK_DETAILS[check][1]} for check in ALLOWED_CHECKS]}
 
 
 def _selected_checks(value):
     # 先验证元素类型，再判断成员和重复值，避免未哈希输入引发 TypeError。
-    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= len(CHECKS):
+    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= len(ALLOWED_CHECKS):
         raise ValueError(_INVALID_CHECKS)
     selected = []
     for check in value:
-        if not isinstance(check, str) or check not in CHECKS or check in selected:
+        if not isinstance(check, str) or check not in ALLOWED_CHECKS or check in selected:
             raise ValueError(_INVALID_CHECKS)
         selected.append(check)
     return tuple(selected)

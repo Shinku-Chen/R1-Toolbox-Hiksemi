@@ -145,3 +145,13 @@ console.log(await response.json());
 5. 未授权 IP、过期窗口、缺口令会话和跨站请求被拒绝；请求不能指定其他原厂命令。
 
 以上函数地址均为用户提供 Build_260907 固件 PIE ELF 的链接地址，运行时需另加装载基址。分析只读取解包文件，没有执行厂商 ELF 或脚本。
+
+## 显式读取完整硬盘序列号
+
+默认 `storage` 检查和原 `POST /api/dev/storage` 继续只返回序列号摘要。用户明确需要完整序列号时，在已授权的开发窗口使用统一入口 `POST /api/dev/diagnostics`，显式请求：
+
+```json
+{"action":"snapshot","checks":["storage_identity"]}
+```
+
+结果位于 `snapshot.checks.storage_identity.data.storage.items[]`。`serial` 只在当前 sysfs 生命周期有效、已有身份缓存无冲突且与唯一原厂物理盘记录和端口一致时返回；换盘、缺测或冲突为 `null`。名称仍按原有空间关联规则取得，不用名称反推序列号。默认四项快照不会自动增加此检查，不为它运行 SMART 或打开块设备。来源白名单、到期时间、同源／JSON／CSRF 和存储并发锁与统一诊断相同，完整调用边界见[开发检测](dev-diagnostics.md)。

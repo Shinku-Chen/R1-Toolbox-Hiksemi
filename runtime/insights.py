@@ -734,10 +734,48 @@ class InsightsCollector:
         Only names, device IDs, consistency and one-way serial hashes leave this
         method. A cache from a different sysfs lifetime cannot name a new disk.
         """
-        snapshot = self.storage_client.snapshot()
+        return self._storage_diagnostics()
+
+    def storage_identity_diagnostics(self):
+        """Explicit developer-only identity projection, never a public overview.
+
+        Full serials require a current cache and unique agreement with the fixed
+        vendor disk getter. Nothing here probes SMART or opens a block device.
+        """
+        return self._storage_diagnostics(include_serial=True)
+
+    @staticmethod
+    def _storage_serial_match(name, detail, serials, snapshot, vendor_available):
+        """Join existing serial evidence to one unique physical vendor record."""
+        if detail['status'] != 'ok':
+            return None, detail['status']
+        if not vendor_available:
+            return None, 'vendor_unavailable'
+        rows = snapshot.get('disks', [])
+        matches = [row for row in rows if row.get('disk_name') == name]
+        if not matches:
+            return None, 'vendor_missing'
+        serial = detail['serial']
+        if len(matches) != 1 or sum(value == serial for value in serials.values()) != 1:
+            return None, 'conflict'
+        row = matches[0]
+        port, vendor_serial = row.get('disk_port'), row.get('disk_serial')
+        if (not isinstance(vendor_serial, str) or not vendor_serial
+                or type(port) is not int or not 0 <= port <= 65535):
+            return None, 'vendor_missing'
+        if (vendor_serial != serial or sum(other.get('disk_serial') == serial for other in rows) != 1
+                or sum(type(other.get('disk_port')) is int and other['disk_port'] == port for other in rows) != 1):
+            return None, 'conflict'
+        return serial, 'ok'
+
+    def _storage_diagnostics(self, *, include_serial=False):
+        """Reuse fixed getters and generation-bound caches for both projections."""
         with self._lock:
             contexts = copy.deepcopy(self._disk_name_context)
             identity_cache = copy.deepcopy(self._disk_serial_cache)
+        # Freeze the sampled disk lifetimes before either getter can overlap a
+        # hot replacement or a background publication for the same sdX name.
+        snapshot = self.storage_client.snapshot()
         serials, details = {}, {}
         for name, context in contexts.items():
             folder = self.sys_root / "block" / name
@@ -769,11 +807,26 @@ class InsightsCollector:
                 with self._lock:
                     if self._disk_serial_cache.get(name, {}).get("cache_key") == context["cache_key"]:
                         self._disk_serial_cache.pop(name, None)
+            if include_serial:
+                serial, status = self._storage_serial_match(name, detail, serials, snapshot, names['available'])
+                if status != 'ok':
+                    result = {"user_name": None, "space_names": [], "name_source": None}
+                items.append({"id": name, "device": context["row"].get("device"), **result,
+                              "serial": serial, "serial_status": status,
+                              "serial_sources": detail['sources'] + (["hiksemi_storage_socket"] if serial else []),
+                              "matched": serial is not None})
+                continue
             items.append({"id": name, "device": context["row"].get("device"),
                           "model": context["row"].get("model"), **result,
                           "matched": bool(result["user_name"] or result["space_names"]),
                           "serial_status": detail["status"], "serial_sources": detail["sources"],
                           "serial_hash": serial_hash(detail["serial"])})
+        if include_serial:
+            available = any(row['serial'] is not None for row in items)
+            return {"available": available,
+                    "reason": None if available else "未取得缓存与原厂列表唯一一致的当前硬盘序列号",
+                    "source": "insights_cache+hiksemi_storage_socket", "items": items,
+                    "commands": ["get_disk_list;", "get_space_list;"]}
         vendor = {"disks": [{"disk_name": row.get("disk_name"), "disk_port": row.get("disk_port"),
                               "serial_hash": serial_hash(row.get("disk_serial"))} for row in snapshot.get("disks", [])],
                   "spaces": [{"space_name": row.get("space_name"), "is_raid": row.get("is_raid"), "port": row.get("port"),

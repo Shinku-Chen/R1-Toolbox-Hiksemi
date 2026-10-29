@@ -47,9 +47,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"catalog"}
 {"action":"snapshot"}
 {"action":"snapshot","checks":["device","storage"]}
+{"action":"snapshot","checks":["storage_identity"]}
 ```
 
-不指定 `checks` 时采集全部四项。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立登录会话。
+不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号。目录额外列出 `storage_identity`，只有在 `checks` 中明确选择才采集。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
 
@@ -57,10 +58,30 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 |---|---|
 | `device` | 从已有监控缓存读取设备昵称、主机名、内核与固件字段；不会刷新硬件，也不导出缓存中的其他字段 |
 | `storage` | 固定原厂 `get_space_list`／`get_disk_list` 查询与已有 SMART 身份缓存；交叉核对用户名称和物理盘映射，不运行 SMART、不唤盘；与原存储诊断共用 IPC 锁 |
+| `storage_identity` | 仅显式选择：复用同一固定查询、身份缓存和 IPC 锁，核验当前设备生命周期及唯一映射后返回完整序列号；默认快照与原 `storage` 仍只含序列号哈希 |
 | `business` | 原厂应用已有缓存或 Toolbox 上次显式查询、身份确认的 aria2／qB 有界任务队列、上次显式媒体脱敏结果及真实服务现场；与原业务诊断共用采集锁，具体限制见[业务状态](business-diagnostics.md) |
 | `fan` | `FanDiagnostics.snapshot` 的被动预检与现场；不发送温控信号、不启动时间线、不应用策略、不重试接管 |
 
 读取到的应用缓存不等于完整实时安装列表；下载来源不可用或需要授权时数据保持未知；媒体读取上次显式采集结果和逐项时间，不自动发起原厂媒体查询。白名单授权并不改变这些数据来源的限制。
+
+## 显式核对硬盘完整序列号
+
+使用同一个 `POST /api/dev/diagnostics`，请求体为 `{"action":"snapshot","checks":["storage_identity"]}`。仍要求有效开发模式、实际连接来源命中非空局域网 IP／CIDR 白名单、尚未到期的绝对窗口，以及同源 JSON／CSRF 标记。登录口令会话、Bearer Token 或转发头都不能替代开发窗口与真实来源授权，也不因此获得设置管理或控制权限。
+
+结果位于 `snapshot.checks.storage_identity.data.storage.items[]`，每盘只包含：
+
+| 字段 | 含义 |
+|---|---|
+| `id`／`device` | 已有设备标识与固定设备名，例如 `sda`／`/dev/sda`；不能通过请求选择其他路径 |
+| `user_name`／`space_names`／`name_source` | 按现有严格名称映射取得的自定义盘名或 RAID 空间名；无匹配时保持 `null`／空列表 |
+| `serial` | 完整序列号；只有当前生命周期有效、缓存来源无冲突，并与原厂同设备唯一序列号及端口记录一致时返回 |
+| `serial_status` | `ok` 为核对通过；`missing`／`invalid`／`conflict`／`identity_changed` 表示本机身份缺失、无效、矛盾或已更换；`vendor_unavailable`／`vendor_missing` 表示原厂列表未确认或缺少该盘身份 |
+| `serial_sources` | 只列来源标识，例如 `smart_cache`、`smart_identity_cache`、`sysfs:0`；核对通过时追加 `hiksemi_storage_socket`，不导出原始缓存或原厂列表 |
+| `matched` | 当前缓存身份与唯一原厂物理盘记录是否一致；不代表已设置自定义名称，未命名盘仍可核对序列号 |
+
+采集先冻结已有设备生命周期，再使用固定 `get_disk_list;`／`get_space_list;`。序列号只复用相同生命周期的后台 SMART 缓存、已核验的休眠身份缓存，以及已有 sysfs／udev 身份元数据；返回前再次检查生命周期和稳定身份。序列号来源冲突、重复映射、设备拔插或身份改变均返回 `serial:null`，不会拿原厂列表中的另一个序列号补齐。至少一盘核对通过时该来源 `available:true`，否则仍保留逐盘原因，`available:false`。
+
+接口不调用 SMART、不触发后台刷新、不打开块设备或用户文件，不唤醒休眠盘。与 `storage`／旧 `/api/dev/storage` 共用非阻塞存储锁，忙碌返回该项 `409`。不把完整序列号写入默认诊断、公开概览、业务快照或审计；原四项默认快照和 `storage` 的哈希投影不变。
 
 ## 返回与验收
 

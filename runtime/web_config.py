@@ -1019,6 +1019,7 @@ class WebConfigServer:
             collectors = {
                 'device': self._device_diagnostic_snapshot,
                 'storage': lambda: self._storage_debug_snapshot()[:2],
+                'storage_identity': lambda: self._storage_debug_snapshot(include_serial=True)[:2],
                 'business': lambda: self._business_debug_snapshot()[:2],
                 'fan': lambda: (200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}),
             }
@@ -1097,18 +1098,20 @@ class WebConfigServer:
             return 400, {'ok': False, 'error': '仅支持固定只读 snapshot 查询'}, None
         return self._storage_debug_snapshot()
 
-    def _storage_debug_snapshot(self):
-        """Reuse name evidence and the same IPC lock for both private routes."""
-        if self.insights is None or not callable(getattr(self.insights, 'storage_name_diagnostics', None)):
+    def _storage_debug_snapshot(self, *, include_serial=False):
+        """Share the IPC lock; only an explicitly selected check exports serials."""
+        method = 'storage_identity_diagnostics' if include_serial else 'storage_name_diagnostics'
+        collector = getattr(self.insights, method, None)
+        if not callable(collector):
             return 503, {'ok': False, 'error': '存储名称采集器暂不可用'}, None
         # A single in-flight request bounds IPC pressure without touching the
         # hardware-control lock or changing any saved policy.
         if not self.storage_diagnostic_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有存储名称查询正在进行'}, None
         try:
-            snapshot = self.insights.storage_name_diagnostics()
             identity = self.insights.snapshot().get('device', {}).get('identity', {})
             device = {key: identity.get(key) for key in ('name', 'hostname', 'name_source', 'name_reason')}
+            snapshot = collector()
             return 200, {'ok': True, 'device': device, 'storage': snapshot}, None
         except Exception:
             return 503, {'ok': False, 'error': '存储名称暂不可只读确认'}, None
