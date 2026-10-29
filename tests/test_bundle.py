@@ -42,7 +42,7 @@ class BundleTests(unittest.TestCase):
                      'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py', 'disk_names.py', 'vendor_device.py',
                      'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py',
                      'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
-                     'vendor_media_snapshot.py', 'vendor_app_probe.py',
+                     'vendor_media_snapshot.py', 'vendor_app_probe.py', 'vendor_storage_probe.py',
                      'api_access.py', 'api_permissions.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py',
                      'network_access.py', 'service_settings.py', 'screen_manager.py'):
             (self.root / 'runtime' / name).write_text('# fixture only\n')
@@ -89,6 +89,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn('runtime/vendor_media_batch.py', files)
         self.assertIn('runtime/vendor_media_snapshot.py', files)
         self.assertIn('runtime/vendor_app_probe.py', files)
+        self.assertIn('runtime/vendor_storage_probe.py', files)
         for name in ('api_access', 'api_permissions', 'api_file_roots', 'mcp_service', 'integration_api',
                      'network_access', 'service_settings', 'screen_manager'):
             self.assertIn('runtime/' + name + '.py', files)
@@ -97,6 +98,26 @@ class BundleTests(unittest.TestCase):
         for name in ('vendor_business', 'vendor_runtime', 'vendor_app_diagnostics', 'vendor_download_diagnostics'):
             self.assertIn('runtime/' + name + '.py', files)
         self.assertEqual((self.root / 'build/ui-bundle.sha256').read_text(), self.digest + '\n')
+
+    def test_storage_probe_is_required_by_builder_and_runtime_manifest(self):
+        (self.root / 'runtime/vendor_storage_probe.py').unlink()
+        with self.assertRaises(ValueError):
+            builder.build_bundle(self.root)
+
+        def omit_probe(members):
+            members[:] = [(member, data) for member, data in members
+                          if member.name != 'runtime/vendor_storage_probe.py']
+            for index, (member, data) in enumerate(members):
+                if member.name == 'manifest.json':
+                    manifest = json.loads(data)
+                    manifest['files'].pop('runtime/vendor_storage_probe.py')
+                    data = json.dumps(manifest).encode('utf8')
+                    member.size = len(data)
+                    members[index] = (member, data)
+
+        self.change_tar(omit_probe)
+        with self.assertRaises(ValueError):
+            self.read()
 
     def test_archive_digest_and_payload_hash_corruption_are_rejected(self):
         with self.assertRaises(ValueError):

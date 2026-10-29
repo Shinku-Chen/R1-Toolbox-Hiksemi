@@ -98,6 +98,8 @@ v1.2 dispatcher 在 `0x163dd3–0x163df5` 解析 `check_warning`，但此样本�
 
 Toolbox 继续使用固定 `get_space_list`／`get_disk_list` 与现有身份缓存。完整序列号可由显式 [`storage_identity`](disk-names.md#显式读取完整硬盘序列号) 检查取得，不把 APP 的空间管理查询加入监控轮询。
 
+另提供需逐次确认的开发入口 [`POST /api/dev/storage/probe`](storage-probe.md)，在宿主使用固定所有者已有认证访问 `127.0.0.1:80`，仅投影 `disk_sn` 与空间身份；这是所有者明确授权的主动验证，保留上述原厂副作用，不改变被动采集边界。
+
 ## 旧数据库、当前名称与磁盘休眠
 
 `init_inner_disk_info@0x3cbc3` 在启动时读取旧 `/tmp/nand_config/disk_space.db`，按真实磁盘身份把旧名称等信息写入私有元数据，再在 `0x3da71–0x3da7f` 执行 `rename`，转为 `disk_space_cache.db`。当前 `space_rename@0x3ddea` 走 `disk_dev_inner_info_get@0x330c8`／`disk_dev_inner_info_refresh@0x33ad0` 更新私有元数据和内存，未调用旧数据库更新函数。因此两个 DB 文件和旧 `config.txt:disk_nickname` 数组都不能当作当前名称的权威来源，详见 [`disk-names.md`](disk-names.md)。

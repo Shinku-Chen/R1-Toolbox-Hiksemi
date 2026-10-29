@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat(dev): 增加需逐次确认的原厂空间管理验证入口，宿主复用固定所有者已有会话访问回环 `emhistor:80`，按白名单返回完整 `disk_sn` 与空间名称；独立有界传输、共享存储锁和开发窗口复验，明确原厂 SMART／设备链接副作用，不纳入被动采集。
 - docs(web): 定位云代理到 NAS 内部 REST 的服务链：`proxyDaemon` 连接 `127.0.0.1:80`，由 `emhistor` 内嵌 Appweb 处理；补充启动链、路由函数和实机缓存证据，区分磁盘缓存与 Docker 管理服务。
 - docs(storage): 核对 APP 的 v1.2 `space_manage` 云代理路径，明确序列号 `disk_sn` 与自定义名称 `space_nickname` 的字段语义，以及设备别名、SMART 状态写入和缺少待机保护的副作用；不将其加入被动采集。
 - docs(web): 盘点海康内置 Portainer 与 NAS REST 的接口、认证和适配范围，记录实机版本状态与当前前端差异，明确静态发现和已通过业务验证的边界。

@@ -31,6 +31,7 @@ from vendor_media_batch import collect_media_batch
 from vendor_media_snapshot import record_media_snapshot
 from vendor_app_probe import collect_application_probe
 from vendor_app_diagnostics import record_application_snapshot
+from vendor_storage_probe import collect_storage_probe
 from integration_api import IntegrationApi
 from service_settings import ServiceSettingsStore
 from network_access import peer_matches
@@ -74,7 +75,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
-    '/api/dev/media', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
+    '/api/dev/media', '/api/dev/storage/probe', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
     '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate',
     '/api/services/screen', '/api/services/mcp', '/api/services/developer', '/api/r1/business/refresh',
 ))
@@ -835,6 +836,8 @@ class WebConfigServer:
             return self._diagnostic_post(body, ip)
         if route == '/api/dev/media':
             return self._media_debug_post(body, ip)
+        if route == '/api/dev/storage/probe':
+            return self._storage_probe_post(body, ip)
         if route == '/api/dev/business':
             return self._business_debug_post(body, headers, ip)
         if route == '/api/dev/storage':
@@ -942,6 +945,35 @@ class WebConfigServer:
         receipt = record_media_snapshot(self.state_dir, value, kind=kind)
         self._invalidate_business_cache()
         return receipt
+
+    def _storage_probe_post(self, body, ip):
+        """Explicit fixed native query; never part of a passive storage read.
+
+        This may cause vendor device/SMART work. The developer grant and exact
+        confirmation apply only to this fixed call, with no forwarded arguments.
+        """
+        if not self._dev_authorized(ip):
+            return 403, {'ok': False, 'error': '存储主动测试未启用、已过期或客户端不在白名单'}, None
+        if (not isinstance(body, dict) or set(body) != {'action', 'confirm'}
+                or body.get('action') != 'probe' or body.get('confirm') is not True):
+            return 400, {'ok': False, 'error': '仅支持明确确认的固定存储 probe，不接受账号、令牌、路径或动作参数'}, None
+        if not callable(collect_storage_probe):
+            return 503, {'ok': False, 'error': '存储主动测试来源暂不可用'}, None
+        if not self.storage_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有存储查询正在进行'}, None
+        try:
+            # Revalidate at the point of use; acquiring the shared source lock
+            # must not let an expired/revoked developer window reach the host.
+            if not self._dev_authorized(ip):
+                return 403, {'ok': False, 'error': '存储主动测试未启用、已过期或客户端不在白名单'}, None
+            value = collect_storage_probe()
+            if not isinstance(value, dict) or type(value.get('available')) is not bool:
+                return 503, {'ok': False, 'error': '存储主动测试暂不可确认'}, None
+            return 200, {'ok': True, 'probe': value}, None
+        except Exception:
+            return 503, {'ok': False, 'error': '存储主动测试暂不可确认'}, None
+        finally:
+            self.storage_diagnostic_lock.release()
 
     def _invalidate_business_cache(self):
         """Prevent a slow pre-refresh collection from publishing an older result."""
@@ -1631,7 +1663,7 @@ class WebConfigServer:
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/r1/business/refresh') or route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES)) and (parsed.query or parsed.fragment):
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/storage/probe', '/api/r1/business/refresh') or route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES)) and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:
