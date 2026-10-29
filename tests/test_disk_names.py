@@ -225,6 +225,32 @@ class StorageProtocolTests(unittest.TestCase):
 
 
 class DiskNamesTests(unittest.TestCase):
+    def test_same_physical_name_across_distinct_basic_zones_is_unambiguous(self):
+        for zone_order in ((1, 2), (2, 1)):
+            records = [space('测试单盘名称'), space('测试单盘名称')]
+            for record, zone in zip(records, zone_order):
+                record['member'][0]['disk_name'] = 'sda' + str(zone)
+            result = disk_names.read_disk_names({'sda': 'SERIAL-A'}, snapshot(spaces=records))
+            self.assertEqual(result['items']['sda']['user_name'], '测试单盘名称')
+            self.assertEqual(result['items']['sda']['name_source'], disk_names.NAME_SOURCE)
+
+    def test_different_or_missing_name_on_distinct_zones_stays_unknown(self):
+        for other in ('另一个名称', None, '', '\x04'):
+            records = [space('测试单盘名称'), space(other)]
+            records[0]['member'][0]['disk_name'] = 'sda1'
+            records[1]['member'][0]['disk_name'] = 'sda2'
+            result = disk_names.read_disk_names({'sda': 'SERIAL-A'}, snapshot(spaces=records))
+            self.assertIsNone(result['items']['sda']['user_name'])
+
+    def test_same_name_on_distinct_zones_does_not_bypass_identity_or_port_conflict(self):
+        for field, value in (('root_name', 'sdb'), ('disk_id', 'WRONG-SERIAL'), ('port', 2)):
+            records = [space('测试单盘名称'), space('测试单盘名称')]
+            records[0]['member'][0]['disk_name'] = 'sda1'
+            records[1]['member'][0]['disk_name'] = 'sda2'
+            records[1]['member'][0][field] = value
+            result = disk_names.read_disk_names({'sda': 'SERIAL-A'}, snapshot(spaces=records))
+            self.assertIsNone(result['items']['sda']['user_name'])
+
     def names(self, data=None, serials=None):
         return disk_names.read_disk_names({"sda": "SERIAL-A"} if serials is None else serials,
                                           snapshot() if data is None else data)

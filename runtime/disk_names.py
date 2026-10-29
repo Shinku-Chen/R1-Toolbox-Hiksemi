@@ -272,11 +272,20 @@ def read_disk_names(serials, storage_snapshot=None, *, client=None):
         for member in members:
             name = physical.get(member["disk_id"])
             if name:
-                (raids if space["is_raid"] == 1 else candidates)[name].append(label)
+                if space["is_raid"] == 1:
+                    raids[name].append(label)
+                else:
+                    candidates[name].append((label, member["disk_name"]))
     for name in empty:
         basic, shared = candidates[name], raids[name]
         if name not in blocked:
-            user_name = basic[0] if len(basic) == 1 and not shared else None
+            # The factory lists both private/data zones of a basic disk. A
+            # shared physical identity may have one name across distinct zones;
+            # repeated zone records or different/unknown names stay ambiguous.
+            labels = {label for label, _ in basic}
+            zones = [zone for _, zone in basic]
+            user_name = next(iter(labels)) if (len(labels) == 1 and None not in labels
+                        and len(set(zones)) == len(zones) and not shared) else None
             space_names = sorted({label for label in shared if label}) if len(shared) == len(set(shared)) else []
             empty[name] = {"user_name": user_name, "space_names": space_names,
                            "name_source": NAME_SOURCE if user_name or space_names else None}
