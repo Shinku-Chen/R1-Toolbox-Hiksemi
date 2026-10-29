@@ -4,7 +4,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import socket
 import stat
 import subprocess
@@ -271,9 +270,20 @@ class VendorRuntimeTests(unittest.TestCase):
     def test_unrelated_process_exit_is_ignored_but_target_exit_remains_partial(self):
         folder = self.process(pid=456, comm='ordinary', inodes=('67890',))
 
+        def disappear(process):
+            # Linux rmtree opens directory FDs through the global os.open mock.
+            # Remove only our known fixture nodes, retaining the read fence.
+            self.assertEqual(process.parent, self.proc)
+            for name in ('comm', 'stat', 'cmdline', 'environ'):
+                (process / name).unlink()
+            for descriptor in (process / 'fd').iterdir():
+                descriptor.unlink()
+            (process / 'fd').rmdir()
+            process.rmdir()
+
         def exit_ordinary(path):
             if path.parent == folder / 'fd':
-                shutil.rmtree(folder)
+                disappear(folder)
 
         self.readlink_hook = exit_ordinary
         self.assertTrue(self.gate()['available'])
@@ -281,7 +291,7 @@ class VendorRuntimeTests(unittest.TestCase):
 
         def exit_target(path):
             if path.parent == target / 'fd' and target.exists():
-                shutil.rmtree(target)
+                disappear(target)
 
         self.readlink_hook = exit_target
         self.assert_partial()
