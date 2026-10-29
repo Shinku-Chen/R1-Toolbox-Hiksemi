@@ -20,6 +20,12 @@
 
 `openinfo` 使用独立 SDK 认证路径，不能将普通 NAS 账号 token、已有媒体签名或 Portainer 会话直接套用。认证函数 `0x16730d` 的时间差超过 ±43200 秒时可能通过 `0x167258` 调用 `ntp_check_temporary_v1`（`0xb11ca3`），启动原厂 `NtpClient` 尝试校时。因此不把整个调用链称为完全无副作用，也不为探测生成签名、修改时间或重置会话。本轮仅做无令牌响应与静态核验。`PROXY_TARGET`、`web=1` 在此前置链路中的完整作用未确认，不据参数名开放代理功能。
 
+## APP 硬盘信息的云代理入口
+
+用户随后给出的实际路径为 `/rest/1.2/config?action=space_manage&check_warning=1&PROXY_TARGET=<device>`，经海康分配的 HTTPS 云代理访问。本次给定代理端口 `8018` 的证书校验与 TLSv1.3 连接成功；该端口属于这次代理分配，不硬编码为 NAS 本机 API 端口。签名没有写入仓库或日志，也没有发送该业务请求。
+
+固件 handler 确认物理盘序列号键为 `disk_sn`，新空间的自定义名称主要在 `space_nickname`，不能统一取 `space_name`。该查询同时包含设备链接维护、条件性 SMART 状态写入和缺少休眠保护的采集路径，不适合被动监控轮询；`check_warning` 不是关闭这些行为的开关。字段、版本差异与调用证据见[空间管理 REST 审计](vendor-storage-interfaces.md#app-空间管理-restspace_manage)。
+
 ## 固件里的 Docker 网页证据
 
 完整 Portainer 前端位于 `/histor/bin/docker/hiksemi.tar`，镜像标识为 `hiksemi:260202`，入口 `/portainer`。镜像声明端口不能代替宿主映射实测，尤其不能将 `8000` 当作普通网页入口。

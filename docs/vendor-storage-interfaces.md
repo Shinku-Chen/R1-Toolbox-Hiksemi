@@ -72,6 +72,32 @@
 
 `disk_get_self_test_status@0x24842` 在 `0x248ff` 引用 `smartctl -a /dev/%s`，`0x24929` 调用 `popen`。这个 getter 没有休眠保护。Toolbox 仍只使用自己的后台缓存和带 `-n standby` 的采集链；不能为补字段临时调用该接口。
 
+## APP 空间管理 REST：`space_manage`
+
+用户给出的 APP 请求属于 `/rest/1.2/config?action=space_manage&check_warning=1`。原厂云代理地址和 `PROXY_TARGET` 负责到目标 NAS 的传输，不能把代理端口当作本机服务端口；签名和分配地址不写入仓库。本轮只核验了用户给定代理的 TLS 证书与连接，没有提交带签名的业务请求。
+
+在 Build_260907 中，v1.2 的 handler 为 `rest_space_manage_v1@0x26f41d`，返回空间和未使用磁盘信息。它与本机 socket getter 的字段不同：
+
+| HTTP 字段 | 已确认语义 |
+|---|---|
+| `space_list`、`unused_disk_list` | 空间列表、未使用磁盘列表；不同分支的结构不同 |
+| `disk_sn` | 物理盘缓存结构 `+0x1118` 的序列号；handler 直接构造字符串，未见脱敏。实机缓存是否完整仍需核对 |
+| `space_nickname` | 新空间分支从空间结构 `+0x460` 取得的自定义名称 |
+| `space_name` | 新空间分支刻意为空；兼容分支可能是分区名或默认空间名，不能作为统一的用户昵称字段 |
+
+这里没有 `disk_serial`／`disk_id` 输出键，不能套用 `/var/tmp/disk` 两个 getter 的同名语义或只看 `space_name` 判断名称缺失。
+
+该 action 不符合 Toolbox 的被动采集边界：
+
+- `0x26f7cf` 调用 `disk_creat_satalink@0xaf7fb5`，运行 `create_satalink.sh`；脚本在别名缺失时补建 `/dev/hda` 等链接。
+- 多处分支调用 `disk_manage_info@0xafb4d6`；设备支持但未启用 SMART 时，下游 `0xb172f6` 会发送 ENABLE `0xd8` 和 AUTOSAVE `0xd2`。
+- `disk_get_smartinfo@0xaf9e49` 读取缓存前可能重命名 `/tmp/smartinfo-N`，不是不改变状态的缓存 getter。
+- 5／6 号位 SSD 分支包含未带 `-n standby` 的 `smartctl -A`。待机判断对大于 4 号位或部分错误返回非待机，不能保证不唤醒。
+
+v1.2 dispatcher 在 `0x163dd3–0x163df5` 解析 `check_warning`，但此样本的 handler 不读取该字段；去掉参数也不能消除上述行为。v1.1 同名 handler `0x25a0c1` 是空函数，不能作为等价降级入口。未穷尽的间接分支保持未知，不因为已经确认部分查询行为就宣称整条链无副作用。
+
+Toolbox 继续使用固定 `get_space_list`／`get_disk_list` 与现有身份缓存。完整序列号可由显式 [`storage_identity`](disk-names.md#显式读取完整硬盘序列号) 检查取得，不把 APP 的空间管理查询加入监控轮询。
+
 ## 旧数据库、当前名称与磁盘休眠
 
 `init_inner_disk_info@0x3cbc3` 在启动时读取旧 `/tmp/nand_config/disk_space.db`，按真实磁盘身份把旧名称等信息写入私有元数据，再在 `0x3da71–0x3da7f` 执行 `rename`，转为 `disk_space_cache.db`。当前 `space_rename@0x3ddea` 走 `disk_dev_inner_info_get@0x330c8`／`disk_dev_inner_info_refresh@0x33ad0` 更新私有元数据和内存，未调用旧数据库更新函数。因此两个 DB 文件和旧 `config.txt:disk_nickname` 数组都不能当作当前名称的权威来源，详见 [`disk-names.md`](disk-names.md)。
