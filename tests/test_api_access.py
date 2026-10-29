@@ -46,7 +46,8 @@ class ApiAccessTests(unittest.TestCase):
         state = json.loads(self.store.path.read_text(encoding='utf-8'))
         state['version'] = 1
         for row in state['keys']:
-            for field in ('role', 'policy_version', 'file_roots', 'disabled'):
+            for field in ('role', 'policy_version', 'file_roots', 'disabled',
+                          'tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'):
                 row.pop(field, None)
         return state
 
@@ -88,6 +89,7 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(principal, {
             'key_id': key['id'], 'name': key['name'], 'scopes': ['read'],
             'role': 'legacy', 'policy_version': 1, 'file_roots': [],
+            'tool_grants': [], 'docker_projects': [], 'grant_revision': 2, 'credential_generation': 1,
         })
         other = access.ApiAccessStore(self.temp.name, clock=lambda: self.now)
         other.configure({'enabled': False})
@@ -358,10 +360,11 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.configure({'enabled': True})
         migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 3)
+        self.assertEqual(migrated['version'], 4)
         self.assertEqual(migrated['keys'][0], {
             **old['keys'][0], 'policy_version': 1, 'role': 'legacy', 'file_roots': [],
             'disabled': False,
+            'tool_grants': [], 'docker_projects': [], 'grant_revision': 1, 'credential_generation': 1,
         })
         self.assertEqual(self.authorize(key), (principal, 'ok'))
         self.assertEqual(self.authorize(key, scope='docker'), (None, 'scope_denied'))
@@ -377,7 +380,7 @@ class ApiAccessTests(unittest.TestCase):
         principal, _ = self.authorize(valid)
         self.store.record(principal, 'integration/capabilities', '192.168.31.22', 'success')
         state = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(state['version'], 3)
+        self.assertEqual(state['version'], 4)
         self.assertTrue(all(row['role'] == 'legacy' for row in state['keys']))
         self.assertEqual(self.authorize(revoked), (None, 'key_revoked'))
         self.now += 86400
@@ -392,7 +395,8 @@ class ApiAccessTests(unittest.TestCase):
                     state = json.loads(store.path.read_text(encoding='utf-8'))
                     state['version'] = 1
                     for row in state['keys']:
-                        for field in ('role', 'policy_version', 'file_roots', 'disabled'):
+                        for field in ('role', 'policy_version', 'file_roots', 'disabled',
+                                      'tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'):
                             row.pop(field)
                     store.path.write_text(json.dumps(state), encoding='utf-8')
                     os.chmod(store.path, 0o600)
@@ -401,7 +405,7 @@ class ApiAccessTests(unittest.TestCase):
                     else:
                         store.create_key({'name': '新键', 'role': 'readonly', 'scopes': ['read']})
                     result = json.loads(store.path.read_text(encoding='utf-8'))
-                    self.assertEqual(result['version'], 3)
+                    self.assertEqual(result['version'], 4)
                     self.assertEqual(result['keys'][0]['role'], 'legacy')
                     self.assertEqual(result['keys'][0]['scopes'], ['power'])
                     self.assertEqual(result['keys'][0]['digest'], state['keys'][0]['digest'])
@@ -501,7 +505,7 @@ class ApiAccessTests(unittest.TestCase):
         state = json.loads(self.store.path.read_text(encoding='utf-8'))
         row = state['keys'][0]
         bad_rows = ({**row, 'policy_version': 1}, {**row, 'policy_version': True},
-                    {**row, 'policy_version': 3}, {**row, 'role': 'legacy'},
+                    {**row, 'policy_version': 4}, {**row, 'role': 'legacy'},
                     {**row, 'role': []}, {**row, 'role': 'superadmin'},
                     {field: value for field, value in row.items() if field != 'file_roots'},
                     {**row, 'file_roots': None},
@@ -554,6 +558,8 @@ class ApiAccessTests(unittest.TestCase):
         old['version'] = 2
         for row in old['keys']:
             row.pop('disabled')
+            for field in ('tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'):
+                row.pop(field)
         self.write_state(old)
         before = self.store.path.read_bytes()
         self.assertFalse(self.store.snapshot()['keys'][0]['disabled'])
@@ -564,8 +570,10 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.update_key({'id': key['id'], 'name': '重命名'})
         migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 3)
-        self.assertEqual(migrated['keys'][0], {**old['keys'][0], 'name': '重命名', 'disabled': False})
+        self.assertEqual(migrated['version'], 4)
+        self.assertEqual(migrated['keys'][0], {**old['keys'][0], 'name': '重命名', 'disabled': False,
+                                             'tool_grants': [], 'docker_projects': [],
+                                             'grant_revision': 1, 'credential_generation': 1})
         self.assertEqual(self.authorize(key)[0]['role'], 'readwrite')
 
     def test_update_preserves_secret_creation_and_legacy_permissions_until_role_is_explicit(self):
@@ -821,6 +829,289 @@ class ApiAccessTests(unittest.TestCase):
         rows = self.store.snapshot()['audit']
         self.assertEqual([row['operation'] for row in rows], ['key.rotate', 'key.enable', 'key.update'])
         self.assertNotIn(key['token'], json.dumps(rows))
+
+    def v3_key(self, **updates):
+        return self.create(**{'role': 'readonly', 'tool_grants': ['get_nas_status'], **updates})
+
+    def test_v3_exact_tools_and_resource_metadata_are_detached_and_secret_free(self):
+        roots = [{'id': 'root_' + 'a' * 24, 'path': '媒体', 'access': 'readonly'}]
+        projects = [{'id': 'project_' + 'b' * 24, 'operations': ['inspect']}]
+        tools = ['list_file_roots', 'list_docker_projects']
+        key = self.create(role='readonly', scopes=['files', 'docker'], tool_grants=tools,
+                          file_roots=roots, docker_projects=projects)
+        self.assertEqual(key['policy_version'], 3)
+        self.assertEqual(key['grant_revision'], 1)
+        self.assertEqual(key['credential_generation'], 1)
+        self.enable()
+        tools.append('prepare_file_upload')
+        projects[0]['operations'].append('update_image')
+        roots[0]['path'] = '篡改'
+        principal, reason = self.authorize(key, scope='files')
+        self.assertEqual(reason, 'ok')
+        self.assertEqual(principal['tool_grants'], ['list_file_roots', 'list_docker_projects'])
+        self.assertEqual(principal['docker_projects'][0]['operations'], ['inspect'])
+        self.assertEqual(principal['file_roots'][0]['path'], '媒体')
+        self.assertEqual(principal['grant_revision'], 2)
+        principal['tool_grants'].clear()
+        principal['docker_projects'][0]['operations'].clear()
+        key['docker_projects'].clear()
+        self.assertEqual(len(self.authorize(key, scope='files')[0]['tool_grants']), 2)
+        public = json.dumps(self.store.snapshot(), ensure_ascii=False)
+        self.assertNotIn(key['token'], public)
+        self.assertNotIn('digest', public)
+
+    def test_explicit_tools_are_the_only_upgrade_and_role_edits_never_downgrade_v3(self):
+        key = self.create(role='admin', scopes=['read', 'docker'])
+        for update in ({'name': '新名称'}, {'allowed_ips': ['192.168.31.22']},
+                       {'expires_days': 0}, {'role': 'readwrite'}):
+            result = self.store.update_key({'id': key['id'], **update})
+            self.assertEqual(result['policy_version'], 2)
+            self.assertEqual(result['tool_grants'], [])
+        upgraded = self.store.update_key({'id': key['id'], 'scopes': ['read'],
+                                          'tool_grants': ['get_nas_status']})
+        self.assertEqual(upgraded['policy_version'], 3)
+        edited = self.store.update_key({'id': key['id'], 'role': 'readonly'})
+        self.assertEqual(edited['policy_version'], 3)
+        self.assertEqual(edited['tool_grants'], ['get_nas_status'])
+        rotated = self.store.rotate_key(key['id'])
+        self.assertEqual(rotated['policy_version'], 3)
+        self.assertEqual(rotated['tool_grants'], ['get_nas_status'])
+        legacy = self.create()
+        with self.assertRaises(ValueError):
+            self.store.update_key({'id': legacy['id'], 'tool_grants': ['get_nas_status']})
+        self.assertEqual(self.store.update_key({'id': legacy['id'], 'role': 'readonly',
+                                                'tool_grants': ['get_nas_status']})['policy_version'], 3)
+
+    def test_v3_invalid_tools_role_scope_resources_and_dependencies_never_write(self):
+        root = {'id': 'root_' + 'a' * 24, 'path': '', 'access': 'readonly'}
+        project = {'id': 'project_' + 'b' * 24, 'operations': ['inspect']}
+        cases = (
+            {'tool_grants': ['unknown_private_value']}, {'tool_grants': ['*']},
+            {'tool_grants': ['get_nas_status'] * 2}, {'tool_grants': None},
+            {'tool_grants': ['set_fan_policy']},
+            {'tool_grants': ['set_fan_policy'], 'scopes': ['fan']},
+            {'tool_grants': ['create_directory'], 'role': 'readwrite', 'scopes': ['files'], 'file_roots': [root]},
+            {'tool_grants': ['commit_file_upload'], 'role': 'admin', 'scopes': ['files'],
+             'file_roots': [{**root, 'access': 'readwrite'}]},
+            {'tool_grants': ['list_docker_projects'], 'scopes': ['docker']},
+            {'tool_grants': ['list_docker_projects'], 'scopes': ['docker'],
+             'docker_projects': [{**project, 'operations': ['update_image']}]},
+            {'role': 'admin', 'tool_grants': ['execute_docker_project_update'], 'scopes': ['docker'],
+             'docker_projects': [{**project, 'operations': ['update_image']}]},
+            {'role': 'readwrite', 'tool_grants': ['plan_docker_project_update'], 'scopes': ['docker'],
+             'docker_projects': [{**project, 'operations': ['update_image']}]},
+            {'tool_grants': [], 'docker_projects': [project]},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields), self.assertRaises(ValueError) as raised:
+                self.create(role=fields.get('role', 'readonly'),
+                            **{key: value for key, value in fields.items() if key != 'role'})
+            self.assertNotIn('unknown_private_value', str(raised.exception))
+            self.assertFalse(self.store.path.exists())
+        # A future resource can be pre-authorized without granting its admin tool.
+        key = self.create(role='readwrite', scopes=['docker'], tool_grants=['list_docker_projects'],
+                          docker_projects=[{**project, 'operations': ['inspect', 'update_image']}])
+        self.assertEqual(key['policy_version'], 3)
+        before = self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.store.update_key({'id': key['id'], 'role': 'readonly'})
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_v3_empty_tool_set_does_not_imply_original_or_future_tools(self):
+        from api_permissions import permission_allows
+        key = self.v3_key(role='admin', tool_grants=[])
+        self.enable()
+        principal, _ = self.authorize(key)
+        self.assertFalse(permission_allows(principal, 'read', 'readonly', tool_name='get_nas_status'))
+        with self.assertRaises(ValueError):
+            self.store.update_key({'id': key['id'], 'tool_grants': ['list_file_roots']})
+
+    def test_grant_revision_changes_only_for_effective_policy_and_generation_only_on_rotate(self):
+        key = self.v3_key(expires_days=0)
+        self.assertEqual(key['grant_revision'], 1)
+        self.enable()
+        principal, _ = self.authorize(key)
+        revision = principal['grant_revision']
+        self.assertEqual(revision, 2)
+        for update in ({'name': '改名'}, {'role': 'readonly'}, {'allowed_ips': []},
+                       {'expires_days': 0}, {'tool_grants': ['get_nas_status']}):
+            result = self.store.update_key({'id': key['id'], **update})
+            self.assertEqual(result['grant_revision'], revision)
+            self.assertEqual(result['credential_generation'], 1)
+        self.store.record(principal, 'get_nas_status', '192.168.31.22', 'success')
+        self.assertEqual(self.authorize(key)[0]['grant_revision'], revision)
+        for update in ({'allowed_ips': ['192.168.31.9/24']}, {'expires_days': 7},
+                       {'role': 'readwrite'}, {'tool_grants': []}):
+            result = self.store.update_key({'id': key['id'], **update})
+            revision += 1
+            self.assertEqual(result['grant_revision'], revision)
+            self.assertEqual(result['credential_generation'], 1)
+        result = self.store.set_key_enabled(key['id'], False)
+        self.assertEqual(result['grant_revision'], revision + 1)
+        self.assertEqual(self.store.set_key_enabled(key['id'], False)['grant_revision'], revision + 1)
+        result = self.store.set_key_enabled(key['id'], True)
+        self.assertEqual(result['grant_revision'], revision + 2)
+        rotated = self.store.rotate_key(key['id'])
+        self.assertEqual(rotated['grant_revision'], revision + 2)
+        self.assertEqual(rotated['credential_generation'], 2)
+        self.assertEqual(self.store.revoke_key(key['id'])['grant_revision'], revision + 3)
+
+    def test_v3_policy_edits_must_explicitly_remove_incompatible_tools_and_resources(self):
+        root = {'id': 'root_' + 'a' * 24, 'path': '目标', 'access': 'readwrite'}
+        key = self.create(role='admin', scopes=['files'], file_roots=[root],
+                          tool_grants=['prepare_file_upload', 'commit_file_upload'])
+        before = self.store.path.read_bytes()
+        for update in ({'role': 'readonly'}, {'scopes': ['read']},
+                       {'file_roots': [{**root, 'access': 'readonly'}]},
+                       {'tool_grants': ['commit_file_upload']}):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                self.store.update_key({'id': key['id'], **update})
+            self.assertEqual(self.store.path.read_bytes(), before)
+        changed = self.store.update_key({'id': key['id'], 'role': 'readonly',
+                                        'file_roots': [{**root, 'access': 'readonly'}],
+                                        'tool_grants': ['list_file_roots']})
+        self.assertEqual(changed['policy_version'], 3)
+        self.assertEqual(changed['tool_grants'], ['list_file_roots'])
+        self.assertEqual(changed['grant_revision'], 2)
+
+    def test_old_v3_bytes_read_unchanged_then_write_v4_without_policy_upgrade(self):
+        key = self.create(role='readwrite', scopes=['read', 'docker'], expires_days=7)
+        self.enable()
+        old = json.loads(self.store.path.read_text(encoding='utf-8'))
+        old['version'] = 3
+        for row in old['keys']:
+            for field in ('tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'):
+                del row[field]
+        self.write_state(old)
+        before = self.store.path.read_bytes()
+        principal, reason = self.authorize(key)
+        self.assertEqual(reason, 'ok')
+        self.assertEqual(principal['policy_version'], 2)
+        self.assertEqual(principal['tool_grants'], [])
+        self.assertEqual(principal['grant_revision'], 1)
+        self.assertTrue(self.store.is_current(principal))
+        self.store.snapshot()
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.store.update_key({'id': key['id'], 'name': '改名'})
+        data = json.loads(self.store.path.read_text(encoding='utf-8'))
+        self.assertEqual(data['version'], 4)
+        self.assertEqual(data['keys'][0]['digest'], old['keys'][0]['digest'])
+        self.assertEqual(data['keys'][0]['policy_version'], 2)
+        self.assertEqual(data['keys'][0]['grant_revision'], 1)
+        self.assertTrue(self.store.is_current(principal))
+
+    def test_v4_managed_counters_and_malformed_policy_fail_closed_without_overwrite(self):
+        key = self.v3_key()
+        self.enable()
+        state = json.loads(self.store.path.read_text(encoding='utf-8'))
+        row = state['keys'][0]
+        invalid = [{**row, field: value} for field in ('grant_revision', 'credential_generation')
+                   for value in (None, True, 0, -1, 1.0, 2 ** 53, '1')]
+        invalid += [{field: value for field, value in row.items() if field != missing}
+                    for missing in ('tool_grants', 'docker_projects', 'grant_revision', 'credential_generation')]
+        invalid += [{**row, 'policy_version': 2}, {**row, 'tool_grants': ['not_known']}]
+        for broken in invalid:
+            with self.subTest(broken=broken):
+                self.write_state({**state, 'keys': [broken]})
+                before = self.store.path.read_bytes()
+                self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+                with self.assertRaises(OSError):
+                    self.store.update_key({'id': key['id'], 'name': '不能覆盖损坏数据'})
+                self.assertEqual(self.store.path.read_bytes(), before)
+        self.write_state(state)
+        for field in ('grant_revision', 'credential_generation'):
+            with self.assertRaises(ValueError):
+                self.store.update_key({'id': key['id'], field: 123})
+            with self.assertRaises(ValueError):
+                self.create(**{field: 123})
+
+    def test_is_current_rechecks_rotation_revocation_expiry_and_service_state(self):
+        for change in ('pause', 'revoke', 'rotate', 'expiry', 'global', 'ip', 'permissions'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                store = access.ApiAccessStore(folder, clock=lambda: self.now)
+                key = store.create_key({'name': 'fixture', 'role': 'readonly',
+                                        'tool_grants': ['get_nas_status'], 'expires_days': 1})
+                store.configure({'enabled': True})
+                principal, _ = store.authorize('Bearer ' + key['token'], '192.168.31.22')
+                self.assertTrue(store.is_current(principal))
+                store.update_key({'id': key['id'], 'name': '仅改名'})
+                self.assertTrue(store.is_current(principal))
+                if change == 'pause':
+                    store.set_key_enabled(key['id'], False)
+                    store.set_key_enabled(key['id'], True)
+                elif change == 'revoke':
+                    store.revoke_key(key['id'])
+                elif change == 'rotate':
+                    store.rotate_key(key['id'])
+                elif change == 'expiry':
+                    self.now += 86400
+                elif change == 'global':
+                    store.configure({'enabled': False})
+                    store.configure({'enabled': True})
+                elif change == 'ip':
+                    store.update_key({'id': key['id'], 'allowed_ips': ['192.168.31.22']})
+                else:
+                    store.update_key({'id': key['id'], 'tool_grants': []})
+                self.assertFalse(store.is_current(principal))
+
+    def test_is_current_invalid_storage_clock_and_principals_fail_closed(self):
+        key = self.v3_key()
+        self.enable()
+        principal, _ = self.authorize(key)
+        for value in (None, {}, [], {'key_id': key['id']},
+                      dict(principal, credential_generation=True), dict(principal, key_id='0' * 24)):
+            self.assertFalse(self.store.is_current(value))
+        with mock.patch.object(self.store, 'clock', return_value=float('nan')):
+            self.assertFalse(self.store.is_current(principal))
+            self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+        self.store.path.write_text('invalid', encoding='utf-8')
+        self.assertFalse(self.store.is_current(principal))
+        self.store.path.unlink()
+        self.assertFalse(self.store.is_current(principal))
+
+    def test_reopened_instances_serialize_create_rotate_and_revoke(self):
+        stores = [access.ApiAccessStore(self.temp.name, clock=lambda: self.now) for _ in range(8)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            created = list(pool.map(lambda item: stores[item % 8].create_key({'name': 'key%d' % item}), range(16)))
+        self.assertEqual(len(self.store.snapshot()['keys']), 16)
+        self.enable()
+        key = created[0]
+        def rotate():
+            try:
+                return stores[0].rotate_key(key['id'])
+            except ValueError:
+                return None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            rotating = pool.submit(rotate)
+            revoking = pool.submit(stores[1].revoke_key, key['id'])
+            rotated, revoked = rotating.result(), revoking.result()
+        self.assertEqual(revoked['status'], 'revoked')
+        self.assertIn(self.authorize(key)[1], ('invalid_key', 'key_revoked'))
+        if rotated:
+            self.assertEqual(self.authorize(rotated)[1], 'key_revoked')
+        self.assertEqual(len(self.store.snapshot()['keys']), 16)
+
+    def test_old_inflight_principal_audit_cannot_touch_rotated_credentials_usage(self):
+        key = self.v3_key()
+        self.enable()
+        principal, _ = self.authorize(key)
+        self.store.rotate_key(key['id'])
+        self.store.record(principal, 'list_file_roots', '192.168.31.22', 'success')
+        self.assertIsNone(self.store.snapshot()['keys'][0]['last_used_at'])
+
+    def test_counter_overflow_never_wraps_or_changes_secret(self):
+        key = self.v3_key()
+        data = json.loads(self.store.path.read_text(encoding='utf-8'))
+        data['keys'][0]['grant_revision'] = 2 ** 53 - 1
+        data['keys'][0]['credential_generation'] = 2 ** 53 - 1
+        self.write_state(data)
+        before = self.store.path.read_bytes()
+        for action in (lambda: self.store.rotate_key(key['id']),
+                       lambda: self.store.configure({'enabled': True}),
+                       lambda: self.store.update_key({'id': key['id'], 'tool_grants': []})):
+            with self.assertRaises(ValueError):
+                action()
+            self.assertEqual(self.store.path.read_bytes(), before)
 
 
 if __name__ == '__main__':

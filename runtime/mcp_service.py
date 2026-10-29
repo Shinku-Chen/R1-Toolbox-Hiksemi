@@ -12,6 +12,7 @@ import math
 import re
 
 from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
+from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
 
 
 MODERN_VERSION = '2026-07-28'
@@ -108,6 +109,12 @@ _TOOLS = (
     _tool('cancel_power', '取消电源操作',
           '取消尚在 5 秒倒计时内的重启或关机请求。',
           'power', _object_schema()),
+)
+_TOOLS += tuple(
+    _tool(contract['name'], contract['title'],
+          '查询明确授权的文件根元数据或固定 Docker 项目；不执行文件读写或项目更新。',
+          contract['scope'], contract['inputSchema'], read_only=True)
+    for contract in contract_catalog()['tools'] if contract['name'] in IMPLEMENTED_TOOLS
 )
 _TOOLS_BY_NAME = {tool['name']: tool for tool in _TOOLS}
 
@@ -296,7 +303,8 @@ def validate_http_metadata(message, headers, protocol_version=None):
 
 
 def _tool_error(code, message):
-    return _tool_result({'ok': False, 'error': {'code': code, 'message': message}})
+    return _tool_result({'ok': False, 'error': {'code': code, 'message': message,
+                                             'retryable': False}})
 
 
 def _tool_result(value):
@@ -310,6 +318,13 @@ def _arguments(name, arguments):
     """Check the advertised fixed outer schema; controllers own policy internals."""
     if not isinstance(arguments, dict) or not _json_tree(arguments):
         return None
+    if name in IMPLEMENTED_TOOLS:
+        if name in ('list_file_roots', 'list_docker_projects'):
+            return {} if not arguments else None
+        project = arguments.get('project_id')
+        return ({'project_id': project} if set(arguments) == {'project_id'}
+                and isinstance(project, str)
+                and re.fullmatch(r'project_[0-9a-f]{24}', project, re.ASCII) else None)
     spec = _TOOLS_BY_NAME[name]['inputSchema']
     props = spec['properties']
     if set(arguments) - set(props) or set(spec.get('required', ())) - set(arguments):

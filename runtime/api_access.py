@@ -5,6 +5,7 @@ projection of metadata only; authorization never trusts proxy forwarding headers
 This store is shared by the HTTP integration routes and MCP transport.
 """
 
+import copy
 import hashlib
 import hmac
 import json
@@ -18,8 +19,9 @@ import tempfile
 import threading
 import time
 
-from api_permissions import (LEGACY_SCOPES, ROLE_CATALOG, SCOPES,
-                             SCOPE_CATALOG, valid_file_roots as _file_roots)
+from api_permissions import (LEGACY_SCOPES, ROLE_CATALOG, SCOPES, SCOPE_BY_TOOL,
+                             SCOPE_CATALOG, valid_file_roots as _file_roots,
+                             valid_tool_grants as _tool_grants)
 from network_access import normalize_peer, normalize_rule, normalize_rules, peer_matches
 
 AUDIT_OPERATIONS = frozenset((
@@ -30,7 +32,7 @@ AUDIT_OPERATIONS = frozenset((
     'integration/capabilities',
     'config', 'key.create', 'key.revoke', 'key.update', 'key.enable', 'key.rotate',
     'authenticate',
-))
+)) | frozenset(SCOPE_BY_TOOL)
 AUDIT_OUTCOMES = frozenset(('success', 'error', 'denied', 'busy', 'unavailable'))
 MAX_ACTIVE_KEYS, MAX_KEYS, MAX_AUDIT = 32, 64, 100
 _MAX_FILE_BYTES = 262144
@@ -44,6 +46,12 @@ _KEY_FIELDS = frozenset((
 ))
 _POLICY_FIELDS = frozenset(('policy_version', 'role', 'file_roots'))
 _V3_FIELDS = frozenset(('disabled',))
+_V4_FIELDS = frozenset(('tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'))
+_REVISION_FIELDS = ('policy_version', 'role', 'scopes', 'file_roots',
+                    'tool_grants', 'docker_projects', 'allowed_ips', 'expires_at', 'disabled', 'revoked_at')
+_MAX_REVISION = 2 ** 53 - 1
+_STORE_LOCKS = {}
+_STORE_LOCKS_GUARD = threading.Lock()
 _AUDIT_FIELDS = frozenset((
     'timestamp', 'key_id', 'operation', 'peer', 'outcome', 'duration_ms',
 ))
@@ -99,7 +107,11 @@ class ApiAccessStore:
     def __init__(self, state_dir, *, clock=None):
         self.path = Path(state_dir) / 'api-access.json'
         self.clock = clock or time.time
-        self.lock = threading.RLock()
+        # Reopened adapters in this process must serialize the same pathname,
+        # otherwise a rotation could overwrite a concurrently saved revoke.
+        lock_path = os.path.normcase(os.path.abspath(os.fspath(self.path)))
+        with _STORE_LOCKS_GUARD:
+            self.lock = _STORE_LOCKS.setdefault(lock_path, threading.RLock())
         self._write_failed = False
 
     def _now(self):
@@ -114,13 +126,15 @@ class ApiAccessStore:
 
     @staticmethod
     def _empty():
-        return {'version': 3, 'enabled': False, 'keys': [], 'audit': []}
+        return {'version': 4, 'enabled': False, 'keys': [], 'audit': []}
 
     @staticmethod
-    def _valid_key(row, version=3):
+    def _valid_key(row, version=4):
         fields = _KEY_FIELDS if version == 1 else _KEY_FIELDS | _POLICY_FIELDS
-        if version == 3:
+        if version >= 3:
             fields |= _V3_FIELDS
+        if version == 4:
+            fields |= _V4_FIELDS
         valid = (isinstance(row, dict) and set(row) == fields
                 and isinstance(row['id'], str) and _KEY_ID_RE.fullmatch(row['id'])
                 and _label(row['name']) and _scopes(row['scopes']) and _ips(row['allowed_ips'])
@@ -130,7 +144,10 @@ class ApiAccessStore:
                 and isinstance(row['digest'], str) and _DIGEST_RE.fullmatch(row['digest']))
         if not valid:
             return False
-        if version == 3 and type(row['disabled']) is not bool:
+        if version >= 3 and type(row['disabled']) is not bool:
+            return False
+        if version == 4 and any(type(row[name]) is not int or not 1 <= row[name] <= _MAX_REVISION
+                                for name in ('grant_revision', 'credential_generation')):
             return False
         if version == 1:
             return _scopes(row['scopes'], LEGACY_SCOPES)
@@ -138,10 +155,15 @@ class ApiAccessStore:
             return False
         if row['policy_version'] == 1:
             return (row['role'] == 'legacy' and row['file_roots'] == []
-                    and _scopes(row['scopes'], LEGACY_SCOPES))
-        return (row['policy_version'] == 2 and isinstance(row['role'], str)
-                and row['role'] in _ROLES
-                and _file_roots(row['file_roots'], row['role'], row['scopes']))
+                    and _scopes(row['scopes'], LEGACY_SCOPES)
+                    and (version < 4 or row['tool_grants'] == [] and row['docker_projects'] == []))
+        if row['policy_version'] == 2:
+            return (isinstance(row['role'], str) and row['role'] in _ROLES
+                    and _file_roots(row['file_roots'], row['role'], row['scopes'])
+                    and (version < 4 or row['tool_grants'] == [] and row['docker_projects'] == []))
+        return (version == 4 and row['policy_version'] == 3
+                and _tool_grants(row['tool_grants'], row['role'], row['scopes'],
+                                 row['file_roots'], row['docker_projects']))
 
     @staticmethod
     def _valid_audit(row):
@@ -161,7 +183,7 @@ class ApiAccessStore:
             flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
             descriptor = os.open(self.path, flags)
         except FileNotFoundError:
-            return self._empty(), True
+            return self._empty(), not self.path.is_symlink()
         except OSError:
             return self._empty(), False
         try:
@@ -176,7 +198,7 @@ class ApiAccessStore:
                     return self._empty(), False
                 data = json.loads(text, parse_constant=_reject_constants, object_pairs_hook=_unique_object)
             if (not isinstance(data, dict) or set(data) != {'version', 'enabled', 'keys', 'audit'}
-                    or type(data['version']) is not int or data['version'] not in (1, 2, 3)
+                    or type(data['version']) is not int or data['version'] not in (1, 2, 3, 4)
                     or type(data['enabled']) is not bool
                     or not isinstance(data['keys'], list) or len(data['keys']) > MAX_KEYS
                     or not all(self._valid_key(row, data['version']) for row in data['keys'])
@@ -192,9 +214,11 @@ class ApiAccessStore:
     def _write(self, state):
         temporary = None
         try:
-            # Pure reads retain v1/v2 bytes. A real write upgrades the complete
+            # Pure reads retain v1/v2/v3 bytes. A real write upgrades the complete
             # state in the same fsync/replace transaction as the requested change.
-            state = dict(state, version=3, keys=[self._policy_row(row) for row in state['keys']])
+            state = dict(state, version=4, keys=[self._policy_row(row) for row in state['keys']])
+            if not all(self._valid_key(row) for row in state['keys']):
+                raise OSError('访问配置不可写')
             serialized = json.dumps(state, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
             if len(serialized.encode('utf-8')) > _MAX_FILE_BYTES:
                 raise OSError('访问配置超出存储上限')
@@ -249,6 +273,8 @@ class ApiAccessStore:
         result['scopes'] = list(row['scopes'])
         result['allowed_ips'] = list(row['allowed_ips'])
         result['file_roots'] = [dict(root) for root in row['file_roots']]
+        result['tool_grants'] = list(row['tool_grants'])
+        result['docker_projects'] = copy.deepcopy(row['docker_projects'])
         result['status'] = cls._key_status(row, now)
         result['enabled'] = not row['disabled']
         return result
@@ -256,9 +282,19 @@ class ApiAccessStore:
     @staticmethod
     def _policy_row(row):
         """Project validated old records without changing effective grants."""
-        policy = ({**row, 'policy_version': 1, 'role': 'legacy', 'file_roots': []}
-                  if 'policy_version' not in row else row)
-        return dict(policy, disabled=policy.get('disabled', False))
+        policy = copy.deepcopy(row)
+        if 'policy_version' not in policy:
+            policy.update(policy_version=1, role='legacy', file_roots=[])
+        for field, default in (('disabled', False), ('tool_grants', []), ('docker_projects', []),
+                               ('grant_revision', 1), ('credential_generation', 1)):
+            policy.setdefault(field, default)
+        return policy
+
+    @staticmethod
+    def _bump(row, field):
+        if row[field] >= _MAX_REVISION:
+            raise ValueError('访问授权修订已达上限')
+        row[field] += 1
 
     def snapshot(self):
         with self.lock:
@@ -277,28 +313,39 @@ class ApiAccessStore:
             raise ValueError('仅接受 enabled 布尔值')
         with self.lock:
             data = self._mutable()
+            if data['enabled'] != body['enabled']:
+                data['keys'] = [self._policy_row(row) for row in data['keys']]
+                for row in data['keys']:
+                    self._bump(row, 'grant_revision')
             data['enabled'] = body['enabled']
             self._write(data)
             return self.snapshot()
 
     def create_key(self, body):
         if (not isinstance(body, dict) or set(body) - {
-                'name', 'scopes', 'allowed_ips', 'expires_days', 'role', 'file_roots'}
+                'name', 'scopes', 'allowed_ips', 'expires_days', 'role', 'file_roots',
+                'tool_grants', 'docker_projects'}
                 or not _label(body.get('name'))):
             raise ValueError('密钥名称或字段无效')
         scopes = body.get('scopes', ['read'])
         days = body.get('expires_days', 90)
         supplied_ips = body.get('allowed_ips', [])
         modern = 'role' in body
+        explicit = 'tool_grants' in body
         role = body.get('role') if modern else 'legacy'
         roots = body.get('file_roots', [])
+        tools = body.get('tool_grants', [])
+        projects = body.get('docker_projects', [])
         if (modern and (not isinstance(role, str) or role not in _ROLES)
-                or not modern and roots != []):
+                or not modern and (roots != [] or explicit)
+                or not explicit and projects != []):
             raise ValueError('密钥角色或文件范围无效')
         if not _scopes(scopes, SCOPES if modern else LEGACY_SCOPES):
             raise ValueError('密钥权限无效')
         if modern and not _file_roots(roots, role, scopes):
             raise ValueError('文件范围或访问权限无效')
+        if explicit and not _tool_grants(tools, role, scopes, roots, projects):
+            raise ValueError('具体工具或项目范围无效')
         if type(days) is not int or not 0 <= days <= 365:
             raise ValueError('有效天数须为 0 至 365 的整数')
         ips = normalize_rules(supplied_ips)
@@ -326,8 +373,10 @@ class ApiAccessStore:
                 key_id = secrets.token_hex(12)
             row = {
                 'id': key_id, 'name': body['name'], 'scopes': list(scopes),
-                'policy_version': 2 if modern else 1, 'role': role,
+                'policy_version': 3 if explicit else 2 if modern else 1, 'role': role,
                 'file_roots': [dict(root) for root in roots],
+                'tool_grants': list(tools), 'docker_projects': copy.deepcopy(projects),
+                'grant_revision': 1, 'credential_generation': 1,
                 'disabled': False,
                 'allowed_ips': ips, 'created_at': now,
                 'expires_at': expires_at,
@@ -369,6 +418,7 @@ class ApiAccessStore:
         """
         if (not isinstance(body, dict) or not 2 <= len(body)
                 or set(body) - {'id', 'name', 'role', 'scopes', 'file_roots',
+                                'tool_grants', 'docker_projects',
                                 'allowed_ips', 'expires_days'} or 'id' not in body):
             raise ValueError('密钥更新字段无效')
         self._key_id(body['id'])
@@ -376,10 +426,13 @@ class ApiAccessStore:
             data = self._mutable()
             row = self._selected_key(data, body['id'])
             candidate = self._policy_row(row)
-            for field in ('name', 'role', 'scopes', 'file_roots'):
+            previous = copy.deepcopy(candidate)
+            for field in ('name', 'role', 'scopes', 'file_roots', 'tool_grants', 'docker_projects'):
                 if field in body:
                     candidate[field] = body[field]
-            if 'role' in body:
+            if 'tool_grants' in body:
+                candidate['policy_version'] = 3
+            elif 'role' in body and candidate['policy_version'] < 3:
                 candidate['policy_version'] = 2
             if 'allowed_ips' in body:
                 candidate['allowed_ips'] = normalize_rules(body['allowed_ips'])
@@ -391,6 +444,8 @@ class ApiAccessStore:
                 candidate['expires_at'] = now + days * 86400 if days else None
             if not self._valid_key(candidate):
                 raise ValueError('密钥角色、权限或文件范围无效')
+            if any(candidate[field] != previous[field] for field in _REVISION_FIELDS):
+                self._bump(candidate, 'grant_revision')
             self._check_active_limit(data, candidate, now)
             data['keys'][data['keys'].index(row)] = candidate
             self._write(data)
@@ -407,6 +462,8 @@ class ApiAccessStore:
             if enabled and row['revoked_at'] is not None:
                 raise ValueError('已撤销的密钥不能恢复')
             candidate = dict(self._policy_row(row), disabled=not enabled)
+            if candidate['disabled'] != row.get('disabled', False):
+                self._bump(candidate, 'grant_revision')
             now = self._now()
             self._check_active_limit(data, candidate, now)
             data['keys'][data['keys'].index(row)] = candidate
@@ -422,11 +479,13 @@ class ApiAccessStore:
             if row['revoked_at'] is not None:
                 raise ValueError('已撤销的密钥不能轮换')
             now = self._now()
+            candidate = self._policy_row(row)
+            self._bump(candidate, 'credential_generation')
             token = 'r1_' + secrets.token_urlsafe(32)
             digest = hashlib.sha256(token.encode('ascii')).hexdigest()
             if any(hmac.compare_digest(digest, other['digest']) for other in data['keys']):
                 raise OSError('未能生成新的访问密钥')
-            candidate = dict(self._policy_row(row), digest=digest, last_used_at=None)
+            candidate.update(digest=digest, last_used_at=None)
             data['keys'][data['keys'].index(row)] = candidate
             self._write(data)
             result = self._public_key(candidate, now)
@@ -443,6 +502,10 @@ class ApiAccessStore:
             if row is None:
                 raise ValueError('密钥不存在')
             if row['revoked_at'] is None:
+                candidate = self._policy_row(row)
+                self._bump(candidate, 'grant_revision')
+                data['keys'][data['keys'].index(row)] = candidate
+                row = candidate
                 row['revoked_at'] = now
                 self._write(data)
             return self._public_key(row, now)
@@ -470,7 +533,10 @@ class ApiAccessStore:
                     matched = row
             if matched is None:
                 return None, 'invalid_key'
-            status = self._key_status(matched, self._now())
+            try:
+                status = self._key_status(matched, self._now())
+            except ValueError:
+                return None, 'storage_unavailable'
             if status != 'active':
                 return None, 'key_' + status
             if matched['allowed_ips'] and not peer_matches(canonical, matched['allowed_ips']):
@@ -481,7 +547,40 @@ class ApiAccessStore:
             return {'key_id': matched['id'], 'name': matched['name'],
                     'scopes': list(matched['scopes']), 'role': policy['role'],
                     'policy_version': policy['policy_version'],
-                    'file_roots': [dict(root) for root in policy['file_roots']]}, 'ok'
+                    'file_roots': [dict(root) for root in policy['file_roots']],
+                    'tool_grants': list(policy['tool_grants']),
+                    'docker_projects': copy.deepcopy(policy['docker_projects']),
+                    'grant_revision': policy['grant_revision'],
+                    'credential_generation': policy['credential_generation']}, 'ok'
+
+    def is_current(self, principal):
+        """Revalidate an already authenticated principal around a bounded read.
+
+        This is not initial authentication and must never accept a principal
+        supplied over HTTP. The original authorize() checked the real peer;
+        changes to IP policy advance the revision checked here. No secret is
+        needed to discard a result after rotation, revocation or natural expiry.
+        """
+        if (not isinstance(principal, dict)
+                or not isinstance(principal.get('key_id'), str)
+                or not _KEY_ID_RE.fullmatch(principal['key_id'])
+                or any(type(principal.get(field)) is not int
+                       or not 1 <= principal[field] <= _MAX_REVISION
+                       for field in ('grant_revision', 'credential_generation'))):
+            return False
+        with self.lock:
+            try:
+                data, valid = self._read()
+                if not valid or not data['enabled']:
+                    return False
+                row = next((row for row in data['keys'] if row['id'] == principal['key_id']), None)
+                if row is None or self._key_status(row, self._now()) != 'active':
+                    return False
+                policy = self._policy_row(row)
+                return all(principal[field] == policy[field]
+                           for field in ('grant_revision', 'credential_generation'))
+            except (OSError, ValueError, TypeError):
+                return False
 
     def record(self, principal, operation, peer, outcome, duration_ms=0, *, touch_key=True):
         """Persist only a known operation, outcome and address, never its arguments."""
@@ -495,7 +594,9 @@ class ApiAccessStore:
             key_id = principal.get('key_id') if isinstance(principal, dict) else None
             row = next((row for row in data['keys'] if row['id'] == key_id), None)
             key_id = row['id'] if row is not None else None
-            if row is not None and touch_key:
+            if (row is not None and touch_key and
+                    (not isinstance(principal, dict) or principal.get('credential_generation',
+                     row.get('credential_generation', 1)) == row.get('credential_generation', 1))):
                 row['last_used_at'] = now
             data['audit'].append({
                 'timestamp': now, 'key_id': key_id, 'operation': operation,

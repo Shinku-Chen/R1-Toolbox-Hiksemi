@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 import test_integration_http as fixture
-from api_contracts import contract_catalog
+from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
 
 
 ROUTE = '/api/access/contracts'
@@ -33,7 +33,7 @@ class ApiContractHTTPTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual({'ok': True, **contract_catalog()}, value)
         self.assertEqual(20, len(value['tools']))
-        self.assertTrue(all(tool['implemented'] is False for tool in value['tools']))
+        self.assertEqual({tool['name'] for tool in value['tools'] if tool['implemented']}, IMPLEMENTED_TOOLS)
         after = self.server.api_access.path.read_bytes() if self.server.api_access.path.exists() else None
         self.assertEqual(before, after)
         roots.assert_not_called()
@@ -100,7 +100,7 @@ class ApiContractHTTPTests(unittest.TestCase):
                 with self.subTest(role=role, name=name):
                     status, _, value = self.rest_action(key, tool=name, arguments={})
                     self.assertEqual(200, status)
-                    self.assert_tool_error(value, 'unknown_tool')
+                    self.assert_tool_error(value, 'scope_denied' if name in IMPLEMENTED_TOOLS else 'unknown_tool')
         self.assert_no_actions()
 
 

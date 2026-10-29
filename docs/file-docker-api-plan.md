@@ -1,8 +1,8 @@
 # 文件读写与固定 Docker 项目接口方案
 
-状态：接口定义已落地；文件操作、传输和固定项目工具的真实后端尚未接入。日期：2026-10-29；定义前代码基线：`4a6b3c3fe03fbf4d22d5c4f1933ea3e99e07a229`。
+状态：逐工具授权、文件根元数据和固定 Docker 项目读取已接入；真实文件内容操作与项目更新仍待接入。日期：2026-10-29；本批前代码基线：`4328137fb862fbc9fce9e921d9b3b075d41e10d6`。
 
-本批方案覆盖文件读写，以及已登记 Docker 项目的读取和受控镜像更新。用户选择的“先只做文件读取和项目状态核对”仅限定本次 NAS 实机验收，不取消写能力设计，也不把写工具排除到未选范围。现有 MCP 工具继续有效；以下新增接口均尚未实现，须完成后端核验、测试和明确授权后才开放。
+本方案覆盖文件读写，以及已登记 Docker 项目的读取和受控镜像更新。用户选择的“先只做文件读取和项目状态核对”仅限定 NAS 实机验收，不取消写能力设计。二十项新增合同中，`list_file_roots` 与三个 Docker 读取工具已有实际回调；其余十六项仍待接入，须完成后端核验、测试和明确授权后才开放。
 
 ## 0．已实现的定义入口
 
@@ -11,7 +11,7 @@
 - 所有者接口：`GET /api/access/contracts`，无查询参数；遵循原有 Web `password/pair/open` 授权、同源规则和 `no-store`，Bearer（即使同时带所有者 Cookie）与单独开发窗口不能使用。MCP 关闭时仍可由所有者查阅。
 - 网页“API 管理 → 文件与 Docker 接口定义”按需读取、展示和复制定义；不创建 Token、不更改权限、不访问文件或查询原厂服务。
 
-定义明确返回 `status:definitions_only`，所有二十项的 `implemented:false`。这不是 MCP `tools/list`；当前可调用目录仍为原十工具。`policy_version:3`、逐工具授权、项目登记和实时文件 ACL 是后端接入前的合同要求，本轮没有迁移密钥存储或启用这些未来权限。只读实机核对安排见[验收清单](file-docker-readonly-acceptance.md)。
+定义目录仍返回 `status:definitions_only`、`execution_allowed:false`，因为查阅定义本身不授予执行权；逐项 `implemented` 反映四项已接入、十六项待接入。这不是 MCP `tools/list`。当前全量可调用目录为十四项，policy v1／v2 仍冻结原十项。`policy_version:3`、逐工具授权、项目登记和存储 v4 已落地；真实文件 ACL 与安全打开尚未闭合。Docker 实现边界见[固定项目读取](docker-projects.md)，只读实机核对见[验收清单](file-docker-readonly-acceptance.md)。
 
 ## 1．能力范围与调用方式
 
@@ -75,9 +75,9 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 ### 版本与授权结构
 
-当前持久格式为 v1／v2／v3，权限策略为 policy v1／v2，两者不同。本批建议持久格式 v4、权限策略 v3：
+当前持久格式为 v4，兼容读取 v1／v2／v3；权限策略为 policy v1／v2／v3，两者不同。以下为 policy v3 的结构合同：
 
-以下为本次只读验收键的示例，不代表其他角色只能选择读取工具。写入键须另选具体写工具，并将相应目录设为 `readwrite`；Docker 更新另授予项目 `update_image`，不能仅凭 `inspect` 执行。
+以下为本批四项新读取工具的授权结构示例，实际根和项目 ID 必须由所有者选择已核验的资源。当前所有者接口只接受已接入的十四项工具，尚未接入的文件内容操作拒绝授权。后续写入键须另选具体写工具并获得目录读写范围；Docker 更新还须 `update_image`，不能仅凭 `inspect` 执行，本批所有者接口只开放项目 `inspect`。
 
 ```json
 {
@@ -85,8 +85,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
   "role": "readonly",
   "scopes": ["files", "docker"],
   "tool_grants": [
-    "list_file_roots", "list_directory", "get_file_info",
-    "prepare_file_download", "get_file_transfer", "cancel_file_transfer",
+    "list_file_roots",
     "list_docker_projects", "get_docker_project_status", "get_docker_project_summary"
   ],
   "file_roots": [
@@ -294,7 +293,9 @@ HTTP Range 与 HEAD 语义依据 [RFC 9110，第 9.3.2、14 节](https://www.rfc
 
 登记默认只允许 `inspect`；所有者可另行登记第 7 节的 `update_image` 服务及镜像范围，只有通过后端门槛才可启用。本次实机验收只登记 `inspect`。`r1-toolbox` 等自身项目可在所有者明确选择后提供只读摘要；机器更新始终受实际容器／项目身份保护，不能靠改名绕过。MCP 本身不登记资源。
 
-### 原厂读取与结果投影
+### 实际读取来源与原厂备选合同
+
+本批实际走固定本机 Docker Unix socket 的受限 GET，并核验 dockerd peer、引擎与已登记配置／服务身份；项目状态和摘要只声称引擎证据，不读取 Compose 正文。`native_status/pop_status` 为 `null`，摘要明确配置尚未完整解析。下述原厂签名 HTTP 读取仍为备选合同，未作为本批生产适配器开放，不能把静态证据当成已实测。
 
 后端将登记 ID 映射至固定项目，调用已审计的：
 

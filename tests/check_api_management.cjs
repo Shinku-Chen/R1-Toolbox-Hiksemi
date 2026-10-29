@@ -46,7 +46,18 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const rotatedSecret = 'r1-fixture-rotated-ONLY-ONCE-<svg onload=x>';
   const unsafeName = '<img src=x onerror="window.apiNameInjected=1">客厅 AI';
   const calls = [];
-  let reads = 0, contractReads = 0, failContracts = false, failCreate = false, failRead = false, failManage = false;
+  let reads = 0, contractReads = 0, projectReads = 0, failContracts = false, failCreate = false, failRead = false, failManage = false;
+  const fixtureTools = [
+    ['get_nas_status', 'read', 'readonly'], ['get_media_status', 'media', 'readwrite'],
+    ['set_fan_policy', 'fan', 'readwrite'], ['release_fan', 'fan', 'readwrite'],
+    ['set_light_policy', 'light', 'readwrite'], ['set_rgb', 'light', 'readwrite'],
+    ['set_screen', 'screen', 'readwrite'], ['update_screen_settings', 'screen', 'readwrite'],
+    ['request_power', 'power', 'admin'], ['cancel_power', 'power', 'admin'],
+    ['list_file_roots', 'files', 'readonly'], ['list_docker_projects', 'docker', 'readonly'],
+    ['get_docker_project_status', 'docker', 'readonly'], ['get_docker_project_summary', 'docker', 'readonly'],
+  ].map(([name, scope, min_role]) => ({ name, title: name, scope, min_role }));
+  const projectId = 'project_' + '3'.repeat(24), candidateId = 'candidate_' + '4'.repeat(24);
+  const unsafeProject = '<svg onload="window.apiProjectInjected=1">片库';
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
     role_catalog: [
@@ -63,13 +74,15 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       { id: 'media', label: '媒体状态', description: '查询原厂媒体任务', min_role: 'readwrite', implemented: true },
       ...[['files', '文件管理'], ['docker', 'Docker 部署'], ['apps', '应用市场'], ['downloads', '下载器'],
         ['movie', '影视墙'], ['albums', '相册'], ['sharing', '分享'], ['backup', '备份'], ['system', '系统管理']]
-        .map(([id, label]) => ({ id, label, description: '分领域授权', min_role: 'readonly', implemented: false })),
+        .map(([id, label]) => ({ id, label, description: '分领域授权', min_role: 'readonly', implemented: ['files', 'docker'].includes(id) })),
       { id: 'unrecognized', label: '未知功能不可伪造', implemented: true },
     ],
     file_root_catalog: { available: true, status: 'ok', reason: null, roots: [
       { id: 'root_' + '1'.repeat(24), label: '<img src=x onerror="window.apiRootInjected=1">视频资源', mount: '/drives/space_1', read_only: false },
       { id: 'root_' + '2'.repeat(24), label: '备份磁盘', mount: '/drives/space_2', read_only: true },
     ] },
+    tools: fixtureTools,
+    docker_project_catalog: { ok: true, projects: [] },
     audit: [{ timestamp: 1793240000, key_id: 'fixture-key-1', key_name: unsafeName,
       operation: 'get_status', peer: '192.168.31.100', outcome: 'ok', duration_ms: 12 }],
     endpoints: { mcp: '/mcp', status: '/api/integration/status', action: '/api/integration/action', capabilities: '/api/integration/capabilities' },
@@ -88,8 +101,29 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await context.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
       if (url.origin !== origin && url.protocol !== 'data:') return route.abort('blockedbyclient');
-      if (url.pathname !== '/api/access' && !url.pathname.startsWith('/api/access/')) return route.continue();
       const reply = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      if (url.pathname.startsWith('/api/docker/projects')) {
+        if (request.method() === 'GET') {
+          projectReads += 1;
+          return reply(200, url.pathname.endsWith('/catalog')
+            ? { ok: true, available: true, candidates: [{ id: candidateId, label: unsafeProject, available: true }] }
+            : state.docker_project_catalog);
+        }
+        const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
+        if (url.pathname.endsWith('/register')) {
+          assert.deepEqual(Object.keys(body).sort(), ['candidate_id', 'label']);
+          assert.equal(body.candidate_id, candidateId);
+          state.docker_project_catalog.projects.push({ id: projectId, label: body.label, operations: ['inspect'], available: true, revoked: false, reason: null });
+        } else if (url.pathname.endsWith('/update')) {
+          assert.deepEqual(Object.keys(body).sort(), ['label', 'project_id']);
+          state.docker_project_catalog.projects.find(row => row.id === body.project_id).label = body.label;
+        } else if (url.pathname.endsWith('/revoke')) {
+          assert.deepEqual(Object.keys(body), ['project_id']);
+          Object.assign(state.docker_project_catalog.projects.find(row => row.id === body.project_id), { revoked: true, available: false, reason: 'fixture：登记已撤销' });
+        } else throw new Error('unexpected project mutation');
+        return reply(200, { ok: true });
+      }
+      if (url.pathname !== '/api/access' && !url.pathname.startsWith('/api/access/')) return route.continue();
       if (url.pathname === '/api/access/contracts') {
         contractReads += 1;
         if (failContracts) return reply(503, { error: 'fixture：接口定义读取失败' });
@@ -105,7 +139,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       if (url.pathname === '/api/access/settings') { state.enabled = body.enabled; return reply(200, { ok: true }); }
       if (url.pathname === '/api/access/keys') {
         if (failCreate) return reply(429, { error: 'fixture：密钥创建失败' });
-        const key = { id: 'fixture-key-' + (state.keys.length + 1), ...body, created_at: 1793240000, enabled: true, disabled: false,
+        const key = { id: 'fixture-key-' + (state.keys.length + 1), ...body, policy_version: Object.hasOwn(body, 'tool_grants') ? 3 : 2, created_at: 1793240000, enabled: true, disabled: false,
           expires_at: body.expires_days === 0 ? null : 1801016000, revoked_at: null, last_used_at: null, status: 'active' };
         state.keys.push(key); return reply(200, { ok: true, key, token: secret });
       }
@@ -120,7 +154,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
         assert.ok(key && key.status !== 'revoked', '只管理未撤销 key');
         if (url.pathname.endsWith('/update')) {
           Object.assign(key, body);
-          if (Object.hasOwn(body, 'role')) key.policy_version = 2;
+          if (Object.hasOwn(body, 'tool_grants')) key.policy_version = 3;
+          else if (Object.hasOwn(body, 'role') && key.policy_version !== 3) key.policy_version = 2;
           if (Object.hasOwn(body, 'expires_days')) key.expires_at = body.expires_days === 0 ? null : 1802222000;
           return reply(200, { ok: true, key });
         }
@@ -145,7 +180,10 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('默认仅勾选读取状态', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
     check('默认只读角色与三级选项', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('select[data-ref="role"] option').evaluateAll(options => options.map(option => option.value))) === '["readonly","readwrite","admin"]');
     check('十五项功能只显示已知领域', await manager.locator('[data-ref="scopes"] input').count() === 15 && await manager.locator('[data-ref="scopes"] input[value="unrecognized"]').count() === 0);
-    check('新增功能明确显示待接入', (await manager.locator('[data-ref="scopes"] label').filter({ hasText: '文件管理' }).innerText()).includes('待接入') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('仅预授权'));
+    check('文件与项目元数据已接入但真实文件操作仍待接入', (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('浏览、属性、上传和下载仍待接入') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('已接入'));
+    check('具体工具仅显示真实14项且默认仅状态读取', await manager.locator('[data-ref="toolOptions"] input').count() === 14 && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
+    check('角色不足或未选功能的工具不可选', await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isDisabled() && await manager.locator('[data-ref="toolOptions"] input[value="list_file_roots"]').isDisabled());
+    check('项目候选和登记不自动轮询', projectReads === 0);
     check('未选择文件功能时隐藏范围', await manager.locator('[data-ref="fileRoots"]').isHidden());
     await manager.locator('select[data-ref="role"]').selectOption('admin');
     check('管理员角色不自动新增功能授权', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
@@ -171,7 +209,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="loadContracts"]').click();
     await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 20);
     const definition = JSON.parse(await manager.locator('[data-ref="contractDefinition"]').inputValue());
-    check('真实服务返回20项待接入接口与输入输出schema', definition.status === 'definitions_only' && definition.tools.length === 20 && definition.tools.every(tool => tool.implemented === false && tool.inputSchema && tool.outputSchema));
+    check('真实服务返回20项定义并区分4项已接入与16项待接入', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.filter(tool => tool.implemented === true).length === 4 && definition.tools.filter(tool => tool.implemented === false).length === 16 && definition.tools.every(tool => tool.inputSchema && tool.outputSchema));
     check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === 0);
     await page.setViewportSize({ width: 320, height: 960 });
     check('320宽度接口定义无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
@@ -186,6 +224,13 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('input[data-ref="name"]').fill(unsafeName);
     await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
     check('低角色保留功能选择但说明工具不可调用', (await manager.locator('[data-ref="roleStatus"]').innerText()).includes('当前角色不可调用') && await manager.locator('[data-ref="scopes"] input[value="fan"]').isChecked());
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').check();
+    await manager.locator('select[data-ref="role"]').selectOption('readonly');
+    check('降级角色清除不允许的工具', !(await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isChecked()) && await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isDisabled());
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    check('提高角色不重新自动勾选工具', !(await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isChecked()));
+    await manager.locator('select[data-ref="role"]').selectOption('readonly');
     await manager.locator('textarea[data-ref="ips"]').fill('192.168.31.100\nfd00::2');
     await manager.locator('[data-ref="create"]').click();
     await page.locator('.fullmask [data-yes]').click();
@@ -196,7 +241,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     const config = JSON.parse(await secretDialog.locator('[data-ref="config"]').inputValue());
     check('MCP 配置包含对应 URL 和 Bearer 请求头', config.mcpServers.toolbox.url === origin + '/mcp' && config.mcpServers.toolbox.headers.Authorization === 'Bearer ' + secret);
     const created = calls.find(call => call.path === '/api/access/keys');
-    check('创建提交明确角色、功能、空文件范围、来源与有效期', created.body.role === 'readonly' && JSON.stringify(created.body.file_roots) === '[]' && JSON.stringify(created.body.scopes) === '["read","fan"]' && created.body.allowed_ips.length === 2 && created.body.expires_days === 90);
+    check('创建显式policy3且仅授权默认状态工具及空项目文件范围', created.body.role === 'readonly' && JSON.stringify(created.body.file_roots) === '[]' && JSON.stringify(created.body.docker_projects) === '[]' && JSON.stringify(created.body.tool_grants) === '["get_nas_status"]' && JSON.stringify(created.body.scopes) === '["read","fan"]' && created.body.allowed_ips.length === 2 && created.body.expires_days === 90);
     await secretDialog.locator('[data-ref="copyConfig"]').click();
     check('复制 MCP 配置', await page.evaluate(() => window.__apiCopied.some(text => JSON.parse(text).mcpServers.toolbox.url.endsWith('/mcp'))));
     await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }); document.execCommand = () => false; });
@@ -225,7 +270,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
     const metadataEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
     check('IP编辑接受CIDR和点分掩码且不重设有效期或扩大权限', JSON.stringify(metadataEdit.allowed_ips) === JSON.stringify(['192.168.31.0/24', 'fd00::/64', '192.168.32.0/255.255.255.0'])
-      && !Object.hasOwn(metadataEdit, 'expires_days') && !Object.hasOwn(metadataEdit, 'role') && !Object.hasOwn(metadataEdit, 'scopes') && !Object.hasOwn(metadataEdit, 'file_roots'));
+      && !Object.hasOwn(metadataEdit, 'expires_days') && !Object.hasOwn(metadataEdit, 'role') && !Object.hasOwn(metadataEdit, 'scopes') && !Object.hasOwn(metadataEdit, 'file_roots') && !Object.hasOwn(metadataEdit, 'tool_grants') && !Object.hasOwn(metadataEdit, 'docker_projects'));
     await manager.locator('.r1-api-item [data-ref="edit"]').click();
     await manager.locator('select[data-ref="role"]').selectOption('readwrite');
     await manager.locator('[data-ref="scopes"] input[value="screen"]').check();
@@ -233,8 +278,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
     const permissionEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
-    check('明确编辑角色权限和有效期才提交对应字段', permissionEdit.role === 'readwrite'
-      && JSON.stringify(permissionEdit.scopes) === '["read","fan","screen"]' && permissionEdit.expires_days === 7 && JSON.stringify(permissionEdit.file_roots) === '[]');
+    check('角色功能有效期分别提交且不重写未编辑工具和资源', permissionEdit.role === 'readwrite'
+      && JSON.stringify(permissionEdit.scopes) === '["read","fan","screen"]' && permissionEdit.expires_days === 7 && !Object.hasOwn(permissionEdit, 'file_roots') && !Object.hasOwn(permissionEdit, 'tool_grants') && !Object.hasOwn(permissionEdit, 'docker_projects'));
     await manager.locator('.r1-api-item [data-ref="toggle"]').click();
     await manager.locator('.r1-api-item [data-ref="status"]').filter({ hasText: '已停用' }).waitFor();
     check('单key停用不撤销且可以再启用', calls.at(-1).path === '/api/access/keys/enable' && calls.at(-1).body.enabled === false
@@ -290,7 +335,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       path: element.querySelector('[data-root-path]').value, writeDisabled: element.querySelector('option[value="readwrite"]').disabled,
       role: document.querySelector('#r1ApiManager [data-ref="role"]').value }));
     check('默认文件范围只读且子目录为空：' + JSON.stringify(initialFileGrant), initialFileGrant.access === 'readonly' && initialFileGrant.path === '' && initialFileGrant.writeDisabled);
-    check('子目录限制 1024 字符且根名称不注入 HTML', await writableRoot.locator('[data-root-path]').getAttribute('maxlength') === '1024' && await manager.locator('[data-ref="fileRootOptions"] img').count() === 0 && (await writableRoot.innerText()).includes('视频资源'));
+    check('子目录容纳1024个Unicode标量且根名称不注入 HTML', await writableRoot.locator('[data-root-path]').getAttribute('maxlength') === '2048' && await manager.locator('[data-ref="fileRootOptions"] img').count() === 0 && (await writableRoot.innerText()).includes('视频资源'));
     await writableRoot.locator('[data-root-access]').evaluate(select => { select.value = 'readwrite'; });
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '只读角色或只读挂载' }).waitFor();
@@ -326,6 +371,39 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     ]) && !JSON.stringify(fileRequest).includes('/drives'));
     check('列表展示角色和范围预授权', (await manager.locator('.r1-api-item').last().innerText()).includes('读写') && (await manager.locator('.r1-api-item').last().innerText()).includes('电影/2026') && (await manager.locator('.r1-api-item').last().innerText()).includes('待接入'));
 
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    const sameRoot = manager.locator('.r1-api-file-root').first();
+    await sameRoot.locator('[data-add-range]').click();
+    await sameRoot.locator('[data-root-path]').nth(1).fill('备份/资料');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const multiGrantEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('同根多个子目录无损保存且只提交已改文件范围', JSON.stringify(multiGrantEdit.file_roots) === JSON.stringify([
+      { id: 'root_' + '1'.repeat(24), path: '电影/2026', access: 'readwrite' },
+      { id: 'root_' + '1'.repeat(24), path: '备份/资料', access: 'readonly' },
+      { id: 'root_' + '2'.repeat(24), path: '', access: 'readonly' },
+    ]) && !Object.hasOwn(multiGrantEdit, 'role') && !Object.hasOwn(multiGrantEdit, 'scopes') && !Object.hasOwn(multiGrantEdit, 'tool_grants'));
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    check('再次编辑保留同根全部范围及并集提示', await manager.locator('.r1-api-file-root').first().locator('[data-root-path]').count() === 2 && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('并集'));
+    await manager.locator('input[data-ref="name"]').fill('文件范围 AI 已编辑');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const multiMetadata = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('只改名称不重写多范围或工具和项目授权', !Object.hasOwn(multiMetadata, 'file_roots') && !Object.hasOwn(multiMetadata, 'tool_grants') && !Object.hasOwn(multiMetadata, 'docker_projects') && state.keys.at(-1).file_roots.length === 3);
+    state.file_root_catalog.roots[0].read_only = true;
+    await manager.locator('[data-ref="refresh"]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    check('挂载变只读仍显示原读写授权而非静默改写', await manager.locator('.r1-api-file-root').first().locator('[data-root-access]').first().inputValue() === 'readwrite');
+    await manager.locator('input[data-ref="name"]').fill('文件范围 AI 挂载变更保留');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    check('失效写绑定不阻止只改名称且原多范围保持', !Object.hasOwn(calls.filter(call => call.path === '/api/access/keys/update').at(-1).body, 'file_roots') && state.keys.at(-1).file_roots[0].access === 'readwrite');
+    state.file_root_catalog.roots[0].read_only = false;
+    await manager.locator('[data-ref="refresh"]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    await manager.locator('[data-ref="scopes"] input[value="files"]').check();
+
     const rootsBeforeUnavailable = state.file_root_catalog;
     state.file_root_catalog = { available: false, status: 'unavailable', reason: 'fixture：尚无可信挂载', roots: [] };
     await manager.locator('[data-ref="refresh"]').click();
@@ -356,7 +434,45 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
     const legacyEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
     check('旧key仅编辑元数据不发送角色功能或新过期时间', legacyEdit.id === 'fixture-legacy'
-      && !Object.hasOwn(legacyEdit, 'role') && !Object.hasOwn(legacyEdit, 'scopes') && !Object.hasOwn(legacyEdit, 'expires_days'));
+      && !Object.hasOwn(legacyEdit, 'role') && !Object.hasOwn(legacyEdit, 'scopes') && !Object.hasOwn(legacyEdit, 'expires_days') && !Object.hasOwn(legacyEdit, 'tool_grants') && !Object.hasOwn(legacyEdit, 'docker_projects'));
+    await legacy.locator('[data-ref="edit"]').click();
+    await manager.locator('[data-ref="upgradePolicy"]').check();
+    check('旧键仅显式升级后启用逐工具且新4工具不自动授权', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const upgraded = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('显式升级准确提交工具权限而非全部scope工具', upgraded.id === 'fixture-legacy' && JSON.stringify(upgraded.tool_grants) === '["get_nas_status"]' && state.keys.find(key => key.id === 'fixture-legacy').policy_version === 3);
+
+    await manager.locator('input[data-ref="name"]').fill('项目读取 AI');
+    await manager.locator('[data-ref="scopes"] input[value="docker"]').check();
+    const beforeProjectKey = calls.length;
+    await manager.locator('[data-ref="create"]').click();
+    await manager.locator('[data-ref="error"]').filter({ hasText: '已登记 Docker 项目' }).waitFor();
+    check('Docker范围没有登记项目时不会虚构授权', calls.length === beforeProjectKey && await manager.locator('[data-ref="dockerProjectOptions"] input').count() === 0);
+    await manager.locator('[data-ref="projectManager"] summary').click();
+    await manager.locator('[data-ref="loadProjects"]').click();
+    await manager.locator('[data-ref="projectCandidates"] [data-register]').waitFor();
+    check('项目候选仅按需读且动态名称不注入', projectReads === 2 && await manager.locator('[data-ref="projectCandidates"] svg').count() === 0);
+    await manager.locator('[data-ref="projectCandidates"] [data-register]').click();
+    check('登记确认明确不部署或启停', (await page.locator('.fullmask').last().innerText()).includes('不部署、更新或启停 Docker'));
+    await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="dockerProjectOptions"] input').waitFor();
+    await manager.locator('[data-ref="dockerProjectOptions"] input').check();
+    await manager.locator('[data-ref="toolOptions"] input[value="get_docker_project_status"]').check();
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.locator('#r1ApiSecret').waitFor(); await page.locator('#r1ApiSecret [data-ref="close"]').click();
+    const projectKey = calls.filter(call => call.path === '/api/access/keys').at(-1).body;
+    check('项目键只发送已登记inspect和显式读取工具', JSON.stringify(projectKey.docker_projects) === JSON.stringify([{ id: projectId, operations: ['inspect'] }]) && JSON.stringify(projectKey.tool_grants) === '["get_nas_status","get_docker_project_status"]');
+    await manager.locator('[data-ref="registeredProjects"] [data-project-label]').fill('片库新标签');
+    await manager.locator('[data-ref="registeredProjects"] [data-update]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="registeredProjects"] strong').filter({ hasText: '片库新标签' }).waitFor();
+    check('项目标签更新只修改元数据且保留授权ID', state.keys.at(-1).docker_projects[0].id === projectId && calls.some(call => call.path === '/api/docker/projects/update' && call.body.project_id === projectId));
+    await manager.locator('[data-ref="registeredProjects"] [data-revoke]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="registeredProjects"] [data-project-reason]').filter({ hasText: '已撤销登记' }).waitFor();
+    check('撤销登记不调用部署/停止且失效项目不可勾选', await manager.locator('[data-ref="dockerProjectOptions"] input').isDisabled() && calls.filter(call => call.path.startsWith('/api/docker')).every(call => ['/api/docker/projects/register','/api/docker/projects/update','/api/docker/projects/revoke'].includes(call.path)));
+    check('项目管理没有执行动态名称脚本', await page.evaluate(() => !window.apiProjectInjected));
+    await manager.locator('[data-ref="scopes"] input[value="docker"]').uncheck();
+    await manager.locator('[data-ref="projectManager"] summary').click();
     await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
 
     await manager.locator('input[data-ref="name"]').fill('长期 AI');

@@ -64,6 +64,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/history/diag', '/api/smart', '/api/disk_health', '/api/scan_log', '/api/notify',
     '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
     '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/access/contracts', '/api/services',
+    '/api/access/file-readiness', '/api/docker/projects', '/api/docker/projects/catalog',
     '/api/business',
 )) | PANEL_QUERY_ROUTES
 
@@ -78,12 +79,17 @@ PANEL_POST_ROUTES = frozenset((
     '/api/dev/media', '/api/dev/storage/probe', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
     '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate',
     '/api/services/screen', '/api/services/mcp', '/api/services/developer', '/api/r1/business/refresh',
+    '/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
 ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
                               '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate'))
 SERVICE_POST_ROUTES = frozenset(('/api/services/screen', '/api/services/mcp', '/api/services/developer'))
+PROJECT_POST_ROUTES = frozenset(('/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke'))
+MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES
+OWNER_READ_ROUTES = frozenset(('/api/access', '/api/access/contracts', '/api/access/file-readiness',
+                               '/api/services', '/api/docker/projects', '/api/docker/projects/catalog'))
 
 
 def _mcp_accepts(values):
@@ -726,7 +732,7 @@ class WebConfigServer:
     def panel_get(self, route, query, headers, peer=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
-        if route in ('/api/access', '/api/access/contracts', '/api/services'):
+        if route in OWNER_READ_ROUTES:
             if (headers.get('Authorization') is not None
                     or self.panel_authorized(headers, peer=peer) not in ('password', 'pair', 'open')):
                 return 403, {'ok': False, 'error': 'API 管理需要网页登录授权'}, 'application/json; charset=utf-8'
@@ -734,6 +740,12 @@ class WebConfigServer:
                 raise ValueError('API 管理不接受查询参数')
             if route == '/api/access/contracts':
                 return 200, self.integration.contracts(), 'application/json; charset=utf-8'
+            if route == '/api/access/file-readiness':
+                return 200, self.integration.file_readiness(), 'application/json; charset=utf-8'
+            if route in ('/api/docker/projects', '/api/docker/projects/catalog'):
+                value = (self.integration.docker_projects.catalog() if route.endswith('/catalog')
+                         else self.integration.docker_projects.snapshot())
+                return (200 if value.get('ok') is True else 503), value, 'application/json; charset=utf-8'
             return 200, (self.integration.snapshot() if route == '/api/access' else self.services_snapshot()), 'application/json; charset=utf-8'
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
@@ -830,7 +842,7 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
-        if route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES) and headers.get('Authorization') is not None:
+        if route in MANAGEMENT_POST_ROUTES and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
         if route == '/api/r1/business/refresh':
             return self._business_refresh_post(body, headers, ip)
@@ -884,7 +896,7 @@ class WebConfigServer:
             return 200, {'ok': True}, self._auth_cookie('', clear=True)
         authorization = self.panel_authorized(headers, peer=ip)
         authorized = authorization is not None
-        if route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES) and authorization == 'dev':
+        if route in MANAGEMENT_POST_ROUTES and authorization == 'dev':
             return 403, {'ok': False, 'error': '授权管理需要网页登录，开发者白名单不能修改授权'}, None
         if not authorized and not (route == '/api/ui' and not self.auth.required()):
             # With a login password the panel is already gated, so a 401 sends the
@@ -894,6 +906,20 @@ class WebConfigServer:
                 return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
             return 403, {'ok': False, 'error': 'need_pairing',
                          'message': '需要在小屏「设置 → 网页配置」生成五位配对码后解锁设置'}, None
+        if route in PROJECT_POST_ROUTES:
+            # Registry has its own bounded lock; daemon reads must not hold the
+            # hardware-policy lock while an owner registers metadata.
+            started = time.monotonic()
+            try:
+                value = self.integration.manage(route, body)
+            except (ValueError, TypeError):
+                return 400, {'ok': False, 'error': '项目登记参数无效'}, None
+            except Exception:
+                return 503, {'ok': False, 'error': '项目登记暂不可用'}, None
+            code = value.get('error', {}).get('code') if isinstance(value.get('error'), dict) else None
+            status = 200 if value.get('ok') is True else 400 if code == 'invalid_arguments' else 409 if code == 'resource_busy' else 503
+            self.integration.record(None, 'config', ip, value, started=started, touch_key=False)
+            return status, value, None
         # Serialise writes: settings files are read-modify-write, and a fan or
         # light apply must not interleave with another configuration save.
         if not self.operation_lock.acquire(blocking=False):
@@ -1056,11 +1082,27 @@ class WebConfigServer:
                 'storage_identity': lambda: self._storage_debug_snapshot(include_serial=True)[:2],
                 'business': lambda: self._business_debug_snapshot()[:2],
                 'fan': lambda: (200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}),
+                'file_access_readiness': self._file_readiness_snapshot,
+                'docker_project_readiness': lambda: (200, {'ok': True,
+                    'discovery': self.integration.docker_projects.catalog(),
+                    'registry': self.integration.docker_projects.metadata()}),
             }
+            snapshot = collect_diagnostics(checks, collectors)
+            if not self._dev_authorized(ip):
+                return 403, {'ok': False, 'error': '开发窗口已失效，未返回检测结果'}, None
             return 200, {'ok': True, 'version': self.version, 'access': access,
-                         'snapshot': collect_diagnostics(checks, collectors)}, None
+                         'snapshot': snapshot}, None
         finally:
             self.diagnostic_lock.release()
+
+    def _file_readiness_snapshot(self):
+        """Share storage pressure control without opening user files."""
+        if not self.storage_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有存储查询正在进行'}
+        try:
+            return 200, self.integration.file_readiness()
+        finally:
+            self.storage_diagnostic_lock.release()
 
     def _device_diagnostic_snapshot(self):
         """Project identity fields from the existing cache; never refresh hardware."""
@@ -1599,7 +1641,7 @@ class WebConfigServer:
                     if route in MACHINE_ROUTES:
                         self.machine(parsed)
                         return
-                    if route in ('/api/access', '/api/access/contracts', '/api/services') and parsed.fragment:
+                    if route in OWNER_READ_ROUTES and parsed.fragment:
                         self.send(400, {'error': 'API 管理不接受 URL 参数'})
                         return
                     public = route in PUBLIC_ROUTES
@@ -1665,7 +1707,7 @@ class WebConfigServer:
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/storage/probe', '/api/r1/business/refresh') or route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES)) and (parsed.query or parsed.fragment):
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/storage/probe', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:

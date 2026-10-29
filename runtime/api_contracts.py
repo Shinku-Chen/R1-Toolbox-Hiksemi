@@ -13,6 +13,11 @@ from api_permissions import ROLE_CATALOG
 
 _DRAFT = 'https://json-schema.org/draft/2020-12/schema'
 _SAFE_INTEGER = 2 ** 53 - 1
+# Only these contracts have concrete callbacks. Definitions never grant access.
+IMPLEMENTED_TOOLS = frozenset((
+    'list_file_roots', 'list_docker_projects',
+    'get_docker_project_status', 'get_docker_project_summary',
+))
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',
     'role_denied', 'tool_denied', 'permission_denied', 'root_unavailable',
@@ -267,9 +272,10 @@ def _tool(name, title, scope, role, arguments, output, resources, *,
           category='read', idempotency='read_only', gates=None):
     return {
         'name': name, 'title': title, 'scope': scope, 'min_role': role,
-        'category': category, 'implemented': False, 'execution_allowed': False,
-        'status': 'definitions_only',
-        'unimplemented_reason': {
+        'category': category, 'implemented': name in IMPLEMENTED_TOOLS,
+        'execution_allowed': False,
+        'status': 'registered_requires_authorization' if name in IMPLEMENTED_TOOLS else 'definitions_only',
+        'unimplemented_reason': None if name in IMPLEMENTED_TOOLS else {
             'code': 'not_implemented',
             'message': '仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。',
             'required_gates': gates or ['native_contract', 'live_resource_identity',

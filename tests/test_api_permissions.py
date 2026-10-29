@@ -12,6 +12,7 @@ import api_permissions as permissions
 
 
 ROOT_ID = 'root_' + 'a' * 24
+PROJECT_ID = 'project_' + 'b' * 24
 ROLES = ('readonly', 'readwrite', 'admin')
 TOOL_SCOPES = {
     'get_nas_status': 'read', 'get_media_status': 'media',
@@ -26,6 +27,18 @@ def principal(role, scopes):
     return {'policy_version': 2, 'role': role, 'scopes': scopes,
             'file_roots': [{'id': ROOT_ID, 'path': '', 'access': 'readonly'}]
             if 'files' in scopes else []}
+
+
+def explicit_principal(role, tools, scopes=None):
+    scopes = scopes if scopes is not None else sorted({permissions.SCOPE_BY_TOOL[name] for name in tools})
+    scopes = scopes or ['read']
+    value = principal(role, scopes)
+    value.update(policy_version=3, tool_grants=list(tools), docker_projects=[
+        {'id': PROJECT_ID, 'operations': ['inspect'] if role == 'readonly' else ['inspect', 'update_image']}
+    ] if 'docker' in scopes else [])
+    if role != 'readonly' and value['file_roots']:
+        value['file_roots'][0]['access'] = 'readwrite'
+    return value
 
 
 class ApiPermissionTests(unittest.TestCase):
@@ -49,14 +62,15 @@ class ApiPermissionTests(unittest.TestCase):
         # explicit domain. Admin is a ceiling, never an all-domains wildcard.
         for level, role in enumerate(ROLES):
             for scope in permissions.SCOPES:
+                tool = next((name for name, domain in TOOL_SCOPES.items() if domain == scope), None)
                 for minimum, minimum_role in enumerate(ROLES):
                     for granted in (False, True):
                         scopes = [scope] if granted else ['read' if scope != 'read' else 'fan']
                         with self.subTest(role=role, scope=scope, minimum=minimum_role, granted=granted):
                             self.assertEqual(
                                 permissions.permission_allows(principal(role, scopes), scope,
-                                                              minimum_role, tool_name='future_tool'),
-                                granted and level >= minimum,
+                                                              minimum_role, tool_name=tool or 'future_tool'),
+                                bool(tool) and granted and level >= minimum,
                             )
 
     def test_existing_tools_obey_declared_minimum_roles(self):
@@ -135,6 +149,82 @@ class ApiPermissionTests(unittest.TestCase):
         key['file_roots'] = [{'id': ROOT_ID, 'path': '../secret', 'access': 'readwrite'}]
         self.assertFalse(permissions.permission_allows(key, 'files', 'readonly', tool_name='browse_files'))
 
+    def test_policy_v2_pre_authorized_domains_never_gain_any_of_the_new_twenty_tools(self):
+        for role in ROLES:
+            key = principal(role, list(permissions.SCOPES))
+            for name in set(permissions.MIN_ROLE_BY_TOOL) - permissions.LEGACY_TOOLS:
+                with self.subTest(role=role, tool=name):
+                    self.assertFalse(permissions.permission_allows(
+                        key, permissions.SCOPE_BY_TOOL[name], permissions.MIN_ROLE_BY_TOOL[name], tool_name=name))
 
+    def test_known_catalog_matches_reviewed_twenty_and_literal_legacy_ten(self):
+        from api_contracts import contract_catalog
+        declared = {tool['name']: (tool['scope'], tool['min_role']) for tool in contract_catalog()['tools']}
+        self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared))
+        self.assertEqual(set(permissions.SCOPE_BY_TOOL), set(permissions.MIN_ROLE_BY_TOOL))
+        for name, (scope, role) in declared.items():
+            self.assertEqual(permissions.SCOPE_BY_TOOL[name], scope)
+            self.assertEqual(permissions.MIN_ROLE_BY_TOOL[name], role)
+
+    def test_v3_role_domain_exact_tool_cartesian_and_unknown_names(self):
+        for name, scope in permissions.SCOPE_BY_TOOL.items():
+            tools = [name]
+            if name == 'commit_file_upload':
+                tools.append('prepare_file_upload')
+            if name == 'execute_docker_project_update':
+                tools.append('plan_docker_project_update')
+            for level, role in enumerate(ROLES):
+                for domain_granted in (False, True):
+                    for tool_granted in (False, True):
+                        scopes = [scope] if domain_granted else ['read' if scope != 'read' else 'fan']
+                        key = explicit_principal(role, tools if tool_granted else [], scopes)
+                        expected = (domain_granted and tool_granted
+                                    and level >= ROLES.index(permissions.MIN_ROLE_BY_TOOL[name]))
+                        with self.subTest(name=name, role=role, domain=domain_granted, tool=tool_granted):
+                            self.assertEqual(permissions.permission_allows(
+                                key, scope, permissions.MIN_ROLE_BY_TOOL[name], tool_name=name), expected)
+        key = explicit_principal('admin', ['get_nas_status'])
+        for name in (None, [], '*', 'new_future_tool'):
+            self.assertFalse(permissions.permission_allows(key, 'read', 'readonly', tool_name=name))
+        self.assertFalse(permissions.permission_allows(key, 'fan', 'readonly', tool_name='get_nas_status'))
+
+    def test_v3_write_needs_writable_grant_but_copy_source_access_stays_runtime(self):
+        key = explicit_principal('readwrite', ['copy_file'])
+        self.assertTrue(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
+        key['file_roots'][0]['access'] = 'readonly'
+        self.assertFalse(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
+        key['file_roots'].append({'id': ROOT_ID, 'path': 'target', 'access': 'readwrite'})
+        self.assertTrue(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
+
+    def test_v3_docker_exact_operations_dependencies_and_role_ceiling(self):
+        for name in ('list_docker_projects', 'get_docker_project_status', 'get_docker_project_summary',
+                     'get_docker_project_task'):
+            key = explicit_principal('admin', [name])
+            key['docker_projects'][0]['operations'] = ['update_image']
+            self.assertFalse(permissions.permission_allows(key, 'docker', 'readonly', tool_name=name))
+        key = explicit_principal('admin', ['plan_docker_project_update', 'execute_docker_project_update'])
+        self.assertTrue(permissions.permission_allows(key, 'docker', 'admin', tool_name='execute_docker_project_update'))
+        key['tool_grants'].remove('plan_docker_project_update')
+        self.assertFalse(permissions.permission_allows(key, 'docker', 'admin', tool_name='execute_docker_project_update'))
+        key = explicit_principal('readwrite', [], ['docker'])
+        self.assertTrue(permissions.valid_docker_projects(key['docker_projects'], 'readwrite', ['docker']))
+        key['tool_grants'] = ['plan_docker_project_update']
+        self.assertFalse(permissions.permission_allows(key, 'docker', 'admin', tool_name='plan_docker_project_update'))
+
+    def test_v3_malformed_tools_or_resource_grants_fail_closed(self):
+        good = explicit_principal('admin', ['get_nas_status'])
+        bad = [dict(good, tool_grants=tools) for tools in (None, {}, ['*'], ['get_nas_status'] * 2, [[]])]
+        bad += [dict(good, docker_projects=projects) for projects in (None, {}, [{'id': PROJECT_ID, 'operations': ['inspect']}])]
+        for key in bad:
+            with self.subTest(key=key):
+                self.assertFalse(permissions.permission_allows(key, 'read', 'readonly', tool_name='get_nas_status'))
+        project = {'id': PROJECT_ID, 'operations': ['inspect']}
+        for value in (None, {}, [project, project], [{**project, 'id': 'name'}],
+                      [{**project, 'operations': []}], [{**project, 'operations': ['inspect', 'inspect']}],
+                      [{**project, 'operations': [[]]}], [{**project, 'operations': ['*']}],
+                      [{**project, 'extra': True}], [project] * 33):
+            self.assertFalse(permissions.valid_docker_projects(value, 'admin', ['docker']))
+        self.assertFalse(permissions.valid_docker_projects(
+            [{'id': PROJECT_ID, 'operations': ['update_image']}], 'readonly', ['docker']))
 if __name__ == '__main__':
     unittest.main()

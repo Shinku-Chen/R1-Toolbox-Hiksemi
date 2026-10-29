@@ -83,7 +83,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 改代码必须同步新增或修改受影响的测试；没有自动化落点的改动要在汇报里说明缺口与手工验证路径。
 - 任何实际文件变更都要更新 `CHANGELOG.md`（本仓库已存在）。最终需求、架构边界、踩坑、运行/测试/发布方式写进本文件、README 或 docs，不要只留在会话记忆里。
 - 项目不使用 Redis，无 TTL 约定。
-- 文件／Docker 的二十项待接入合同维护在 `runtime/api_contracts.py`，同步到 `docs/api/file-docker-contracts.json`。`GET /api/access/contracts` 仅供所有者查阅，不能把 `implemented:false` 的定义加入 MCP 可调用目录或据此扩大旧 Token 权限；真实文件与项目后端仍须按 `docs/file-docker-api-plan.md` 闭合 ACL、句柄和资源授权后接入。
+- 文件／Docker 的二十项合同维护在 `runtime/api_contracts.py`，同步到 `docs/api/file-docker-contracts.json`。当前四项已接入（授权根元数据和三个固定项目读取），其余十六项不得注册假回调。所有者查定义不授执行权；policy v1／v2 固定原十工具，v3 才按精确工具及资源授权，存储 v4 读取不强制重写。机器根信息不返回宿主绝对挂载路径。Docker 固定 Unix GET 必须验证 peer／引擎／配置及服务身份，原文不出宿主；根规划与 O_PATH 项目配置元数据都不能代替真实文件 ACL、安全打开或内容读取证明。见 `docs/docker-projects.md` 与 `docs/file-docker-api-plan.md`。
 - 中文正文、UI 文案与文档使用全角标点；代码、路径、标识符保持原样。
 
 ## 提交规范

@@ -23,6 +23,12 @@ ROUTE = '/api/dev/diagnostics'
 class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
     """Real HTTP requests; every device/provider read is an isolated mock."""
 
+    def _patch(self, target, name, **kwargs):
+        patcher = mock.patch.object(target, name, **kwargs)
+        value = patcher.start()
+        self.addCleanup(patcher.stop)
+        return value
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='r1-dev-diagnostics-http-')
         self.addCleanup(temporary.cleanup)
@@ -124,7 +130,8 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertLessEqual(value['access']['expires_in'], 3600)
         self.assertEqual(value['catalog']['schema_version'], 1)
         self.assertIs(value['catalog']['read_only'], True)
-        self.assertEqual({row['id'] for row in value['catalog']['checks']}, CHECKS | {'storage_identity'})
+        self.assertEqual({row['id'] for row in value['catalog']['checks']},
+                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness'})
         self.assertNotIn('set-cookie', headers)
         self.assert_no_sources()
 
@@ -148,6 +155,51 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.business.assert_called_once_with(state_dir=self.server.state_dir)
         self.fan.snapshot.assert_called_once_with()
         self.assertNotIn('set-cookie', headers)
+        self.assert_no_controls()
+
+    def test_file_readiness_is_explicit_metadata_and_shares_the_storage_lock(self):
+        provider = self._patch(self.server.integration, 'file_readiness', return_value={
+            'ok': True, 'diagnostic_available': True, 'file_access_available': False,
+            'status': 'metadata_only', 'blockers': ['acl_unverified', 'secure_open_unavailable']})
+        body = {'action': 'snapshot', 'checks': ['file_access_readiness']}
+        status, _, value = self.request(body)
+        self.assertEqual(200, status)
+        data = value['snapshot']['checks']['file_access_readiness']['data']
+        self.assertIs(data['file_access_available'], False)
+        self.assertEqual(data['status'], 'metadata_only')
+        provider.assert_called_once_with()
+        provider.reset_mock()
+        with self.server.storage_diagnostic_lock:
+            _, _, value = self.request(body)
+            self.assertEqual(409, value['snapshot']['checks']['file_access_readiness']['http_status'])
+        provider.assert_not_called()
+        self.assertEqual(400, self.request({**body, 'path': '/private'})[0])
+        self.assert_no_controls()
+
+    def test_docker_readiness_only_discovers_and_reads_registered_metadata(self):
+        registry = self.server.integration.docker_projects
+        discover = self._patch(registry, 'catalog', return_value={
+            'ok': True, 'available': False, 'reason': 'fixture unavailable', 'candidates': []})
+        metadata = self._patch(registry, 'metadata', return_value={'ok': True, 'projects': []})
+        live = self._patch(registry, 'snapshot', side_effect=AssertionError('duplicate engine read'))
+        status, _, value = self.request({'action': 'snapshot', 'checks': ['docker_project_readiness']})
+        self.assertEqual(200, status)
+        data = value['snapshot']['checks']['docker_project_readiness']['data']
+        self.assertIs(data['discovery']['available'], False)
+        self.assertEqual([], data['registry']['projects'])
+        discover.assert_called_once_with()
+        metadata.assert_called_once_with()
+        live.assert_not_called()
+        self.assert_no_controls()
+
+    def test_expired_window_during_collection_discards_the_diagnostic_result(self):
+        self._patch(self.server, '_dev_authorized', side_effect=[True, False])
+        self._patch(self.server.integration, 'file_readiness', return_value={
+            'ok': True, 'status': 'private-fixture-proof'})
+        status, _, value = self.request({'action': 'snapshot', 'checks': ['file_access_readiness']})
+        self.assertEqual(403, status)
+        self.assertNotIn('snapshot', value)
+        self.assertNotIn('private-fixture-proof', json.dumps(value))
         self.assert_no_controls()
 
     def test_selected_check_executes_only_its_fixed_source(self):

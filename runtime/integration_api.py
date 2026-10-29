@@ -9,7 +9,9 @@ import copy
 import time
 
 from api_access import ApiAccessStore, AUDIT_OPERATIONS
-from api_contracts import contract_catalog
+from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
+from api_docker_projects import DockerProjectRegistry
+from api_file_readiness import collect_file_access_readiness
 from api_file_roots import collect_file_roots, validate_file_grants
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
@@ -19,6 +21,7 @@ class IntegrationApi:
     def __init__(self, web, *, state_dir, version='dev'):
         self.web = web
         self.access = ApiAccessStore(state_dir)
+        self.docker_projects = DockerProjectRegistry(state_dir)
         self.mcp = McpService(self.execute, version=version)
 
     def snapshot(self):
@@ -27,13 +30,31 @@ class IntegrationApi:
         state['audit'] = [dict(row, key_name=names.get(row.get('key_id')))
                           for row in state['audit']]
         return {'ok': True, **state,
+                'scope_catalog': self.scope_catalog(),
                 'endpoints': {'mcp': '/mcp', 'status': '/api/integration/status',
                               'action': '/api/integration/action',
                               'capabilities': '/api/integration/capabilities',
                               'contracts': '/api/access/contracts'},
                 'protocol_versions': list(SUPPORTED_VERSIONS),
                 'file_root_catalog': self.file_root_catalog(),
+                'docker_project_catalog': self.docker_projects.metadata(),
                 'tools': self.mcp.tool_catalog()}
+
+    @staticmethod
+    def scope_catalog():
+        """Project partial implementation without granting pending operations."""
+        from api_permissions import SCOPE_CATALOG
+        result = copy.deepcopy(list(SCOPE_CATALOG))
+        for item in result:
+            if item['id'] == 'files':
+                item.update(implemented=True, description='仅提供已授权根的绑定元数据；浏览、上传和下载待接入。')
+            elif item['id'] == 'docker':
+                item.update(implemented=True, description='读取已登记项目的状态和脱敏摘要；部署、启停与更新待接入。')
+        return result
+
+    def file_readiness(self):
+        """No user file or credential reads; report every missing access proof."""
+        return {'ok': True, **collect_file_access_readiness(self.web.panel)}
 
     @staticmethod
     def contracts():
@@ -51,19 +72,21 @@ class IntegrationApi:
         scope. Future domain grants are explicitly pending; they create no tool
         callbacks and do not query native services or install dependencies.
         """
-        from api_permissions import SCOPE_CATALOG
         tools = self.mcp.tool_catalog(principal)
         scopes = list(principal['scopes'])
         domains = []
-        for domain in SCOPE_CATALOG:
+        for domain in self.scope_catalog():
             if domain['id'] not in scopes:
                 continue
             available = [tool['name'] for tool in tools
                          if tool['_meta'][META_REQUIRED_SCOPE] == domain['id']]
             implemented = domain.get('implemented') is not False
+            pending_enable = principal.get('policy_version', 1) < 3 and domain['id'] in ('files', 'docker')
             domains.append({'id': domain['id'], 'label': domain['label'],
                             'implemented': implemented, 'available_tools': available,
+                            'status': 'pending_enable' if pending_enable else 'available' if available else 'not_granted' if implemented else 'backend_unverified',
                             'reason': '待接入，当前没有可调用工具。' if not implemented
+                            else '需要所有者显式启用逐工具授权，旧密钥不会自动获得新工具。' if pending_enable
                             else '当前角色没有可执行的工具。' if not available else None})
         grants = []
         selected = principal.get('file_roots', []) if 'files' in scopes else []
@@ -76,22 +99,47 @@ class IntegrationApi:
                 can_use = root is not None and not (root['read_only'] and grant['access'] == 'readwrite')
                 grants.append({**copy.deepcopy(grant), 'available': can_use,
                                'label': root['label'] if root else None,
-                               'mount': root['mount'] if root else None,
                                'read_only': root['read_only'] if root else None,
                                'reason': '根目录当前无法确认。' if root is None
                                else '挂载已变为只读，原写入授权当前不可用。' if not can_use else None})
         return {'ok': True, 'role': principal.get('role', 'legacy'),
                 'policy_version': principal.get('policy_version', 1),
                 'scopes': scopes, 'file_roots': grants,
+                'tool_grants': list(principal.get('tool_grants', [])),
+                'docker_projects': copy.deepcopy(principal.get('docker_projects', [])),
                 'tools': tools, 'domains': domains}
+
+    def _validate_new_grants(self, body):
+        """Owner grants may select only registered callbacks and resources."""
+        if 'tool_grants' in body:
+            active = {tool['name'] for tool in self.mcp.tool_catalog()}
+            grants = body['tool_grants']
+            if not isinstance(grants, list) or any(not isinstance(name, str) or name not in active for name in grants):
+                raise ValueError('只能选择已接入的具体工具，待接入操作不能授权。')
+        if 'docker_projects' in body:
+            projects = body['docker_projects']
+            registered = {item['id']: item for item in self.docker_projects.metadata().get('projects', [])
+                          if item.get('revoked') is not True}
+            if (not isinstance(projects, list) or any(not isinstance(row, dict)
+                    or not isinstance(row.get('id'), str) or row['id'] not in registered
+                    or row.get('operations') != ['inspect'] for row in projects)):
+                raise ValueError('Docker 范围只能选择已登记项目的读取权限。')
 
     def manage(self, route, body):
         """Called only after the browser's existing session and CSRF gates."""
         if not isinstance(body, dict):
             raise ValueError('API 管理参数需要是对象')
+        project_operations = {
+            '/api/docker/projects/register': self.docker_projects.register,
+            '/api/docker/projects/update': self.docker_projects.update,
+            '/api/docker/projects/revoke': self.docker_projects.revoke,
+        }
+        if route in project_operations:
+            return project_operations[route](body)
         if route == '/api/access/settings':
             return {'ok': True, **self.access.configure(body)}
         if route == '/api/access/keys':
+            self._validate_new_grants(body)
             if body.get('file_roots'):
                 validate_file_grants(body['file_roots'], self.file_root_catalog())
             created = self.access.create_key(body)
@@ -102,6 +150,7 @@ class IntegrationApi:
                 raise ValueError('撤销密钥需要有效的 id')
             return {'ok': True, **self.access.revoke_key(body['id'])}
         if route == '/api/access/keys/update':
+            self._validate_new_grants(body)
             if body.get('file_roots'):
                 validate_file_grants(body['file_roots'], self.file_root_catalog())
             return {'ok': True, 'key': self.access.update_key(body)}
@@ -174,8 +223,40 @@ class IntegrationApi:
             return {key: state.get(key) for key in ('screen', 'settings', 'capabilities')}
         raise ValueError('不支持的状态类别')
 
+    def _read_resource(self, name, arguments, principal):
+        """Read registered metadata only, after initial machine authorization."""
+        if name == 'list_file_roots':
+            catalog = {root['id']: root for root in self.file_root_catalog()['roots']}
+            grouped = {}
+            for grant in principal.get('file_roots', []):
+                grouped.setdefault(grant['id'], []).append({'path': grant['path'], 'access': grant['access']})
+            roots = []
+            for root_id, grants in grouped.items():
+                root = catalog.get(root_id)
+                usable = root is not None and not (root.get('read_only') and any(g['access'] == 'readwrite' for g in grants))
+                roots.append({'root_id': root_id, 'label': str(root['label'])[:128] if root else None,
+                              'grants': grants, 'binding_status': 'present' if usable else 'unavailable',
+                              'verification': 'metadata_only',
+                              'backend': {'status': 'backend_unverified' if usable else 'resource_unavailable',
+                                          'reason': '仅确认根绑定元数据，文件 ACL 与安全打开尚未验证。' if usable else '存储根或已授权挂载模式当前无法确认。'}})
+            return {'ok': True, 'roots': roots, 'may_wake_disks': False}
+        if name == 'list_docker_projects':
+            return self.docker_projects.list_projects(principal)
+        if name == 'get_docker_project_status':
+            return self.docker_projects.get_status(principal, arguments['project_id'])
+        if name == 'get_docker_project_summary':
+            return self.docker_projects.get_summary(principal, arguments['project_id'])
+        raise ValueError('不支持的资源读取')
+
     def execute(self, name, arguments, principal):
-        """Fixed tool callbacks; caller scopes and schemas are checked first."""
+        """Fixed callbacks; short resource reads also recheck before disclosure."""
+        if name in IMPLEMENTED_TOOLS:
+            denied = {'ok': False, 'error': {'code': 'invalid_key',
+                       'message': '读取期间授权已失效，请使用当前有效密钥。', 'retryable': False}}
+            if not self.access.is_current(principal):
+                return denied
+            result = self._read_resource(name, arguments, principal)
+            return result if self.access.is_current(principal) else denied
         if name == 'get_nas_status':
             return {'ok': True, 'section': arguments.get('section', 'overview'),
                     'data': self._status(arguments.get('section', 'overview'))}

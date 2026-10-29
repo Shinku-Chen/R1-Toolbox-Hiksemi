@@ -15,7 +15,8 @@ from mcp_service import (LEGACY_VERSIONS, META_CLIENT_CAPABILITIES,
                          META_VERSION, MODERN_VERSION, READ_SECTIONS,
                          SUPPORTED_VERSIONS, McpService, tool_catalog,
                          validate_http_metadata)
-from api_permissions import MIN_ROLE_BY_TOOL
+from api_permissions import MIN_ROLE_BY_TOOL as DECLARED_MIN_ROLE_BY_TOOL, LEGACY_TOOLS
+MIN_ROLE_BY_TOOL = {name: DECLARED_MIN_ROLE_BY_TOOL[name] for name in LEGACY_TOOLS}
 
 
 def modern_meta(version=MODERN_VERSION):
@@ -59,8 +60,8 @@ class McpServiceTests(unittest.TestCase):
 
     def test_catalog_is_detached_public_metadata_and_has_no_source_calls(self):
         public = tool_catalog()
-        self.assertEqual(10, len(public))
-        self.assertEqual(10, len({item['name'] for item in public}))
+        self.assertEqual(14, len(public))
+        self.assertEqual(14, len({item['name'] for item in public}))
         self.assertTrue(all(item['name'].replace('_', '').isalnum() for item in public))
         self.assertTrue(all(item['inputSchema']['additionalProperties'] is False
                             for item in public))
@@ -247,15 +248,15 @@ class McpServiceTests(unittest.TestCase):
                     ('read', 'media', 'fan', 'light', 'screen', 'power')),
                 'file_roots': []}
 
-    def test_catalog_announces_exact_minimum_roles_for_existing_ten_tools(self):
+    def test_catalog_announces_exact_minimum_roles_for_registered_tools(self):
         metadata = {item['name']: item['_meta'][META_MINIMUM_ROLE]
                     for item in tool_catalog()}
-        self.assertEqual(dict(MIN_ROLE_BY_TOOL), metadata)
+        self.assertEqual({name: DECLARED_MIN_ROLE_BY_TOOL[name] for name in metadata}, metadata)
         self.assertEqual('readonly', metadata['get_nas_status'])
         self.assertEqual('readwrite', metadata['get_media_status'])
         self.assertEqual('admin', metadata['request_power'])
         self.assertEqual('admin', metadata['cancel_power'])
-        self.assertEqual(10, len(metadata))
+        self.assertEqual(14, len(metadata))
 
     def test_catalog_combines_roles_with_explicit_domains(self):
         expected = {

@@ -10,13 +10,15 @@ from datetime import datetime, timezone
 CHECKS = ('device', 'storage', 'business', 'fan')
 # Identity serials require an explicit selection; the default snapshot remains
 # the original four checks even as the discovery catalog grows.
-ALLOWED_CHECKS = CHECKS + ('storage_identity',)
+ALLOWED_CHECKS = CHECKS + ('storage_identity', 'file_access_readiness', 'docker_project_readiness')
 _CHECK_DETAILS = {
     'device': ('设备信息', '只读现有监控中的设备身份缓存。'),
     'storage': ('存储信息', '固定名称查询与现有身份缓存，不运行 SMART 或唤醒磁盘。'),
     'business': ('业务状态', '采集业务只读证据，并保留不可用类别的原因。'),
     'fan': ('风扇现场', '采集风扇预检、进程和监督端现场，不重试接管。'),
     'storage_identity': ('硬盘完整身份', '仅显式选择时交叉核对现有缓存与原厂列表，返回完整序列号；不运行 SMART 或唤盘。'),
+    'file_access_readiness': ('文件访问就绪证据', '只读可信根规划与缺失安全证明，不读取用户文件、凭据或 SMART。'),
+    'docker_project_readiness': ('固定项目就绪证据', '显式读取已核验本机 Docker 元数据和登记绑定，不部署、启停或读取 Compose 原文。'),
 }
 _INVALID_REQUEST = '诊断操作或参数无效。'
 _INVALID_CHECKS = '诊断项目必须是非空且不重复的固定项目列表。'

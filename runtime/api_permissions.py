@@ -64,6 +64,26 @@ MIN_ROLE_BY_TOOL = {
     'update_screen_settings': 'readwrite',
     'request_power': 'admin',
     'cancel_power': 'admin',
+    'list_file_roots': 'readonly',
+    'list_directory': 'readonly',
+    'get_file_info': 'readonly',
+    'prepare_file_download': 'readonly',
+    'get_file_transfer': 'readonly',
+    'cancel_file_transfer': 'readonly',
+    'prepare_file_upload': 'readwrite',
+    'commit_file_upload': 'readwrite',
+    'create_directory': 'readwrite',
+    'rename_file': 'readwrite',
+    'copy_file': 'readwrite',
+    'move_file': 'readwrite',
+    'trash_file': 'readwrite',
+    'get_file_operation': 'readwrite',
+    'list_docker_projects': 'readonly',
+    'get_docker_project_status': 'readonly',
+    'get_docker_project_summary': 'readonly',
+    'plan_docker_project_update': 'admin',
+    'execute_docker_project_update': 'admin',
+    'get_docker_project_task': 'readonly',
 }
 LEGACY_TOOLS = frozenset((
     'get_nas_status', 'get_media_status', 'set_fan_policy', 'release_fan',
@@ -72,6 +92,40 @@ LEGACY_TOOLS = frozenset((
 ))
 _ROLE_LEVELS = {'readonly': 0, 'readwrite': 1, 'admin': 2}
 _ROOT_ID_RE = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
+_PROJECT_ID_RE = re.compile(r'project_[0-9a-f]{24}\Z', re.ASCII)
+SCOPE_BY_TOOL = {
+    'get_nas_status': 'read', 'get_media_status': 'media',
+    'set_fan_policy': 'fan', 'release_fan': 'fan',
+    'set_light_policy': 'light', 'set_rgb': 'light',
+    'set_screen': 'screen', 'update_screen_settings': 'screen',
+    'request_power': 'power', 'cancel_power': 'power',
+    'list_file_roots': 'files', 'list_directory': 'files', 'get_file_info': 'files',
+    'prepare_file_download': 'files', 'get_file_transfer': 'files',
+    'cancel_file_transfer': 'files', 'prepare_file_upload': 'files',
+    'commit_file_upload': 'files', 'create_directory': 'files',
+    'rename_file': 'files', 'copy_file': 'files', 'move_file': 'files',
+    'trash_file': 'files', 'get_file_operation': 'files',
+    'list_docker_projects': 'docker', 'get_docker_project_status': 'docker',
+    'get_docker_project_summary': 'docker', 'plan_docker_project_update': 'docker',
+    'execute_docker_project_update': 'docker', 'get_docker_project_task': 'docker',
+}
+_WRITE_FILE_TOOLS = frozenset((
+    'prepare_file_upload', 'commit_file_upload', 'create_directory',
+    'rename_file', 'copy_file', 'move_file', 'trash_file', 'get_file_operation',
+))
+_UPDATE_PROJECT_TOOLS = frozenset((
+    'plan_docker_project_update', 'execute_docker_project_update',
+))
+_TOOL_DEPENDENCIES = {
+    'commit_file_upload': 'prepare_file_upload',
+    'execute_docker_project_update': 'plan_docker_project_update',
+}
+
+
+def _valid_scopes(value):
+    return (isinstance(value, (list, tuple, set, frozenset)) and bool(value)
+            and all(isinstance(item, str) and item in SCOPES for item in value)
+            and len(set(value)) == len(value))
 
 
 def valid_file_roots(value, role, scopes):
@@ -80,7 +134,8 @@ def valid_file_roots(value, role, scopes):
     Empty paths select an entire known root. Nonempty paths are relative POSIX
     subdirectories, with no aliases that could hide traversal or duplicate grants.
     """
-    if not isinstance(value, list) or len(value) > 32:
+    if (not isinstance(value, list) or len(value) > 32 or not _valid_scopes(scopes)
+            or not isinstance(role, str) or role not in _ROLE_LEVELS):
         return False
     identities = set()
     for row in value:
@@ -99,6 +154,58 @@ def valid_file_roots(value, role, scopes):
     return bool(value) == ('files' in scopes)
 
 
+def valid_docker_projects(value, role, scopes):
+    """Validate configured project grants, without trusting names or a registry.
+
+    Readwrite may pre-authorize update resources, but only admin can select an
+    update tool. The owner adapter must separately verify every registered ID.
+    """
+    if (not isinstance(value, list) or len(value) > 32 or not _valid_scopes(scopes)
+            or not isinstance(role, str) or role not in _ROLE_LEVELS):
+        return False
+    identities = set()
+    for row in value:
+        if (not isinstance(row, dict) or set(row) != {'id', 'operations'}
+                or not isinstance(row['id'], str) or not _PROJECT_ID_RE.fullmatch(row['id'])
+                or row['id'] in identities or not isinstance(row['operations'], list)
+                or not 1 <= len(row['operations']) <= 2
+                or any(not isinstance(item, str) or item not in ('inspect', 'update_image')
+                       for item in row['operations'])
+                or len(set(row['operations'])) != len(row['operations'])
+                or role == 'readonly' and 'update_image' in row['operations']):
+            return False
+        identities.add(row['id'])
+    return bool(value) == ('docker' in scopes)
+
+
+def valid_tool_grants(value, role, scopes, file_roots, docker_projects):
+    """Check the exact known tool set and structural resource dependencies.
+
+    This confers no filesystem, task ownership or native ACL proof. In
+    particular transfer queries/cancel still restore their original permissions
+    from a trusted runtime record before inspecting an upload or download.
+    """
+    if (not isinstance(role, str) or role not in _ROLE_LEVELS
+            or not isinstance(value, list) or len(value) > len(SCOPE_BY_TOOL)
+            or not valid_file_roots(file_roots, role, scopes)
+            or not valid_docker_projects(docker_projects, role, scopes)
+            or any(not isinstance(name, str) or name not in SCOPE_BY_TOOL for name in value)
+            or len(set(value)) != len(value)):
+        return False
+    writable = any(root['access'] == 'readwrite' for root in file_roots)
+    project_operations = {operation for project in docker_projects for operation in project['operations']}
+    for name in value:
+        if (SCOPE_BY_TOOL[name] not in scopes
+                or _ROLE_LEVELS[role] < _ROLE_LEVELS[MIN_ROLE_BY_TOOL[name]]
+                or name in _WRITE_FILE_TOOLS and not writable
+                or name in _UPDATE_PROJECT_TOOLS and 'update_image' not in project_operations
+                or SCOPE_BY_TOOL[name] == 'docker' and name not in _UPDATE_PROJECT_TOOLS
+                   and 'inspect' not in project_operations
+                or name in _TOOL_DEPENDENCIES and _TOOL_DEPENDENCIES[name] not in value):
+            return False
+    return True
+
+
 def permission_allows(principal, scope, minimum_role, *, tool_name=None):
     """Apply a role ceiling AND an explicitly selected domain, never role alone.
 
@@ -108,7 +215,9 @@ def permission_allows(principal, scope, minimum_role, *, tool_name=None):
     """
     if (not isinstance(principal, dict) or not isinstance(scope, str)
             or scope not in SCOPES or not isinstance(minimum_role, str)
-            or minimum_role not in _ROLE_LEVELS):
+            or minimum_role not in _ROLE_LEVELS
+            or not isinstance(tool_name, str) or tool_name not in SCOPE_BY_TOOL
+            or SCOPE_BY_TOOL[tool_name] != scope):
         return False
     scopes = principal.get('scopes')
     if (not isinstance(scopes, (list, tuple, set, frozenset)) or not scopes
@@ -116,17 +225,28 @@ def permission_allows(principal, scope, minimum_role, *, tool_name=None):
             or len(set(scopes)) != len(scopes) or scope not in scopes):
         return False
     if 'role' not in principal and 'policy_version' not in principal:
+        if principal.get('tool_grants', []) != [] or principal.get('docker_projects', []) != []:
+            return False
         legacy = True
     else:
         version, role = principal.get('policy_version'), principal.get('role')
         if type(version) is not int:
             return False
         if version == 1 and role == 'legacy':
-            if principal.get('file_roots') != []:
+            if (principal.get('file_roots') != [] or principal.get('tool_grants', []) != []
+                    or principal.get('docker_projects', []) != []):
                 return False
             legacy = True
         elif version == 2 and isinstance(role, str) and role in _ROLE_LEVELS:
-            return (valid_file_roots(principal.get('file_roots'), role, scopes)
+            return (tool_name in LEGACY_TOOLS
+                    and principal.get('tool_grants', []) == []
+                    and principal.get('docker_projects', []) == []
+                    and valid_file_roots(principal.get('file_roots'), role, scopes)
+                    and _ROLE_LEVELS[role] >= _ROLE_LEVELS[minimum_role])
+        elif version == 3 and isinstance(role, str) and role in _ROLE_LEVELS:
+            return (valid_tool_grants(principal.get('tool_grants'), role, scopes,
+                                      principal.get('file_roots'), principal.get('docker_projects'))
+                    and tool_name in principal['tool_grants']
                     and _ROLE_LEVELS[role] >= _ROLE_LEVELS[minimum_role])
         else:
             return False

@@ -10,7 +10,8 @@ import os
 import unittest
 
 import test_integration_http as fixture
-from api_permissions import MIN_ROLE_BY_TOOL
+from api_permissions import MIN_ROLE_BY_TOOL as DECLARED_MIN_ROLE_BY_TOOL, LEGACY_TOOLS
+MIN_ROLE_BY_TOOL = {name: DECLARED_MIN_ROLE_BY_TOOL[name] for name in LEGACY_TOOLS}
 
 
 CAPABILITIES = '/api/integration/capabilities'
@@ -82,7 +83,7 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         status, _, value = self.capabilities(key)
         self.assertEqual(200, status)
         self.assertEqual({'ok', 'role', 'policy_version', 'scopes', 'file_roots',
-                          'tools', 'domains'}, set(value))
+                          'tools', 'domains', 'tool_grants', 'docker_projects'}, set(value))
         self.assertIs(value['ok'], True)
         self.assertEqual('admin', value['role'])
         self.assertEqual(2, value['policy_version'])
@@ -195,7 +196,8 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         state = json.loads(path.read_text(encoding='utf-8'))
         state['version'] = 1
         for row in state['keys']:
-            for field in ('role', 'policy_version', 'file_roots', 'disabled'):
+            for field in ('role', 'policy_version', 'file_roots', 'disabled',
+                          'tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'):
                 row.pop(field, None)
         digest = state['keys'][0]['digest']
         path.write_text(json.dumps(state), encoding='utf-8')
@@ -211,7 +213,7 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         self.assertFalse(result['isError'])
         self.controller.action.assert_called_once_with('power.cancel', {})
         persisted = json.loads(path.read_text(encoding='utf-8'))
-        self.assertEqual(3, persisted['version'])
+        self.assertEqual(4, persisted['version'])
         self.assertEqual(digest, persisted['keys'][0]['digest'])
         self.assertEqual('legacy', persisted['keys'][0]['role'])
         self.assertEqual(1, persisted['keys'][0]['policy_version'])
@@ -289,13 +291,14 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
             self.assertEqual(expected, root[name])
         self.assertIs(root['available'], True)
         self.assertEqual('主磁盘', root['label'])
-        self.assertEqual('/drives/data', root['mount'])
+        self.assertNotIn('mount', root)
         serialized = json.dumps(capabilities, ensure_ascii=False)
         self.assertNotIn(OTHER_ROOT_ID, serialized)
         self.assertNotIn('其它私有空间', serialized)
         self.assertNotIn('/drives/private-unselected', serialized)
         for domain in capabilities['domains']:
-            self.assertIs(domain['implemented'], False)
+            self.assertIs(domain['implemented'], True)
+            self.assertEqual(domain['status'], 'pending_enable')
             self.assertEqual([], domain['available_tools'])
             self.assertTrue(domain['reason'])
         self.assertGreaterEqual(catalog.call_count, 1)

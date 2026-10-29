@@ -1076,7 +1076,7 @@ function r1OpenApiManager() {
       <div class="r1-api-service"><label class="check"><input type="checkbox" data-ref="enabled">启用局域网 API 服务</label><span class="sub" data-ref="serviceStatus"></span></div>
       <div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label><label>功能能力目录<input class="textfield mono" data-ref="restCapabilities" readonly aria-label="功能能力目录地址"></label></div>
       <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
-        <p class="sub">只读、读写、管理员按工具和资源分别授权。以下接口仍待接入，查看定义不会启用工具或修改密钥。</p>
+        <p class="sub">只读、读写、管理员按工具和资源分别授权。定义分别标明已接入与待接入；查看定义不会启用工具或修改密钥。</p>
         <button class="btn" type="button" data-ref="loadContracts">读取接口定义</button>
         <p class="sub" data-ref="contractStatus" role="status"></p><div data-ref="contractList"></div>
         <label class="r1-api-input" data-ref="contractJson" hidden>接口定义 JSON<textarea class="textfield mono" data-ref="contractDefinition" rows="10" readonly spellcheck="false" aria-label="接口定义 JSON"></textarea></label>
@@ -1085,20 +1085,35 @@ function r1OpenApiManager() {
       <h3 data-ref="formTitle">创建访问密钥</h3><form data-ref="form" class="r1-api-create">
         <label class="r1-api-input">密钥名称<input class="textfield" data-ref="name" aria-label="密钥名称" placeholder="例如：客厅 AI" maxlength="64" required autocomplete="off"></label>
         <label class="r1-api-input">操作角色<select class="textfield" data-ref="role" aria-label="操作角色"></select><span class="sub" data-ref="roleDescription"></span></label>
+        <label class="r1-api-root-choice" data-ref="upgradePolicyLabel" hidden><input type="checkbox" data-ref="upgradePolicy"><span>启用逐工具授权<span class="sub">旧密钥默认保持原策略。明确启用后只以原十工具中符合当前角色和功能的权限作为初值，不自动增加新工具。</span></span></label>
         <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
         <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
-        <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">待接入，当前仅保存范围授权；尚不能通过 AI 浏览、上传或下载文件。只会显示宿主已确认的存储根，不会自动授予全盘。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+        <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
+        <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">目前仅接入根规划元数据；浏览、属性、上传和下载仍待接入，当前仅保存范围授权。多个范围按允许范围的并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+        <fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许读取的已登记 Docker 项目</legend><p class="sub">仅授权读取身份已核验的项目；不会部署、更新或启停容器。角色不替代具体工具和项目范围。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
         <label class="r1-api-input">允许的来源 IP／网段（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="192.168.31.0/24&#10;fd00::/64"></textarea><span class="sub">支持 IPv4／IPv6、CIDR 与 IPv4 点分掩码。留空允许持密钥的局域网客户端；不接受域名、通配符或公网全放行。</span></label>
         <label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="keep" data-ref="keepExpiry" hidden>保持当前有效期</option><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
         <div class="r1-api-actions"><button class="btn primary" type="submit" data-ref="create">创建密钥</button><button class="btn" type="button" data-ref="cancelEdit" hidden>取消编辑</button></div>
       </form>
+      <details data-ref="projectManager"><summary>登记 Docker 项目（仅管理元数据）</summary><p class="sub">登记、改标签或撤销只修改 Toolbox 的授权登记，不创建、更新、停止或删除 Docker 项目。</p><button class="btn" type="button" data-ref="loadProjects">读取项目候选与登记</button><p class="sub" data-ref="projectStatus" role="status"></p><div class="r1-api-list" data-ref="projectCandidates"></div><div class="r1-api-list" data-ref="registeredProjects"></div></details>
       <div class="r1-api-head"><h3>访问密钥</h3><button class="btn" type="button" data-ref="refresh">刷新列表</button></div><div class="r1-api-list" data-ref="keys"></div>
       <h3>最近调用记录</h3><p class="sub">仅显示时间、密钥标识、来源、功能和结果，不记录令牌或请求内容。</p><div class="r1-api-list" data-ref="audit"></div>
     </div></div></div>`);
   const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media', 'files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing', 'backup', 'system'];
   const roleLevel = { readonly: 0, readwrite: 1, admin: 2 }, roleLabels = { readonly: '只读', readwrite: '读写', admin: '管理员' };
   const defaultMinRole = { read: 'readonly', fan: 'readwrite', light: 'readwrite', screen: 'readwrite', power: 'admin', media: 'readwrite' };
-  let state = null, busy = false, closed = false, editing = null, permissionDirty = false, contractsBusy = false;
+  const legacyTools = new Set(['get_nas_status', 'get_media_status', 'set_fan_policy', 'release_fan', 'set_light_policy', 'set_rgb', 'set_screen', 'update_screen_settings', 'request_power', 'cancel_power']);
+  let state = null, busy = false, closed = false, editing = null, contractsBusy = false, projectsBusy = false;
+  let dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
+  const policyDirty = () => Object.values(dirty).some(Boolean);
+  const exactPolicy = () => !editing || editing.policy_version === 3 || x.upgradePolicy.checked;
+  const selectedScopes = () => [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
+  const projectRows = () => Array.isArray(state && state.docker_project_catalog && state.docker_project_catalog.projects)
+    ? state.docker_project_catalog.projects.filter(row => row && /^project_[0-9a-f]{24}$/.test(row.id) && typeof row.label === 'string') : [];
+  const currentTools = () => (Array.isArray(state && state.tools) ? state.tools : []).map(tool => ({ ...tool,
+    scope: tool.scope || (tool._meta || {})['io.github.shinku-chen.r1-toolbox/requiredScope'],
+    min_role: tool.min_role || (tool._meta || {})['io.github.shinku-chen.r1-toolbox/minimumRole'],
+  })).filter(tool => tool && /^[a-z_]{1,64}$/.test(tool.name) && allowedScopes.includes(tool.scope) && Object.hasOwn(roleLevel, tool.min_role) && tool.implemented !== false);
   const close = () => {
     if ($('#r1ApiSecret')) return;
     closed = true; document.removeEventListener('keydown', onKey); el.remove();
@@ -1112,7 +1127,7 @@ function r1OpenApiManager() {
   const pending = value => {
     busy = value; el.setAttribute('aria-busy', String(value));
     x.enabled.disabled = value || !state || state.storage_ok !== true;
-    x.create.disabled = value || !state || state.storage_ok !== true || (filesSelected() && !fileRoots().length && (!editing || permissionDirty));
+    x.create.disabled = value || !state || state.storage_ok !== true || (filesSelected() && !fileRoots().length && (!editing || dirty.files));
     x.cancelEdit.disabled = value;
     x.refresh.disabled = value;
     x.keys.querySelectorAll('button').forEach(button => { button.disabled = value || !state || state.storage_ok !== true; });
@@ -1128,7 +1143,7 @@ function r1OpenApiManager() {
     return (labels.get(id) || id) + (scope && scope.implemented === false ? '（待接入）' : '');
   };
   /** A path grant is relative to an independently discovered storage root. */
-  const validSubpath = value => typeof value === 'string' && value.length <= 1024 && !/[\\\u0000-\u001f\u007f]/.test(value) && !/^[A-Za-z]:/.test(value)
+  const validSubpath = value => typeof value === 'string' && [...value].length <= 1024 && new TextEncoder().encode(value).length <= 4096 && !/[\\\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value) && !/^[A-Za-z]:/.test(value)
     && (!value || value.split('/').every(part => part && part !== '.' && part !== '..'));
   const updatePermissions = () => {
     const role = x.role.value, legacy = role === 'legacy' && editing, level = legacy ? Infinity : roleLevel[role] ?? -1;
@@ -1147,42 +1162,97 @@ function r1OpenApiManager() {
     const description = roles().find(item => item.id === role);
     setText(x.roleDescription, legacy ? '保留旧密钥原有精确权限，不会自动升级成管理员。明确选择新角色后才更新权限策略。' : description ? String(description.description || '') : '未获得有效角色配置，请刷新后重试。');
     setText(x.roleStatus, legacy ? '当前仅编辑名称、来源和有效期；原有功能权限保持。选择新角色后可重新配置。' : limited.length ? `已选择${limited.join('、')}，当前角色不可调用这些工具。提高角色等级后仍只授予已勾选的功能。`
-      : '提高角色等级不会自动勾选功能；待接入的功能只保存预授权。');
+      : '提高角色等级不会自动勾选功能或工具；角色、具体工具、文件和项目范围须同时满足。');
+    setText(x.toolsStatus, exactPolicy() ? '只显示当前真正接入的工具；新增工具默认不勾选，缺少功能或角色等级不足时不能选择。'
+      : '保留旧策略的原十工具权限；明确勾选“启用逐工具授权”后才能修改具体工具。');
+    for (const input of x.toolOptions.querySelectorAll('input')) {
+      const tool = currentTools().find(item => item.name === input.value);
+      const allowed = tool && selected.has(tool.scope) && level >= roleLevel[tool.min_role];
+      input.disabled = !exactPolicy() || !allowed;
+      if (exactPolicy() && !allowed && input.checked) { input.checked = false; if (editing) dirty.tools = true; }
+    }
     x.fileRoots.hidden = !filesSelected();
     for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
       const checked = item.querySelector('[data-root-check]').checked;
-      const access = item.querySelector('[data-root-access]');
-      const writable = role !== 'readonly' && item.dataset.readOnly !== 'true';
-      access.querySelector('option[value="readwrite"]').disabled = !writable;
-      if (!writable) access.value = 'readonly';
-      access.disabled = !checked;
-      item.querySelector('[data-root-path]').disabled = !checked;
+      const writable = role !== 'readonly' && item.dataset.readOnly !== 'true' && item.dataset.available !== 'false';
+      for (const range of item.querySelectorAll('[data-root-range]')) {
+        const access = range.querySelector('[data-root-access]');
+        access.querySelector('option[value="readwrite"]').disabled = !writable;
+        if (!writable && access.value !== 'readonly' && (!editing || (dirty.role && role === 'readonly'))) {
+          access.value = 'readonly'; if (editing) dirty.files = true;
+        }
+        access.disabled = !checked;
+        range.querySelector('[data-root-path]').disabled = !checked;
+      }
       item.querySelector('[data-root-fields]').hidden = !checked;
       setText(item.querySelector('[data-root-note]'), item.dataset.readOnly === 'true' ? '此存储根为只读挂载，只能授权读取。'
-        : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '仅对勾选的根与子目录保存授权。');
+        : item.dataset.available === 'false' ? '原范围当前失效；元数据编辑仍保留绑定，不按名称换盘。' : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '仅对勾选的根与子目录保存授权；真实文件操作仍待接入。');
     }
+    x.dockerProjects.hidden = !selected.has('docker');
+    x.dockerProjectOptions.querySelectorAll('input').forEach(input => { input.disabled = !exactPolicy() || input.dataset.available !== 'true'; });
+    setText(x.dockerProjectsStatus, projectRows().some(row => row.available === true && row.revoked !== true)
+      ? '仅选择已登记项目的 inspect 读取范围，不会授予更新权限。' : '暂无可用的已登记项目；请在下方读取候选并登记，不能凭名称创建授权。');
     pending(busy);
   };
-  const drawFileRoots = () => {
+  const appendRange = (item, draft = {}) => {
+    const range = mount('<div class="r1-api-file-range" data-root-range><label class="r1-api-input">子目录（可选）<input class="textfield" data-root-path maxlength="2048" autocomplete="off" placeholder="例如：电影/2026"><span class="sub">最多 1024 个 Unicode 字符；相对目录以 / 分隔，空表示整个已选根。</span></label><label class="r1-api-input">访问方式<select class="textfield" data-root-access><option value="readonly">只读</option><option value="readwrite">读写</option></select></label><button class="btn" type="button" data-remove-range>移除此范围</button></div>');
+    const path = range.querySelector('[data-root-path]'), access = range.querySelector('[data-root-access]');
+    path.value = typeof draft.path === 'string' ? draft.path : ''; access.value = draft.access === 'readwrite' ? 'readwrite' : 'readonly';
+    path.setAttribute('aria-label', '文件子目录'); access.setAttribute('aria-label', '文件访问方式');
+    path.oninput = () => { dirty.files = true; };
+    access.onchange = () => { dirty.files = true; };
+    range.querySelector('[data-remove-range]').onclick = () => {
+      range.remove(); dirty.files = true;
+      if (!item.querySelector('[data-root-range]')) { item.querySelector('[data-root-check]').checked = false; appendRange(item); }
+      updatePermissions();
+    };
+    item.querySelector('[data-root-ranges]').append(range);
+  };
+  const drawFileRoots = (prefill = null) => {
     const drafts = new Map([...x.fileRootOptions.querySelectorAll('.r1-api-file-root')].map(item => [item.dataset.rootId,
-      { checked: item.querySelector('[data-root-check]').checked, path: item.querySelector('[data-root-path]').value, access: item.querySelector('[data-root-access]').value }]));
-    const roots = fileRoots();
+      { checked: item.querySelector('[data-root-check]').checked, ranges: [...item.querySelectorAll('[data-root-range]')].map(range => ({ path: range.querySelector('[data-root-path]').value, access: range.querySelector('[data-root-access]').value })) }]));
+    const roots = [...fileRoots()];
+    if (editing) for (const grant of prefill || editing.file_roots || []) if (!roots.some(root => root.id === grant.id)) roots.push({ id: grant.id, label: '当前未确认的存储根', mount: '', read_only: false, unavailable: true });
     x.fileRootOptions.replaceChildren();
     const reason = state.file_root_catalog && state.file_root_catalog.reason;
     setText(x.fileRootsStatus, roots.length ? '请至少勾选一个存储根；子目录留空表示整个已选根。' : `没有已确认的存储根，不能创建文件权限。${reason ? '原因：' + String(reason) : '请确认磁盘已挂载后刷新。'}`);
     for (const root of roots) {
-      const item = mount(`<article class="r1-api-file-root"><label class="r1-api-root-choice"><input type="checkbox" data-root-check><span data-root-label></span></label><p class="sub mono" data-root-mount></p><div class="r1-api-file-fields" data-root-fields hidden><label class="r1-api-input">子目录（可选）<input class="textfield" data-root-path maxlength="1024" placeholder="例如：电影／2026，请使用 / 分隔" autocomplete="off"><span class="sub">相对目录使用 / 分隔，不接受绝对路径、反斜杠、. 或 ..。</span></label><label class="r1-api-input">访问方式<select class="textfield" data-root-access><option value="readonly">只读</option><option value="readwrite">读写</option></select></label></div><p class="sub" data-root-note></p></article>`);
-      item.dataset.rootId = root.id; item.dataset.readOnly = String(root.read_only);
+      const item = mount('<article class="r1-api-file-root"><label class="r1-api-root-choice"><input type="checkbox" data-root-check><span data-root-label></span></label><p class="sub mono" data-root-mount></p><div class="r1-api-file-fields" data-root-fields hidden><div data-root-ranges></div><button class="btn" type="button" data-add-range>增加同根子目录范围</button></div><p class="sub" data-root-note></p></article>');
+      item.dataset.rootId = root.id; item.dataset.readOnly = String(root.read_only); item.dataset.available = String(!root.unavailable);
       setText(item.querySelector('[data-root-label]'), root.label);
       setText(item.querySelector('[data-root-mount]'), root.mount);
-      const checkbox = item.querySelector('[data-root-check]'), path = item.querySelector('[data-root-path]'), access = item.querySelector('[data-root-access]');
-      checkbox.value = root.id; path.setAttribute('aria-label', root.label + '的子目录'); access.setAttribute('aria-label', root.label + '的访问方式');
-      const draft = drafts.get(root.id);
-      if (draft) { checkbox.checked = draft.checked; path.value = draft.path; access.value = draft.access; }
-      checkbox.onchange = () => { if (editing) permissionDirty = true; updatePermissions(); };
-      path.oninput = () => { if (editing) permissionDirty = true; };
-      access.onchange = () => { if (editing) permissionDirty = true; };
+      const checkbox = item.querySelector('[data-root-check]'); checkbox.value = root.id;
+      const saved = prefill ? prefill.filter(grant => grant.id === root.id) : null;
+      const draft = saved ? { checked: saved.length > 0, ranges: saved } : drafts.get(root.id);
+      checkbox.checked = !!(draft && draft.checked);
+      for (const range of draft && draft.ranges.length ? draft.ranges : [{}]) appendRange(item, range);
+      checkbox.onchange = () => { dirty.files = true; updatePermissions(); };
+      item.querySelector('[data-add-range]').onclick = () => { appendRange(item); dirty.files = true; updatePermissions(); };
       x.fileRootOptions.append(item);
+    }
+  };
+  const drawTools = (chosen = null) => {
+    const selected = chosen || new Set(x.toolOptions.children.length ? [...x.toolOptions.querySelectorAll('input:checked')].map(input => input.value) : ['get_nas_status']);
+    x.toolOptions.replaceChildren();
+    for (const tool of currentTools()) {
+      const row = mount('<label class="r1-api-scope"><input type="checkbox"><span><b></b><span class="sub mono" data-tool-name></span><span class="sub" data-tool-note></span></span></label>');
+      const input = row.querySelector('input'); input.value = tool.name; input.checked = selected.has(tool.name);
+      setText(row.querySelector('b'), tool.title || tool.name); setText(row.querySelector('[data-tool-name]'), tool.name);
+      setText(row.querySelector('[data-tool-note]'), `最低角色：${roleLabels[tool.min_role]}；功能：${names().get(tool.scope) || tool.scope}。`);
+      input.onchange = () => { dirty.tools = true; };
+      x.toolOptions.append(row);
+    }
+  };
+  const drawProjects = (chosen = null) => {
+    const selected = chosen || new Set([...x.dockerProjectOptions.querySelectorAll('input:checked')].map(input => input.value));
+    x.dockerProjectOptions.replaceChildren();
+    for (const project of projectRows()) {
+      const row = mount('<label class="r1-api-scope"><input type="checkbox"><span><b></b><span class="sub" data-project-note></span></span></label>');
+      const input = row.querySelector('input'); input.value = project.id; input.checked = selected.has(project.id);
+      input.dataset.available = String(project.available === true && project.revoked !== true);
+      setText(row.querySelector('b'), project.label); setText(row.querySelector('[data-project-note]'), input.dataset.available === 'true' ? 'inspect：读取项目状态和脱敏摘要。' : project.reason || '登记已撤销或项目绑定暂不可用。');
+      input.onchange = () => { dirty.projects = true; };
+      x.dockerProjectOptions.append(row);
     }
   };
   const draw = () => {
@@ -1206,20 +1276,30 @@ function r1OpenApiManager() {
       const input = label.querySelector('input'); input.value = scope.id; input.checked = chosenScopes.has(scope.id);
       label.querySelector('b').textContent = String(scope.label || scope.id);
       label.querySelector('[data-scope-description]').textContent = String(scope.description || '');
-      input.onchange = () => { if (editing) permissionDirty = true; updatePermissions(); };
+      input.onchange = () => {
+        dirty.scopes = true;
+        if (scope.id === 'files') dirty.files = true;
+        if (scope.id === 'docker') dirty.projects = true;
+        if (!input.checked && scope.id === 'files') { dirty.files = true; x.fileRootOptions.querySelectorAll('[data-root-check]').forEach(check => { check.checked = false; }); }
+        if (!input.checked && scope.id === 'docker') { dirty.projects = true; x.dockerProjectOptions.querySelectorAll('input').forEach(check => { check.checked = false; }); }
+        updatePermissions();
+      };
       x.scopes.append(label);
     }
     const keys = Array.isArray(state.keys) ? state.keys : [];
     x.keys.replaceChildren();
     if (!keys.length) x.keys.append(mount('<p class="sub">尚未创建访问密钥。</p>'));
     for (const key of keys) {
-      const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><div class="r1-api-actions"><button class="btn" type="button" data-ref="edit">编辑权限</button><button class="btn" type="button" data-ref="toggle"></button><button class="btn" type="button" data-ref="rotate">轮换 Token</button><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></div></article>`);
+      const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>具体工具</dt><dd data-ref="tools"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>Docker 项目</dt><dd data-ref="projects"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><div class="r1-api-actions"><button class="btn" type="button" data-ref="edit">编辑权限</button><button class="btn" type="button" data-ref="toggle"></button><button class="btn" type="button" data-ref="rotate">轮换 Token</button><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></div></article>`);
       const k = collect(item);
       setText(k.name, String(key.name || '未命名密钥')); setText(k.status, ({ active: '有效', disabled: '已停用', expired: '已到期', revoked: '已撤销' })[key.status] || '状态未知');
       setText(k.role, !key.role || key.role === 'legacy' ? '原有精确权限' : (roles().find(role => role.id === key.role) || {}).label || roleLabels[key.role] || '角色未知');
       setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => scopeName(id, labels)).join('、') || '未授予权限');
+      setText(k.tools, key.policy_version === 3 ? (Array.isArray(key.tool_grants) ? key.tool_grants : []).map(name => (currentTools().find(tool => tool.name === name) || {}).title || name).join('、') || '未选择具体工具' : '原有十工具按原角色和功能授权；新增工具未启用。');
+      setText(k.projects, (Array.isArray(key.docker_projects) ? key.docker_projects : []).map(grant => `${(projectRows().find(project => project.id === grant.id) || {}).label || grant.id}（${(grant.operations || []).join('、')}）`).join('；') || '未授予项目范围');
       const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
       if (!grants.length) setText(k.files, '未授予文件范围');
+      else k.files.append(mount('<p class="sub">仅根规划元数据已接入；真实文件读写待接入。</p>'));
       for (const grant of grants) {
         const root = fileRoots().find(item => item.id === grant.id), row = document.createElement('p');
         setText(row, `${root ? root.label : '当前未确认的存储根（' + String(grant.id || '未知') + '）'} · ${grant.path ? '子目录：' + String(grant.path) : '整个已选根'} · ${({ readonly: '只读', readwrite: '读写' })[grant.access] || '权限未知'}`);
@@ -1253,32 +1333,34 @@ function r1OpenApiManager() {
       setText(a.result, String(record.outcome || record.result || record.status || '结果未知'));
       x.audit.append(item);
     }
-    drawFileRoots(); updatePermissions();
+    drawFileRoots(); drawTools(); drawProjects(); updatePermissions();
   };
   const endEdit = () => {
-    editing = null; permissionDirty = false;
+    editing = null; dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
+    x.upgradePolicy.checked = false; x.upgradePolicyLabel.hidden = true;
     setText(x.formTitle, '创建访问密钥'); setText(x.create, '创建密钥');
     x.cancelEdit.hidden = true; x.keepExpiry.hidden = true; x.expiry.value = '90';
     x.name.value = ''; x.ips.value = ''; x.role.value = 'readonly';
     x.scopes.querySelectorAll('input').forEach(input => { input.checked = input.value === 'read'; });
     x.fileRootOptions.querySelectorAll('[data-root-check]').forEach(input => { input.checked = false; });
+    drawFileRoots([]);
+    drawTools(new Set(['get_nas_status'])); drawProjects(new Set());
     if (state) draw();
   };
   const beginEdit = key => {
-    editing = key; permissionDirty = false; draw();
+    editing = key; x.upgradePolicy.checked = false; x.upgradePolicyLabel.hidden = key.policy_version === 3; draw();
     setText(x.formTitle, '编辑访问密钥'); setText(x.create, '保存修改');
     x.cancelEdit.hidden = false; x.keepExpiry.hidden = false; x.expiry.value = 'keep';
     x.name.value = String(key.name || ''); x.ips.value = Array.isArray(key.allowed_ips) ? key.allowed_ips.join('\n') : '';
     x.role.value = !key.role || key.role === 'legacy' ? 'legacy' : key.role;
     const chosen = new Set(Array.isArray(key.scopes) ? key.scopes : []);
     x.scopes.querySelectorAll('input').forEach(input => { input.checked = chosen.has(input.value); });
-    for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
-      const grant = (Array.isArray(key.file_roots) ? key.file_roots : []).find(root => root.id === item.dataset.rootId);
-      item.querySelector('[data-root-check]').checked = !!grant;
-      item.querySelector('[data-root-path]').value = grant ? String(grant.path || '') : '';
-      item.querySelector('[data-root-access]').value = grant && grant.access === 'readwrite' ? 'readwrite' : 'readonly';
-    }
-    updatePermissions(); x.formTitle.scrollIntoView({ block: 'start', behavior: 'smooth' }); x.name.focus();
+    drawFileRoots(Array.isArray(key.file_roots) ? key.file_roots : []);
+    const keyLevel = x.role.value === 'legacy' ? Infinity : roleLevel[x.role.value];
+    drawTools(new Set(key.policy_version === 3 ? key.tool_grants || [] : currentTools().filter(tool => legacyTools.has(tool.name) && chosen.has(tool.scope) && keyLevel >= roleLevel[tool.min_role]).map(tool => tool.name)));
+    drawProjects(new Set((key.docker_projects || []).map(project => project.id)));
+    updatePermissions(); dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
+    x.formTitle.scrollIntoView({ block: 'start', behavior: 'smooth' }); x.name.focus();
   };
   const refresh = async () => {
     const result = await API.get('/api/access');
@@ -1304,6 +1386,71 @@ function r1OpenApiManager() {
     } catch (error) { fail(error); return null; }
     finally { if (!closed) pending(false); }
   };
+  const projectError = value => typeof (value && value.error) === 'string' ? value.error
+    : value && value.error && typeof value.error.message === 'string' ? value.error.message : '项目登记读取失败，请重试。';
+  const projectMutation = async (path, body) => {
+    if (closed || projectsBusy || busy) return;
+    projectsBusy = true; x.loadProjects.disabled = true;
+    try {
+      const result = await R1.post(path, body);
+      if (!result || result.ok !== true) throw new Error(projectError(result));
+      await refresh();
+      projectsBusy = false;
+      await loadProjects();
+    } catch (error) { if (!closed) setText(x.projectStatus, String(error && error.message || '项目登记操作失败。')); }
+    finally { projectsBusy = false; if (!closed) x.loadProjects.disabled = false; }
+  };
+  const loadProjects = async () => {
+    if (closed || projectsBusy || busy) return;
+    projectsBusy = true; x.loadProjects.disabled = true;
+    setText(x.projectStatus, '正在读取固定本机项目元数据…');
+    x.projectCandidates.replaceChildren(); x.registeredProjects.replaceChildren();
+    try {
+      const [candidates, registered] = await Promise.all([API.get('/api/docker/projects/catalog'), API.get('/api/docker/projects')]);
+      if (closed) return;
+      if (!registered || registered.ok !== true || !Array.isArray(registered.projects)) throw new Error(projectError(registered));
+      state.docker_project_catalog = registered; drawProjects(); updatePermissions();
+      setText(x.projectStatus, candidates && candidates.ok === true ? '候选只定位项目；登记时后端重新核验身份，仅保存 inspect 读取登记。' : projectError(candidates));
+      for (const candidate of candidates && Array.isArray(candidates.candidates) ? candidates.candidates.slice(0, 128) : []) {
+        if (!candidate || !/^candidate_[0-9a-f]{24}$/.test(candidate.id)) continue;
+        const item = mount('<article class="r1-api-project"><strong></strong><label class="r1-api-input">登记标签<input class="textfield" maxlength="128" data-project-label autocomplete="off"></label><p class="sub" data-project-reason></p><button class="btn" type="button" data-register>登记读取项目</button></article>');
+        setText(item.querySelector('strong'), candidate.label || '未命名候选');
+        item.querySelector('[data-project-label]').value = String(candidate.label || '');
+        setText(item.querySelector('[data-project-reason]'), candidate.available === true ? '仅登记元数据，不启动或更新容器。' : candidate.reason || '候选身份当前不可用。');
+        const button = item.querySelector('[data-register]'); button.disabled = candidate.available !== true;
+        button.onclick = async () => {
+          const label = item.querySelector('[data-project-label]').value.trim();
+          if (!label) { setText(x.projectStatus, '请填写项目登记标签。'); return; }
+          if (!(await R1.ask('登记项目读取范围？', `将「${esc(label)}」加入可授权项目，不部署、更新或启停 Docker。`))) return;
+          await projectMutation('/api/docker/projects/register', { candidate_id: candidate.id, label });
+        };
+        x.projectCandidates.append(item);
+      }
+      for (const project of projectRows()) {
+        const item = mount('<article class="r1-api-project"><strong></strong><p class="sub" data-project-reason></p><label class="r1-api-input">登记标签<input class="textfield" maxlength="128" data-project-label autocomplete="off"></label><div class="r1-api-actions"><button class="btn" type="button" data-update>保存标签</button><button class="btn danger" type="button" data-revoke>撤销登记</button></div></article>');
+        setText(item.querySelector('strong'), project.label);
+        setText(item.querySelector('[data-project-reason]'), project.revoked ? '已撤销登记；原 Docker 项目不受影响。' : project.available ? '已登记 inspect：仅可授权读取。' : project.reason || '当前绑定不可用。');
+        item.querySelector('[data-project-label]').value = project.label;
+        item.querySelector('[data-update]').disabled = project.revoked === true;
+        item.querySelector('[data-revoke]').disabled = project.revoked === true;
+        item.querySelector('[data-update]').onclick = async () => {
+          const label = item.querySelector('[data-project-label]').value.trim();
+          if (!label) { setText(x.projectStatus, '请填写项目登记标签。'); return; }
+          if (!(await R1.ask('保存项目标签？', '只更新 Toolbox 登记标签，项目身份和原 Docker 设置保持不变。'))) return;
+          await projectMutation('/api/docker/projects/update', { project_id: project.id, label });
+        };
+        item.querySelector('[data-revoke]').onclick = async () => {
+          if (!(await R1.ask('撤销项目登记？', `「${esc(project.label)}」不再作为可授权项目；不会停止或删除原 Docker 项目。`, true))) return;
+          await projectMutation('/api/docker/projects/revoke', { project_id: project.id });
+        };
+        x.registeredProjects.append(item);
+      }
+      if (!x.projectCandidates.children.length) x.projectCandidates.append(mount('<p class="sub">暂无可登记的安全候选，不会按名称猜测项目。</p>'));
+      if (!x.registeredProjects.children.length) x.registeredProjects.append(mount('<p class="sub">尚未登记项目。</p>'));
+    } catch (error) { if (!closed) setText(x.projectStatus, String(error && error.message || '项目登记读取失败。')); }
+    finally { projectsBusy = false; if (!closed) x.loadProjects.disabled = false; }
+  };
+  x.loadProjects.onclick = loadProjects;
   // Definitions are owner metadata, loaded separately from callable tools and keys.
   x.loadContracts.onclick = async () => {
     if (closed || contractsBusy) return;
@@ -1317,19 +1464,19 @@ function r1OpenApiManager() {
       if (!result || result.ok !== true) throw new Error(typeof (result && result.error) === 'string' ? result.error : '接口定义读取失败，请重试。');
       if (result.schema_version !== 1 || result.status !== 'definitions_only'
           || !Array.isArray(result.tools) || !result.tools.length || result.tools.length > 64
-          || !result.tools.every(tool => tool && tool.implemented === false && Object.hasOwn(roleLevel, tool.min_role)
+          || !result.tools.every(tool => tool && typeof tool.implemented === 'boolean' && Object.hasOwn(roleLevel, tool.min_role)
             && ['files', 'docker'].includes(tool.scope) && typeof tool.name === 'string'
             && tool.inputSchema && tool.outputSchema)) throw new Error('接口定义暂不可用，请确认服务版本。');
       for (const tool of result.tools) {
         const row = mount('<article class="r1-api-audit r1-api-contract"><strong></strong><span class="mono"></span><span data-contract-role></span></article>');
         setText(row.querySelector('strong'), String(tool.title || tool.name));
         setText(row.querySelector('.mono'), tool.name);
-        setText(row.querySelector('[data-contract-role]'), `最低角色：${roleLabels[tool.min_role]}；功能：${tool.scope === 'files' ? '文件管理' : 'Docker 管理'}；待接入。`);
+        setText(row.querySelector('[data-contract-role]'), `最低角色：${roleLabels[tool.min_role]}；功能：${tool.scope === 'files' ? '文件管理' : 'Docker 管理'}；${tool.implemented ? '已接入，仍需明确授权。' : '待接入。'}`);
         x.contractList.append(row);
       }
       x.contractDefinition.value = JSON.stringify(result, null, 2);
       x.contractJson.hidden = false; x.copyContracts.hidden = false;
-      setText(x.contractStatus, `已读取 ${result.tools.length} 项接口定义，均待接入；未改变任何密钥权限。`);
+      setText(x.contractStatus, `已读取 ${result.tools.length} 项接口定义，已接入 ${result.tools.filter(tool => tool.implemented).length} 项；其余待接入，定义本身不授予执行权限。`);
     } catch (error) { if (!closed) setText(x.contractStatus, String(error && error.message || '接口定义读取失败，请重试。')); }
     finally { contractsBusy = false; if (!closed) x.loadContracts.disabled = false; }
   };
@@ -1345,33 +1492,60 @@ function r1OpenApiManager() {
     const name = x.name.value.trim(), role = x.role.value, scopes = [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
     let allowed_ips;
     try { allowed_ips = r1ApiRules(x.ips.value); } catch (error) { fail(error); return; }
-    const changePolicy = !editing || permissionDirty;
+    const changePolicy = !editing || policyDirty();
+    const upgrade = !!editing && editing.policy_version !== 3 && x.upgradePolicy.checked;
     if (!name || (changePolicy && !scopes.length)) { fail(new Error('请填写名称，并选择至少一项功能权限。')); return; }
     if (changePolicy && !Object.hasOwn(roleLevel, role)) { fail(new Error('请选择有效的操作角色。')); return; }
-    const file_roots = [];
-    if (changePolicy && scopes.includes('files')) {
+    const changeFiles = !editing || dirty.files;
+    const file_roots = changeFiles ? [] : (Array.isArray(editing.file_roots) ? editing.file_roots : []);
+    if (changeFiles && scopes.includes('files')) {
       if (!fileRoots().length) { fail(new Error('没有已确认的存储根，不能创建文件权限。')); return; }
+      const identities = new Set();
       for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
         if (!item.querySelector('[data-root-check]').checked) continue;
-        const path = item.querySelector('[data-root-path]').value, access = item.querySelector('[data-root-access]').value;
-        if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符。')); return; }
-        if (!['readonly', 'readwrite'].includes(access) || (access === 'readwrite' && (role === 'readonly' || item.dataset.readOnly === 'true'))) { fail(new Error('只读角色或只读挂载不能授予文件读写权限。')); return; }
-        file_roots.push({ id: item.dataset.rootId, path, access });
+        if (item.dataset.available === 'false') { fail(new Error('原文件范围当前失效，请明确取消失效范围或保持原文件配置。')); return; }
+        for (const range of item.querySelectorAll('[data-root-range]')) {
+          const path = range.querySelector('[data-root-path]').value, access = range.querySelector('[data-root-access]').value;
+          if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符和 4096 个 UTF-8 字节。')); return; }
+          if (!['readonly', 'readwrite'].includes(access) || (access === 'readwrite' && (role === 'readonly' || item.dataset.readOnly === 'true'))) { fail(new Error('只读角色或只读挂载不能授予文件读写权限。')); return; }
+          const identity = item.dataset.rootId + '\n' + path;
+          if (identities.has(identity)) { fail(new Error('同一存储根的相同子目录不能重复授权。')); return; }
+          identities.add(identity); file_roots.push({ id: item.dataset.rootId, path, access });
+        }
       }
       if (!file_roots.length) { fail(new Error('请至少勾选一个已确认的文件存储根。')); return; }
+      if (file_roots.length > 32) { fail(new Error('文件范围最多 32 条。')); return; }
+    }
+    const changeProjects = !editing || dirty.projects || upgrade;
+    const docker_projects = changeProjects ? [] : (Array.isArray(editing.docker_projects) ? editing.docker_projects : []);
+    if (exactPolicy() && changeProjects && scopes.includes('docker')) {
+      for (const input of x.dockerProjectOptions.querySelectorAll('input:checked')) {
+        if (input.dataset.available !== 'true') { fail(new Error('所选项目登记已失效，请明确移除后重新选择已登记项目。')); return; }
+        docker_projects.push({ id: input.value, operations: ['inspect'] });
+      }
+      if (!docker_projects.length) { fail(new Error('请至少选择一个可用的已登记 Docker 项目。')); return; }
+    }
+    const tool_grants = [...x.toolOptions.querySelectorAll('input:checked')].map(input => input.value);
+    if (exactPolicy()) for (const name of tool_grants) {
+      const tool = currentTools().find(item => item.name === name);
+      if (!tool || !scopes.includes(tool.scope) || roleLevel[role] < roleLevel[tool.min_role]) { fail(new Error('具体工具不满足当前角色和功能权限，请重新选择。')); return; }
     }
     const labels = names(), grant = scopes.map(id => labels.get(id) || id).join('、');
-    const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root.label) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。文件功能待接入，当前仅保存范围授权。` : '';
+    const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root ? root.label : item.id) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。真实文件读写待接入，当前仅保存范围授权。` : '';
     const body = { name, allowed_ips };
-    if (changePolicy) Object.assign(body, { role, scopes, file_roots });
+    if (!editing || dirty.role || upgrade) body.role = role;
+    if (!editing || dirty.scopes || upgrade) body.scopes = scopes;
+    if (changeFiles) body.file_roots = scopes.includes('files') ? file_roots : [];
+    if (exactPolicy() && (!editing || dirty.tools || upgrade)) body.tool_grants = tool_grants;
+    if (exactPolicy() && changeProjects) body.docker_projects = scopes.includes('docker') ? docker_projects : [];
     if (!editing || x.expiry.value !== 'keep') body.expires_days = Number(x.expiry.value);
     if (editing) {
       body.id = editing.id;
-      const note = changePolicy ? `角色：${roleLabels[role]}；功能：${esc(grant)}。${rangeNote}` : '原有角色、功能与文件范围保持不变。';
+      const note = changePolicy ? `角色：${roleLabels[role]}；功能：${esc(grant)}。${rangeNote}${exactPolicy() ? '具体工具：' + esc(tool_grants.join('、') || '未授予') + '。' : '旧策略保持原有十工具范围。'}` : '原有角色、功能、具体工具、文件与项目范围保持不变。';
       if (!(await R1.ask('保存访问密钥修改？', `保存「${esc(name)}」的设置。${note}${x.expiry.value === 'keep' ? '到期时间保持不变。' : '有效期从本次保存重新计算。'}Token 不会变化。`))) return;
       await mutate('/api/access/keys/update', body);
     } else {
-      if (!(await R1.ask('创建访问密钥？', `角色：${roleLabels[role]}。将向「${esc(name)}」授予：${esc(grant)}。${scopes.includes('power') ? '电源权限可安排关机或重启，需要管理员角色。' : ''}${rangeNote}`))) return;
+      if (!(await R1.ask('创建访问密钥？', `角色：${roleLabels[role]}。将向「${esc(name)}」授予：${esc(grant)}。具体工具：${esc(tool_grants.join('、') || '未授予')}。${scopes.includes('power') ? '电源权限可安排关机或重启，需要管理员角色。' : ''}${rangeNote}`))) return;
       await mutate('/api/access/keys', body);
     }
   };
@@ -1380,7 +1554,17 @@ function r1OpenApiManager() {
     pending(true); x.error.hidden = true;
     try { await refresh(); } catch (error) { fail(error); } finally { if (!closed) pending(false); }
   };
-  x.role.onchange = () => { if (editing) permissionDirty = true; updatePermissions(); };
+  x.role.onchange = () => { dirty.role = true; updatePermissions(); };
+  x.upgradePolicy.onchange = () => {
+    if (!editing || editing.policy_version === 3) return;
+    dirty.tools = x.upgradePolicy.checked;
+    if (x.upgradePolicy.checked) {
+      if (x.role.value === 'legacy') { x.role.value = 'readonly'; dirty.role = true; }
+      const scopes = new Set(selectedScopes());
+      drawTools(new Set(currentTools().filter(tool => legacyTools.has(tool.name) && scopes.has(tool.scope) && roleLevel[x.role.value] >= roleLevel[tool.min_role]).map(tool => tool.name)));
+    }
+    updatePermissions();
+  };
   x.cancelEdit.onclick = endEdit;
   x.close.onclick = close; document.addEventListener('keydown', onKey);
   document.body.append(el); pending(true);

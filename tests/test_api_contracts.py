@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
-from api_contracts import catalog, contract_catalog
+from api_contracts import IMPLEMENTED_TOOLS, catalog, contract_catalog
 from mcp_service import tool_catalog
 
 
@@ -173,15 +173,16 @@ class ApiContractsTests(unittest.TestCase):
         self.assertEqual(contract_catalog(), self.catalog)
         self.assertEqual(catalog(), self.catalog)
 
-    def test_exact_twenty_tools_and_unmodified_active_mcp_catalog(self):
+    def test_exact_twenty_definitions_register_only_four_read_callbacks(self):
         self.assertEqual(set(self.tools), set(valid_inputs()))
         self.assertEqual(len(self.catalog['tools']), 20)
         self.assertEqual(sum(t['category'] == 'read' for t in self.tools.values()), 9)
         self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 8)
         self.assertEqual(sum(t['category'] == 'docker_update' for t in self.tools.values()), 3)
         active = {item['name'] for item in tool_catalog()}
-        self.assertEqual(len(active), 10)
-        self.assertFalse(active.intersection(self.tools))
+        self.assertEqual(len(active), 14)
+        self.assertEqual(active.intersection(self.tools), IMPLEMENTED_TOOLS)
+        self.assertFalse(active.intersection(name for name, tool in self.tools.items() if not tool['implemented']))
 
     def test_all_schemas_validate_and_only_close_instance_objects(self):
         def walk(value):
@@ -337,10 +338,13 @@ class ApiContractsTests(unittest.TestCase):
             for required in ('runtime_acl_required', 'current_credential_required',
                              'current_expiry_required', 'grant_revision_required', 'unknown_denied'):
                 self.assertIs(authorization[required], True)
-            self.assertFalse(tool['implemented'])
+            self.assertEqual(tool['implemented'], name in IMPLEMENTED_TOOLS)
             self.assertFalse(tool['execution_allowed'])
-            self.assertEqual(tool['unimplemented_reason']['code'], 'not_implemented')
-            self.assertTrue(tool['unimplemented_reason']['required_gates'])
+            if name in IMPLEMENTED_TOOLS:
+                self.assertIsNone(tool['unimplemented_reason'])
+            else:
+                self.assertEqual(tool['unimplemented_reason']['code'], 'not_implemented')
+                self.assertTrue(tool['unimplemented_reason']['required_gates'])
             self.assertFalse(authorization['admin_bypass_allowed'])
 
     def test_transfer_query_cancel_keep_original_upload_write_authority(self):

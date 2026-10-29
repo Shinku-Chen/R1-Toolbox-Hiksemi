@@ -295,13 +295,14 @@ class IntegrationTokenHTTPTests(unittest.TestCase):
             self.assertNotIn(private, serialized)
         self.assert_no_actions()
 
-    def test_v2_http_snapshot_reads_do_not_rewrite_and_first_owner_edit_migrates_to_v3(self):
+    def test_v2_http_snapshot_reads_do_not_rewrite_and_first_owner_edit_migrates_to_v4(self):
         key = self.key(role='readwrite', scopes=['read', 'fan'])
         path = self.server.api_access.path
         old = json.loads(path.read_text(encoding='utf-8'))
         old['version'] = 2
         for row in old['keys']:
-            row.pop('disabled')
+            for field in ('disabled', 'tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'):
+                row.pop(field)
         path.write_text(json.dumps(old, separators=(',', ':')), encoding='utf-8')
         os.chmod(path, 0o600)
         before = path.read_bytes()
@@ -311,9 +312,10 @@ class IntegrationTokenHTTPTests(unittest.TestCase):
         self.assertTrue(row['enabled'])
         self.update(key, name='v2 迁移 fixture')
         migrated = json.loads(path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 3)
+        self.assertEqual(migrated['version'], 4)
         actual = migrated['keys'][0]
-        expected = {**old['keys'][0], 'name': 'v2 迁移 fixture', 'disabled': False}
+        expected = {**old['keys'][0], 'name': 'v2 迁移 fixture', 'disabled': False,
+                    'tool_grants': [], 'docker_projects': [], 'grant_revision': 1, 'credential_generation': 1}
         self.assertEqual(actual, expected)
         self.assertEqual(self.capability(key)[0], 200)
         self.assertEqual(self.key_row(key['id'])['role'], 'readwrite')

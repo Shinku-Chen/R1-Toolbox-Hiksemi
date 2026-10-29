@@ -168,7 +168,14 @@
 .r1-api-root-choice { display: flex; align-items: flex-start; gap: 10px; min-height: 40px; font-size: 14px; cursor: pointer; }
 .r1-api-root-choice input { width: 20px; height: 20px; flex: none; accent-color: var(--ink-1); }
 .r1-api-root-choice span { min-width: 0; overflow-wrap: anywhere; }
+.r1-api-root-choice[hidden] { display: none; }
 .r1-api-file-fields { display: grid; gap: 12px; min-width: 0; }
+.r1-api-file-range, .r1-api-project { display: grid; gap: 10px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.r1-api-file-range:last-child { border-bottom: 0; }
+.r1-api-file-range .btn { justify-self: start; }
+.r1-api-tools > p { margin: 0 0 8px; }
+.r1-api-root-choice > span > .sub { display: block; margin-top: 5px; }
+.r1-api-project strong, .r1-api-project p { overflow-wrap: anywhere; min-width: 0; }
 .r1-api-file-fields[hidden], .r1-api-file-roots[hidden] { display: none; }
 .r1-api-list { display: grid; gap: 12px; }
 .r1-api-item { padding: 14px; border: 1px solid var(--line); border-radius: 12px; min-width: 0; }

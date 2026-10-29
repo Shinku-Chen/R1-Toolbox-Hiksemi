@@ -43,7 +43,7 @@ class BundleTests(unittest.TestCase):
                      'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py',
                      'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
                      'vendor_media_snapshot.py', 'vendor_app_probe.py', 'vendor_storage_probe.py',
-                     'api_access.py', 'api_permissions.py', 'api_contracts.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py',
+                     'api_access.py', 'api_permissions.py', 'api_contracts.py', 'api_docker_projects.py', 'api_file_readiness.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py',
                      'network_access.py', 'service_settings.py', 'screen_manager.py'):
             (self.root / 'runtime' / name).write_text('# fixture only\n')
         (self.root / 'ui/web').mkdir()
