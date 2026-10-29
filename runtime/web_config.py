@@ -28,6 +28,8 @@ from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
 from vendor_media_probe import collect_media_probe
 from vendor_media_batch import collect_media_batch
+from integration_api import IntegrationApi
+from mcp_service import validate_http_metadata
 from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
@@ -55,7 +57,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/raidcard', '/api/processes', '/api/apps', '/api/modules', '/api/vms', '/api/history',
     '/api/history/diag', '/api/smart', '/api/disk_health', '/api/scan_log', '/api/notify',
     '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
-    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1',
+    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access',
 )) | PANEL_QUERY_ROUTES
 
 PANEL_POST_ROUTES = frozenset((
@@ -66,8 +68,29 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
-    '/api/dev/media',
+    '/api/dev/media', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
 ))
+MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action'))
+ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/api/access/keys/revoke'))
+
+
+def _mcp_accepts(values):
+    """Require both advertised MCP response types with nonzero HTTP quality."""
+    accepted = set()
+    for item in ','.join(values).split(','):
+        parts = [part.strip() for part in item.split(';')]
+        quality, seen, valid = '1', False, True
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition('=')
+            if not separator:
+                valid = False
+            elif name.strip().lower() == 'q':
+                if seen or not re.fullmatch(r'(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)', value.strip()):
+                    valid = False
+                quality, seen = value.strip(), True
+        if valid and float(quality) > 0:
+            accepted.add(parts[0].lower())
+    return {'application/json', 'text/event-stream'} <= accepted
 
 
 class _Reader:
@@ -278,6 +301,8 @@ class WebConfigServer:
         self.dev_until = time.time() + 60 * max(1, min(1440, minutes)) if self.dev_no_pairing and self.dev_allow_ips else 0
         self.dev_commands = os.environ.get('R1_DEV_ALLOW_COMMANDS') == '1'
         self.fan_diagnostics = FanDiagnostics(fan_policy, version=version)
+        self.integration = IntegrationApi(self, state_dir=self.state_dir, version=version)
+        self.api_access = self.integration.access
 
     def _expire(self):
         now = self.clock()
@@ -619,6 +644,13 @@ class WebConfigServer:
     def panel_get(self, route, query, headers, peer=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
+        if route == '/api/access':
+            if (headers.get('Authorization') is not None
+                    or self.panel_authorized(headers, peer=peer) is None):
+                return 403, {'ok': False, 'error': 'API 管理需要网页登录授权'}, 'application/json; charset=utf-8'
+            if query:
+                raise ValueError('API 管理不接受查询参数')
+            return 200, self.integration.snapshot(), 'application/json; charset=utf-8'
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
         if route == '/api/auth/session':
@@ -709,6 +741,8 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
+        if route in ACCESS_POST_ROUTES and headers.get('Authorization') is not None:
+            return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
         if route == '/api/dev/diagnostics':
             return self._diagnostic_post(body, ip)
         if route == '/api/dev/media':
@@ -981,6 +1015,8 @@ class WebConfigServer:
         if not isinstance(body, dict):
             raise ValueError('请求体必须是 JSON 对象')
         panel = self.panel
+        if route in ACCESS_POST_ROUTES:
+            return 200, self.integration.manage(route, body)
         if route == '/api/ui':
             clean = panel.store.save_ui(body)
             return 200, {'ok': True, 'ui': clean}
@@ -1165,7 +1201,7 @@ class WebConfigServer:
                 def log_message(self, *args):
                     pass
 
-                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False):
+                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None):
                     data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
                     try:
                         self.connection.settimeout(self.RESPONSE_TIMEOUT)
@@ -1180,6 +1216,8 @@ class WebConfigServer:
                         self.send_header(key, content)
                     if cookie:
                         self.send_header('Set-Cookie', cookie)
+                    for key, content in (extra_headers or {}).items():
+                        self.send_header(key, content)
                     if public:
                         self.send_header('Access-Control-Allow-Origin', '*')
                         self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
@@ -1246,9 +1284,99 @@ class WebConfigServer:
                         return None, None
                     return key, session
 
+                def machine(self, parsed):
+                    """Bearer-only machine routes; browser cookies grant nothing here."""
+                    duplicates = {'authorization', 'content-type', 'mcp-protocol-version',
+                                  'mcp-method', 'mcp-name'}
+                    for name in self.headers:
+                        if (name.lower() in duplicates or name.lower().startswith('mcp-')) and len(self.headers.get_all(name, [])) > 1:
+                            self.send(400, {'error': '重复机器接口请求头'})
+                            return
+                    # No Origin is valid for native clients. A supplied Origin
+                    # must still match the actual local Host, as on the panel.
+                    if not self.valid(panel=True):
+                        return
+                    route, peer = parsed.path, self.client_address[0]
+                    if parsed.fragment or (parsed.query and route != '/api/integration/status'):
+                        self.send(400, {'error': '该机器接口不接受 URL 参数'})
+                        return
+                    principal, reason = outer.api_access.authorize(
+                        self.headers.get('Authorization'), peer,
+                        required_scope='read' if route == '/api/integration/status' else None)
+                    if principal is None:
+                        status = 503 if reason == 'storage_unavailable' else 403 if reason in (
+                            'disabled', 'peer_not_lan', 'peer_not_allowed', 'scope_denied') else 401
+                        self.send(status, {'ok': False, 'error': {'code': reason, 'message': 'API 访问未授权'}},
+                                  extra_headers={'WWW-Authenticate': 'Bearer realm="r1-toolbox"'} if status == 401 else None)
+                        return
+                    allowed = 'GET' if route == '/api/integration/status' else 'POST'
+                    if self.command != allowed:
+                        self.send(405, {'error': '请求方法不支持'}, extra_headers={'Allow': allowed})
+                        return
+                    started = time.monotonic()
+                    if route == '/api/integration/status':
+                        try:
+                            params = outer._panel_query(parsed.query, {'section'})
+                            result = outer.integration.mcp.call_tool('get_nas_status', params, principal)
+                            payload = result.get('structuredContent') or {'ok': False, 'error': '状态不可用'}
+                            status = 400 if result.get('isError') else 200
+                        except (ValueError, TypeError):
+                            status, payload = 400, {'ok': False, 'error': '状态参数无效'}
+                        except Exception:
+                            status, payload = 503, {'ok': False, 'error': '状态来源暂不可用'}
+                        outer.integration.record(principal, 'get_nas_status', peer, payload, started=started)
+                        self.send(status, payload)
+                        return
+                    if route == '/mcp':
+                        if not _mcp_accepts(self.headers.get_all('Accept', [])):
+                            self.send(406, {'error': 'MCP Accept 需要包含 application/json 和 text/event-stream'})
+                            return
+                    try:
+                        body = self.body(limit=65536)
+                    except (ValueError, UnicodeError, RecursionError, OverflowError):
+                        self.send(400, {'jsonrpc': '2.0', 'id': None,
+                                       'error': {'code': -32700, 'message': '请求 JSON 或长度无效'}} if route == '/mcp'
+                                  else {'ok': False, 'error': '请求 JSON 或长度无效'})
+                        return
+                    operation = 'tools/call'
+                    if route == '/mcp':
+                        try:
+                            invalid = validate_http_metadata(body, self.headers)
+                            status, payload = invalid if invalid is not None else outer.integration.mcp.handle(
+                                body, principal, protocol_version=self.headers.get('MCP-Protocol-Version'))
+                        except Exception:
+                            status, payload = 503, {'jsonrpc': '2.0', 'id': None,
+                                'error': {'code': -32603, 'message': 'MCP 服务暂不可用'}}
+                        if isinstance(body, dict):
+                            operation = body.get('method') if isinstance(body.get('method'), str) else 'tools/call'
+                            params = body.get('params')
+                            if operation == 'tools/call' and isinstance(params, dict) and type(params.get('name')) is str:
+                                operation = params['name']
+                        outcome = payload.get('result', payload) if isinstance(payload, dict) else {}
+                        outer.integration.record(principal, operation, peer, outcome, started=started)
+                        self.send(status, b'' if payload is None else payload)
+                        return
+                    if (not isinstance(body, dict) or set(body) != {'tool', 'arguments'}
+                            or type(body['tool']) is not str or not isinstance(body['arguments'], dict)):
+                        self.send(400, {'ok': False, 'error': '仅接受 tool 和 arguments 字段'})
+                        return
+                    try:
+                        payload = outer.integration.mcp.call_tool(body['tool'], body['arguments'], principal)
+                        status = 200
+                    except Exception:
+                        status, payload = 503, {'ok': False, 'error': '集成操作暂不可用'}
+                    outer.integration.record(principal, body['tool'], peer, payload, started=started)
+                    self.send(status, payload)
+
                 def do_GET(self):
                     parsed = urllib.parse.urlsplit(self.path)
                     route = parsed.path
+                    if route in MACHINE_ROUTES:
+                        self.machine(parsed)
+                        return
+                    if route == '/api/access' and parsed.fragment:
+                        self.send(400, {'error': 'API 管理不接受 URL 参数'})
+                        return
                     public = route in PUBLIC_ROUTES
                     panel = route in PANEL_GET_ROUTES
                     if not self.valid(public=public, panel=panel):
@@ -1306,11 +1434,14 @@ class WebConfigServer:
                 def do_POST(self):
                     parsed = urllib.parse.urlsplit(self.path)
                     route = parsed.path
+                    if route in MACHINE_ROUTES:
+                        self.machine(parsed)
+                        return
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if route in ('/api/dev/diagnostics', '/api/dev/media') and (parsed.query or parsed.fragment):
-                        self.send(400, {'error': '开发者检测不接受 URL 参数'})
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media') or route in ACCESS_POST_ROUTES) and (parsed.query or parsed.fragment):
+                        self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:
                         body = self.body(limit=65536 if panel else 8192)
@@ -1377,6 +1508,10 @@ class WebConfigServer:
                         self.send(404, {'error': '接口不存在'})
 
                 def unsupported(self):
+                    parsed = urllib.parse.urlsplit(self.path)
+                    if parsed.path in MACHINE_ROUTES:
+                        self.machine(parsed)
+                        return
                     self.send(405, {'error': '请求方法不支持'})
 
                 def do_OPTIONS(self):

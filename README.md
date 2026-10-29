@@ -1,5 +1,7 @@
 # R1 Toolbox
 
+局域网 AI 接入：网页“设置 → API 管理”可开启 MCP 与 REST、创建按功能授权的访问密钥并查看调用记录。MCP 地址为 `http://NAS_IP:18732/mcp`，默认关闭；详见[MCP 与 API 管理](docs/mcp-api.md)。
+
 海康 R1 NAS 的 Docker 工具箱：使用 `composer.yml` 部署本仓库构建的镜像，UI 和运行脚本均随镜像交付。
 
 最终产物为 **`composer.yml` 与 Docker 镜像**，另提供同一镜像的 `docker save` 离线包。源码仓库保持私有，GHCR 镜像可以公开拉取。

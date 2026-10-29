@@ -192,6 +192,7 @@ def read_bundle(tar_path, expected_sha):
                              'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'runtime/fan_guard.so', 'frontend/web/index.html',
                              'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                              'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
+                             'runtime/api_access.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
                              'runtime/light_policy.py', 'runtime/monitoring.py',
                              'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
                              'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')
@@ -229,6 +230,7 @@ def read_bundle(tar_path, expected_sha):
                                            'runtime/fan_watchdog.py', 'runtime/temperature_sources.py', 'frontend/web/index.html',
                                            'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                                            'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
+                                           'runtime/api_access.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
                                            'runtime/light_policy.py', 'runtime/monitoring.py',
                                            'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
                                            'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')),

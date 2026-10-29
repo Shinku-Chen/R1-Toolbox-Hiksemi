@@ -891,6 +891,194 @@ function r1AuthSettings(card) {
   card._sync();
 }
 
+/** API metadata is loaded only when its manager opens, never by the status poll. */
+function r1ApiSettings(card) {
+  card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">管理 MCP 与 REST 的独立访问密钥。默认关闭，按功能授权；密钥仅在创建时显示一次。</p></div><button class="btn" type="button" data-ref="open">打开 API 管理</button></div>`;
+  card._r = collect(card);
+  card._r.open.onclick = r1OpenApiManager;
+}
+
+function r1ApiTime(value) {
+  if (value === null || value === undefined || value === '') return '尚无记录';
+  const date = new Date(typeof value === 'number' ? value * 1000 : value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : '时间未知';
+}
+
+/** Copy only after an explicit click; select the visible field on HTTP fallback. */
+async function r1ApiCopy(field, status) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(field.value);
+    else {
+      field.focus(); field.select();
+      if (!document.execCommand('copy')) throw new Error('manual_copy');
+    }
+    setText(status, '已复制。');
+  } catch (_) {
+    field.focus(); field.select();
+    setText(status, '已选中文本，请手动复制。');
+  }
+}
+
+/** The secret belongs to this temporary dialog only and is cleared on close. */
+function r1ShowApiSecret(value) {
+  let secret = String(value || '');
+  if (!secret) throw new Error('服务端未返回新密钥，请撤销后重新创建。');
+  const el = mount(`<div class="fullmask r1-api-secret" id="r1ApiSecret" role="dialog" aria-modal="true" aria-labelledby="r1ApiSecretTitle"><div class="card fm-card r1-api-dialog">
+    <h2 id="r1ApiSecretTitle">保存新密钥</h2><p>密钥仅显示这一次。关闭后无法再次查看；请保存到 AI 客户端的安全配置中。</p>
+    <label class="r1-api-input">访问密钥<textarea class="textfield mono" data-ref="token" rows="3" readonly spellcheck="false" autocomplete="off" aria-label="新访问密钥"></textarea></label>
+    <button class="btn" type="button" data-ref="copyToken">复制密钥</button>
+    <label class="r1-api-input">MCP 客户端配置<textarea class="textfield mono" data-ref="config" rows="10" readonly spellcheck="false" autocomplete="off" aria-label="MCP 客户端配置"></textarea></label>
+    <p class="sub">支持远程 Streamable HTTP 的客户端可使用此配置；若客户端字段不同，填写相同 URL 和 Authorization 请求头。</p>
+    <button class="btn" type="button" data-ref="copyConfig">复制 MCP 配置</button><p class="sub" data-ref="copyStatus" role="status"></p>
+    <div class="fm-btns"><button class="btn primary" type="button" data-ref="close">已保存，关闭</button></div></div></div>`);
+  const x = collect(el);
+  x.token.value = secret;
+  x.config.value = JSON.stringify({ mcpServers: { toolbox: { url: location.origin + '/mcp', headers: { Authorization: 'Bearer ' + secret } } } }, null, 2);
+  const close = () => {
+    secret = ''; x.token.value = ''; x.config.value = '';
+    x.copyToken.onclick = null; x.copyConfig.onclick = null; x.close.onclick = null;
+    document.removeEventListener('keydown', onKey, true); el.remove();
+    const opener = document.querySelector('#r1ApiManager [data-ref="create"]'); if (opener) opener.focus();
+  };
+  const onKey = event => { if (event.key === 'Escape') { event.stopImmediatePropagation(); close(); } };
+  x.copyToken.onclick = () => r1ApiCopy(x.token, x.copyStatus);
+  x.copyConfig.onclick = () => r1ApiCopy(x.config, x.copyStatus);
+  x.close.onclick = close;
+  document.addEventListener('keydown', onKey, true);
+  document.body.append(el); x.close.focus();
+}
+
+function r1OpenApiManager() {
+  if ($('#r1ApiManager')) return;
+  const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dialog" aria-modal="true" aria-labelledby="r1ApiTitle"><div class="card fm-card r1-api-dialog">
+    <div class="r1-api-head"><h2 id="r1ApiTitle">API 管理</h2><button class="btn" type="button" data-ref="close" aria-label="关闭 API 管理">关闭</button></div>
+    <p>仅允许持密钥的局域网客户端读取或操作 NAS。按功能授予权限，可随时撤销；普通网页登录权限不变。</p>
+    <p class="sub" data-ref="status" role="status">正在读取 API 设置…</p><p class="st-crit" data-ref="error" role="alert" hidden></p>
+    <div data-ref="content" hidden>
+      <div class="r1-api-service"><label class="check"><input type="checkbox" data-ref="enabled">启用局域网 API 服务</label><span class="sub" data-ref="serviceStatus"></span></div>
+      <div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label></div>
+      <h3>创建访问密钥</h3><form data-ref="form" class="r1-api-create">
+        <label class="r1-api-input">密钥名称<input class="textfield" data-ref="name" aria-label="密钥名称" placeholder="例如：客厅 AI" maxlength="64" required autocomplete="off"></label>
+        <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
+        <label class="r1-api-input">允许的来源 IP（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="每行一个精确 IPv4 或 IPv6 地址"></textarea><span class="sub">留空允许持密钥的局域网客户端；不接受网段、域名或通配符。</span></label>
+        <label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
+        <button class="btn primary" type="submit" data-ref="create">创建密钥</button>
+      </form>
+      <div class="r1-api-head"><h3>访问密钥</h3><button class="btn" type="button" data-ref="refresh">刷新列表</button></div><div class="r1-api-list" data-ref="keys"></div>
+      <h3>最近调用记录</h3><p class="sub">仅显示时间、密钥标识、来源、功能和结果，不记录令牌或请求内容。</p><div class="r1-api-list" data-ref="audit"></div>
+    </div></div></div>`);
+  const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media'];
+  let state = null, busy = false, closed = false;
+  const close = () => {
+    if ($('#r1ApiSecret')) return;
+    closed = true; document.removeEventListener('keydown', onKey); el.remove();
+  };
+  const onKey = event => { if (event.key === 'Escape' && [...document.querySelectorAll('.fullmask')].at(-1) === el) close(); };
+  const fail = error => {
+    if (closed) return;
+    const message = String((error && error.message) || '请求未完成').slice(0, 160);
+    setText(x.error, 'API 管理操作失败：' + message); x.error.hidden = false;
+  };
+  const pending = value => {
+    busy = value; el.setAttribute('aria-busy', String(value));
+    x.enabled.disabled = value || !state || state.storage_ok !== true;
+    x.create.disabled = value || !state || state.storage_ok !== true;
+    x.refresh.disabled = value;
+    x.keys.querySelectorAll('button').forEach(button => { button.disabled = value || !state || state.storage_ok !== true; });
+  };
+  const names = () => new Map((Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []).map(scope => [scope.id, scope.label || scope.id]));
+  const draw = () => {
+    const labels = names();
+    x.content.hidden = false; x.enabled.checked = state.enabled === true;
+    setText(x.status, state.storage_ok === true ? '密钥只在创建时显示。关闭服务后，所有 MCP 与 REST 密钥立即停止访问。' : '访问配置存储不可用，暂不能启用服务或管理密钥。');
+    setText(x.serviceStatus, state.enabled === true ? '已开启' : '已关闭');
+    x.mcp.value = location.origin + '/mcp'; x.restStatus.value = location.origin + '/api/integration/status'; x.restAction.value = location.origin + '/api/integration/action';
+    if (!x.scopes.children.length) {
+      for (const scope of Array.isArray(state.scope_catalog) ? state.scope_catalog : []) {
+        if (!allowedScopes.includes(scope.id)) continue;
+        const label = mount(`<label class="r1-api-scope"><input type="checkbox"><span><b></b><span class="sub"></span></span></label>`);
+        const input = label.querySelector('input'); input.value = scope.id; input.checked = scope.id === 'read';
+        label.querySelector('b').textContent = String(scope.label || scope.id);
+        label.querySelector('.sub').textContent = String(scope.description || '');
+        x.scopes.append(label);
+      }
+    }
+    const keys = Array.isArray(state.keys) ? state.keys : [];
+    x.keys.replaceChildren();
+    if (!keys.length) x.keys.append(mount('<p class="sub">尚未创建访问密钥。</p>'));
+    for (const key of keys) {
+      const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></article>`);
+      const k = collect(item);
+      setText(k.name, String(key.name || '未命名密钥')); setText(k.status, ({ active: '有效', expired: '已到期', revoked: '已撤销' })[key.status] || '状态未知');
+      setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => labels.get(id) || id).join('、') || '未授予权限');
+      setText(k.ips, Array.isArray(key.allowed_ips) && key.allowed_ips.length ? key.allowed_ips.join('、') : '持密钥的局域网客户端');
+      setText(k.created, r1ApiTime(key.created_at)); setText(k.expires, key.expires_at === null ? '长期' : r1ApiTime(key.expires_at)); setText(k.used, r1ApiTime(key.last_used_at));
+      if (key.status === 'revoked') k.revoke.hidden = true;
+      k.revoke.onclick = async () => {
+        if (busy || !(await R1.ask('撤销访问密钥？', `撤销「${esc(key.name || '未命名密钥')}」后，使用此密钥的客户端立即失去访问权限。`, true))) return;
+        await mutate('/api/access/keys/revoke', { id: key.id });
+      };
+      x.keys.append(item);
+    }
+    x.audit.replaceChildren();
+    const audit = Array.isArray(state.audit) ? state.audit : [];
+    if (!audit.length) x.audit.append(mount('<p class="sub">尚无调用记录。</p>'));
+    for (const record of audit.slice(0, 100)) {
+      const item = mount('<article class="r1-api-audit"><span data-ref="time"></span><strong data-ref="action"></strong><span data-ref="source"></span><span data-ref="result"></span></article>');
+      const a = collect(item);
+      setText(a.time, r1ApiTime(record.timestamp ?? record.created_at)); setText(a.action, String(record.operation || record.tool || record.action || record.scope || '功能未知'));
+      setText(a.source, [record.key_name || record.key_id, record.peer || record.source_ip || record.ip].filter(Boolean).join(' · ') || '来源未知');
+      setText(a.result, String(record.outcome || record.result || record.status || '结果未知'));
+      x.audit.append(item);
+    }
+    pending(busy);
+  };
+  const refresh = async () => {
+    const result = await API.get('/api/access');
+    if (!result || result.ok !== true) throw new Error((result && result.error) || '未读取到访问配置');
+    if (closed) return;
+    state = result; draw();
+  };
+  const mutate = async (url, body) => {
+    if (busy) return null;
+    pending(true); x.error.hidden = true;
+    try {
+      const result = await R1.post(url, body);
+      if (!result || result.ok !== true) throw new Error((result && result.error) || '操作未完成');
+      if (url === '/api/access/keys') {
+        if (!closed) { r1ShowApiSecret(result.token); x.name.value = ''; x.ips.value = ''; }
+        result.token = '';
+      }
+      await refresh(); return result;
+    } catch (error) { fail(error); return null; }
+    finally { if (!closed) pending(false); }
+  };
+  x.enabled.onchange = async () => {
+    if (busy || !state) return;
+    const enabled = x.enabled.checked; x.enabled.checked = state.enabled === true;
+    if (enabled && !(await R1.ask('开启局域网 API 服务？', '已创建的有效密钥将能按授权功能访问 NAS。请将密钥仅交给可信客户端。'))) return;
+    await mutate('/api/access/settings', { enabled });
+  };
+  x.form.onsubmit = async event => {
+    event.preventDefault(); if (busy) return;
+    const name = x.name.value.trim(), scopes = [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
+    const allowed_ips = x.ips.value.split(/[\s,，;；]+/).map(value => value.trim()).filter(Boolean);
+    if (!name || !scopes.length) { fail(new Error('请填写名称，并选择至少一项功能权限。')); return; }
+    if (new Set(allowed_ips).size !== allowed_ips.length || allowed_ips.some(ip => /[/\*]/.test(ip))) { fail(new Error('来源 IP 不可重复，也不接受网段或通配符。')); return; }
+    const labels = names(), grant = scopes.map(id => labels.get(id) || id).join('、');
+    if (!(await R1.ask('创建访问密钥？', `将向「${esc(name)}」授予：${esc(grant)}。${scopes.includes('power') ? '电源权限可安排关机或重启。' : ''}`))) return;
+    await mutate('/api/access/keys', { name, scopes, allowed_ips, expires_days: Number(x.expiry.value) });
+  };
+  x.refresh.onclick = async () => {
+    if (busy) return;
+    pending(true); x.error.hidden = true;
+    try { await refresh(); } catch (error) { fail(error); } finally { if (!closed) pending(false); }
+  };
+  x.close.onclick = close; document.addEventListener('keydown', onKey);
+  document.body.append(el); pending(true);
+  refresh().catch(fail).finally(() => { if (!closed) pending(false); });
+}
+
 function r1ConnSettings(card) {
   let sig = '';
   card.innerHTML = `<div data-ref="rows"></div>`;
@@ -947,6 +1135,7 @@ SET_SCHEMA.push(
   ...(R1_THRESHOLDS ? [R1_THRESHOLDS] : []),
   { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
   { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选，默认关闭）。启用后网页写操作需要先登录；也可通过 R1_WEB_AUTH_MODE=password 完全停用配对码。', custom: r1AuthSettings },
+  { id: 'r1-api', title: 'API 管理', icon: 'key', desc: '为局域网 AI 与自动化管理 MCP／REST 访问密钥、功能权限、来源限制和调用记录。', custom: r1ApiSettings },
   { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
   { id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [
     { k: 'weatherAuto', label: '自动定位', type: 'toggle', hint: '按 NAS 公网 IP 估算城市；需要外网。关闭后可手动填写下方位置。',
