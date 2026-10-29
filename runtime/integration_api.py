@@ -157,7 +157,7 @@ class IntegrationApi:
         if section == 'containers':
             return panel.docker()
         if section == 'apps':
-            return collect_applications()
+            return collect_applications(state_dir=web.state_dir)
         if section == 'fans':
             return {'fan_policy': web._read(web.fan_policy), 'sensors': panel.fans()}
         if section == 'lights':
@@ -180,8 +180,9 @@ class IntegrationApi:
                 # exactly the same collectors and fixture replacement points.
                 from web_config import collect_media_probe, collect_media_batch
                 action = arguments.get('action', 'face')
-                return {'ok': True, 'action': action,
-                        'data': collect_media_batch() if action == 'all' else collect_media_probe()}
+                value = collect_media_batch() if action == 'all' else collect_media_probe()
+                receipt = self.web._save_media_snapshot(value, 'batch' if action == 'all' else 'face')
+                return {'ok': True, 'action': action, 'data': value, 'cache': receipt}
             finally:
                 self.web.media_probe_lock.release()
         routes = {'set_fan_policy': '/api/r1/fan', 'release_fan': '/api/r1/fan/release',

@@ -1,10 +1,16 @@
 # 原厂下载任务：只读诊断入口与副作用审计
 
-样本为用户提供的 `R1_X01_GML_STD_V6.3.3_Build_260907.zip`，复核日期为 2026-10-29。本文地址均为 `emhistor` ELF 链接虚拟地址，SHA-256 为 `402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26`。未运行厂商 ELF／脚本，未访问 NAS、查询用户文件、启动下载或读取令牌。
+样本为用户提供的 `R1_X01_GML_STD_V6.3.3_Build_260907.zip`，复核日期为 2026-10-29。本文地址均为 `emhistor` ELF 链接虚拟地址，SHA-256 为 `402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26`。固件静态审计未运行厂商 ELF／脚本。下述实机证据只涉及已授权的 qB 版本元数据，不包含用户文件、任务写操作或令牌读取。
+
+## 下载数据与进程现场是两种结果
+
+`vendor_business` 的 `runtime.available:true` 只表示能读取 `/proc`，不表示进程扫描完整，更不表示已取得任务。`vendor_runtime.require_one_listener` 还必须确认 `complete:true`、唯一监听归属及目标进程身份。过去把“可读但不完整”一律返回 `proc_unavailable`，容易误判为现场完全不可读；现在分别返回 `proc_partial` 与 `proc_unavailable`。
+
+此前扫描所有进程 FD 时，无关进程正常关闭一个 FD 或正常退出，也会令完整性失败。现在仅忽略无关 FD 明确的 `ENOENT`，以及确认 PID 目录已经不存在的自然退出；存活进程身份变化、权限拒绝、覆盖预算不足、目标服务 FD 变化或监听变化仍使核验失败。目标 PID／启动时刻／可执行身份及 socket inode 的前后复核保持严格，不因状态文案调整而跳过预检。
 
 ## 实际接入：已有 aria2 的固定只读 RPC
 
-`runtime/vendor_download_diagnostics.py` 的 `collect(root='/')` 查询已经运行的原厂 `aria2c-nox`，不调用原厂业务 REST。
+`runtime/vendor_download_diagnostics.py` 的 `collect_aria2(root='/')` 查询已经运行的原厂 `aria2c-nox`，不调用原厂业务 REST。
 
 1. 使用 `vendor_runtime.require_one_listener` 核对唯一进程、`comm`、可执行 basename、PID、启动时刻及监听 socket inode。仅允许已证的 `aria2c-nox` 拥有 IPv4 本机 `6800` 监听，缺失或不完整就不连接。
 2. 固定向 `127.0.0.1:6800/jsonrpc` 发 `aria2.getVersion`，参数为空；不带 secret。
@@ -42,6 +48,28 @@
 
 需要授权时返回 `available: false, status: auth_required, data: null`；不会读取配置凑 secret、登录、续令牌或再次试密码。服务不可用、归属不明、畸形响应、RPC 错误或身份变化也保持 `data: null`。生产调用不接受来自 HTTP 请求的 host、端口、方法、路径、token 或任务 ID。`ownership_check`／`socket_factory`／`monotonic` 仅供 Python fixture 注入。
 
+## 已有 qB 的固定只读 WebAPI
+
+用户已明确 qB WebUI 端口为 `8181`。2026-10-29 的授权实机外部只读检查确认：下述三个 GET 均在不发送账号、口令或 Cookie 时返回 HTTP 200，版本为 `v5.1.4`；全局连接状态为 `connected`，任务列表实际返回 3 项、状态均为 `uploading`，正文约 14 KiB。速度是采样瞬时值，不作为固定验收值。对应运行进程名为 `qbittorrent-nox`，启动参数亦明确该端口；既有监控还观察到该监听为 TCP6 `::`。这些结果不代表所有设备无需认证，也不代替新镜像在宿主内执行回环监听归属核验。
+
+`collect_qbittorrent` 先严格核验固定本机 `8181` 监听归属 `qbittorrent-nox`。IPv4 监听固定连接 `127.0.0.1:8181`；TCP6 的 `::`／`::1` 监听固定连接 `[::1]:8181`，不依据全局 `bindv6only` 猜测单个 socket 能否双栈转发。跨 IPv4／IPv6 出现多个候选监听时直接拒绝。随后依次发送三个 GET：
+
+1. `/api/v2/app/version`，确认真实版本文本。
+2. `/api/v2/transfer/info`，投影当前全局下载／上传速度和有限枚举的连接状态。
+3. `/api/v2/torrents/info?filter=all&sort=hash&limit=129&offset=0`，读取一个有界任务窗口。
+
+固定同源 `Host`／`Referer`，IPv6 地址按 URL 规范加方括号；不使用代理、Cookie 或 Authorization，不访问登录、偏好设置、日志、种子文件、Tracker、任务文件或任何控制路由。只读方法及字段依据 [qBittorrent 官方 WebUI API](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29)。请求前与每次响应后均复核同一 PID／启动时刻／socket inode／连接地址；单引擎网络窗口为 2 秒，HTTP 头部／正文上限沿用 aria2 限制，版本文本上限为 4 KiB。
+
+请求 129 项用于发现超过 128 项的情况；超量时整份 qB 结果返回 `limit_exceeded`，不把截断窗口描述成全量。成功仍标记 `complete:false`。`counts.tasks` 只表示本次返回任务条目数，不是跨引擎总量或全部历史记录。任务只保留状态、选定下载内容的字节数、已完成字节、原生进度百分比和速率；缺测保持 `null`，未知状态不会透传为任意文本。真实零值仍为 `0`。qB 的 `size` 表示选定下载文件总量，不用包含未选文件的 `total_size` 替代。
+
+qB 不支持请求时只选返回字段，因此原始列表可能在进程内存中含有文件名、路径、磁力链接或 hash；投影后这些字段一律丢弃，不向网页、审计或日志输出。HTTP 401／403 立即返回 `auth_required/data:null`，不尝试用户此前提供的密码，不创建登录会话、不改认证配置、不读取未知 profile 文件。正常服务网络日志仍可能变化。
+
+## 两种引擎分别采集
+
+`collect(root='/')` 分别执行 aria2 与 qB 来源，单源失败不阻断另一源。顶层 `engines` 始终保留各来源的 `engine/available/status/reason/source`；至少一源成功时，`data.engines` 额外包含各自受限 `data`，并明确总层 `complete:false`。所有来源均失败时顶层 `data:null`，状态为 `no_readable_engine`；不会返回空任务列表假装采集成功。
+
+两引擎的任务状态与计数定义不同，且原厂可能迁移任务；实现不合并任务标识，不对两种来源求和，也不生成统一的“全部下载数量”。业务聚合层另有字段白名单，不应直接转发原始 provider JSON。
+
 ## 固件中这条旧 BT 查询链的证据
 
 | 层 | 函数／地址 | 直接证据 |
@@ -73,7 +101,7 @@
 
 `custom.json` 的初始化 `0x2d99bd` 从动态模块 profile 路径取文件；该文件与 `aria2.session` 不属于已经证明的 RAM 统计缓存。读取它们可能触及用户盘，并且持久配置不等于实时任务进度。因此不通过这些文件补查询，也不扫描下载目录。
 
-qB 的确切 basename 为 `qbittorrent-nox`，证据是 `qb_check_exe_run@0x2da833`。WebUI 端口由运行配置填入 `%s --profile=%s --webui-port=%d --daemon`，没有充分证据把它固定写成 `8080`。运行现场可以观察进程，但不能把进程存在当成取得了 qB 任务列表。
+qB 的确切 basename 为 `qbittorrent-nox`，证据是 `qb_check_exe_run@0x2da833`。WebUI 端口由运行配置填入 `%s --profile=%s --webui-port=%d --daemon`，不能凭通用默认值写成 `8080`。本版使用的 `8181` 来自用户明确配置与实机启动现场；进程存在仍不能代替任务协议成功。
 
 ## Thunder 也存在自动授权与写状态
 
@@ -83,6 +111,6 @@ qB 的确切 basename 为 `qbittorrent-nox`，证据是 `qb_check_exe_run@0x2da8
 
 ## 验证边界
 
-定向测试使用注入的进程身份、内存 socket 和本机临时 HTTP fixture，覆盖固定方法、三次身份复核、授权失败、禁止重定向／代理、大小与时间上限、字段脱敏、缺测、真零和真实空队列。`vendor_runtime` 的 `/proc` fixture 与聚合 HTTP 鉴权由对应模块测试覆盖。
+定向测试使用注入的进程身份、内存 socket 和本机临时 HTTP fixture，覆盖 aria2 固定 POST、qB 固定 GET、各阶段身份复核、授权失败且不登录、禁止重定向／代理、大小与时间上限、字段脱敏、缺测、真零、真实空队列及多来源失败隔离。`vendor_runtime` 的 `/proc` fixture 额外覆盖无关 FD 关闭／进程退出不会误拒绝、权限错误仍失败关闭、qB 端口与进程必须精确匹配。
 
-本轮未连接用户 NAS。部署后只有已核验的 `aria2c-nox` 正在监听且无需额外授权时，才可能获得任务快照；qB／迅雷观察仍只是运行现场，不能宣称已获取其任务列表。
+实机 qB 外部只读三项查询已核对；新 provider 部署前仍不能宣称其宿主回环、唯一监听 gate 与任务列表投影已经在 NAS 通过。部署后须分别核对两个来源的状态、唯一监听归属和任务协议结果。迅雷仍只是运行现场，未接入任务读取。

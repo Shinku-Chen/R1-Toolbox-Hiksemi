@@ -28,6 +28,9 @@ from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
 from vendor_media_probe import collect_media_probe
 from vendor_media_batch import collect_media_batch
+from vendor_media_snapshot import record_media_snapshot
+from vendor_app_probe import collect_application_probe
+from vendor_app_diagnostics import record_application_snapshot
 from integration_api import IntegrationApi
 from service_settings import ServiceSettingsStore
 from network_access import peer_matches
@@ -60,6 +63,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/history/diag', '/api/smart', '/api/disk_health', '/api/scan_log', '/api/notify',
     '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
     '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/services',
+    '/api/business',
 )) | PANEL_QUERY_ROUTES
 
 PANEL_POST_ROUTES = frozenset((
@@ -72,7 +76,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
     '/api/dev/media', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
     '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate',
-    '/api/services/screen', '/api/services/mcp', '/api/services/developer',
+    '/api/services/screen', '/api/services/mcp', '/api/services/developer', '/api/r1/business/refresh',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
@@ -265,8 +269,12 @@ class WebConfigServer:
         self.operation_lock = threading.RLock()
         self.storage_diagnostic_lock = threading.Lock()
         self.business_diagnostic_lock = threading.Lock()
+        self.business_state_lock = threading.Lock()
         self.diagnostic_lock = threading.Lock()
         self.media_probe_lock = threading.Lock()
+        self.application_probe_lock = threading.Lock()
+        self._business_cached, self._business_cached_at = None, 0
+        self._business_epoch = self._business_cached_epoch = 0
         self.server = self.thread = None
         self.reason = None
         self.pair_hash, self.pair_until = None, 0
@@ -731,6 +739,11 @@ class WebConfigServer:
         if route == '/api/r1':
             authorized = self.panel_authorized(headers, peer=peer) is not None
             return 200, panel.r1_state(authorized=authorized), 'application/json; charset=utf-8'
+        if route == '/api/business':
+            if query:
+                raise ValueError('业务状态不接受查询参数')
+            status, value, _ = self._business_state()
+            return status, value, 'application/json; charset=utf-8'
         params = self._panel_query(query, {
             '/api/history': ('metric', 'range'), '/api/smart': ('dev',),
             '/api/vms': ('probe',), '/api/apps': ('refresh',), '/api/gpu': ('diag',),
@@ -816,6 +829,8 @@ class WebConfigServer:
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES) and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
+        if route == '/api/r1/business/refresh':
+            return self._business_refresh_post(body, headers, ip)
         if route == '/api/dev/diagnostics':
             return self._diagnostic_post(body, ip)
         if route == '/api/dev/media':
@@ -911,12 +926,76 @@ class WebConfigServer:
             return 409, {'ok': False, 'error': '已有媒体测试正在进行'}, None
         try:
             if body['action'] == 'probe_all':
-                return 200, {'ok': True, 'batch': collect_media_batch()}, None
-            return 200, {'ok': True, 'probe': collect_media_probe()}, None
+                value = collect_media_batch()
+                receipt = self._save_media_snapshot(value, 'batch')
+                return 200, {'ok': True, 'batch': value, 'cache': receipt}, None
+            value = collect_media_probe()
+            receipt = self._save_media_snapshot(value, 'face')
+            return 200, {'ok': True, 'probe': value, 'cache': receipt}, None
         except Exception:
             return 503, {'ok': False, 'error': '媒体测试暂不可确认'}, None
         finally:
             self.media_probe_lock.release()
+
+    def _save_media_snapshot(self, value, kind):
+        """Record an already completed explicit query; never retry on write failure."""
+        receipt = record_media_snapshot(self.state_dir, value, kind=kind)
+        self._invalidate_business_cache()
+        return receipt
+
+    def _invalidate_business_cache(self):
+        """Prevent a slow pre-refresh collection from publishing an older result."""
+        with self.business_state_lock:
+            self._business_epoch += 1
+            self._business_cached, self._business_cached_at = None, 0
+
+    def _business_refresh_post(self, body, headers, ip):
+        """Owner-initiated fixed getters; native middleware may update its state."""
+        authorization = self.panel_authorized(headers, peer=ip)
+        if headers.get('Authorization') is not None or authorization not in ('password', 'pair', 'open'):
+            if self.auth.required() and authorization is None:
+                return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
+            return 403, {'ok': False, 'error': '刷新原厂业务需要网页登录授权'}, None
+        if (not isinstance(body, dict) or set(body) != {'source'}
+                or body['source'] not in ('applications', 'media')):
+            return 400, {'ok': False, 'error': '请选择 applications 或 media 固定来源'}, None
+        source = body['source']
+        lock = self.media_probe_lock if source == 'media' else self.application_probe_lock
+        if not lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '该业务来源已有刷新正在进行'}, None
+        try:
+            if source == 'media':
+                value = collect_media_batch()
+                receipt = self._save_media_snapshot(value, 'batch')
+            else:
+                value = collect_application_probe()
+                stored = record_application_snapshot(self.state_dir, value)
+                receipt = {'stored': stored, 'reason': None if stored else 'snapshot_not_saved'}
+                self._invalidate_business_cache()
+            # The result reports native success separately from HTTP handling.
+            return 200, {'ok': True, 'source': source, 'result': value, 'cache': receipt}, None
+        except Exception:
+            return 503, {'ok': False, 'error': '业务刷新未能完成，请先核对当前状态'}, None
+        finally:
+            lock.release()
+
+    def _business_state(self):
+        """Short-lived passive snapshot; no signed native query runs from GET."""
+        with self.business_state_lock:
+            cached = self._business_cached
+            if (cached is not None and self._business_cached_epoch == self._business_epoch
+                    and time.monotonic() - self._business_cached_at < 30):
+                return 200, {'ok': True, 'snapshot': copy.deepcopy(cached), 'cached': True}, None
+        status, value, cookie = self._business_debug_snapshot()
+        if status == 409 and value.get('error_code') == 'business_changed':
+            # Retry only the passive read, never a native signed refresh.
+            return self._business_debug_snapshot()
+        if status == 409:
+            with self.business_state_lock:
+                if self._business_cached is not None and self._business_cached_epoch == self._business_epoch:
+                    return 200, {'ok': True, 'snapshot': copy.deepcopy(self._business_cached),
+                                 'cached': True, 'busy': True}, None
+        return status, value, cookie
 
     def _diagnostic_post(self, body, ip):
         """Explicit developer IP access grants passive checks without a login.
@@ -983,7 +1062,22 @@ class WebConfigServer:
         if not self.business_diagnostic_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有业务诊断正在进行'}, None
         try:
-            return 200, {'ok': True, 'snapshot': collect_business_diagnostics()}, None
+            # Compatibility for embedding fixtures created without __init__.
+            if not hasattr(self, 'business_state_lock'):
+                self.business_state_lock = threading.Lock()
+                self._business_epoch = self._business_cached_epoch = 0
+            with self.business_state_lock:
+                epoch = self._business_epoch
+            state_dir = getattr(self, 'state_dir', None)
+            snapshot = (collect_business_diagnostics(state_dir=state_dir) if state_dir is not None
+                        else collect_business_diagnostics())
+            with self.business_state_lock:
+                if epoch != self._business_epoch:
+                    return 409, {'ok': False, 'error': '业务来源已刷新，请读取新快照',
+                                 'error_code': 'business_changed'}, None
+                self._business_cached, self._business_cached_at = copy.deepcopy(snapshot), time.monotonic()
+                self._business_cached_epoch = epoch
+            return 200, {'ok': True, 'snapshot': snapshot, 'cached': False}, None
         except Exception:
             return 503, {'ok': False, 'error': '业务诊断暂不可确认'}, None
         finally:
@@ -1534,7 +1628,7 @@ class WebConfigServer:
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if (route in ('/api/dev/diagnostics', '/api/dev/media') or route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES)) and (parsed.query or parsed.fragment):
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/r1/business/refresh') or route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES)) and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:

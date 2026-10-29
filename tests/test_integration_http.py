@@ -343,7 +343,7 @@ class IntegrationHTTPTests(unittest.TestCase):
                         self.assertIsNone(value['data']['data'])
                     if section == 'system':
                         self.assertNotIn('data_dir', value['data'])
-            applications.assert_called_once_with()
+            applications.assert_called_once_with(state_dir=self.server.state_dir)
         self.assert_no_actions()
 
     def test_screen_only_key_cannot_read_rest_status(self):

@@ -40,6 +40,7 @@ node tests/check_interactions.cjs      # 小屏真实 API、触摸/导航/详情
 node tests/check_web_config.cjs        # 网页面板 + 真实 HTTP fixture
 node tests/check_api_management.cjs    # Token 创建、编辑、停用、轮换与权限范围
 node tests/check_service_settings.cjs  # 服务开关、实际显示状态与开发白名单
+node tests/check_business_status.cjs   # 应用／下载／媒体来源、显式采集及移动端展示
 node tests/check_small_screen_prototype.cjs  # 独立小屏原型（离线 HTML）
 python tests/check_fan_guard_linux.py
 python tests/check_fan_startup_linux.py
@@ -65,6 +66,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 开发者白名单直接检测统一使用 `/api/dev/diagnostics`：只在显式开发模式、实际连接来源命中非空局域网 IP／CIDR 白名单和有效窗口内免登录读取固定项目，保持同源／JSON／CSRF。Web 保存绝对到期时间，重启不续期；过期、配置损坏或无白名单都关闭授权。只读授权不得扩展到控制、风扇重试或任意命令，采集复用各来源的并发锁，逐项报告失败。接口边界见 `docs/dev-diagnostics.md`。
 - 原厂媒体会话验证使用显式 `POST /api/dev/media`，不自动加入被动检测。只读复用固定管理员已有会话，令牌与签名留在宿主，校验证书后只读首个状态帧；不重新登录、校时、重置令牌或转发任意原厂动作。原厂查询可能写完成状态，必须按 `docs/media-probe.md` 如实说明。
 - 媒体 `probe_all` 固定验证七类状态，每项取一次首帧，失败相互隔离。共享相册只使用当前管理员创建的既有相册，不由网页传入标识；没有相册时标记不适用，不造样本。原厂共享列表存在修复故障分支、计数有吞错零值，不能宣传为全程无副作用或据零值推断空闲。
+- 原厂业务 `GET /api/business` 只用被动来源；应用／媒体原厂查询仅由所有者显式 `POST /api/r1/business/refresh` 或原有显式媒体接口触发，再保存 Toolbox 脱敏快照。保留逐项时间和最近失败，不在 GET／被动诊断里重签名或自动重试；刷新后旧采集不得覆盖新结果。qB 核验唯一 IPv4／IPv6 本机监听后固定连接回环地址，不猜双栈、不自动登录。见 `docs/business-diagnostics.md`。
 - 局域网 MCP `/mcp` 与 `/api/integration/*` 只使用独立 API Token，不把网页会话、小屏令牌或开发者窗口转成机器授权。服务默认关闭，新键按只读／读写／管理员角色、显式功能域及文件范围共同授权，列表与调用共用 `api_permissions`；管理员不绕过域与资源，旧键只保留原十工具和原六 scope。Token 支持编辑、暂停／启用、不可逆撤销和原子轮换；省略权限或有效期字段保持原值，不把旧键自动升级。来源接受完整落在局域网／回环范围的 IP、CIDR 或点分掩码，始终匹配真实 peer，不能用转发头或公网全放行网段。API 管理沿用网页授权与同源／CSRF；新工具复用原有校验和锁，禁止任意命令、SQL 或原厂 action 代理。文件功能使用可信根 ID 加相对路径，真实打开时还须重新核验身份、ACL、符号链接和句柄，不能将授权规划缓存当安全证明。未实现领域标记待接入，不制造假工具。Token 仅创建／轮换响应显示一次、持久化只存摘要；轮换立即使旧摘要失效，审计不记录参数／结果／凭据。见 `docs/mcp-api.md` 与 `docs/ai-capability-roadmap.md`。
 
 ## 代码约定

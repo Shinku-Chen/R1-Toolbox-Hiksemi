@@ -1,66 +1,51 @@
-# 原厂应用、下载与媒体业务诊断
+# 原厂应用、下载与媒体业务状态
 
-`POST /api/dev/business` 一次采集三个业务类别的受限只读结果和真实运行现场。它不代理原厂 REST，不接收命令、路径、URL、端口、令牌、用户 ID 或任务 ID。
+网页“应用 → 原厂业务状态”显示三个独立来源，不用容器列表替代应用清单，也不用进程存在替代任务数量。页面轮询只读取被动来源；原厂应用／媒体签名查询由用户点击采集按钮后发起。
 
-白名单 IP 需要免登录检测时，可改用统一 `POST /api/dev/diagnostics`，请求 `{"action":"snapshot","checks":["business"]}`。它复用同一个业务采集器及并发锁；仅统一入口接受开发者白名单授权，不改变本页旧接口的口令与命令开关要求。见[开发者白名单检测](dev-diagnostics.md)。
+## 接口与授权
 
-## 请求及授权
-
-需要 `R1_DEV_NO_PAIRING=1`、精确客户端 `R1_DEV_ALLOW_IPS`、有效的 `R1_DEV_MINUTES` 窗口及 `R1_DEV_ALLOW_COMMANDS=1`。已启用登录口令时还需要正常登录会话；开发者身份不替代口令，同源、JSON 和 CSRF 检查继续生效。接口没有公开 GET 或 CORS 放行。
-
-唯一允许的请求体是 `{"action":"snapshot"}`：
-
-```javascript
-const response = await fetch('/api/dev/business', {
-  method: 'POST',
-  headers: {'Content-Type': 'application/json', 'X-FNM-Request': '1'},
-  body: JSON.stringify({action: 'snapshot'})
-});
-console.log(await response.json());
-```
-
-同一时刻只接受一个业务诊断请求；已有请求运行时返回 `409`。`200/ok:true` 表示完成一次诊断请求，各业务是否取得数据由 `snapshot.categories.<类别>.available` 和 `status` 分别表达，不等于三类业务都可读取。
-
-## 本版能实际检查什么
-
-| 类别 | 数据来源 | 返回语义 |
-|---|---|---|
-| `applications` | 已有 `/tmp/nand_config/app_center.conf` | 只投影缓存应用名、版本和原厂状态代码；`status:cached`，`live:false`、`complete:false`、`running:null`，保留缓存修改时间 |
-| `downloads` | 已在运行并经 `/proc` 核验的 `aria2c-nox`，固定 `127.0.0.1:6800/jsonrpc` | 先确认版本，再只读 active／waiting／stopped 队列，返回状态、字节、百分比和速度；需要原厂授权时停止，不读取或刷新令牌 |
-| `media` | 真实 `/proc` 进程、监听与归属现场 | 可观察 `intelligent`、`image_ocr` 等进程和已确认端口；任务读取维持 `unverified_read_only/data:null`，不伪造媒体任务数或进度 |
-
-应用缓存的原厂 `count` 统计范围与序列化 `list[]` 不同，不能当成已缓存条目数或当前已安装应用总数。缓存文件存在也不能证明应用当前运行。缺缓存返回 `cache_missing/data:null`，不调用原厂 getter 生成缓存。细节见 [应用来源与副作用](vendor-app-diagnostics.md)。
-
-下载只发 `aria2.getVersion` 及固定 `system.multicall` 中的 `aria2.tellActive`、`tellWaiting`、`tellStopped`。每队列最多 128 项；`counts` 仅是这次有界窗口的条目数，`complete:false` 不表示取得全部历史任务。`tellActive` 返回超限时拒绝整个快照，不截成全量成功。没有任务只有在身份和协议查询均通过、真实返回空队列时才能表示为零；缺服务、缺授权或读取失败均保留 `data:null`。URL、文件名、文件路径、GID、账号、令牌及原始响应不会透出聚合接口。详见 [下载安全读取链](vendor-download-diagnostics.md)。
-
-媒体任务查询仍未确认安全的一次性来源：缩略图入口是流式循环；OCR 会查询用户图片表并写完成事件；刮削入口代理到尚未审明的 `refresh_status`。它们不会为了诊断被调用。`intelligent` 的已确认端口为 `7786`，`image_ocr` 为 `7778`，`9660` 仅确认是刮削代理目的端口，不能据此推断进程名。详见 [媒体证据与边界](vendor-media-diagnostics.md)。
-
-## 运行现场与身份核验
-
-`runtime/vendor_runtime.py` 只读取固定 `/proc` 元数据：进程 `comm`、`stat`、`exe` 链接、FD 的 socket inode 和 TCP 监听表。不读取命令行、环境变量、可执行文件内容、用户目录或下载 session；不扫描端口、运行命令或启动服务。
-
-输出只保留固定服务名、PID、启动时刻和监听元数据；没有确认的归属保持未知。扫描有总时间、进程数、FD 数及文件大小上限，`runtime.complete:false` 时不能把未观察到的进程当成服务已停止。
-
-下载 RPC 发送前、版本读取后和任务读取后，均要求同一个 `aria2c-nox` 的 PID、启动时刻和监听 inode。只有固定 IPv4 回环可到的 `6800` 监听才能使用；请求始终发向 `127.0.0.1`，不使用代理环境变量、重定向或任意主机。TCP／HTTP 响应的头、正文、条目数与时间均有上限。
-
-主要状态包括：
-
-| 状态 | 含义 |
+| 接口 | 行为 |
 |---|---|
-| `cached` | 成功读取已有应用缓存；完整性和当前运行态未保证 |
-| `ok` | 成功读取已核验 aria2 的本次有界队列窗口 |
-| `cache_missing`／`cache_invalid` | 没有可用应用缓存；不会自动创建或修复 |
-| `not_listening` | 完整现场里未观察到固定下载监听 |
-| `proc_unavailable`／`owner_unverified`／`ambiguous` | 现场或监听归属无法严格确认，未发送下载请求 |
-| `auth_required` | 原厂 RPC 要求授权，未自动登录、读取或刷新令牌 |
-| `identity_changed` | 查询期间进程或监听变更，丢弃结果 |
-| `timeout`／`limit_exceeded`／`invalid_response` | 查询超时、超限或不符合已验证协议，数据保持未知 |
-| `unverified_read_only` | 媒体任务读取链尚未确认安全；独立保留真实服务现场 |
+| `GET /api/business` | 与其他网页监控同样授权；开启口令后需登录。不接受查询参数，不签名查询原厂应用／媒体 |
+| `POST /api/r1/business/refresh` | 网页所有者显式采集，固定 `{"source":"applications"}` 或 `{"source":"media"}`。同源、JSON、CSRF；拒绝 Bearer 与开发白名单代替所有者授权 |
+| `POST /api/dev/business` | 保留原开发窗口、实际来源白名单、命令开关与已启用口令会话要求；只接受 `{"action":"snapshot"}` |
+| `POST /api/dev/diagnostics` | 有效开发白名单可免登录检测，固定 `{"action":"snapshot","checks":["business"]}`，复用被动采集器与并发锁 |
+| `POST /api/dev/media` | 保留显式 `probe`／`probe_all` 授权与媒体共享锁，结果同时保存到 Toolbox 媒体快照 |
 
-原厂 REST 自身也可能在鉴权后启动用户资源；Toolbox 登录会话与原厂 token 不相互替代。本版不调用应用更新／安装、下载启动／暂停／删除／恢复、媒体扫描／OCR、自检或任意控制动作。系统和服务正常网络日志仍可能变化。
+不接受任意命令、URL、路径、端口、原厂动作、用户、令牌或任务标识，不开放 CORS。媒体一次批量最坏约 81 秒，客户端允许至少 90 秒；前端超时后不自动重复原厂查询。
 
-## 验收范围
+被动状态最多复用 30 秒的内存结果，明确返回 `sampled_at`；应用／媒体还保留各自原采集时间。显式刷新使旧内存结果失效；并发旧采集不能覆盖新结果。忙碌返回 `409`，有仍有效的缓存时可返回缓存并标记 `busy:true`。原厂查询失败与缓存写失败分开报告，`cache.stored:false` 不代表原厂请求没有执行。
 
-自动化使用隔离配置、`/proc` fixture 与本地 HTTP fixture，不访问 NAS、真实下载文件或用户相册。运行时与业务诊断不能代替实机验证。
+## 三类来源
 
-部署本版后，应在一次快照里核对各类别 `status/source/data` 和 `runtime`：应用是否确有缓存；aria2 是否运行、监听归属是否一致以及是否需要原厂授权；媒体服务是否实际可观察。未部署时只能说明代码和协议测试通过，不能宣称已经拿到实机应用或任务列表。
+| 类别 | 实际来源与限制 |
+|---|---|
+| `applications` | 优先读取 Toolbox `application-snapshot.json`，其次读取原厂既有 `/tmp/nand_config/app_center.conf`。名称、版本、已知安装状态码和采集时间；运行状态始终 `null`，不当作完整已安装清单 |
+| `downloads` | 核验已运行的 aria2 `6800` 与 qBittorrent `8181`，直接查询各自底层协议，分别报告状态、字节和速度，不走会初始化／恢复服务的原厂 `dleng` |
+| `media` | 仅读取 Toolbox `media-snapshot.json`；被动 GET／开发快照不读取原厂会话、不重签名、不重发原厂媒体查询 |
+
+应用显式采集复用已有管理员会话，固定 `get_apply_list&opttype=0`，跳过同步分支，不调用安装进度、安装或更新。原厂共同鉴权仍可能初始化用户资源，故仅按需执行。未知安装状态不推断运行；缺失或无效缓存保留错误码，不伪造空清单。详见[应用来源](vendor-app-diagnostics.md)。
+
+下载 `data.engines[]` 独立给出 aria2／qB 结果，不合并两客户端计数。两源均失败时 `data:null`，顶层 `engines[]` 仍保留原因。每窗口最多 128 项，超限拒绝，`complete:false`，不冒充全部历史。真实零和空列表必须来自成功协议；缺测为 `null`。名称、路径、GID、hash、账号和原始响应不透出聚合接口。详见[下载来源](vendor-download-diagnostics.md)。
+
+媒体涵盖相册识别、OCR、缩略图、相似图片、AI 配置、影视刮削和已有共享相册。逐项保存时间；失败清除该项旧数据，保留最近失败，不能把旧成功当新成功。单独刷新人脸时保留其他项原时间，整批 `complete:false`。无共享相册仅标记不适用，不建样本。六项完整且共享相册不适用时，可表示本次适用项目完整，但不代表全 NAS 所有用户和媒体均被枚举。详见[媒体字段与副作用](media-probe.md)。
+
+两种 Toolbox 快照位于原 Web 持久目录，采用普通文件、有界脱敏白名单、重复键拒绝、符号链接拒绝与原子替换。重启后仍保留原采集时间，不冒充重启后的实时进度。
+
+## 现场与机器调用边界
+
+`vendor_runtime` 只读固定 `/proc` 元数据：`comm/stat/exe`、FD 的 socket inode 和 TCP／TCP6 表，不读命令行、环境、用户文件或下载 session，不扫描端口、启动服务或运行命令。
+
+下载请求前后核对同一 PID、启动时刻、执行者和唯一监听 inode。IPv4 固定连 `127.0.0.1`；qB 唯一 IPv6 本机监听则直接连 `::1`，不从全局 `bindv6only` 猜单个 socket 行为。多监听冲突、目标身份变化、权限失败或扫描不完整均拒绝查询。无关进程自然退出／FD 消失与目标身份变化分开判断。固定传输不走代理或重定向，有大小和时间上限；401／403 不触发登录、读取口令或重试凭据。
+
+`runtime.available:true` 仅表示取得现场；`complete:false` 时未观察到服务不能证明其停止。HTTP `200/ok:true` 仅表示处理请求，业务结果看 `snapshot.categories.<类别>.available/status/reason`，下载再逐引擎、媒体再逐项检查。
+
+现有 MCP `get_nas_status(section="apps")` 优先读取 Toolbox 应用快照；`get_media_status` 显式结果同时写入媒体快照。未增加安装、下载控制或任意原厂转发工具，也不扩展旧 Token 权限。
+
+## 实机事实与后续验收
+
+2026-10-29，“小可爱NAS”旧镜像显式 `probe_all`：七项中六项返回完整可用字段，共享相册无已有管理员相册，标记不适用。图片 `69380/69380`、视频 `5236/5237`，OCR `78140/78140`。相似图片的原厂计数有已审计缺陷，不用于完成率。
+
+同日对用户指定的 `8181` 外部固定只读查询，qB `v5.1.4` 三个 GET 均 HTTP 200，真实返回三个 `uploading` 任务；旧端口现场为 TCP6 `::`。未创建登录会话或改变任务。
+
+这些事实不代替新镜像验收。部署后仍需核对 qB 本机监听归属与 `::1` 查询、应用显式列表响应、刷新后的被动快照与逐项时间。自动化使用隔离协议、进程与浏览器 fixture，不接触真实凭据或用户文件。

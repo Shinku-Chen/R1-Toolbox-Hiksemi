@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import stat
 import subprocess
@@ -43,7 +44,7 @@ class VendorRuntimeTests(unittest.TestCase):
             candidate = Path(path)
             self.opens.append(candidate)
             self.assertTrue(candidate.is_relative_to(self.proc), str(candidate))
-            self.assertIn(candidate.name, ('tcp', 'comm', 'stat'))
+            self.assertIn(candidate.name, ('tcp', 'tcp6', 'comm', 'stat'))
             self.assertFalse(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC))
             return original_open(path, flags, *args, **kwargs)
 
@@ -91,7 +92,7 @@ class VendorRuntimeTests(unittest.TestCase):
     def assert_partial(self):
         result = self.gate()
         self.assertFalse(result['available'], result)
-        self.assertEqual(result['status'], 'proc_unavailable')
+        self.assertEqual(result['status'], 'proc_partial')
         self.assertIsNone(result['pid'])
         self.assertIsNone(result['socket_inode'])
 
@@ -111,9 +112,61 @@ class VendorRuntimeTests(unittest.TestCase):
 
     def test_gate_only_accepts_fixed_port_and_comm_before_reading_proc(self):
         with mock.patch.object(runtime, 'collect_runtime', side_effect=AssertionError('参数不合法时不得采集')):
-            for port, comm in ((5050, 'aria2c-nox'), (6800, 'emhistor'), ('6800', 'aria2c-nox'), (True, 'aria2c-nox')):
+            for port, comm in ((5050, 'aria2c-nox'), (6800, 'emhistor'), ('6800', 'aria2c-nox'),
+                               (True, 'aria2c-nox'), (8181, 'aria2c-nox'), (6800, 'qbittorrent-nox')):
                 with self.subTest(port=port, comm=comm), self.assertRaises(ValueError):
                     runtime.require_one_listener(self.root, port=port, comm=comm)
+
+    def test_fixed_qb_listener_requires_its_own_process_and_executable(self):
+        self.table(HEADER + tcp(port=8181))
+        self.process(pid=456, comm='qbittorrent-nox', inodes=('12345',))
+        self.links[self.proc / '123/fd/0'] = 'socket:[54321]'
+        result = runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')
+        self.assertTrue(result['available'], result)
+        self.assertEqual(result['pid'], 456)
+        self.links[self.proc / '456/exe'] = '/usr/bin/aria2c-nox'
+        self.assertEqual(runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')['status'],
+                         'owner_unverified')
+
+    def test_ipv6_qb_wildcard_and_loopback_use_fixed_ipv6_not_dual_stack_assumption(self):
+        self.table(HEADER)
+        self.process(pid=456, comm='qbittorrent-nox', inodes=('12345',))
+        self.links[self.proc / '123/fd/0'] = 'socket:[54321]'
+        for address in ('0' * 32, '00000000000000000000000001000000'):
+            (self.proc / 'net/tcp6').write_bytes((HEADER + tcp(address=address, port=8181)).encode('ascii'))
+            result = runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')
+            self.assertTrue(result['available'], result)
+            self.assertEqual(result['pid'], 456)
+            self.assertEqual(result['connect_host'], '::1')
+            state = runtime.collect_runtime(self.root)
+            self.assertIn(state['listeners'][0]['address'], ('::', '::1'))
+
+    def test_ipv4_ipv6_conflicting_fixed_listeners_are_ambiguous(self):
+        self.table(HEADER + tcp(port=8181))
+        (self.proc / 'net/tcp6').write_bytes((HEADER + tcp('67890', address='0' * 32, port=8181)).encode('ascii'))
+        self.process(pid=456, comm='qbittorrent-nox', inodes=('67890',))
+        # Even one process owning both candidates does not erase ambiguity.
+        for inodes in (('67890',), ('12345', '67890')):
+            self.process(pid=456, comm='qbittorrent-nox', inodes=inodes)
+            result = runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')
+            self.assertEqual(result['status'], 'ambiguous')
+
+    def test_ipv6_external_bind_and_malformed_table_do_not_authorize_qb(self):
+        self.table(HEADER)
+        self.process(pid=456, comm='qbittorrent-nox', inodes=('12345',))
+        (self.proc / 'net/tcp6').write_bytes((HEADER + tcp(address='20010DB8' + '0' * 24, port=8181)).encode('ascii'))
+        self.assertEqual(runtime.require_one_listener(self.root, port=8181, comm='qbittorrent-nox')['status'],
+                         'not_listening')
+        (self.proc / 'net/tcp6').write_bytes(b'malformed\n')
+        self.assert_partial()
+
+    def test_unavailable_proc_and_partial_inventory_are_distinct(self):
+        with mock.patch.object(runtime, 'collect_runtime', return_value={
+                'available': False, 'complete': False, 'processes': [], 'listeners': []}):
+            self.assertEqual(self.gate()['status'], 'proc_unavailable')
+        with mock.patch.object(runtime, 'collect_runtime', return_value={
+                'available': True, 'complete': False, 'processes': [], 'listeners': []}):
+            self.assertEqual(self.gate()['status'], 'proc_partial')
 
     def test_wrong_or_deleted_executable_is_not_confirmed_and_never_leaks_basename(self):
         for executable in ('/private/user/SECRET-PHOTO.jpg', '/usr/bin/image_ocr', '/usr/bin/aria2c-nox (deleted)'):
@@ -206,6 +259,42 @@ class VendorRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(runtime.os, 'scandir', side_effect=denied):
             self.assert_partial()
+
+    def test_vanished_unrelated_fd_does_not_invalidate_stable_download_owner(self):
+        self.process(pid=456, comm='ordinary', inodes=('67890',))
+        self.links[self.proc / '456/fd/0'] = FileNotFoundError('normal unrelated FD close')
+        self.assertTrue(self.gate()['available'])
+        # Permission failures could hide an owner and must remain fail-closed.
+        self.links[self.proc / '456/fd/0'] = PermissionError('unreadable descriptor')
+        self.assert_partial()
+
+    def test_unrelated_process_exit_is_ignored_but_target_exit_remains_partial(self):
+        folder = self.process(pid=456, comm='ordinary', inodes=('67890',))
+
+        def exit_ordinary(path):
+            if path.parent == folder / 'fd':
+                shutil.rmtree(folder)
+
+        self.readlink_hook = exit_ordinary
+        self.assertTrue(self.gate()['available'])
+        target = self.proc / '123'
+
+        def exit_target(path):
+            if path.parent == target / 'fd' and target.exists():
+                shutil.rmtree(target)
+
+        self.readlink_hook = exit_target
+        self.assert_partial()
+
+    def test_unrelated_live_process_identity_change_still_invalidates_coverage(self):
+        folder = self.process(pid=456, comm='ordinary', inodes=('67890',))
+
+        def replace(path):
+            if path.parent == folder / 'fd':
+                (folder / 'stat').write_bytes(process_stat(456, 'ordinary', 999).encode('ascii'))
+
+        self.readlink_hook = replace
+        self.assert_partial()
 
     def test_fd_limit_is_global_across_allowed_and_other_processes(self):
         self.process(pid=456, comm='ordinary', inodes=('67890',))

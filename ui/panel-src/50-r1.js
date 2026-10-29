@@ -1425,3 +1425,104 @@ SET_SCHEMA.push(
 
 /* 首次进入面板时读一次 R1 状态 */
 Poll.run('r1');
+
+/* 原厂业务：GET 只采集被动来源；签名查询仅由显式刷新触发。 */
+// fnOS 的相册统计在 R1 没有来源，由下面的原厂业务模块提供真实数据。
+if (MODS.apps) MODS.apps.el.hidden = true;
+const R1_BUSINESS = {
+  state: null, error: null, pending: null,
+  async load(force = false) {
+    if (this.pending) {
+      if (!force) return this.pending;
+      await this.pending;
+      return this.load(true);
+    }
+    const task = (async () => {
+      try { this.state = await API.get('/api/business'); this.error = null; }
+      catch (error) { this.error = String(error.message || error); }
+    })();
+    this.pending = task;
+    try { return await task; } finally { if (this.pending === task) this.pending = null; }
+  },
+};
+const R1_MEDIA_LABELS = { face: '相册识别', ocr: '文字识别', thumbnail: '缩略图', similar: '相似图片', ai: 'AI 配置', scraper: '影视刮削', shared_album: '共享相册' };
+const r1BusinessNumber = value => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '--';
+const r1BusinessTime = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '尚未采集';
+function r1MediaSummary(row) {
+  if (row.status === 'not_applicable') return '没有可查询的已有共享相册';
+  if (!row.available || !row.data) return row.reason || '数据暂不可用';
+  const d = row.data, n = r1BusinessNumber;
+  if (row.id === 'face') return `图片 ${n(d.processedpic)} / ${n(d.totalpic)}，视频 ${n(d.processedvid)} / ${n(d.totalvid)}`;
+  if (row.id === 'ocr') return `已处理 ${n(d.processedpic)} / ${n(d.totalpic)}，剩余 ${n(d.remainpic)}`;
+  if (row.id === 'similar') return `待计算哈希 ${n(d.pending_hashes)}；原厂计数不用于推断完成率`;
+  if (row.id === 'ai') return `识别范围数量 ${n(d.recognition_range_count)}，配置状态 ${n(d.configuration_status)}`;
+  if (row.id === 'scraper') return `scaned / total：${n(d.scaned)} / ${n(d.total)}，num：${n(d.num)}，状态码 ${n(d.native_status)}`;
+  if (row.id === 'thumbnail') return ['b', 'st', 'pt', 'sc', 'cc'].map(key => `${key}：${n(d[key])}`).join('，') + '；单位及状态含义待确认';
+  return `状态码 ${n(d.native_status)}，扫描 ${n(d.scan_num)}，失败 ${n(d.failed_num)}，等待 ${n(d.await_num)}`;
+}
+function r1BusinessApplications(source) {
+  const data = source.data;
+  const failed = source.error_code ? `（${source.error_code}）` : '';
+  const attempted = source.latest_attempt_at || source.sampled_at;
+  const attemptNote = attempted ? `<p class="sub">最近尝试：${esc(r1BusinessTime(attempted))}</p>` : '';
+  if (!source.available || !data) return `<p class="sub">${esc((source.reason || '尚未读取应用列表，请按需采集。') + failed)}</p>` + attemptNote;
+  const rows = Array.isArray(data.apps) ? data.apps : [];
+  return `<p class="sub">采集时间：${esc(r1BusinessTime(data.cache_modified_at))}。${esc((source.reason || '列表不代表应用实时运行状态。') + failed)}</p>` + attemptNote
+    + (rows.length ? rows.map(row => `<div class="r1-business-row"><strong>${esc(row.name || '名称未知')}</strong><span>版本 ${esc(row.version || '--')} · 安装状态码 ${esc(r1BusinessNumber(row.installation_status_code))}</span></div>`).join('') : '<p class="sub">本次返回的列表为空。</p>');
+}
+function r1BusinessDownloads(source) {
+  const engines = source.data && Array.isArray(source.data.engines) ? source.data.engines : source.engines || [];
+  if (!engines.length) return `<p class="sub">${esc(source.reason || '下载数据暂不可用。')}</p>`;
+  return engines.map(row => {
+    const label = row.engine === 'qbittorrent' ? 'qBittorrent' : 'aria2', d = row.data;
+    if (!row.available || !d) return `<div class="r1-business-row"><strong>${label}</strong><span>${esc(row.reason || '该引擎暂不可用')}</span></div>`;
+    const counts = d.counts || {}, count = row.engine === 'qbittorrent'
+      ? `当前窗口 ${r1BusinessNumber(counts.tasks)} 个任务`
+      : `活动 ${r1BusinessNumber(counts.active)}，等待 ${r1BusinessNumber(counts.waiting)}，停止 ${r1BusinessNumber(counts.stopped)}`;
+    const speed = value => typeof value === 'number' && Number.isFinite(value) ? F.bytesStr(value) + '/s' : '--';
+    return `<div class="r1-business-row"><strong>${label} ${esc(d.version || '')}</strong><span>${esc(count)}</span><span>下载 ${esc(speed(d.download_bytes_per_second))} · 上传 ${esc(speed(d.upload_bytes_per_second))}</span><span class="sub">有界快照，不代表全部历史任务。</span></div>`;
+  }).join('');
+}
+if (!LAYOUT_DEFAULT.apps.includes('r1business')) LAYOUT_DEFAULT.apps.push('r1business');
+defineModule({
+  id: 'r1business', page: 'apps', kicker: 'NAS SERVICES', title: '原厂业务状态',
+  dek: '应用列表、下载队列与媒体处理状态；各来源独立报告采集时间与可用性',
+  build(body, m) {
+    body.innerHTML = `<div class="r1-business-grid">
+      <section class="card pad"><h3>应用</h3><div data-ref="applications"></div><button class="btn" type="button" data-ref="refreshApplications">采集应用状态</button></section>
+      <section class="card pad"><h3>下载</h3><div data-ref="downloads"></div><p class="sub" data-ref="downloadTime"></p></section>
+      <section class="card pad"><h3>媒体</h3><div data-ref="media"></div><button class="btn" type="button" data-ref="refreshMedia">采集媒体状态</button></section>
+      </div><p class="sub r1-note" data-ref="notice">应用与媒体按需采集。原厂查询可能初始化用户资源或更新完成标记；页面轮询只读取已保存结果，不自动发起这些查询。</p>`;
+    m.x = collect(body);
+    for (const [button, source] of [[m.x.refreshApplications, 'applications'], [m.x.refreshMedia, 'media']]) {
+      button.onclick = async () => {
+        button.disabled = true;
+        const oldText = button.textContent; setText(button, '正在采集…');
+        try {
+          const result = await R1.post('/api/r1/business/refresh', { source });
+          if (!result || result.ok !== true) throw new Error(result && result.error || '采集未完成');
+          const saved = result.cache && result.cache.stored === true;
+          toast(!saved ? '查询已结束，但快照未保存，请核对来源状态' : result.result && result.result.available ? '采集结果已保存' : '已保存本次结果，来源暂不可用', { icon: saved ? 'check' : 'alert' });
+          await R1_BUSINESS.load(true); renderNow();
+        } catch (error) { toast('采集未确认：' + String(error.message || error), { icon: 'alert' }); }
+        finally { button.disabled = false; setText(button, oldText); }
+      };
+    }
+  },
+  update(o, m) {
+    const state = R1_BUSINESS.state, categories = state && state.snapshot && state.snapshot.categories;
+    if (!categories) {
+      for (const key of ['applications', 'downloads', 'media']) setText(m.x[key], R1_BUSINESS.error || '正在读取业务来源…');
+      return;
+    }
+    setHTML(m.x.applications, r1BusinessApplications(categories.applications || {}));
+    setHTML(m.x.downloads, r1BusinessDownloads(categories.downloads || {}));
+    setText(m.x.downloadTime, '采集时间：' + r1BusinessTime(state.snapshot.sampled_at));
+    const media = categories.media || {}, data = media.data;
+    setHTML(m.x.media, data && Array.isArray(data.results)
+      ? data.results.map(row => `<div class="r1-business-row"><strong>${esc(R1_MEDIA_LABELS[row.id] || '媒体状态')}</strong><span>${esc(r1MediaSummary(row))}</span><span class="sub">采集时间：${esc(r1BusinessTime(row.captured_at))}</span></div>`).join('')
+      : `<p class="sub">${esc(media.reason || '尚未采集媒体状态。')}</p>`);
+    setText(m.x.notice, (R1_BUSINESS.error ? '状态更新未完成：' + R1_BUSINESS.error + '。显示上次结果。' : '') + '应用与媒体按需采集。原厂查询可能初始化用户资源或更新完成标记；页面轮询只读取已保存结果，不自动发起这些查询。');
+  },
+});
+Poll.add('r1-business', async () => { await R1_BUSINESS.load(); renderNow(); }, 30000, () => S.page === 'apps');

@@ -186,6 +186,12 @@
 .r1-service-item .check input { width: 20px; height: 20px; flex: none; accent-color: var(--ink-1); }
 .r1-service-item .sub { line-height: 1.6; }
 .r1-services .r1-api-create { margin-top: 10px; }
+.r1-business-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.r1-business-grid section { min-width: 0; }
+.r1-business-grid h3 { margin-bottom: 12px; }
+.r1-business-grid .btn { margin-top: 12px; }
+.r1-business-row { display: grid; gap: 5px; padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; font-size: 13px; }
+@media (max-width: 900px) { .r1-business-grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 560px) {
   .r1-api-intro { flex-direction: column; align-items: stretch; }
   .r1-api-dialog.fm-card { padding: 20px 16px; max-height: calc(100dvh - 20px); }

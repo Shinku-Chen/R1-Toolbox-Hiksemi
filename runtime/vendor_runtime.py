@@ -13,7 +13,7 @@ import time
 
 SERVICES = frozenset(('emhistor', 'appcenter', 'aria2c-nox', 'qbittorrent-nox',
                       'intelligent', 'image_ocr', 'image_convert', 'image_similar'))
-PORTS = frozenset((5050, 6800, 8888, 9660, 7786, 7778, 7769, 7799))
+PORTS = frozenset((5050, 6800, 8181, 8888, 9660, 7786, 7778, 7769, 7799))
 MAX_PROCESSES, MAX_FDS, MAX_BYTES = 4096, 32768, 1024 * 1024
 
 
@@ -91,8 +91,8 @@ def _process(folder, deadline=None, kernel_identity=None):
             '_exe_token': token}
 
 
-def _listeners(proc, deadline=None):
-    raw = _read(proc / 'net/tcp', MAX_BYTES, deadline)
+def _listener_table(proc, name, deadline=None):
+    raw = _read(proc / ('net/' + name), MAX_BYTES, deadline)
     if raw is None:
         return [], False
     result = []
@@ -110,29 +110,47 @@ def _listeners(proc, deadline=None):
             continue
         try:
             address, port_text = fields[1].split(b':')
-            if not re.fullmatch(rb'[0-9A-Fa-f]{8}', address) or not re.fullmatch(rb'[0-9A-Fa-f]{4}', port_text) or not re.fullmatch(rb'[0-9A-Fa-f]{2}', fields[3]):
+            width = 32 if name == 'tcp6' else 8
+            if (len(address) != width or not re.fullmatch(rb'[0-9A-Fa-f]+', address)
+                    or not re.fullmatch(rb'[0-9A-Fa-f]{4}', port_text)
+                    or not re.fullmatch(rb'[0-9A-Fa-f]{2}', fields[3])):
                 complete = False
                 continue
             port = int(port_text, 16)
             if fields[3].upper() != b'0A' or port not in PORTS:
                 continue
-            # Our clients connect only to IPv4 127.0.0.1. A wildcard IPv4
-            # listener is reachable there too; no external address is dialled.
+            # Linux exposes IPv6 addresses as four native-endian words.
+            # Only fixed loopback/wildcard endpoints qualify, never LAN binds.
             address = address.upper()
-            if address not in (b'0100007F', b'00000000'):
+            addresses = ({b'0100007F': '127.0.0.1', b'00000000': '0.0.0.0'} if name == 'tcp'
+                         else {b'00000000000000000000000001000000': '::1', b'0' * 32: '::'})
+            if address not in addresses:
                 continue
             inode = fields[9].decode('ascii', 'strict')
             if not re.fullmatch(r'[1-9][0-9]{0,23}', inode):
                 complete = False
                 continue
-            result.append({'address': '127.0.0.1' if address == b'0100007F' else '0.0.0.0',
+            result.append({'address': addresses[address],
                            'port': port, 'socket_inode': inode, 'owner_pids': []})
         except (ValueError, UnicodeError):
             complete = False
     return result, complete
 
 
-def _socket_inodes(folder, deadline, budget=None):
+def _listeners(proc, deadline=None):
+    """Read IPv4 plus an optional kernel IPv6 table, never infer dual-stack."""
+    ipv4, complete = _listener_table(proc, 'tcp', deadline)
+    try:
+        (proc / 'net/tcp6').lstat()
+    except FileNotFoundError:
+        return ipv4, complete
+    except OSError:
+        return ipv4, False
+    ipv6, complete6 = _listener_table(proc, 'tcp6', deadline)
+    return ipv4 + ipv6, complete and complete6
+
+
+def _socket_inodes(folder, deadline, budget=None, *, strict=True):
     found, complete = set(), True
     budget = [MAX_FDS] if budget is None else budget
     try:
@@ -149,13 +167,30 @@ def _socket_inodes(folder, deadline, budget=None):
                     match = re.fullmatch(r'socket:\[([1-9][0-9]{0,23})\]', target)
                     if match:
                         found.add(match[1])
+                except FileNotFoundError:
+                    # A vanished unrelated FD cannot still own the listener.
+                    # Target services remain strict and are checked again.
+                    if strict:
+                        complete = False
                 except OSError:
-                    # Normal FD churn still leaves owner coverage uncertain.
-                    # Report a partial observation, never a stopped service.
                     complete = False
+    except FileNotFoundError:
+        if strict or not _gone(folder):
+            complete = False
     except OSError:
         complete = False
     return found, complete
+
+
+def _gone(folder):
+    """Only a confirmed absent PID may be ignored after normal process exit."""
+    try:
+        folder.stat()
+        return False
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
 
 
 def collect_runtime(root='/'):
@@ -181,16 +216,19 @@ def collect_runtime(root='/'):
                 folder = proc / entry.name
                 before_identity = _kernel_identity(folder, deadline)
                 if before_identity is None:
-                    scan_complete = False
+                    if not _gone(folder):
+                        scan_complete = False
                     continue
                 before = _process(folder, deadline, before_identity)
                 # Other processes are scanned only to reject shared ownership.
                 # Their names, executables and file paths never leave this module.
-                inodes, fd_complete = _socket_inodes(folder, deadline, fd_budget)
+                inodes, fd_complete = _socket_inodes(folder, deadline, fd_budget,
+                                                     strict=before is not None)
                 after_identity = _kernel_identity(folder, deadline)
                 after = _process(folder, deadline, after_identity) if before is not None else None
                 if after_identity != before_identity or after != before:
-                    scan_complete = False
+                    if before is not None or not _gone(folder):
+                        scan_complete = False
                     continue
                 if before is not None:
                     processes.append({key: value for key, value in before.items() if not key.startswith('_')})
@@ -232,18 +270,21 @@ def collect_runtime(root='/'):
 
 
 def require_one_listener(root='/', port=6800, comm='aria2c-nox'):
-    """Require one stable matching process owning the fixed IPv4 listener.
+    """Require one stable matching process owning the fixed local listener.
 
     Call before and after the fixed RPC and compare pid/start_ticks/inode.
     Internal arguments are fixture hooks; HTTP cannot select a port or name.
     """
-    if port != 6800 or comm != 'aria2c-nox':
+    if (port, comm) not in ((6800, 'aria2c-nox'), (8181, 'qbittorrent-nox')):
         raise ValueError('仅允许已核实的下载服务监听身份')
     state = collect_runtime(root)
     result = {'available': False, 'status': 'proc_unavailable',
               'reason': '下载服务监听身份暂不可确认',
               'pid': None, 'start_ticks': None, 'socket_inode': None}
-    if not state['available'] or not state['complete']:
+    if not state['available']:
+        return result
+    if not state['complete']:
+        result.update(status='proc_partial', reason='下载运行现场仅部分可确认，未发送请求')
         return result
     listeners = [row for row in state['listeners'] if row['port'] == port]
     if not listeners:
@@ -253,6 +294,9 @@ def require_one_listener(root='/', port=6800, comm='aria2c-nox'):
         result.update(status='ambiguous', reason='下载服务监听存在竞争，未发送请求')
         return result
     listener = listeners[0]
+    if comm == 'aria2c-nox' and listener['address'] not in ('127.0.0.1', '0.0.0.0'):
+        result.update(status='owner_unverified', reason='aria2 未确认固定 IPv4 回环监听')
+        return result
     matches = [row for row in state['processes'] if row['name'] == comm
                and row['identity_confirmed'] and row['pid'] in listener['owner_pids']]
     if len(matches) != 1 or listener['owner_pids'] != [matches[0]['pid']]:
@@ -262,4 +306,8 @@ def require_one_listener(root='/', port=6800, comm='aria2c-nox'):
     result.update(available=True, status='verified', reason=None,
                   pid=process['pid'], start_ticks=process['start_ticks'],
                   socket_inode=listener['socket_inode'])
+    if listener['address'] in ('::', '::1'):
+        # Connect to IPv6 loopback directly. The system-wide bindv6only value
+        # cannot prove the per-socket option and is deliberately not inferred.
+        result['connect_host'] = '::1'
     return result

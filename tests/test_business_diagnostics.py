@@ -214,7 +214,7 @@ class BusinessHTTPTests(unittest.TestCase):
         self.run.assert_not_called()
         cookie = web_config.AUTH_COOKIE + '=' + auth['sid']
         self.assertEqual(self.request(headers={'Cookie': cookie})[0], 200)
-        self.run.assert_called_once_with()
+        self.run.assert_called_once_with(state_dir=self.server.state_dir)
 
     def test_http_snapshot_is_private_no_store_and_post_only(self):
         for method, expected in (('GET', 401), ('OPTIONS', 405), ('PUT', 405)):
@@ -223,7 +223,7 @@ class BusinessHTTPTests(unittest.TestCase):
         status, payload = self.request()
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(payload)['ok'])
-        self.run.assert_called_once_with()
+        self.run.assert_called_once_with(state_dir=self.server.state_dir)
 
 
 if __name__ == '__main__':

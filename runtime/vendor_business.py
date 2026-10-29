@@ -1,8 +1,8 @@
 """Private business diagnostics using passive caches and fixed verified RPC.
 
-This does not proxy factory REST. Media task getters remain blocked until an
-independent safe source is verified; their kernel runtime observations are real
-observations, never substituted for task counts or progress.
+This does not proxy factory REST. Explicit application/media refreshes save
+their projected results separately; passive reads never repeat those queries.
+Kernel observations are never substituted for task counts or progress.
 """
 import datetime
 import json
@@ -16,16 +16,27 @@ from vendor_runtime import collect_runtime
 _SERVICES = {'applications': frozenset(('appcenter',)),
              'downloads': frozenset(('aria2c-nox', 'qbittorrent-nox')),
              'media': frozenset(('intelligent', 'image_ocr', 'image_convert', 'image_similar'))}
-_PORTS = {'applications': frozenset((8888,)), 'downloads': frozenset((6800, 5050)),
+_PORTS = {'applications': frozenset((8888,)), 'downloads': frozenset((6800, 5050, 8181)),
           'media': frozenset((7786, 7778, 7769, 7799, 9660))}
 # A second projection fence prevents future providers from returning credentials,
 # user paths, torrent identifiers or raw upstream JSON by accident.
 _DATA_FIELDS = {
     'applications': frozenset(('apps', 'name', 'version', 'installation_status_code', 'running',
                               'cached_entries', 'live', 'complete', 'cache_modified_at')),
-    'downloads': frozenset(('version', 'complete', 'engine', 'tasks', 'counts', 'limits',
+    'downloads': frozenset(('version', 'complete', 'engine', 'engines', 'data', 'available',
+                           'reason', 'source', 'error_code', 'connection_status',
+                           'tasks', 'counts', 'limits',
                            'active', 'waiting', 'stopped', 'status', 'total_bytes', 'completed_bytes',
                            'progress_percent', 'download_bytes_per_second', 'upload_bytes_per_second')),
+    'media': frozenset(('captured_at', 'live', 'explicit_refresh', 'complete', 'results', 'coverage',
+                       'id', 'available', 'status', 'reason', 'query_success', 'data', 'last_failure',
+                       'total', 'applicable', 'not_applicable', 'succeeded', 'data_available', 'data_complete',
+                       'totalpic', 'totalvid', 'processed', 'processedpic', 'processedvid', 'remainpic',
+                       'picture_completion_ratio', 'video_completion_ratio', 'sync_percent',
+                       'upgrade_status', 'range_status', 'estimated_remaining', 'value', 'unit',
+                       'b', 'st', 'pt', 'sc', 'cc', 'pending_hashes', 'completion_ratio',
+                       'configuration_status', 'recognition_range_count', 'scaned', 'timestamp',
+                       'num', 'native_status', 'scan_num', 'failed_num', 'await_num')),
 }
 
 
@@ -34,19 +45,19 @@ def _text(value, limit=256):
         ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in value) else None
 
 
-def _data(value, fields, depth=0):
+def _data(value, fields, depth=0, minimum=-1):
     if depth > 6:
         raise ValueError('diagnostic nesting limit')
     if isinstance(value, dict):
-        return {key: _data(item, fields, depth + 1) for key, item in value.items() if key in fields}
+        return {key: _data(item, fields, depth + 1, minimum) for key, item in value.items() if key in fields}
     if isinstance(value, list):
         if len(value) > 384:
             raise ValueError('diagnostic item limit')
-        return [_data(item, fields, depth + 1) for item in value]
+        return [_data(item, fields, depth + 1, minimum) for item in value]
     if value is None or isinstance(value, bool):
         return value
     if type(value) in (int, float):
-        if not math.isfinite(value) or not -1 <= value <= 2**64:
+        if not math.isfinite(value) or not minimum <= value <= 2**64:
             raise ValueError('diagnostic number limit')
         return value
     text = _text(value)
@@ -67,15 +78,27 @@ def _result(provider, root, category):
         result = {'available': value['available'], 'status': value['status'],
                   'source': _text(value.get('source'), 128),
                   'reason': _text(value.get('reason')), 'data': None}
-        if result['available']:
+        if result['available'] or category == 'media' and isinstance(value.get('data'), dict):
             if not isinstance(value.get('data'), dict):
                 return failure
-            result['data'] = _data(value['data'], _DATA_FIELDS[category])
+            result['data'] = _data(value['data'], _DATA_FIELDS[category],
+                                   minimum=-(2**53 - 1) if category == 'media' else -1)
+        if category == 'downloads' and isinstance(value.get('engines'), list):
+            # Failures remain visible even when neither engine yields tasks.
+            result['engines'] = _data(value['engines'], _DATA_FIELDS[category])
         # Auth/socket/engine errors use fixed provider error codes, not upstream
         # bodies, HTTP headers or exception text.
         code = value.get('error_code')
         if isinstance(code, str) and re.fullmatch(r'[a-z_]{1,48}', code):
             result['error_code'] = code
+        if category == 'applications':
+            for key in ('sampled_at', 'latest_attempt_at'):
+                stamp = _text(value.get(key), 64)
+                if stamp is not None:
+                    result[key] = stamp
+            code = value.get('cache_error_code')
+            if isinstance(code, str) and re.fullmatch(r'[a-z_]{1,48}', code):
+                result['cache_error_code'] = code
         if len(json.dumps(result, ensure_ascii=True, allow_nan=False)) > 256 * 1024:
             return failure
         return result
@@ -83,9 +106,15 @@ def _result(provider, root, category):
         return failure
 
 
-def collect_business_diagnostics(root='/', *, applications=None, downloads=None, runtime=None):
+def collect_business_diagnostics(root='/', *, applications=None, downloads=None, media=None,
+                                 runtime=None, state_dir=None):
     """One fixed snapshot. Injection hooks are internal fixtures, never HTTP input."""
     state = (runtime or collect_runtime)(root=root)
+    if applications is None and state_dir is not None:
+        applications = lambda **kw: collect_applications(state_dir=state_dir, **kw)
+    if media is None and state_dir is not None:
+        from vendor_media_snapshot import collect_media_snapshot
+        media = lambda **kw: collect_media_snapshot(state_dir, **kw)
     categories = {
         'applications': _result(applications or collect_applications, root, 'applications'),
         'downloads': _result(downloads or collect_downloads, root, 'downloads'),
@@ -94,6 +123,8 @@ def collect_business_diagnostics(root='/', *, applications=None, downloads=None,
                   'reason': '尚未确认安全的一次性媒体任务来源；已跳过用户资源启动、相册查询、事件写入和状态刷新代理',
                   'blocked_queries': ['get_thumb_convert_process', 'get_ocr_status', 'lib_scan_status']},
     }
+    if media is not None:
+        categories['media'] = _result(media, root, 'media')
     for name, result in categories.items():
         # These are process/socket observations, not task data. Incomplete proc
         # coverage must not be interpreted as proof that a service is stopped.

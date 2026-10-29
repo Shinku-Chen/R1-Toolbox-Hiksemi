@@ -136,7 +136,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
             self.assertIsInstance(result['data'], dict)
             self.assertIsNone(result['error'])
         self.insights.storage_name_diagnostics.assert_called_once_with()
-        self.business.assert_called_once_with()
+        self.business.assert_called_once_with(state_dir=self.server.state_dir)
         self.fan.snapshot.assert_called_once_with()
         self.assertNotIn('set-cookie', headers)
         self.assert_no_controls()
@@ -301,7 +301,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assert_no_sources()
         self.assertEqual(self.request({'action': 'snapshot', 'checks': ['storage', 'business']})[0], 200)
         self.insights.storage_name_diagnostics.assert_called_once_with()
-        self.business.assert_called_once_with()
+        self.business.assert_called_once_with(state_dir=self.server.state_dir)
 
     def test_global_busy_does_not_collect_and_catalog_stays_available(self):
         with self.server.diagnostic_lock:
