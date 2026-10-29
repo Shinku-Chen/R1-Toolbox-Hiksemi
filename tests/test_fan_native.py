@@ -58,8 +58,8 @@ class FakeBackend:
     def mode(self):
         return self.policy
 
-    def sync_mode(self, folder, expected=None, safe_auto=False, apply_manual=True):
-        self.events.append(("sync_mode", expected, safe_auto, apply_manual))
+    def sync_mode(self, folder, expected=None, apply_manual=True):
+        self.events.append(("sync_mode", expected, apply_manual))
         if expected is not None and self.policy != expected:
             raise RuntimeError("vendor_policy_changed")
         if "sync_mode" in self.failures:
@@ -104,6 +104,116 @@ class FakeBackend:
             self.live.pop(self.guarded["pid"], None)  # Orphan from this fixture lease.
         self.live[original["identity"]["pid"]] = dict(original["identity"])
         return original["identity"]
+
+
+class CachedVendorGradeBackend(FakeBackend):
+    """Model vendor grade bookkeeping separately from requested ioctl output."""
+    sync_mode = watchdog.SystemBackend.sync_mode
+
+    def __init__(self, folder, initialize_at, failure=None):
+        super().__init__()
+        self.grade_path = folder / "fixture-vendor-fan"
+        self.grade_path.write_bytes(struct.pack("<i", 2))
+        self.initialize_at, self.failure = initialize_at, failure
+        self.system_raw, self.synced = 26, False
+        self.initialized = False
+        self.clock = lambda: 0.0
+
+    def write(self, targets):
+        super().write(targets)
+        if self.failure == "retry_write" and self.system_raw == 120:
+            raise OSError("fixture safe-high retry failed")
+        if "system" in targets:
+            self.system_raw = targets["system"]
+
+    def initialize_vendor(self):
+        # The matching firmware starts with grade 2/raw 120. This is a fake
+        # request recorder, never a hardware output or PWM readback.
+        if self.initialized:
+            return
+        self.initialized = True
+        self.grade_path.write_bytes(struct.pack("<i", 2))
+        self.system_raw = 120
+        self.events.append(("vendor_write", 120))
+
+    def _write(self, targets, minimum):
+        self.write(targets)
+
+    def sample_auto(self):
+        grade = struct.unpack("<i", self.grade_path.read_bytes())[0]
+        # The fixture uses the verified vendor band at 45 C: grade 3/4 drops
+        # to 2, while an existing grade 2 does not cause another output request.
+        if grade > 2:
+            self.grade_path.write_bytes(struct.pack("<i", 2))
+            self.system_raw = 120
+            self.events.append(("vendor_write", 120))
+        else:
+            self.events.append(("same_grade", grade))
+
+    def restore_daemon(self, original, guarded, lease=None):
+        if self.failure == "spawn":
+            raise RuntimeError("fixture vendor spawn failed")
+        identity = super().restore_daemon(original, guarded, lease=lease)
+        if self.initialize_at == "before_get":
+            self.initialize_vendor()
+        return identity
+
+    def _vendors(self):
+        return [item for item in self.live.values() if item["exe"] == self.vendor["exe"]]
+
+    def _owner_kind(self, identity, lease):
+        return "vendor"
+
+    def _histor(self, folder):
+        backend = self
+
+        class RPC:
+            def _has_socket(self):
+                return True
+
+            def _config_mode(self):
+                return histor_module.MODES[backend.policy]
+
+            def _get_mode(self):
+                if backend.failure in ("sync", "retry_write"):
+                    raise ValueError("fixture policy synchronization failed")
+                if backend.failure == "sync_policy_changed":
+                    backend.policy, backend.system_raw = "medium", 191
+                    backend.grade_path.write_bytes(struct.pack("<i", 3))
+                    backend.events.append(("external_vendor_write", 191))
+                    raise ValueError("fixture external policy changed during synchronization")
+                if backend.initialize_at == "during_get":
+                    backend.initialize_vendor()
+                if backend.policy == "auto":
+                    backend.sample_auto()
+                return histor_module.MODES[backend.policy]
+
+            def _rpc(self, command, code):
+                if command != "set_fan_status" or code not in (2, 3, 4, 5):
+                    raise AssertionError("fixture accepts only the fixed vendor SET")
+                backend.events.append(("vendor_set", code))
+                backend.policy = histor_module._CODES[code]
+                if code == 5:
+                    backend.sample_auto()
+                else:
+                    backend.grade_path.write_bytes(struct.pack("<i", code))
+                    backend.system_raw = {2: 120, 3: 191, 4: 255}[code]
+                    backend.events.append(("vendor_write", backend.system_raw))
+                return "OK!"
+
+        return RPC()
+
+    def wait_ready(self, identity, **unused):
+        super().assert_ready(identity)
+        if self.initialize_at == "during_stability":
+            self.initialize_vendor()
+        self.synced = True
+        return identity
+
+    def assert_ready(self, identity, **options):
+        if self.failure == "final_readiness" and self.synced:
+            raise RuntimeError("fixture final readiness failed")
+        return super().assert_ready(identity, **options)
 
 
 class NativeFanTests(unittest.TestCase):
@@ -173,7 +283,83 @@ class NativeFanTests(unittest.TestCase):
         self.assertEqual([item[1] for item in self.backend.events if item[0] == "write"], [{"system": 255}])
         owner.restore("release_requested")
         self.assertEqual(self.backend.policy, "auto")
-        self.assertEqual(self.backend.events[-1], ("sync_mode", "auto", True, True))
+        self.assertEqual(self.backend.events[-1], ("sync_mode", "auto", True))
+
+    def cached_vendor_recovery(self, initialize_at, failure=None, channels=None, mode="auto"):
+        self.backend = CachedVendorGradeBackend(self.folder, initialize_at, failure)
+        self.backend.policy = mode
+        owner = self.make(channels or {"system"})
+        owner.original, owner.guarded, owner.old_mode = self.backend.capture(), self.backend.guarded, mode
+        owner.descriptor["daemon_changed"] = True
+        self.backend.live.pop(self.backend.vendor["pid"])
+        self.backend.live[self.backend.guarded["pid"]] = dict(self.backend.guarded)
+        owner.save()
+        return owner
+
+    def test_auto_restore_keeps_vendor_initial_output_before_during_and_after_get(self):
+        for initialize_at in ("before_get", "during_get", "during_stability"):
+            with self.subTest(initialize_at=initialize_at):
+                owner = self.cached_vendor_recovery(initialize_at)
+                self.assertTrue(owner.restore("release_requested"))
+                self.assertEqual(self.backend.events[0], ("write", {"system": 255}))
+                self.assertIn(("vendor_write", 120), self.backend.events)
+                self.assertIn(("same_grade", 2), self.backend.events)
+                self.assertEqual(struct.unpack("<i", self.backend.grade_path.read_bytes())[0], 2)
+                self.assertEqual(self.backend.system_raw, 120)
+                self.assertEqual([event for event in self.backend.events if event[0] == "write"],
+                                 [("write", {"system": 255})])
+                status = native.read_json(self.folder / "status.json")
+                self.assertEqual(status["phase"], "released")
+                self.assertTrue(status["restore_ok"])
+
+    def test_manual_factory_restore_updates_grade_before_later_auto_transition(self):
+        for mode, grade, raw in (("medium", 3, 191), ("high", 4, 255)):
+            with self.subTest(mode=mode):
+                owner = self.cached_vendor_recovery("before_get", mode=mode)
+                self.assertTrue(owner.restore("release_requested"))
+                self.assertEqual(self.backend.system_raw, raw)
+                self.assertEqual(struct.unpack("<i", self.backend.grade_path.read_bytes())[0], grade)
+                self.assertIn(("vendor_set", grade), self.backend.events)
+                # Match a later explicit vendor auto selection. If restoration
+                # only wrote raw, stale grade 2 would suppress this correction.
+                rpc = self.backend._histor(self.folder)
+                self.assertEqual(rpc._get_mode(), grade)
+                self.assertEqual(rpc._rpc("set_fan_status", 5), "OK!")
+                self.assertEqual(rpc._get_mode(), 5)
+                self.assertEqual(self.backend.system_raw, 120)
+                self.assertEqual(struct.unpack("<i", self.backend.grade_path.read_bytes())[0], 2)
+
+    def test_auto_restore_failure_reasserts_safe_high_once_and_keeps_descriptor(self):
+        for failure, expected in (("spawn", "vendor_daemon_unconfirmed"),
+                                  ("sync", "vendor_policy_unconfirmed"),
+                                  ("final_readiness", "vendor_daemon_unconfirmed"),
+                                  ("retry_write", "safe_high_unconfirmed")):
+            with self.subTest(failure=failure):
+                owner = self.cached_vendor_recovery("before_get", failure)
+                self.assertFalse(owner.restore("lease_or_identity_failed"))
+                writes = [event for event in self.backend.events if event[0] == "write"]
+                self.assertEqual(writes, [("write", {"system": 255}), ("write", {"system": 255})])
+                if failure != "retry_write":
+                    self.assertEqual(self.backend.system_raw, 255)
+                status = native.read_json(self.folder / "status.json")
+                self.assertEqual(status["phase"], "recovery_failed")
+                self.assertFalse(status["restore_ok"])
+                self.assertIn(expected, status["recovery_errors"])
+                self.assertIn("original", native.read_json(self.folder / "descriptor.json"))
+
+    def test_failed_sync_preserves_new_external_system_policy_but_keeps_cpu_safe(self):
+        owner = self.cached_vendor_recovery("before_get", "sync_policy_changed", {"cpu", "system"})
+        self.assertFalse(owner.restore("release_requested"))
+        self.assertEqual([event for event in self.backend.events if event[0] == "write"],
+                         [("write", {"cpu": 255, "system": 255}), ("write", {"cpu": 255})])
+        self.assertEqual(self.backend.policy, "medium")
+        self.assertEqual(self.backend.system_raw, 191)
+        self.assertEqual(struct.unpack("<i", self.backend.grade_path.read_bytes())[0], 3)
+        status = native.read_json(self.folder / "status.json")
+        self.assertEqual(status["phase"], "recovery_failed")
+        self.assertFalse(status["restore_ok"])
+        self.assertIn("vendor_policy_unconfirmed", status["recovery_errors"])
+        self.assertIn("original", native.read_json(self.folder / "descriptor.json"))
 
     def test_both_channels_reassert_same_target_bounded_without_restarting(self):
         owner = self.make({"cpu", "system"})
@@ -651,10 +837,12 @@ class NativeFanTests(unittest.TestCase):
             self.write_proc_identity(backend, second["pid"], 301, exe=self.folder / "unknown/temp_control")
             self.assertIn("来源或版本无法确认", adapter.capabilities()["reason"])
 
-    def test_backend_sync_uses_only_get_existing_mode_and_exact_manual_factory_value(self):
+    def test_backend_sync_verifies_manual_ioctl_then_reasserts_same_vendor_grade(self):
         backend = watchdog.SystemBackend(root=self.folder)
+        calls = []
         rpc = type("RPC", (), {"_has_socket": lambda _: True, "_config_mode": lambda _: 2,
-                                "_get_mode": lambda _: 2})()
+                                "_get_mode": lambda _: calls.append(("get",)) or 2,
+                                "_rpc": lambda _, command, value: calls.append((command, value)) or "OK!"})()
         with patch.object(backend, "verify_live"), patch.object(backend, "_histor", return_value=rpc), \
                 patch.object(backend, "mode", return_value="low"), patch.object(backend, "_write") as write, \
                 patch.object(backend, "_vendors", return_value=[self.backend.vendor]), \
@@ -662,7 +850,62 @@ class NativeFanTests(unittest.TestCase):
                 patch.object(backend, "assert_ready"), patch.object(backend, "wait_ready"):
             backend.sync_mode(self.folder, expected="low")
             write.assert_called_once_with({"system": 120}, minimum=120)
-        self.assertFalse(hasattr(rpc, "_rpc"))  # There is no SET primitive here.
+        self.assertEqual(calls, [("get",), ("set_fan_status", 2), ("get",)])
+
+    def test_manual_restore_ioctl_failure_never_uses_vendor_ack_as_write_proof(self):
+        owner = self.cached_vendor_recovery("before_get", mode="high")
+        with patch.object(self.backend, "_write", side_effect=OSError("fixture manual ioctl failed")):
+            self.assertFalse(owner.restore("release_requested"))
+        self.assertFalse(any(event[0] == "vendor_set" for event in self.backend.events))
+        self.assertEqual(self.backend.system_raw, 255)
+        status = native.read_json(self.folder / "status.json")
+        self.assertFalse(status["restore_ok"])
+        self.assertIn("vendor_policy_unconfirmed", status["recovery_errors"])
+        self.assertIn("original", native.read_json(self.folder / "descriptor.json"))
+
+    def test_manual_restore_ack_and_readback_failures_remain_unconfirmed(self):
+        for failure in ("ack", "readback"):
+            with self.subTest(failure=failure):
+                owner = self.cached_vendor_recovery("before_get", mode="medium")
+                rpc = self.backend._histor(self.folder)
+                if failure == "ack":
+                    failing = patch.object(rpc, "_rpc", return_value="OK")
+                else:
+                    failing = patch.object(rpc, "_get_mode", side_effect=[3, 4])
+                with patch.object(self.backend, "_histor", return_value=rpc), failing:
+                    self.assertFalse(owner.restore("release_requested"))
+                self.assertEqual(self.backend.system_raw, 255)
+                status = native.read_json(self.folder / "status.json")
+                self.assertFalse(status["restore_ok"])
+                self.assertIn("vendor_policy_unconfirmed", status["recovery_errors"])
+                self.assertIn("original", native.read_json(self.folder / "descriptor.json"))
+
+    def test_manual_sync_rechecks_driver_and_external_mode_before_vendor_set(self):
+        for change in ("driver", "mode"):
+            with self.subTest(change=change):
+                owner = self.cached_vendor_recovery("before_get", mode="high")
+                write = self.backend._write
+
+                def change_after_write(targets, minimum):
+                    write(targets, minimum)
+                    if change == "driver":
+                        self.backend.verified = False
+                    else:
+                        self.backend.policy, self.backend.system_raw = "medium", 191
+                        self.backend.grade_path.write_bytes(struct.pack("<i", 3))
+
+                with patch.object(self.backend, "_write", side_effect=change_after_write):
+                    self.assertFalse(owner.restore("release_requested"))
+                self.assertFalse(any(event[0] == "vendor_set" for event in self.backend.events))
+                if change == "mode":
+                    self.assertEqual(self.backend.policy, "medium")
+                    self.assertEqual(self.backend.system_raw, 191)
+                    self.assertEqual([event for event in self.backend.events if event[0] == "write"],
+                                     [("write", {"system": 255}), ("write", {"system": 255})])
+                status = native.read_json(self.folder / "status.json")
+                self.assertFalse(status["restore_ok"])
+                self.assertIn("vendor_policy_unconfirmed", status["recovery_errors"])
+                self.assertIn("original", native.read_json(self.folder / "descriptor.json"))
 
     def fake_startup_clock(self, backend, on_sleep=lambda seconds: None):
         now = [0.0]

@@ -247,7 +247,7 @@ body{display:block;overflow:auto;background:#101211}
     const parentTabs={metrics:'overview',processor:'overview',trends:'overview',container:'apps',ports:'network',web:'controls',power:'controls'};
     const mainTabs=['overview','storage','network','apps','thermal','controls'];
     const demoApps=[['J','jellyfin','jellyfin/jellyfin:latest','运行中','12.4%','428 MB','8096 → 8096'],['q','qbittorrent','lscr.io/linuxserver/qbittorrent','运行中','3.8%','186 MB','8080 → 8080'],['i','immich','ghcr.io/immich-app/server','运行中','8.6%','1.2 GB','2283 → 2283'],['v','vaultwarden','vaultwarden/server:latest','已停止',null,null,'Docker 未提供端口文本']];
-    const state={view:'overview',history:[],brightness:65,trendRange:'1h',mode:'interactive',modal:null,power:null,timer:null,toastTimer:null,containerName:'jellyfin',fan:{cpu:'auto',system:'auto'},lightHue:120,lightBrightness:80,lightEffect:1,sleepTimeout:0,saverTimeout:60,saverBrightness:30,saverItems:['cpu_usage','memory_usage'],saver:false,saverStartedAt:null,sleeping:false,lastActivity:Date.now(),swallowUntil:0};
+    const state={view:'overview',history:[],brightness:65,trendRange:'1h',mode:'interactive',modal:null,power:null,timer:null,toastTimer:null,containerName:'jellyfin',fan:{cpu:{mode:'vendor',manual_percent:70},system:{mode:'vendor',manual_percent:65}},fanOfficialMode:'auto',lightHue:120,lightBrightness:80,lightEffect:1,sleepTimeout:0,saverTimeout:60,saverBrightness:30,saverItems:['cpu_usage','memory_usage'],saver:false,saverStartedAt:null,sleeping:false,lastActivity:Date.now(),swallowUntil:0};
     const device=document.querySelector('#device');
     const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
     const SAVER_FIXED={cpu_usage:'CPU 使用率',memory_usage:'内存使用率',cpu_temperature:'CPU 温度',board_temperature:'主板温度'};
@@ -313,11 +313,16 @@ body{display:block;overflow:auto;background:#101211}
     function ports(){return `<div class="detail-lead"><p class="kicker">HOST LISTENING PORTS</p><h2>宿主监听</h2><p>读取 /proc/net · 不推测服务归属</p></div>${[[22,'TCP','0.0.0.0'],[18731,'TCP','127.0.0.1'],[18732,'TCP','0.0.0.0']].map(([port,proto,address])=>`<article class="card port-row"><span class="port-number">${port}</span><div><p class="port-name">${proto}</p><p class="port-note mono">${address}</p></div></article>`).join('')}<div class="section-label"><h2>DOCKER / 端口映射</h2></div>${demoApps.slice(0,2).map(a=>`<article class="card"><div class="card-top"><h3>${a[1]}</h3><span class="green"><span class="dot"></span></span></div><p class="mono" style="font-size:20px">${a[6]} / tcp</p></article>`).join('')}<p class="info-note">Docker 映射与宿主监听来自不同数据源，仅展示各自的原始语义。</p>`;}
     const FAN_MODES = [['auto','自动'],['low','低'],['medium','中'],['high','高'],['manual','手动']];
     const FAN_MODE_TXT = {auto:'自动',low:'低',medium:'中',high:'高',manual:'手动'};
-    const fanIndependent=name=>state.fan[name]!=='auto'&&(name==='cpu'||state.fan[name]==='manual');
+    const FAN_QUICK_PERCENT = {low:50,medium:75,high:100};
+    const FAN_NATIVE_LABEL = {auto:'自动',low:'低档',medium:'中档',high:'高档'};
+    const fanIndependent=name=>state.fan[name].mode!=='vendor';
     const fanActive=()=>['cpu','system'].some(fanIndependent);
-    function fanLiveState(name,reference=false){const mode=state.fan[name];return !fanIndependent(name)?'原厂管理':`${reference?'63° · ':'目标 '}${({low:50,medium:75,high:100,manual:50})[mode]}%`;}
+    // Match the screen's saved selection and actual vendor state using offline data only.
+    function fanQuickMode(name){const item=state.fan[name];if(item.mode==='vendor')return name==='cpu'?'auto':FAN_NATIVE_LABEL[item.vendor_mode]?item.vendor_mode:FAN_NATIVE_LABEL[state.fanOfficialMode]?state.fanOfficialMode:'';if(item.mode==='manual')return name==='cpu'?Object.keys(FAN_QUICK_PERCENT).find(key=>FAN_QUICK_PERCENT[key]===item.manual_percent)||'':'';return item.mode==='temperature'?'manual':'';}
+    function fanLiveState(name,reference=false){const item=state.fan[name];if(!fanIndependent(name))return name==='cpu'?'原厂自动':FAN_NATIVE_LABEL[state.fanOfficialMode]?`原厂${FAN_NATIVE_LABEL[state.fanOfficialMode]}`:'原厂档位未读取';const legacy=item.mode==='manual'&&(name==='system'||!fanQuickMode(name));return `${reference?'63° · ':legacy?'旧固定目标 ':'目标 '}${item.mode==='manual'?item.manual_percent:50}%`;}
+    function setFanQuick(name,mode){const item=state.fan[name];if(name==='system'&&mode!=='manual'){item.mode='vendor';item.vendor_mode=mode;state.fanOfficialMode=mode;}else if(mode==='auto')item.mode='vendor';else if(mode==='manual'){item.mode='temperature';delete item.vendor_mode;}else{item.mode='manual';item.manual_percent=FAN_QUICK_PERCENT[mode];}}
     function fanQuickRow(name,label){
-      const current=state.fan[name];
+      const current=fanQuickMode(name);
       return `<div class="fan-quick-row"><div class="fan-quick-head"><strong>${label}</strong><span>${fanLiveState(name)}</span></div><div class="fan-quick-grid">${FAN_MODES.map(([key,text])=>`<button type="button" class="fan-mode" data-fan-channel="${name}" data-fan-mode="${key}" aria-pressed="${current===key}">${text}</button>`).join('')}</div></div>`;
     }
     function fanControl(){
@@ -363,7 +368,7 @@ body{display:block;overflow:auto;background:#101211}
       if(button.dataset.tab){navigate(button.dataset.tab,true);return;}
       if(button.dataset.view){if(button.dataset.app)state.containerName=button.dataset.app;navigate(button.dataset.view);return;}
       if(button.dataset.range){const offset=document.querySelector('#screen-body').scrollTop;state.trendRange=button.dataset.range;render(offset);return;}
-      if(button.dataset.fanChannel){const offset=document.querySelector('#screen-body').scrollTop;state.fan[button.dataset.fanChannel]=button.dataset.fanMode;render(offset);toast(`${button.dataset.fanChannel==='cpu'?'CPU':'系统'}风扇：${FAN_MODE_TXT[button.dataset.fanMode]}`);return;}
+      if(button.dataset.fanChannel){const offset=document.querySelector('#screen-body').scrollTop;setFanQuick(button.dataset.fanChannel,button.dataset.fanMode);render(offset);toast(`${button.dataset.fanChannel==='cpu'?'CPU':'系统'}风扇：${FAN_MODE_TXT[button.dataset.fanMode]}（原型）`);return;}
       const action=button.dataset.action;
       if(action==='back')back();
       if(action==='saver-preview')showSaver();

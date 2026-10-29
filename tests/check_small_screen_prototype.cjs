@@ -242,7 +242,7 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
         'fan shortcut state survives main-tab navigation');
       await inside('[data-fan-channel="cpu"][data-fan-mode="auto"]').tap();
       await inside('[data-fan-channel="system"][data-fan-mode="high"]').tap();
-      assert.equal(await inside('.fan-quick-row').last().locator('.fan-quick-head span').textContent(), '原厂管理',
+      assert.equal(await inside('.fan-quick-row').last().locator('.fan-quick-head span').textContent(), '原厂高档',
         'a native system preset must not fabricate a target percentage');
       assert.equal(await inside('.fan-control .badge').textContent(), '原厂管理');
       await inside('[data-fan-channel="system"][data-fan-mode="manual"]').tap();
@@ -267,6 +267,51 @@ const galleryViews = ['overview', 'metrics', 'trends', 'processor', 'storage', '
       assert.equal(await inside('#light-effect').inputValue(), '2');
       await inside('#sleep-timeout').selectOption('300');
       assert.equal(await inside('#sleep-timeout').inputValue(), '300');
+    });
+
+    await check('system native shortcuts show the actual mode and preserve independent CPU output', async () => {
+      await open('thermal');
+      const cpu = inside('.fan-quick-row').first();
+      const system = inside('.fan-quick-row').last();
+      await inside('[data-fan-channel="cpu"][data-fan-mode="medium"]').tap();
+      for (const [mode, label] of [['high', '高档'], ['low', '低档'], ['medium', '中档'], ['auto', '自动']]) {
+        await inside(`[data-fan-channel="system"][data-fan-mode="${mode}"]`).tap();
+        assert.equal(await system.locator('[aria-pressed="true"]').getAttribute('data-fan-mode'), mode);
+        assert.equal(await system.locator('.fan-quick-head span').textContent(), `原厂${label}`);
+        assert.equal(await cpu.locator('[aria-pressed="true"]').getAttribute('data-fan-mode'), 'medium');
+        assert.equal(await cpu.locator('.fan-quick-head span').textContent(), '目标 75%');
+        assert.equal(await inside('.fan-control .badge').textContent(), '独立温控');
+      }
+      await inside('[data-fan-channel="system"][data-fan-mode="manual"]').tap();
+      assert.equal(await system.locator('[aria-pressed="true"]').getAttribute('data-fan-mode'), 'manual');
+      assert.equal(await system.locator('.fan-quick-head span').textContent(), '目标 50%');
+      await inside('[data-fan-channel="system"][data-fan-mode="auto"]').tap();
+      await inside('[data-fan-channel="cpu"][data-fan-mode="auto"]').tap();
+      assert.equal(await system.locator('.fan-quick-head span').textContent(), '原厂自动');
+      assert.equal(await inside('.fan-control .badge').textContent(), '原厂管理');
+      assert.ok((await inside('.fan-value').filter({ has: page.locator('small') }).allTextContents())
+        .every(value => /^--\s*RPM$/.test(value)), 'native modes cannot invent measured RPM');
+    });
+
+    await check('native selection falls back to observed mode and legacy system outputs stay explicit', async () => {
+      await open('thermal');
+      const system = inside('.fan-quick-row').last();
+      await page.evaluate(() => { state.fan.system = { mode: 'vendor', manual_percent: 65 }; state.fanOfficialMode = 'high'; render(); });
+      assert.equal(await system.locator('[aria-pressed="true"]').getAttribute('data-fan-mode'), 'high',
+        'old vendor configurations without a saved selection use the observed native mode');
+      await page.evaluate(() => { state.fan.system.vendor_mode = 'medium'; state.fanOfficialMode = 'low'; render(); });
+      assert.equal(await system.locator('[aria-pressed="true"]').getAttribute('data-fan-mode'), 'medium');
+      assert.equal(await system.locator('.fan-quick-head span').textContent(), '原厂低档',
+        'the selected draft cannot masquerade as the observed native mode');
+      await page.evaluate(() => { state.fan.system = { mode: 'manual', manual_percent: 75 }; render(); });
+      assert.equal(await system.locator('[aria-pressed="true"]').count(), 0,
+        'an old system fixed percentage is neither a native preset nor a temperature rule');
+      assert.equal(await system.locator('.fan-quick-head span').textContent(), '旧固定目标 75%');
+      await inside('[data-fan-channel="system"][data-fan-mode="auto"]').tap();
+      assert.equal(await system.locator('.fan-quick-head span').textContent(), '原厂自动');
+      await page.evaluate(() => { state.fan.system = { mode: 'vendor', manual_percent: 65 }; state.fanOfficialMode = null; render(); });
+      assert.equal(await system.locator('[aria-pressed="true"]').count(), 0);
+      assert.equal(await system.locator('.fan-quick-head span').textContent(), '原厂档位未读取');
     });
 
     await check('screen brightness, light brightness and hue sliders share geometry', async () => {

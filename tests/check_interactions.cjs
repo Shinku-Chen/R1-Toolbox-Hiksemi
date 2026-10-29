@@ -39,7 +39,7 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
   } };
   let independentPolicy = { config: fanConfig, active: false, busy: false, capability: { available: true, reason: '' }, channels: {
     cpu: { active: false, target_percent: null, reference_c: null }, system: { active: false, target_percent: null, reference_c: null },
-  }, sources: saverSources };
+  }, official: { mode: 'high', control_available: true }, recovery_confirmed: true, sources: saverSources };
   const lightConfig = { schema_version: 1, enabled: false, mode: 'manual', sources: [], stops: [], brightness: 70,
     manual: { mode: 1, color: '#00C832', brightness: 70 }, schedule: { enabled: false, start: '22:00', end: '07:00', brightness: 15 } };
   let lightPolicy = { config: lightConfig, active: false, busy: false, capability: { available: true, reason: '' },
@@ -125,12 +125,16 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
         else if (body.action === 'fan.policy.quick') {
           assert.ok(['cpu', 'system'].includes(body.channel));
           const channel = fanConfig.channels[body.channel];
-          if (body.mode === 'auto') channel.mode = 'vendor';
-          else if (body.mode === 'manual') { assert.ok(channel.sources.length); channel.mode = 'temperature'; }
+          if (body.channel === 'system' && ['auto', 'low', 'medium', 'high'].includes(body.mode)) {
+            channel.mode = 'vendor'; channel.vendor_mode = body.mode;
+            independentPolicy.official.mode = body.mode;
+          } else if (body.mode === 'auto') channel.mode = 'vendor';
+          else if (body.mode === 'manual') { assert.ok(channel.sources.length); channel.mode = 'temperature'; delete channel.vendor_mode; }
           else { channel.mode = 'manual'; channel.manual_percent = { low: 50, medium: 75, high: 100 }[body.mode]; }
-          independentPolicy = { ...independentPolicy, active: body.mode !== 'auto', config: fanConfig, channels: {
-            ...independentPolicy.channels, [body.channel]: { active: body.mode !== 'auto', target_percent: channel.manual_percent || null, reference_c: null },
+          independentPolicy = { ...independentPolicy, config: fanConfig, channels: {
+            ...independentPolicy.channels, [body.channel]: { active: channel.mode !== 'vendor', target_percent: channel.mode === 'vendor' ? null : channel.manual_percent, reference_c: null },
           } };
+          independentPolicy.active = Object.values(independentPolicy.channels).some(item => item.active);
           data = { ok: true, fan_policy: independentPolicy };
         } else if (body.action === 'light.policy.quick') {
           assert.ok(Number.isInteger(body.hue) && Number.isInteger(body.brightness) && Number.isInteger(body.effect));
@@ -238,6 +242,9 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.equal(await title(), '温度与风扇');
     assert.match(await page.locator('.screen-body').textContent(), /Package/);
     assert.equal(await page.locator('.fan-quick-row').count(), 2);
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="high"]').getAttribute('aria-pressed'), 'true', 'legacy vendor config selects the actual native high mode');
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="auto"]').getAttribute('aria-pressed'), 'false', 'native high must never appear as automatic');
+    assert.match(await page.locator('.fan-quick-row').nth(1).textContent(), /原厂高档/);
     assert.equal(await page.locator('.disk-temperature-row').count(), 4, 'every physical disk has a temperature row');
     assert.match(await page.locator('[data-disk="sda"]').textContent(), /家庭照片与备份盘.*38°/);
     assert.match(await page.locator('[data-disk="sdb"]').textContent(), /sdb.*--.*温度暂不可读/);
@@ -307,6 +314,57 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]').click();
     await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]')?.getAttribute('aria-pressed') === 'true');
     assert.equal(fanConfig.channels.cpu.mode, 'vendor');
+    for (const [mode, label] of [['low', '低档'], ['medium', '中档'], ['high', '高档'], ['auto', '自动']]) {
+      await page.locator(`[data-action="fan-quick"][data-channel="system"][data-mode="${mode}"]`).click();
+      await page.waitForFunction(mode => document.querySelector(`[data-action="fan-quick"][data-channel="system"][data-mode="${mode}"]`)?.getAttribute('aria-pressed') === 'true', mode);
+      assert.equal(fanConfig.channels.system.mode, 'vendor');
+      assert.equal(fanConfig.channels.system.vendor_mode, mode, 'system shortcuts select the same native mode as the web');
+      assert.equal(independentPolicy.channels.system.active, false);
+      assert.match(await page.locator('.fan-quick-row').nth(1).textContent(), new RegExp('原厂' + label));
+    }
+    fanConfig.channels.system.mode = 'manual';
+    fanConfig.channels.system.manual_percent = 50;
+    independentPolicy.channels.system = { active: true, target_percent: 50 };
+    independentPolicy.active = true;
+    await page.waitForFunction(() => document.querySelectorAll('.fan-quick-row')[1]?.textContent.includes('旧固定目标 50%'));
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][aria-pressed="true"]').count(), 0, 'legacy independent 50% is neither native low nor a temperature curve');
+    fanConfig.channels.system.mode = 'vendor';
+    delete fanConfig.channels.system.vendor_mode;
+    independentPolicy.channels.system = { active: false, target_percent: null };
+    independentPolicy.active = false;
+    independentPolicy.official.mode = null;
+    await page.waitForFunction(() => document.querySelectorAll('.fan-quick-row')[1]?.textContent.includes('原厂档位未读取'));
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][aria-pressed="true"]').count(), 0, 'unknown native mode must stay unknown');
+    independentPolicy.official.mode = 'low';
+    fanConfig.channels.system.vendor_mode = 'high';
+    await page.waitForFunction(() => document.querySelectorAll('.fan-quick-row')[1]?.textContent.includes('原厂低档'));
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="high"]').getAttribute('aria-pressed'), 'true', 'saved selection and actual running native mode remain distinct');
+    independentPolicy.capability.available = false;
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="cpu"][data-mode="low"]')?.disabled);
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="cpu"][data-mode="auto"]').isEnabled(), true, 'CPU release does not need independent takeover capability');
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="low"]').isEnabled(), true, 'native system capability is independent from custom takeover');
+    await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="low"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="system"][data-mode="low"]')?.getAttribute('aria-pressed') === 'true');
+    independentPolicy.capability.available = true;
+    independentPolicy.official.control_available = false;
+    independentPolicy.official.reason = '模拟原厂接口未通过验证';
+    fanConfig.channels.system.sources = ['cpu'];
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="system"][data-mode="auto"]')?.disabled);
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="manual"]').isEnabled(), true, 'custom temperature control uses its own preflight');
+    assert.match(await page.locator('.fan-control').textContent(), /模拟原厂接口未通过验证/);
+    await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="manual"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="system"][data-mode="manual"]')?.getAttribute('aria-pressed') === 'true');
+    assert.equal(fanConfig.channels.system.mode, 'temperature');
+    assert.equal('vendor_mode' in fanConfig.channels.system, false);
+    independentPolicy.official.control_available = true;
+    independentPolicy.recovery_confirmed = false;
+    await page.waitForFunction(() => document.querySelectorAll('.fan-quick-row')[1]?.textContent.includes('原厂恢复待确认'));
+    assert.equal(await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="auto"]').isDisabled(), true, 'native selection cannot bypass recovery confirmation');
+    independentPolicy.recovery_confirmed = true;
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="system"][data-mode="auto"]')?.disabled === false);
+    await page.locator('[data-action="fan-quick"][data-channel="system"][data-mode="auto"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-action="fan-quick"][data-channel="system"][data-mode="auto"]')?.getAttribute('aria-pressed') === 'true');
+    checks.push('system shortcuts use native modes, distinguish old fixed/unknown/draft states, and preserve separate takeover/recovery gates');
     independentPolicy = { ...independentPolicy, busy: true, last_error: null };
     await page.waitForTimeout(2100);
     assert.match(await page.locator('.fan-control').textContent(), /正在应用/);

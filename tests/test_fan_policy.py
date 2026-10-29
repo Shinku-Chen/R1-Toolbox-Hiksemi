@@ -961,18 +961,135 @@ class NativeModeTests(unittest.TestCase):
         self.assertEqual(self.mode, "high")
         self.histor.set_mode.assert_not_called()
 
-    def test_release_and_legacy_system_auto_preserve_newer_external_native_selection(self):
-        for action, payload in (("fan.policy.release", {"confirmed": True}),
-                                ("fan.policy.quick", {"channel": "system", "mode": "auto"})):
+    def test_release_preserves_newer_external_native_selection(self):
+        self.apply(self.native_config("manual", "low"))
+        self.mode = "high"
+        self.histor.set_mode.reset_mock()
+        self.controller.action("fan.policy.release", {"confirmed": True})
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.mode, "high")
+        self.histor.set_mode.assert_not_called()
+        self.assertNotIn("vendor_mode", self.controller.config["channels"]["system"])
+
+    def test_system_quick_native_modes_match_web_without_independent_capability(self):
+        self.adapter.available = False
+        self.controller._refresh_capability()
+        for mode in ("high", "medium", "low", "auto"):
+            with self.subTest(mode=mode):
+                self.adapter.calls.clear()
+                result = self.controller.action("fan.policy.quick", {"channel": "system", "mode": mode})
+                self.assertTrue(result["ok"], result)
+                self.controller.worker.join(timeout=3)
+                state = self.controller.snapshot()
+                self.assertEqual(self.adapter.calls, [("release",), ("official", mode)])
+                self.assertEqual(state["config"]["channels"]["system"]["mode"], "vendor")
+                self.assertEqual(state["config"]["channels"]["system"]["vendor_mode"], mode)
+                self.assertEqual(state["official"]["mode"], mode)
+                self.assertFalse(state["active"])
+
+    def test_system_auto_handoff_reasserts_matching_native_mode_and_repeat_keeps_cpu_live(self):
+        for action in ("fan.policy.quick", "fan.policy.update", "fan.official"):
             with self.subTest(action=action):
-                self.apply(self.native_config("manual", "low"))
-                self.mode = "high"
+                value = self.native_config("manual", "auto")
+                value["channels"]["system"]["mode"] = "manual"
+                self.mode = "auto"
+                self.apply(value)
+                self.adapter.calls.clear()
+                self.histor.set_mode.reset_mock()
+                target = self.native_config("manual", "auto")
+                payload = ({"channel": "system", "mode": "auto"} if action == "fan.policy.quick"
+                    else {"mode": "auto", "confirmed": True} if action == "fan.official"
+                    else {"config": target, "apply": True, "confirmed": True})
+                result = self.controller.action(action, payload)
+                self.assertTrue(result["ok"], result)
+                self.controller.worker.join(timeout=3)
+                self.assertEqual(self.adapter.calls, [("release",), ("official", "auto"),
+                    ("start", {"cpu"}), ("write", {"cpu": 255})])
+                self.histor.set_mode.assert_called_once_with("auto", confirmed=True)
+                self.assertFalse(self.controller.snapshot()["channels"]["system"]["active"])
+                self.adapter.calls.clear()
                 self.histor.set_mode.reset_mock()
                 self.controller.action(action, payload)
                 self.controller.worker.join(timeout=3)
-                self.assertEqual(self.mode, "high")
+                self.assertEqual(self.adapter.calls, [("write", {"cpu": 178})])
                 self.histor.set_mode.assert_not_called()
-                self.assertNotIn("vendor_mode", self.controller.config["channels"]["system"])
+
+    def test_native_adapter_system_ownership_also_requires_matching_auto_handoff(self):
+        self.mode = "auto"
+        self.adapter.channels = {"system"}
+        self.controller.action("fan.policy.quick", {"channel": "system", "mode": "auto"})
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "auto")])
+
+    def test_system_quick_keeps_active_cpu_rule_without_applying_saved_draft(self):
+        active = self.native_config("manual", "low")
+        self.apply(active)
+        draft = copy.deepcopy(active)
+        draft["channels"]["cpu"]["manual_percent"] = 99
+        self.controller.action("fan.policy.update", {"config": draft, "apply": False})
+        self.adapter.calls.clear()
+        result = self.controller.action("fan.policy.quick", {"channel": "system", "mode": "high"})
+        self.assertTrue(result["ok"], result)
+        self.controller.worker.join(timeout=3)
+        self.assertEqual(self.adapter.calls, [("release",), ("official", "high"),
+            ("start", {"cpu"}), ("write", {"cpu": 255})])
+        self.controller.tick()
+        self.assertEqual(self.adapter.calls[-1], ("write", {"cpu": 178}))
+        self.assertEqual(self.controller.config["channels"]["cpu"]["manual_percent"], 99)
+        self.assertEqual(self.controller.active_config["channels"]["cpu"]["manual_percent"], 70)
+        self.assertTrue(self.controller.snapshot()["pending_changes"])
+
+    def test_cpu_quick_never_reasserts_saved_system_native_draft(self):
+        active = self.native_config("manual", "low")
+        self.apply(active)
+        draft = copy.deepcopy(active)
+        draft["channels"]["system"]["vendor_mode"] = "high"
+        self.controller.action("fan.policy.update", {"config": draft, "apply": False})
+        self.histor.set_mode.reset_mock()
+        for mode in ("low", "auto"):
+            result = self.controller.action("fan.policy.quick", {"channel": "cpu", "mode": mode})
+            self.assertTrue(result["ok"], result)
+            self.controller.worker.join(timeout=3)
+            self.assertEqual(self.mode, "low")
+            self.assertEqual(self.controller.config["channels"]["system"]["vendor_mode"], "high")
+            self.assertEqual(self.controller.active_config["channels"]["system"]["vendor_mode"], "low")
+        self.histor.set_mode.assert_not_called()
+
+    def test_system_quick_manual_uses_saved_curve_and_drops_old_native_selection(self):
+        value = self.native_config(mode="high")
+        value["channels"]["system"]["sources"] = ["cpu"]
+        self.apply(value)
+        self.histor.set_mode.reset_mock()
+        result = self.controller.action("fan.policy.quick", {"channel": "system", "mode": "manual"})
+        self.assertTrue(result["ok"], result)
+        self.controller.worker.join(timeout=3)
+        item = self.controller.active_config["channels"]["system"]
+        self.assertEqual(item["mode"], "temperature")
+        self.assertEqual(item["sources"], ["cpu"])
+        self.assertNotIn("vendor_mode", item)
+        self.histor.set_mode.assert_not_called()
+
+    def test_system_quick_native_cannot_bypass_unconfirmed_recovery(self):
+        self.controller.channels["system"]["reason"] = "原厂恢复未确认"
+        for mode in policy.VENDOR_MODES:
+            result = self.controller.action("fan.policy.quick", {"channel": "system", "mode": mode})
+            self.assertFalse(result["ok"], result)
+            self.assertIn("原厂恢复尚未确认", result["error"])
+        self.assertEqual(self.adapter.calls, [])
+        self.histor.set_mode.assert_not_called()
+
+    def test_system_auto_failed_release_never_sends_matching_native_rpc(self):
+        value = self.native_config(mode="auto")
+        value["channels"]["system"]["mode"] = "manual"
+        self.mode = "auto"
+        self.apply(value)
+        self.histor.set_mode.reset_mock()
+        with mock.patch.object(self.adapter, "release", side_effect=RuntimeError("fixture recovery failure")):
+            result = self.controller.action("fan.policy.quick", {"channel": "system", "mode": "auto"})
+            self.assertTrue(result["ok"], result)
+            self.controller.worker.join(timeout=3)
+        self.histor.set_mode.assert_not_called()
+        self.assertFalse(self.controller.snapshot()["recovery_confirmed"])
 
     def test_startup_restores_only_independent_cpu_and_preserves_external_vendor_mode(self):
         self.controller.config = self.controller.active_config = self.native_config("manual", "low")

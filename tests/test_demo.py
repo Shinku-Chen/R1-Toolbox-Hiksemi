@@ -138,6 +138,41 @@ class DemoTests(unittest.TestCase):
 
 
 class DemoNativeFanModesTests(unittest.TestCase):
+    def test_system_shortcuts_apply_native_modes_and_preserve_cpu_output(self):
+        nas = demo_module.FakeNas()
+        nas.fan_action('fan.policy.quick', {'channel': 'cpu', 'mode': 'medium'})
+        for mode in ('high', 'low', 'medium', 'auto'):
+            with self.subTest(mode=mode):
+                result = nas.fan_action('fan.policy.quick', {'channel': 'system', 'mode': mode})
+                self.assertTrue(result['ok'])
+                snapshot = result['fan_policy']
+                self.assertEqual(snapshot['config']['channels']['system']['mode'], 'vendor')
+                self.assertEqual(snapshot['config']['channels']['system']['vendor_mode'], mode)
+                self.assertEqual(snapshot['official']['mode'], mode)
+                self.assertFalse(snapshot['channels']['system']['active'])
+                self.assertIsNone(snapshot['channels']['system']['target_percent'])
+                self.assertIsNone(snapshot['channels']['system']['rpm'])
+                self.assertEqual(snapshot['channels']['cpu']['target_percent'], 75)
+                self.assertTrue(snapshot['active'])
+                self.assertFalse(snapshot['pending_changes'])
+
+    def test_system_manual_uses_saved_temperature_sources_and_clears_native_selection(self):
+        nas = demo_module.FakeNas()
+        nas.fan_config['channels']['system']['sources'] = ['board']
+        nas.fan_action('fan.policy.quick', {'channel': 'system', 'mode': 'high'})
+        result = nas.fan_action('fan.policy.quick', {'channel': 'system', 'mode': 'manual'})
+        self.assertTrue(result['ok'])
+        snapshot = result['fan_policy']
+        self.assertEqual(snapshot['config']['channels']['system']['mode'], 'temperature')
+        self.assertNotIn('vendor_mode', snapshot['config']['channels']['system'])
+        self.assertTrue(snapshot['channels']['system']['active'])
+        self.assertEqual(snapshot['official']['mode'], 'high')
+        self.assertIsNone(snapshot['channels']['system']['rpm'])
+        result = nas.fan_action('fan.policy.quick', {'channel': 'system', 'mode': 'auto'})
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['fan_policy']['official']['mode'], 'auto')
+        self.assertFalse(result['fan_policy']['active'])
+
     def test_native_system_mode_applies_without_owning_system_and_preserves_cpu(self):
         nas = demo_module.FakeNas()
         config = nas.fan_snapshot()['config']

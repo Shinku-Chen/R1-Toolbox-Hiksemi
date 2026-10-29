@@ -60,6 +60,8 @@ int main(int argc, char **argv) {
     action.sa_handler = received;
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGUSR1, &action, 0) || sigaction(SIGUSR2, &action, 0)) return 6;
+    /* Stand in for the vendor's initial grade-2 output request, never ioctl. */
+    if (write(acknowledge, "I", 1) != 1) return 7;
     for (;;) pause();
 }
 '''
@@ -245,6 +247,29 @@ def main():
                 assert backend.alive(identity), "handler-ready helper died during the fake vendor GET"
                 stop_owned(backend, processes[identity["pid"]][0])
             checks.append("production original/guarded spawn waits for both caught signals, stable identity and synchronization survival")
+
+            # A real helper startup and signaling GET must not add a second
+            # safe-full request after the restored owner's initial request.
+            # The grade file is fixture bookkeeping, never a real /tmp/fan.
+            backend = new_backend("auto-restored-with-grade-cache")
+            saved = original(backend)
+            grade = backend.root / "vendor-grade"
+            grade.write_bytes((2).to_bytes(4, "little"))
+            native.atomic_json(backend.root / "descriptor.json", {
+                "version": 1, "channels": ["cpu", "system"], "original": saved,
+                "guarded": None, "old_mode": "auto", "daemon_changed": True})
+            recovery = watchdog.FanWatchdog(backend.root, backend)
+            with patch.object(watchdog.subprocess, "Popen", side_effect=launch_for(backend)):
+                assert recovery.restore("release_requested") is True
+            status = native.read_json(backend.root / "status.json")
+            assert status["phase"] == "released" and status["restore_ok"] is True
+            assert backend.writes == [{"cpu": 255, "system": 255}], "auto sync overwrote the restored owner's output"
+            assert grade.read_bytes() == (2).to_bytes(4, "little"), "recovery must not force a vendor grade change"
+            identity = backend._vendors()[0]
+            acknowledgement = Path(processes[identity["pid"]][2][2]).read_bytes()
+            assert b"I" in acknowledgement and acknowledgement.endswith(bytes([signal.SIGUSR1]))
+            stop_owned(backend, processes[identity["pid"]][0])
+            checks.append("successful auto recovery keeps pre-handoff safe-full without a post-startup output override")
 
             # Simulate the vendor GET's precise false-positive: return 5 even
             # though its signal just killed the process. Recovery must fail and

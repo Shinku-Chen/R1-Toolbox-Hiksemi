@@ -311,11 +311,12 @@ class SystemBackend:
         code = fan.get("fan_mode") if isinstance(fan, dict) else None
         return {2: "low", 3: "medium", 4: "high", 5: "auto"}.get(code) if type(code) is int else None
 
-    def sync_mode(self, folder, *, expected=None, safe_auto=False, apply_manual=True):
-        """Synchronize existing policy without writing another fan_mode value.
+    def sync_mode(self, folder, *, expected=None, apply_manual=True):
+        """Synchronize existing policy without selecting a different fan_mode.
 
         Vendor GET signals its existing manual/auto flag. Manual PWM is known
-        from the exact binary; auto is never guessed from a nonexistent readback.
+        from the exact binary; a same-mode vendor SET then updates its grade
+        bookkeeping. Auto keeps the restored daemon's last output request.
         """
         self.verify_live()
         from histor import MODES
@@ -335,19 +336,35 @@ class SystemBackend:
         guarded = kind == "ours"
         # get_fan_status sends USR1/USR2; exe/maps alone do not prove that
         # temp_control has installed its handlers. Never send GET while starting.
-        self.assert_ready(identity, require_guard=guarded)
-        actual = adapter._get_mode()
-        self.assert_ready(identity, require_guard=guarded)
-        self.wait_ready(identity, require_guard=guarded, deadline=self.clock() + 0.3)
-        self.verify_live()
-        after = self.mode()
-        if after != before or actual != MODES[before]:
-            raise ValueError("原厂系统策略读回不一致")
-        if apply_manual and after in ("low", "medium", "high"):
-            self._write({"system": {"low": 120, "medium": 191, "high": 255}[after]}, minimum=120)
-        elif safe_auto:
-            self.write({"system": 255})
-        return after
+        def check_owner():
+            self.verify_live()
+            self.assert_ready(identity, require_guard=guarded)
+            if self.mode() != before:
+                raise RuntimeError("vendor_policy_changed")
+
+        def read_mode():
+            check_owner()
+            actual = adapter._get_mode()
+            check_owner()
+            self.wait_ready(identity, require_guard=guarded, deadline=self.clock() + 0.3)
+            check_owner()
+            if actual != MODES[before]:
+                raise ValueError("原厂系统策略读回不一致")
+
+        read_mode()
+        if apply_manual and before in ("low", "medium", "high"):
+            check_owner()
+            # Preserve the exact-device fd and successful ioctl gates. Vendor
+            # ACK alone hides failed writes; its same-mode SET is additionally
+            # needed to keep /tmp/fan consistent for a later auto transition.
+            self._write({"system": {"low": 120, "medium": 191, "high": 255}[before]}, minimum=120)
+            check_owner()
+            acknowledgement = adapter._rpc("set_fan_status", MODES[before])
+            check_owner()
+            if acknowledgement != "OK!":
+                raise ValueError("原厂系统策略同步未返回成功")
+            read_mode()
+        return before
 
     def write(self, targets):
         # Independent targets use the requested 10% floor. The vendor-policy
@@ -740,11 +757,10 @@ class FanWatchdog:
                 errors.append("vendor_daemon_unconfirmed")
         if restored_identity is not None and self.descriptor.get("daemon_changed"):
             try:
-                # Never persist another fan_mode value. An explicit official-app
+                # Never select a different fan_mode value. An explicit official-app
                 # choice wins; otherwise synchronize the policy we inherited.
                 self.backend.sync_mode(self.folder,
-                    expected=None if competing_policy or "system" not in self.channels else self.old_mode,
-                    safe_auto="system" in self.channels and not competing_policy)
+                    expected=None if competing_policy or "system" not in self.channels else self.old_mode)
             except (OSError, ValueError, RuntimeError):
                 errors.append("vendor_policy_unconfirmed")
         if restored_identity is not None:
@@ -754,6 +770,25 @@ class FanWatchdog:
                 self.backend.assert_ready(restored_identity)
             except (OSError, ValueError, RuntimeError):
                 errors.append("vendor_daemon_unconfirmed")
+        if errors and self.original is not None:
+            # A restored daemon may have initialized a lower output before a
+            # later policy/readiness check failed. Fail high once more, but do
+            # not overwrite a newly confirmed external system-policy choice.
+            policy_changed = competing_policy
+            if "system" in self.channels and not policy_changed:
+                try:
+                    current_mode = self.backend.mode()
+                except (OSError, ValueError, RuntimeError):
+                    current_mode = None
+                policy_changed = (current_mode in ("low", "medium", "high", "auto")
+                                  and current_mode != self.old_mode)
+            emergency = {name: 255 for name in self.channels if not (name == "system" and policy_changed)}
+            try:
+                if emergency:
+                    self.backend.write(emergency)
+            except (OSError, ValueError, RuntimeError):
+                if "safe_high_unconfirmed" not in errors:
+                    errors.append("safe_high_unconfirmed")
         final_phase = "recovery_failed" if errors else "released"
         try:
             self.status(final_phase,

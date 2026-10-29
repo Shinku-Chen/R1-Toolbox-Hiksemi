@@ -723,22 +723,34 @@
 
   const FAN_QUICK_MODES = [['auto', '自动'], ['low', '低'], ['medium', '中'], ['high', '高'], ['manual', '手动']];
   const FAN_QUICK_PERCENT = { low: 50, medium: 75, high: 100 };
+  const FAN_NATIVE_LABEL = { auto: '自动', low: '低档', medium: '中档', high: '高档' };
 
-  /** Map the policy's vendor/fixed/temperature modes to the four quick buttons. */
-  function fanQuickMode(item) {
-    if (!item || item.mode === 'vendor' || !item.mode) return 'auto';
+  /** Native system selections and independent CPU outputs have distinct meanings. */
+  function fanQuickMode(name, item, official) {
+    if (item.mode === 'vendor') return name === 'cpu' ? 'auto'
+      : (FAN_NATIVE_LABEL[item.vendor_mode] ? item.vendor_mode : FAN_NATIVE_LABEL[official.mode] ? official.mode : '');
     if (item.mode === 'manual') {
-      return Object.keys(FAN_QUICK_PERCENT).find(key => FAN_QUICK_PERCENT[key] === item.manual_percent) || 'manual';
+      return name === 'cpu' ? Object.keys(FAN_QUICK_PERCENT).find(key => FAN_QUICK_PERCENT[key] === item.manual_percent) || '' : '';
     }
-    return 'manual';
+    return item.mode === 'temperature' ? 'manual' : '';
   }
 
-  function fanQuickRow(name, item, live, available, busy) {
-    const mode = fanQuickMode(item);
-    const disabled = !canWrite() || !available || busy === true;
-    const state = live.active && num(live.target_percent, 0, 100) !== null ? `目标 ${percentText(live.target_percent)}%` : '原厂管理';
+  function fanQuickRow(name, item, live, policy) {
+    const official = obj(policy.official), available = obj(policy.capability).available === true;
+    const mode = fanQuickMode(name, item, official);
+    const disabled = !canWrite() || policy.busy === true;
+    const legacy = item.mode === 'manual' && (name === 'system' || !mode);
+    const native = name === 'system' ? FAN_NATIVE_LABEL[official.mode] ? `原厂${FAN_NATIVE_LABEL[official.mode]}` : '原厂档位未读取' : '原厂自动';
+    const current = policy.recovery_confirmed === false ? '原厂恢复待确认'
+      : live.active && num(live.target_percent, 0, 100) !== null ? `${legacy ? '旧固定目标' : '目标'} ${percentText(live.target_percent)}%` : native;
+    const state = legacy && !live.active ? `旧固定配置 ${percentText(item.manual_percent)}% · ${current}` : current;
     const label = name === 'cpu' ? 'CPU 风扇' : '系统风扇';
-    return `<div class="fan-quick-row"><div class="fan-quick-head"><strong>${label}</strong><span>${esc(state)}</span></div><div class="fan-quick-grid">${FAN_QUICK_MODES.map(([key, text]) => `<button type="button" class="fan-mode" data-action="fan-quick" data-channel="${name}" data-mode="${key}" aria-pressed="${mode === key}" ${disabled || (key === 'manual' && !list(item.sources).length) ? 'disabled' : ''}>${text}</button>`).join('')}</div></div>`;
+    return `<div class="fan-quick-row"><div class="fan-quick-head"><strong>${label}</strong><span>${esc(state)}</span></div><div class="fan-quick-grid">${FAN_QUICK_MODES.map(([key, text]) => {
+      const nativeSelection = name === 'system' && key !== 'manual';
+      const unavailable = nativeSelection ? official.control_available !== true || policy.recovery_confirmed === false
+        : key !== 'auto' && !available || key === 'manual' && !list(item.sources).length;
+      return `<button type="button" class="fan-mode" data-action="fan-quick" data-channel="${name}" data-mode="${key}" aria-pressed="${mode === key}" ${disabled || unavailable ? 'disabled' : ''}>${text}</button>`;
+    }).join('')}</div></div>`;
   }
 
   function fanControl(policy) {
@@ -749,7 +761,8 @@
     const available = capability.available === true;
     const failed = Boolean(policy.last_error);
     const status = policy.busy ? '正在应用' : failed ? '应用失败' : policy.pending_changes ? '待应用' : policy.active ? '独立温控' : '原厂管理';
-    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${failed ? 'warn' : policy.active ? '' : 'neutral'}">${esc(status)}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), available, policy.busy)).join('')}${failed ? `<p class="caption">${esc(policy.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}</article>`;
+    const official = obj(policy.official);
+    return `<article class="card fan-control"><div class="card-top"><h2>风扇</h2><span class="badge ${failed ? 'warn' : policy.active ? '' : 'neutral'}">${esc(status)}</span></div>${['cpu', 'system'].map(name => fanQuickRow(name, obj(current[name]), obj(live[name]), policy)).join('')}${failed ? `<p class="caption">${esc(policy.last_error)}</p>` : ''}${available ? '' : `<p class="caption">${esc(capability.reason || '独立调速能力尚未验证')}</p>`}${official.control_available === true ? '' : `<p class="caption">${esc('原厂档位暂不可切换：' + (official.reason || '尚未确认原厂控制能力'))}</p>`}</article>`;
   }
 
   function hexToHue(value) {

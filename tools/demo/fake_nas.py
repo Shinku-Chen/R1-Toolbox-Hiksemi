@@ -240,12 +240,14 @@ class FakeNas:
                     return {'ok': False, 'settings_saved': False, 'error': '风扇快速调节参数无效'}
                 config = copy.deepcopy(self.fan_config)
                 item = config['channels'][payload['channel']]
-                if payload['mode'] == 'auto':
+                if payload['channel'] == 'system' and payload['mode'] != 'manual':
+                    item.update(mode='vendor', vendor_mode=payload['mode'])
+                    apply_official = True
+                elif payload['mode'] == 'auto':
                     item['mode'] = 'vendor'
-                    if payload['channel'] == 'system':
-                        item.pop('vendor_mode', None)
                 elif payload['mode'] == 'manual':
                     item['mode'] = 'temperature'
+                    item.pop('vendor_mode', None)
                 else:
                     item['mode'] = 'manual'
                     item['manual_percent'] = {'low': 50, 'medium': 75, 'high': 100}[payload['mode']]
@@ -263,8 +265,8 @@ class FakeNas:
             if payload.get('apply') is True:
                 self.fan_active = any(item['mode'] != 'vendor' for item in config['channels'].values())
                 system = config['channels']['system']
-                # Match the real editor without calling a device: only an
-                # explicit apply changes the simulated native system mode.
+                # Only the editor's explicit apply or a native system shortcut
+                # selects a simulated vendor mode; CPU shortcuts preserve it.
                 if apply_official and system['mode'] == 'vendor' and 'vendor_mode' in system:
                     self.official['mode'] = system['vendor_mode']
             return {'ok': True, 'settings_saved': True, 'pending': bool(payload.get('apply')),

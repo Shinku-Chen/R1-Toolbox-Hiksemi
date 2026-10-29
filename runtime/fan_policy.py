@@ -365,6 +365,18 @@ class FanPolicyController:
                  "原厂风扇设置结果未能确认")
 
     def _official_needs_change(self, system):
+        # A matching persisted fan_mode does not prove a guarded system fan
+        # has handed control back. Explicit native selections complete that
+        # handoff before their confirmed RPC, even when the code is unchanged.
+        with self.lock:
+            if self.channels["system"]["active"]:
+                return True
+        try:
+            if "system" in self.adapter.snapshot().get("active_channels", []):
+                return True
+        except Exception:
+            # Unknown ownership cannot authorize skipping the release/RPC gates.
+            return True
         # A cached dashboard mode may lag an external official-app selection.
         # Only the adapter's fresh, gated passive read can omit a signaling RPC.
         reader = getattr(self.histor, "verified_mode", None)
@@ -504,15 +516,16 @@ class FanPolicyController:
                 _require(mode in ("auto", "low", "medium", "high", "manual"), "风扇快速模式无效")
                 config = copy.deepcopy(self.config)
                 item = config["channels"][channel]
-                if mode == "auto":
+                if channel == "system" and mode in VENDOR_MODES:
+                    item.update(mode="vendor", vendor_mode=mode)
+                elif mode == "auto":
                     item["mode"] = "vendor"
-                    if channel == "system":
-                        item.pop("vendor_mode", None)
                 elif mode in QUICK_PERCENT:
                     item["mode"] = "manual"
                     item["manual_percent"] = QUICK_PERCENT[mode]
                 else:
                     item["mode"] = "temperature"
+                    item.pop("vendor_mode", None)
                 # Keep another channel's saved draft in config, but apply only
                 # that channel's already active rule.  A quick single-channel
                 # action must not silently apply the other channel's draft.
@@ -520,9 +533,9 @@ class FanPolicyController:
                 for other in CHANNELS:
                     if other != channel:
                         apply_config["channels"][other] = copy.deepcopy(self.active_config["channels"][other])
-                # Legacy shortcuts select ownership/fixed percentages only;
-                # they cannot reassert a stale saved native system mode.
-                apply_official = False
+                # Only an explicit system native shortcut can select a vendor
+                # mode. CPU shortcuts must not reassert another channel's draft.
+                apply_official = channel == "system" and mode in VENDOR_MODES
                 apply, confirmed = True, True
             elif name == "fan.official":
                 _require(set(payload) == {"mode", "confirmed"} and payload["confirmed"] is True,
