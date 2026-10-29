@@ -24,12 +24,12 @@ PORT = 18731
 WEB_PORT = 18732
 STATUS_URL = f'http://127.0.0.1:{PORT}/api/status'
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-FAN_FIXTURE_CONFIG = {'schema_version': 1, 'channels': {
+FAN_FIXTURE_CONFIG = {'schema_version': 2, 'channels': {
     'cpu': {'mode': 'temperature', 'sources': ['ci:cpu-package', 'ci:disk-a'],
-            'quiet_below': 33, 'normal_at': 57, 'full_at': 74,
+            'low_temp': 57, 'high_temp': 74,
             'quiet_percent': 55, 'normal_percent': 79, 'manual_percent': 70},
     'system': {'mode': 'temperature', 'sources': ['ci:disk-a', 'ci:disk-b'],
-               'quiet_below': 28, 'normal_at': 43, 'full_at': 58,
+               'low_temp': 43, 'high_temp': 58,
                'quiet_percent': 60, 'normal_percent': 80, 'manual_percent': 75},
 }}
 LIGHT_FIXTURE_CONFIG = {'schema_version': 1, 'enabled': False, 'mode': 'temperature',

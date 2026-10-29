@@ -28,7 +28,17 @@ def config():
     value = copy.deepcopy(policy.DEFAULT_CONFIG)
     value["channels"]["cpu"].update(mode="temperature", sources=["cpu", "disk1"])
     value["channels"]["system"].update(mode="temperature", sources=["disk1", "disk2"],
-                                       quiet_below=30, normal_at=40, full_at=55)
+                                       low_temp=40, high_temp=55)
+    return value
+
+
+def legacy_config():
+    """A valid v1 request, retaining its former cooling-only quiet boundary."""
+    value = config()
+    value["schema_version"] = 1
+    for name, item in value["channels"].items():
+        item["quiet_below"] = 40 if name == "cpu" else 30
+        item["normal_at"], item["full_at"] = item.pop("low_temp"), item.pop("high_temp")
     return value
 
 
@@ -70,25 +80,23 @@ class RulesTests(unittest.TestCase):
         system = self.decide(settings["system"], rows)
         self.assertEqual((cpu["reference_c"], cpu["source_id"], cpu["level"]), (60, "cpu", "normal"))
         self.assertEqual((system["reference_c"], system["source_id"], system["level"]), (45, "disk2", "normal"))
-        self.assertEqual(settings["system"]["normal_at"], 40)
+        self.assertEqual(settings["system"]["low_temp"], 40)
 
     def test_rising_crosses_multiple_levels_immediately(self):
         settings = config()["channels"]["cpu"]
-        for temperature, expected in ((40, "quiet"), (55, "normal"), (70, "full"), (78, "full")):
+        for temperature, expected in ((40, "quiet"), (55, "normal"), (70, "normal"), (71, "full"), (78, "full")):
             with self.subTest(temperature=temperature):
                 result = self.decide(settings, [source("cpu", temperature), source("disk1", 30, "disk")], "quiet")
                 self.assertEqual(result["level"], expected)
 
-    def test_three_thresholds_have_real_cooling_hysteresis(self):
+    def test_two_thresholds_include_both_boundaries_in_normal_and_ignore_previous(self):
         settings = config()["channels"]["cpu"]
-        def at(value, prior):
-            return self.decide(settings, [source("cpu", value), source("disk1", 30, "disk")], prior)["level"]
-        self.assertEqual(at(69, "full"), "full")
-        self.assertEqual(at(67, "full"), "full")
-        self.assertEqual(at(66, "full"), "normal")
-        self.assertEqual(at(45, "normal"), "normal")
-        self.assertEqual(at(45, "quiet"), "quiet")
-        self.assertEqual(at(40, "normal"), "quiet")
+        for previous in (None, "quiet", "normal", "full", "failsafe", "manual"):
+            for temperature, expected in ((54.9, "quiet"), (55, "normal"), (55.1, "normal"),
+                                           (69.9, "normal"), (70, "normal"), (70.1, "full")):
+                with self.subTest(previous=previous, temperature=temperature):
+                    result = self.decide(settings, [source("cpu", temperature), source("disk1", 30, "disk")], previous)
+                    self.assertEqual(result["level"], expected)
 
     def test_missing_required_source_cannot_be_ignored_or_become_zero(self):
         settings = config()["channels"]["system"]
@@ -128,27 +136,70 @@ class RulesTests(unittest.TestCase):
     def test_all_fields_are_validated_before_any_control(self):
         value = config()
         self.assertEqual(policy.validate_config(value), value)
-        for changes in ({"normal_at": 40}, {"quiet_percent": 9}, {"normal_percent": 54},
+        for changes in ({"low_temp": 70}, {"high_temp": 54}, {"quiet_percent": 9}, {"normal_percent": 54},
                         {"manual_percent": True}, {"sources": []}, {"sources": ["x", "x"]},
-                        {"full_at": float("nan")}, {"command": "anything"}):
+                        {"high_temp": float("nan")}, {"command": "anything"}):
             candidate = copy.deepcopy(value)
             candidate["channels"]["cpu"].update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 policy.validate_config(candidate)
 
-    def test_optional_native_system_mode_preserves_schema_one_compatibility(self):
-        legacy = config()
-        self.assertEqual(policy.validate_config(legacy), legacy)
-        self.assertNotIn("vendor_mode", policy.validate_config(legacy)["channels"]["system"])
-        for mode in policy.VENDOR_MODES:
-            candidate = copy.deepcopy(legacy)
-            candidate["channels"]["system"]["vendor_mode"] = mode
-            self.assertEqual(policy.validate_config(candidate), candidate)
-        for channel, mode in (("cpu", "auto"), ("system", "stop"), ("system", 5), ("system", None)):
-            candidate = copy.deepcopy(legacy)
-            candidate["channels"][channel]["vendor_mode"] = mode
-            with self.subTest(channel=channel, mode=mode), self.assertRaises(ValueError):
-                policy.validate_config(candidate)
+    def test_legacy_config_is_validated_and_normalized_without_mutating_input(self):
+        value = legacy_config()
+        original = copy.deepcopy(value)
+        self.assertEqual(policy.validate_config(value), config())
+        self.assertEqual(value, original)
+        for quiet in (15, 50):
+            changed = copy.deepcopy(value)
+            changed["channels"]["cpu"]["quiet_below"] = quiet
+            self.assertEqual(policy.validate_config(changed), config())
+
+    def test_legacy_validation_rejects_invalid_discarded_field_and_hybrid_versions(self):
+        for changes in ({"quiet_below": True}, {"quiet_below": 14}, {"quiet_below": 55},
+                        {"normal_at": 40}, {"normal_at": 70}, {"full_at": 86},
+                        {"low_temp": 55}, {"quiet_percent": 9}, {"sources": []}):
+            value = legacy_config()
+            value["channels"]["cpu"].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                policy.validate_config(value)
+        value = legacy_config()
+        del value["channels"]["cpu"]["quiet_below"]
+        with self.assertRaises(ValueError):
+            policy.validate_config(value)
+        value = config()
+        value["channels"]["cpu"]["quiet_below"] = 40
+        with self.assertRaises(ValueError):
+            policy.validate_config(value)
+        for version in (True, "2", 0, 3):
+            value = config()
+            value["schema_version"] = version
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                policy.validate_config(value)
+
+    def test_two_thresholds_are_distinct_integers_with_inclusive_15_to_85_limits(self):
+        value = config()
+        value["channels"]["cpu"].update(low_temp=15, high_temp=85)
+        self.assertEqual(policy.validate_config(value), value)
+        for key, invalid in (("low_temp", 14), ("high_temp", 86), ("low_temp", True),
+                             ("high_temp", 70.0), ("low_temp", 70), ("high_temp", 55)):
+            value = config()
+            value["channels"]["cpu"][key] = invalid
+            with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
+                policy.validate_config(value)
+
+    def test_optional_native_system_mode_preserves_both_versions(self):
+        for value in (config(), legacy_config()):
+            self.assertNotIn("vendor_mode", policy.validate_config(value)["channels"]["system"])
+            for mode in policy.VENDOR_MODES:
+                candidate, expected = copy.deepcopy(value), config()
+                candidate["channels"]["system"]["vendor_mode"] = mode
+                expected["channels"]["system"]["vendor_mode"] = mode
+                self.assertEqual(policy.validate_config(candidate), expected)
+            for channel, mode in (("cpu", "auto"), ("system", "stop"), ("system", 5), ("system", None)):
+                candidate = copy.deepcopy(value)
+                candidate["channels"][channel]["vendor_mode"] = mode
+                with self.subTest(version=value["schema_version"], channel=channel, mode=mode), self.assertRaises(ValueError):
+                    policy.validate_config(candidate)
 
     def test_requested_output_accepts_ten_and_hundred_percent_but_rejects_nine_and_101(self):
         for percent in (10, 100):
@@ -168,7 +219,7 @@ class RulesTests(unittest.TestCase):
     def test_ten_percent_quiet_and_twenty_percent_normal_keep_full_and_missing_cpu_protection(self):
         settings = config()["channels"]["cpu"]
         settings.update(quiet_percent=10, normal_percent=20)
-        for temperature, expected in ((35, 10), (60, 20), (70, 100), (80, 100)):
+        for temperature, expected in ((35, 10), (55, 20), (60, 20), (70, 20), (71, 100), (80, 100)):
             result = self.decide(settings, [source("cpu", temperature), source("disk1", 30, "disk")])
             self.assertEqual(result["target_percent"], expected)
         missing = self.decide(settings, [source("disk1", 30, "disk")])
@@ -236,6 +287,53 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(restored.config, config())
         self.assertFalse(restored.active_on_boot)
         self.assertTrue(restored.snapshot()["pending_changes"])
+
+    def test_legacy_api_request_saves_and_returns_only_canonical_two_threshold_fields(self):
+        # Check the storage contract rather than platform-specific directory
+        # fsync; the existing persistence regressions exercise the real writer.
+        with mock.patch.object(self.controller, "_save") as save:
+            result = self.controller.action("fan.policy.update", {"config": legacy_config(), "apply": False})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["fan_policy"]["config"], config())
+        self.assertEqual(self.adapter.calls, [])
+        save.assert_called_once_with(config(), policy.DEFAULT_CONFIG, False)
+
+    def test_legacy_persistence_keeps_saved_draft_separate_from_active_resume_rules(self):
+        draft, active = legacy_config(), legacy_config()
+        draft["channels"]["cpu"].update(normal_at=45, full_at=50, normal_percent=90)
+        data = {"config": draft, "active_config": active, "resume_on_boot": True}
+        (self.directory / "fan-policy.json").write_text(json.dumps(data), encoding="utf-8")
+        restored = policy.FanPolicyController(self.directory, self.sources, self.adapter, clock=lambda: 100)
+        self.addCleanup(restored.stop)
+        self.assertEqual(restored.config, policy.validate_config(draft))
+        self.assertEqual(restored.active_config, config())
+        self.assertTrue(restored.active_on_boot)
+        self.assertTrue(restored.snapshot()["pending_changes"])
+        self.assertEqual(self.adapter.calls, [])
+        # Loading never rewrites the volume or applies its saved draft. Startup
+        # resumes only the independently validated last successful rules.
+        self.assertEqual(json.loads((self.directory / "fan-policy.json").read_text(encoding="utf-8")), data)
+        with mock.patch.object(restored, "_save"):
+            restored.start()
+            restored.worker.join(timeout=3)
+            self.assertFalse(restored.worker.is_alive())
+            restored.tick()
+            self.assertEqual(self.adapter.calls[-1], ("write", {"cpu": 191, "system": 191}))
+            self.assertEqual(restored.active_config, config())
+            self.assertEqual(restored.config, policy.validate_config(draft))
+
+    def test_invalid_legacy_active_config_disarms_resume_before_any_control(self):
+        for section in ("config", "active_config"):
+            data = {"config": legacy_config(), "active_config": legacy_config(), "resume_on_boot": True}
+            data[section]["channels"]["system"]["quiet_below"] = 90
+            (self.directory / "fan-policy.json").write_text(json.dumps(data), encoding="utf-8")
+            restored = policy.FanPolicyController(self.directory, self.sources, self.adapter, clock=lambda: 100)
+            with self.subTest(section=section):
+                self.assertEqual(restored.config, policy.DEFAULT_CONFIG)
+                self.assertEqual(restored.active_config, policy.DEFAULT_CONFIG)
+                self.assertFalse(restored.active_on_boot)
+                self.assertIsNotNone(restored.settings_error)
+                self.assertEqual(self.adapter.calls, [])
 
     def test_initial_temperature_service_failure_does_not_abort_startup(self):
         with mock.patch.object(self.sources, 'snapshot', side_effect=OSError('fixture unavailable')):
@@ -502,8 +600,8 @@ class NativeModeTests(unittest.TestCase):
     def test_live_curve_ten_twenty_percent_reaches_native_targets_26_and_51(self):
         value = self.native_config("manual", "low")
         self.apply(value)
-        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], quiet_below=45,
-                                          normal_at=55, full_at=70, quiet_percent=10, normal_percent=20)
+        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], low_temp=55,
+                                          high_temp=70, quiet_percent=10, normal_percent=20)
         self.adapter.calls.clear()
         self.apply(value)
         self.assertEqual(self.adapter.calls, [("write", {"cpu": 26})])
@@ -511,7 +609,7 @@ class NativeModeTests(unittest.TestCase):
         self.adapter.calls.clear()
         self.apply(value)
         self.assertEqual(self.adapter.calls, [("write", {"cpu": 51})])
-        self.controller.sources.snapshot.return_value = [source("cpu", 70)]
+        self.controller.sources.snapshot.return_value = [source("cpu", 71)]
         self.adapter.calls.clear()
         self.controller.tick()
         self.assertEqual(self.adapter.calls, [("write", {"cpu": 255})])
@@ -520,22 +618,22 @@ class NativeModeTests(unittest.TestCase):
         value = self.native_config("manual", "low")
         self.apply(value)
         self.adapter.calls.clear()
-        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], quiet_below=45,
-                                          normal_at=55, full_at=70, quiet_percent=55, normal_percent=75)
+        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], low_temp=55,
+                                          high_temp=70, quiet_percent=55, normal_percent=75)
         state = self.apply(value)
         self.assertEqual(self.adapter.calls, [("write", {"cpu": 140})])
         self.assertEqual(state["channels"]["cpu"]["level"], "quiet")
         self.adapter.calls.clear()
-        value["channels"]["cpu"].update(quiet_percent=60, normal_at=53)
+        value["channels"]["cpu"].update(quiet_percent=60, low_temp=53)
         state = self.apply(value)
         self.assertEqual(self.adapter.calls, [("write", {"cpu": 153})])
         self.assertEqual(state["channels"]["cpu"]["reference_c"], 40)
         self.assertEqual(self.controller.active_config, value)
 
-    def test_dual_curve_hysteresis_is_preserved_during_live_rule_edit(self):
+    def test_live_rule_edit_and_ticks_use_current_temperature_without_hysteresis(self):
         value = self.native_config("manual", "low")
-        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], quiet_below=40,
-                                          normal_at=55, full_at=70, quiet_percent=55, normal_percent=75)
+        value["channels"]["cpu"].update(mode="temperature", sources=["cpu"], low_temp=55,
+                                          high_temp=70, quiet_percent=55, normal_percent=75)
         self.apply(value)
         self.controller.sources.snapshot.return_value = [source("cpu", 60)]
         self.controller.tick()
@@ -544,8 +642,15 @@ class NativeModeTests(unittest.TestCase):
         value["channels"]["cpu"]["normal_percent"] = 80
         self.adapter.calls.clear()
         state = self.apply(value)
-        self.assertEqual(self.adapter.calls, [("write", {"cpu": 204})])
-        self.assertEqual(state["channels"]["cpu"]["level"], "normal")
+        self.assertEqual(self.adapter.calls, [("write", {"cpu": 140})])
+        self.assertEqual(state["channels"]["cpu"]["level"], "quiet")
+        for temperature, raw, level in ((71, 255, "full"), (70, 204, "normal"),
+                                         (55, 204, "normal"), (54, 140, "quiet")):
+            self.controller.sources.snapshot.return_value = [source("cpu", temperature)]
+            self.adapter.calls.clear()
+            self.controller.tick()
+            self.assertEqual(self.adapter.calls, [("write", {"cpu": raw})])
+            self.assertEqual(self.controller.channels["cpu"]["level"], level)
 
     def test_same_mask_dual_edit_updates_both_targets_without_restarting_either(self):
         value = self.native_config("manual", "low")
@@ -765,6 +870,19 @@ class NativeModeTests(unittest.TestCase):
         self.assertEqual(self.mode, "low")
         self.histor.set_mode.assert_not_called()
         self.assertNotIn("vendor_mode", self.controller.active_config["channels"]["system"])
+
+    def test_legacy_api_apply_uses_normalized_two_thresholds_and_exact_upper_boundary(self):
+        value = legacy_config()
+        value["channels"]["cpu"]["sources"] = ["cpu"]
+        value["channels"]["system"]["mode"] = "vendor"
+        state = self.apply(value)
+        self.assertEqual(state["config"], policy.validate_config(value))
+        self.assertEqual(self.controller.active_config, state["config"])
+        for temperature, percent in ((70, 75), (71, 100), (54, 55), (55, 75)):
+            self.controller.sources.snapshot.return_value = [source("cpu", temperature)]
+            self.controller.tick()
+            self.assertEqual(self.controller.channels["cpu"]["target_percent"], percent)
+        self.histor.set_mode.assert_not_called()
 
     def test_official_action_uses_active_cpu_rule_instead_of_unsaved_cpu_draft(self):
         active = self.native_config("manual", "low")

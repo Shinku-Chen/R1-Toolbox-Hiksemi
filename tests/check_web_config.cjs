@@ -86,12 +86,13 @@ def controller(folder):
 
 board_stale = False
 cpu_stale = False
+cpu_temperature = 62
 saver_extra_sources = False
 missing_sources = set()
 class Sources:
     def snapshot(self):
         now = time.monotonic()
-        entries = [('cpu', 'CPU Package', 'cpu', 62), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]
+        entries = [('cpu', 'CPU Package', 'cpu', cpu_temperature), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]
         if saver_extra_sources:
             entries += [('extra:' + str(index), ('<img src=x onerror="window.saverLabelInjected=1">' + '超长温度设备名' * 20) if index == 0 else '扩展温度 ' + str(index), 'disk', 35) for index in range(12)]
         return [{'id': name, 'label': label, 'kind': kind, 'temperature_c': temperature, 'status': 'ok',
@@ -262,6 +263,10 @@ try:
         elif operation == 'fresh_cpu':
             cpu_stale = False
             primary.fan_policy.tick()
+        elif operation == 'fan_cpu_temperature':
+            assert type(request['value']) in (int, float) and 0 <= request['value'] < 80
+            cpu_temperature = request['value']
+            primary.fan_policy.tick()
         elif operation == 'fail_release':
             primary.fan_policy.adapter.fail_release = True
         elif operation == 'allow_release':
@@ -339,11 +344,11 @@ finally:
   const ready = new Promise((resolve, reject) => { bootResolve = resolve; bootReject = reject; });
   const fixtureReplies = new Map();
   let fixtureSequence = 0;
-  const fixtureCall = operation => new Promise((resolve, reject) => {
+  const fixtureCall = (operation, value) => new Promise((resolve, reject) => {
     const id = ++fixtureSequence;
     const timer = setTimeout(() => { fixtureReplies.delete(id); reject(new Error('fixture operation timed out: ' + operation)); }, 8000);
     fixtureReplies.set(id, value => { clearTimeout(timer); resolve(value); });
-    child.stdin.write(JSON.stringify({ id, operation }) + '\n');
+    child.stdin.write(JSON.stringify({ id, operation, value }) + '\n');
   });
   const bootTimer = setTimeout(() => bootReject(new Error('本地测试网页服务启动超时')), 15000);
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-4096); });
@@ -567,6 +572,8 @@ finally:
     check('手动直接进入曲线且没有控制类型选择', await cpuEditor.locator('select').count() === 1);
     check('温控曲线显示设备多选', await cpuEditor.locator('.r1-ms').count() === 1 && await fanCard.locator('.r1-sources').count() === 0);
     check('手动温控显示曲线', await cpuEditor.locator('.r1-curve').count() === 1);
+    check('手动温控只显示低温和高温两个阈值', JSON.stringify(await cpuEditor.locator('[data-ref="rows"] input').evaluateAll(inputs => inputs.map(input => input.getAttribute('aria-label')))) === JSON.stringify(['低温℃', '高温℃']));
+    check('三档输出仍各自显示且不再描述隐式迟滞', await cpuEditor.locator('[data-ref="duty"] input').count() === 3 && !/迟滞|降温 3/.test(await cpuEditor.textContent()));
     check('设备多选默认收起', await fanCard.locator('.r1-ms-menu').isHidden());
     await fanCard.locator('.r1-ms-toggle').first().click();
     check('设备下拉可展开', await fanCard.locator('.r1-ms-menu').first().isVisible() && await fanCard.locator('.r1-ms-row').count() >= 1);
@@ -619,6 +626,7 @@ finally:
       const body = await response.json();
       const payload = response.request().postDataJSON();
       check(label + '直接保存并应用', response.status() === 200 && body.ok === true && payload.apply === true && payload.confirmed === true && await page.locator('#r1AskT').count() === 0, JSON.stringify(body.error));
+      check(label + '提交双阈值第二版配置', payload.config.schema_version === 2 && Object.values(payload.config.channels).every(item => Number.isInteger(item.low_temp) && Number.isInteger(item.high_temp) && item.low_temp < item.high_temp && !['quiet_below', 'normal_at', 'full_at'].some(key => Object.hasOwn(item, key))));
       for (const name of ['cpu', 'system']) {
         const selected = selectedModes[name], submitted = payload.config.channels[name];
         const expected = selected === 'manual' ? 'temperature' : selected.startsWith('legacy:') || (name === 'cpu' && ['high', 'medium', 'low'].includes(selected)) ? 'manual' : 'vendor';
@@ -678,6 +686,28 @@ finally:
     const legacyMinimum = await saveFanDirect('旧固定10%');
     check('旧固定 10% 实际映射 raw26', legacyMinimum.channels.cpu.target_percent === 10 && legacyMinimum.channels.cpu.target_raw === 26);
     await cpuModes.selectOption('manual');
+    const lowTemp = cpuEditor.locator('input[aria-label="低温℃"]');
+    const highTemp = cpuEditor.locator('input[aria-label="高温℃"]');
+    check('两个阈值输入保持严格递增范围', await lowTemp.getAttribute('min') === '15' && Number(await lowTemp.getAttribute('max')) === Number(await highTemp.inputValue()) - 1 && Number(await highTemp.getAttribute('min')) === Number(await lowTemp.inputValue()) + 1 && await highTemp.getAttribute('max') === '85');
+    await lowTemp.fill('14');
+    await lowTemp.dispatchEvent('change');
+    await highTemp.fill('86');
+    await highTemp.dispatchEvent('change');
+    check('温度阈值约束在 15 至 85℃', await lowTemp.inputValue() === '15' && await highTemp.inputValue() === '85');
+    await lowTemp.fill('85');
+    await lowTemp.dispatchEvent('change');
+    check('低温不能等于或高于高温', await lowTemp.inputValue() === '84' && await highTemp.getAttribute('min') === '85');
+    await highTemp.fill('15');
+    await highTemp.dispatchEvent('change');
+    check('高温不能等于或低于低温', await highTemp.inputValue() === '85' && await lowTemp.getAttribute('max') === '84');
+    await lowTemp.fill('15.4');
+    await lowTemp.dispatchEvent('change');
+    await highTemp.fill('16');
+    await highTemp.dispatchEvent('change');
+    check('相邻温度阈值合法且输入取整数', await lowTemp.inputValue() === '15' && await highTemp.inputValue() === '16');
+    await highTemp.fill('');
+    await highTemp.dispatchEvent('change');
+    check('清空温度输入保留原值', await highTemp.inputValue() === '16');
     const quietOutput = cpuEditor.locator('input[aria-label="静音输出"]');
     const normalOutput = cpuEditor.locator('input[aria-label="普通输出"]');
     const fullOutput = cpuEditor.locator('input[aria-label="全速输出"]');
@@ -688,6 +718,11 @@ finally:
     await quietOutput.fill('100');
     await quietOutput.dispatchEvent('change');
     check('100% 合法且普通输出不低于静音', await quietOutput.inputValue() === '100' && await normalOutput.inputValue() === '100' && await normalOutput.getAttribute('min') === '100');
+    await quietOutput.fill('101');
+    await quietOutput.dispatchEvent('change');
+    await normalOutput.fill('101');
+    await normalOutput.dispatchEvent('change');
+    check('静音与普通输出不能超过 100%', await quietOutput.inputValue() === '100' && await normalOutput.inputValue() === '100');
     check('100% 曲线绘制到纵轴顶端', (await cpuEditor.locator('.r1-curve-line').getAttribute('d')).startsWith('M8 8.0'));
     await quietOutput.fill('10');
     await quietOutput.dispatchEvent('change');
@@ -698,11 +733,14 @@ finally:
     await normalOutput.dispatchEvent('change');
     check('全速输出固定禁用且保持 100%', await fullOutput.isDisabled() && await fullOutput.inputValue() === '100');
     check('10% 和 20% 按完整 10 到 100 纵轴绘图', (await cpuEditor.locator('.r1-curve-line').getAttribute('d')).startsWith('M8 82.0') && (await cpuEditor.locator('.r1-curve-line').getAttribute('d')).includes('V73.8'));
-    for (const [label, value] of [['全速℃', '85'], ['普通℃', '75'], ['静音℃', '70']]) {
+    for (const [label, value] of [['高温℃', '75'], ['低温℃', '70']]) {
       const input = cpuEditor.locator('input[aria-label="' + label + '"]');
       await input.fill(value);
       await input.dispatchEvent('change');
     }
+    check('阶梯图仅在低温和高温两处跳变', await cpuEditor.locator('.r1-curve-line').getAttribute('d') === 'M8 82.0H184.0V73.8H200.0V8.0H232');
+    check('两个边界显示四个端点且普通区间两端包含', await cpuEditor.locator('.r1-curve-dots circle').count() === 4 && await cpuEditor.locator('.r1-curve-dots .r1-curve-closed').count() === 2);
+    check('区间说明精确显示两个边界与三档输出', await cpuEditor.locator('.r1-curve-ranges').textContent() === 'T < 70℃：静音 10%；70℃ ≤ T ≤ 75℃：普通 20%；T > 75℃：全速 100%。');
     const minimumCurve = await saveFanDirect('10%温控曲线');
     check('曲线保存静音10普通20并实际输出 raw26', minimumCurve.config.channels.cpu.quiet_percent === 10 && minimumCurve.config.channels.cpu.normal_percent === 20 && minimumCurve.channels.cpu.level === 'quiet' && minimumCurve.channels.cpu.target_percent === 10 && minimumCurve.channels.cpu.target_raw === 26, JSON.stringify(minimumCurve.channels.cpu));
     await fixtureCall('stale_cpu');
@@ -713,6 +751,17 @@ finally:
     check('读数恢复后按曲线重新输出 10%', freshMinimum.channels.cpu.target_percent === 10 && freshMinimum.channels.cpu.target_raw === 26);
     const afterMinimum = (await fixtureCall('fan_calls')).fan_calls;
     check('10% 调速与保护恢复沿用接管且无需复位', JSON.stringify(afterMinimum) === JSON.stringify(beforeMinimum), JSON.stringify({ before: beforeMinimum, after: afterMinimum }));
+    await lowTemp.fill('60');
+    await lowTemp.dispatchEvent('change');
+    await highTemp.fill('70');
+    await highTemp.dispatchEvent('change');
+    await saveFanDirect('双阈值边界');
+    for (const [temperature, level, percent] of [[59.5, 'quiet', 10], [60, 'normal', 20], [70, 'normal', 20], [70.5, 'full', 100], [70, 'normal', 20], [60, 'normal', 20], [59.5, 'quiet', 10]]) {
+      await fixtureCall('fan_cpu_temperature', temperature);
+      const live = (await api('/api/r1')).body.fan.channels.cpu;
+      check('升降温 ' + temperature + '℃ 使用明确区间 ' + level, live.reference_c === temperature && live.level === level && live.target_percent === percent, JSON.stringify(live));
+    }
+    await fixtureCall('fan_cpu_temperature', 62);
     await reloadFanSettings(page);
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 844 });

@@ -30,7 +30,7 @@ MAX_SNAPSHOT_BYTES = 1024 * 1024
 MAX_SAMPLE_BYTES = MAX_CAPTURE_BYTES - MAX_SNAPSHOT_BYTES - 65536  # Job metadata and encoding margin.
 MAX_RUNTIME_ENTRIES = 256
 MAX_RUNTIME_FOLDERS = 8
-CONFIG_FIELDS = ("mode", "sources", "quiet_below", "normal_at", "full_at",
+CONFIG_FIELDS = ("mode", "sources", "low_temp", "high_temp",
                  "quiet_percent", "normal_percent", "manual_percent")
 CHANNEL_FIELDS = ("active", "mode", "level", "target_percent", "target_raw",
                   "reference_c", "source_id", "source_label", "reason", "applied_monotonic")

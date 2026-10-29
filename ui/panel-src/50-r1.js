@@ -432,7 +432,7 @@ function fanUiMode(item, name) {
   return name === 'cpu' ? 'auto' : (R1_NATIVE_FAN_TXT[item && item.vendor_mode] ? item.vendor_mode : '');
 }
 
-/** 三段温控曲线的触摸编辑器：温度节点 + 输出，并实时画出阶梯线。 */
+/** 两个温度阈值划分三个输出区间，边界点与说明同步反映实际控制规则。 */
 function fanCurveEditor(item, touch) {
   const box = mount(`<div class="r1-curve">
     <svg class="r1-curve-chart" viewBox="0 0 240 92" aria-hidden="true">
@@ -441,29 +441,41 @@ function fanCurveEditor(item, touch) {
       <g class="r1-curve-dots" data-ref="dots"></g>
     </svg>
     <div class="r1-curve-rows" data-ref="rows"></div>
+    <p class="sub r1-curve-ranges" data-ref="ranges"></p>
   </div>`);
-  const line = box.querySelector('[data-ref="line"]'), dots = box.querySelector('[data-ref="dots"]'), rows = box.querySelector('[data-ref="rows"]');
+  const line = box.querySelector('[data-ref="line"]'), dots = box.querySelector('[data-ref="dots"]'), rows = box.querySelector('[data-ref="rows"]'), ranges = box.querySelector('[data-ref="ranges"]');
   const x = t => 8 + (clamp(t, 15, 85) - 15) / 70 * 224;
   const y = p => 82 - (clamp(p, 10, 100) - 10) / 90 * 74;
   const paint = () => {
-    const qb = clamp(item.quiet_below, 15, 85), na = clamp(item.normal_at, 15, 85), fa = clamp(item.full_at, 15, 85);
+    const low = item.low_temp, high = item.high_temp;
     const q = clamp(item.quiet_percent, 10, 100), n = Math.max(q, clamp(item.normal_percent, 10, 100));
-    line.setAttribute('d', `M8 ${y(q).toFixed(1)}H${x(qb).toFixed(1)}V${y(n).toFixed(1)}H${x(na).toFixed(1)}V${y(100).toFixed(1)}H232`);
-    dots.innerHTML = [[qb, q], [na, n], [fa, 100]].map(([t, p]) => `<circle cx="${x(t).toFixed(1)}" cy="${y(p).toFixed(1)}" r="3.4"></circle>`).join('');
+    line.setAttribute('d', `M8 ${y(q).toFixed(1)}H${x(low).toFixed(1)}V${y(n).toFixed(1)}H${x(high).toFixed(1)}V${y(100).toFixed(1)}H232`);
+    dots.innerHTML = [[low, q, false], [low, n, true], [high, 100, false], [high, n, true]].map(([t, p, closed]) => `<circle class="${closed ? 'r1-curve-closed' : ''}" cx="${x(t).toFixed(1)}" cy="${y(p).toFixed(1)}" r="3.4"></circle>`).join('');
+    ranges.textContent = `T < ${low}℃：静音 ${q}%；${low}℃ ≤ T ≤ ${high}℃：普通 ${n}%；T > ${high}℃：全速 100%。`;
   };
-  const addRow = (label, key, low, high, unit) => {
-    const row = mount(`<div class="r1-curve-row"><span class="r1-curve-name">${esc(label)}</span><input class="r1-curve-input" type="number" inputmode="numeric" min="${low}" max="${high}" step="1" value="${item[key]}" aria-label="${esc(label + unit)}"><span class="r1-curve-unit">${esc(unit)}</span></div>`);
-    row.querySelector('input').addEventListener('change', event => {
-      const value = clamp(Math.round(Number(event.target.value) || item[key]), low, high);
+  const tempInputs = {};
+  const tempBounds = key => key === 'low_temp' ? [15, item.high_temp - 1] : [item.low_temp + 1, 85];
+  const syncTempBounds = () => {
+    for (const [key, input] of Object.entries(tempInputs)) [input.min, input.max] = tempBounds(key);
+  };
+  const addRow = (label, key) => {
+    const row = mount(`<div class="r1-curve-row"><span class="r1-curve-name">${esc(label)}</span><input class="r1-curve-input" type="number" inputmode="numeric" step="1" value="${item[key]}" aria-label="${esc(label + '℃')}"><span class="r1-curve-unit">℃</span></div>`);
+    const input = row.querySelector('input');
+    tempInputs[key] = input;
+    input.addEventListener('change', event => {
+      const entered = event.target.valueAsNumber;
+      const [low, high] = tempBounds(key);
+      const value = clamp(Math.round(Number.isFinite(entered) ? entered : item[key]), low, high);
       event.target.value = value;
       item[key] = value;
+      syncTempBounds();
       touch(); paint();
     });
     rows.append(row);
   };
-  addRow('静音', 'quiet_below', 15, 85, '℃');
-  addRow('普通', 'normal_at', 15, 85, '℃');
-  addRow('全速', 'full_at', 15, 85, '℃');
+  addRow('低温', 'low_temp');
+  addRow('高温', 'high_temp');
+  syncTempBounds();
   const duty = mount(`<div class="r1-curve-rows" data-ref="duty"></div>`);
   const dutyInputs = {};
   const addDuty = (label, key, fixed) => {
@@ -471,7 +483,7 @@ function fanCurveEditor(item, touch) {
     if (fixed == null) {
       dutyInputs[key] = row.querySelector('input');
       dutyInputs[key].addEventListener('change', event => {
-        const entered = Number(event.target.value);
+        const entered = event.target.valueAsNumber;
         const low = key === 'normal_percent' ? item.quiet_percent : 10;
         const value = clamp(Math.round(Number.isFinite(entered) ? entered : item[key]), low, 100);
         event.target.value = value;
@@ -552,7 +564,7 @@ function r1FanSettings(card) {
         : '自动／高／中／低：原厂系统档位。手动：按温度曲线独立调速。'));
       if (item.mode === 'temperature') {
         form.append(r1Field('温度设备 · 多选', r1MultiSelect(sources, item.sources, value => { item.sources = value; touch(); }), '点开下拉多选；只使用新鲜读数，取所选设备的最高温度。'));
-        form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '输出范围 10–100%，普通不低于静音，全速固定 100%。升温到节点后下一轮升档；降温 3°C 才降档。'));
+        form.append(r1Field('温度曲线', fanCurveEditor(item, touch), '低温必须小于高温。输出范围 10–100%，普通不低于静音，全速固定 100%。升温与降温均按当前温度在下一轮采样切换，温度保护优先。'));
       }
       if (item.mode === 'manual') {
         const legacy = mode.startsWith('legacy:');

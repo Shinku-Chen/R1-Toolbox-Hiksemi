@@ -111,12 +111,14 @@
 .r1-ms-temp { color: var(--ink-3); font-size: 12px; flex: none; }
 .r1-ms-empty { padding: 14px 10px; color: var(--ink-3); font-size: 13px; }
 
-/* 三段温控曲线 */
+/* 两个阈值、三个输出区间的温控曲线。 */
 .r1-curve { width: 100%; max-width: 340px; }
 .r1-curve-chart { display: block; width: 100%; height: 92px; margin-bottom: 10px; }
 .r1-curve-track { fill: none; stroke: var(--line-strong); stroke-width: 1; }
 .r1-curve-line { fill: none; stroke: var(--ink-1); stroke-width: 2; stroke-linejoin: round; }
 .r1-curve-dots circle { fill: var(--card); stroke: var(--ink-1); stroke-width: 2; }
+.r1-curve-dots .r1-curve-closed { fill: var(--ink-1); }
+.r1-curve-ranges { margin-top: 10px; overflow-wrap: anywhere; }
 .r1-curve-rows { display: grid; gap: 8px; }
 .r1-curve-rows + .r1-curve-rows { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .r1-curve-row { display: grid; grid-template-columns: 62px 88px auto; align-items: center; gap: 10px; font-size: 14px; }

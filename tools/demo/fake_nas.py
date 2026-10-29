@@ -17,12 +17,14 @@ import math
 import threading
 import time
 
+from fan_policy import validate_config
+
 PAGES = ['overview', 'storage', 'network', 'controls', 'apps', 'system', 'settings']
 
-FAN_DEFAULT = {'schema_version': 1, 'channels': {
-    'cpu': {'mode': 'vendor', 'sources': [], 'quiet_below': 45, 'normal_at': 60, 'full_at': 75,
+FAN_DEFAULT = {'schema_version': 2, 'channels': {
+    'cpu': {'mode': 'vendor', 'sources': [], 'low_temp': 60, 'high_temp': 75,
             'quiet_percent': 55, 'normal_percent': 75, 'manual_percent': 70},
-    'system': {'mode': 'vendor', 'sources': [], 'quiet_below': 40, 'normal_at': 50, 'full_at': 60,
+    'system': {'mode': 'vendor', 'sources': [], 'low_temp': 50, 'high_temp': 60,
                'quiet_percent': 50, 'normal_percent': 70, 'manual_percent': 65},
 }}
 
@@ -193,9 +195,9 @@ class FakeNas:
                     'rpm': None, 'reason': '未选择有效温度设备，使用普通档'}
         best = max(selected, key=lambda row: row['temperature_c'])
         value = best['temperature_c']
-        if value <= policy['quiet_below']:
+        if value < policy['low_temp']:
             level, target = 'quiet', policy['quiet_percent']
-        elif value < policy['full_at']:
+        elif value <= policy['high_temp']:
             level, target = 'normal', policy['normal_percent']
         else:
             level, target = 'full', 100
@@ -251,17 +253,12 @@ class FakeNas:
                 name = 'fan.policy.update'
             if name != 'fan.policy.update' or not isinstance(payload, dict) or 'config' not in payload:
                 return {'ok': False, 'settings_saved': False, 'error': '风扇配置参数无效'}
-            config = payload['config']
-            if not isinstance(config, dict) or not isinstance(config.get('channels'), dict):
-                return {'ok': False, 'settings_saved': False, 'error': '风扇配置字段无效'}
-            for channel in ('cpu', 'system'):
-                item = config['channels'].get(channel)
-                if not isinstance(item, dict) or item.get('mode') not in ('vendor', 'manual', 'temperature'):
-                    return {'ok': False, 'settings_saved': False, 'error': '风扇模式无效'}
-                if 'vendor_mode' in item and (channel != 'system' or item['vendor_mode'] not in ('auto', 'low', 'medium', 'high')):
-                    return {'ok': False, 'settings_saved': False, 'error': '系统风扇原厂档位无效'}
-                if item['mode'] == 'temperature' and not item.get('sources'):
-                    return {'ok': False, 'settings_saved': False, 'error': '手动模式至少选择一个温度设备'}
+            try:
+                # Reuse production validation and strict v1→v2 migration so
+                # demo saves cannot accept fields or ranges the NAS rejects.
+                config = validate_config(payload['config'])
+            except ValueError as error:
+                return {'ok': False, 'settings_saved': False, 'error': str(error)}
             self.fan_config = copy.deepcopy(config)
             if payload.get('apply') is True:
                 self.fan_active = any(item['mode'] != 'vendor' for item in config['channels'].values())

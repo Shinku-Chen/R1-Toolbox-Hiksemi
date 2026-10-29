@@ -53,6 +53,35 @@ def _tool(name, title, description, scope, schema, *, read_only=False,
 
 _CONFIG = {'type': 'object', 'maxProperties': 64,
            'description': 'Toolbox 已有策略对象；由原有控制器继续校验内部字段。'}
+
+
+def _fan_config_schema(version):
+    """Describe both accepted input versions; the controller normalizes to v2."""
+    temperatures = ('low_temp', 'high_temp') if version == 2 else ('quiet_below', 'normal_at', 'full_at')
+    fields = {
+        'mode': {'type': 'string', 'enum': ['vendor', 'manual', 'temperature']},
+        'sources': {'type': 'array', 'maxItems': 32, 'uniqueItems': True,
+                    'items': {'type': 'string', 'minLength': 1, 'maxLength': 256}},
+        **{name: {'type': 'integer', 'minimum': 15, 'maximum': 85} for name in temperatures},
+        **{name: {'type': 'integer', 'minimum': 10, 'maximum': 100}
+           for name in ('quiet_percent', 'normal_percent', 'manual_percent')},
+    }
+    cpu = _object_schema(fields, fields)
+    system = _object_schema(dict(fields, vendor_mode={'type': 'string',
+                            'enum': ['auto', 'low', 'medium', 'high']}), fields)
+    return _object_schema({'schema_version': {'type': 'integer', 'const': version},
+                           'channels': _object_schema({'cpu': cpu, 'system': system},
+                                                      ('cpu', 'system'))},
+                          ('schema_version', 'channels'))
+
+
+_FAN_CONFIG = {'type': 'object', 'maxProperties': 64,
+               'description': '优先使用 schema_version=2；low_temp<high_temp，均为 15–85°C 整数。'
+                              'T<low_temp 静音，两阈值含边界为普通，T>high_temp 全速 100%，无迟滞。'
+                              '静音／普通／固定输出为 10–100%，普通不得低于静音；温控需选择来源。'
+                              '兼容严格校验的 v1：normal_at→low_temp、full_at→high_temp，'
+                              'quiet_below 不再参与控制；响应与保存统一为 v2。',
+               'oneOf': [_fan_config_schema(2), _fan_config_schema(1)]}
 _CONFIRMED = {'type': 'boolean', 'const': True,
               'description': '仅在用户已明确授权本次操作后传入 true。'}
 _APPLY = {'type': 'boolean', 'default': True}
@@ -70,9 +99,10 @@ _TOOLS = (
                                             'enum': ['face', 'all'],
                                             'default': 'face'}}), idempotent=False),
     _tool('set_fan_policy', '设置风扇策略',
-          '保存风扇策略，并在 apply=true 时按原有预检接管。必须已获用户确认；'
+          '保存 CPU／系统独立风扇策略，v2 温控使用低温／高温两阈值；'
+          '在 apply=true 时按原有预检接管。必须已获用户确认；'
           '不会跳过驱动、二进制和唯一进程核验。',
-          'fan', _object_schema({'config': _CONFIG, 'apply': _APPLY,
+          'fan', _object_schema({'config': _FAN_CONFIG, 'apply': _APPLY,
                                  'confirmed': _CONFIRMED}, ('config', 'confirmed'))),
     _tool('release_fan', '恢复原厂风扇管理',
           '用户确认后释放 Toolbox 风扇接管，交回原厂自动温控。',

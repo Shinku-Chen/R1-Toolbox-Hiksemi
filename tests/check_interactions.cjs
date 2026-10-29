@@ -33,9 +33,9 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     { id: staleSource, label: '已过期硬盘', kind: 'disk', temperature_c: 99, status: 'ok', fresh: false },
     ...Array.from({ length: 12 }, (_, i) => ({ id: 'hwmon:' + String(i).padStart(24, '0'), label: '主板测点 ' + i, kind: 'board', temperature_c: i, status: 'ok', fresh: true })),
   ];
-  const fanConfig = { schema_version: 1, channels: {
-    cpu: { mode: 'vendor', sources: [], quiet_below: 40, normal_at: 55, full_at: 70, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
-    system: { mode: 'vendor', sources: [], quiet_below: 35, normal_at: 45, full_at: 55, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
+  const fanConfig = { schema_version: 2, channels: {
+    cpu: { mode: 'vendor', sources: [], low_temp: 55, high_temp: 70, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
+    system: { mode: 'vendor', sources: [], low_temp: 45, high_temp: 55, quiet_percent: 55, normal_percent: 75, manual_percent: 70 },
   } };
   let independentPolicy = { config: fanConfig, active: false, busy: false, capability: { available: true, reason: '' }, channels: {
     cpu: { active: false, target_percent: null, reference_c: null }, system: { active: false, target_percent: null, reference_c: null },

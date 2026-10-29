@@ -59,8 +59,9 @@ class FanDiagnosticsTests(unittest.TestCase):
         self.adapter = SimpleNamespace(root=self.root, runtime_dir=self.runtime, guard_path=self.guard,
                                        folder=self.folder, lock=ForbiddenLock(), allow_writes=True)
         self.policy = SimpleNamespace(adapter=self.adapter, lock=threading.RLock(), busy=False,
-                                      config={"schema_version": 1, "channels": {
-                                          "cpu": {"mode": "manual", "manual_percent": 70},
+                                      config={"schema_version": 2, "channels": {
+                                          "cpu": {"mode": "manual", "manual_percent": 70,
+                                                  "low_temp": 55, "high_temp": 70},
                                           "system": {"mode": "vendor"}}},
                                       channels={"cpu": {"active": False, "mode": "vendor"},
                                                 "system": {"active": False, "mode": "vendor"}},
@@ -250,6 +251,15 @@ class FanDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(value["config"])
         self.assertIsNone(value["channels"])
         self.assertIsNone(value["active"])
+
+    def test_policy_evidence_keeps_only_canonical_two_temperature_fields(self):
+        self.policy.config["channels"]["cpu"].update(quiet_below=40, normal_at=55, full_at=70,
+                                                    unexpected_private_value="secret")
+        value = self.collector.snapshot()["policy"]["config"]
+        self.assertEqual(value["schema_version"], 2)
+        cpu = value["channels"]["cpu"]
+        self.assertEqual((cpu["low_temp"], cpu["high_temp"]), (55, 70))
+        self.assertFalse({"quiet_below", "normal_at", "full_at", "unexpected_private_value"} & set(cpu))
 
     def test_capture_initial_state_changes_and_terminal_snapshot_are_retained(self):
         job = self.collector.start(duration_seconds=1, interval_ms=100)

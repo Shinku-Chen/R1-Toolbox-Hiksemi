@@ -20,13 +20,14 @@ MIN_OUTPUT_PERCENT = 10
 # Requested output scale only; the driver does not supply measured RPM.
 MIN_TARGET_RAW = 26  # round(255 * 10 / 100), never a zero/stop command.
 QUICK_PERCENT = {"low": 50, "medium": 75, "high": 100}
-FIELDS = {"mode", "sources", "quiet_below", "normal_at", "full_at",
+FIELDS = {"mode", "sources", "low_temp", "high_temp",
           "quiet_percent", "normal_percent", "manual_percent"}
-DEFAULT_CONFIG = {"schema_version": 1, "channels": {
-    "cpu": {"mode": "vendor", "sources": [], "quiet_below": 40, "normal_at": 55,
-            "full_at": 70, "quiet_percent": 55, "normal_percent": 75, "manual_percent": 70},
-    "system": {"mode": "vendor", "sources": [], "quiet_below": 35, "normal_at": 45,
-               "full_at": 55, "quiet_percent": 55, "normal_percent": 75, "manual_percent": 70},
+LEGACY_FIELDS = (FIELDS - {"low_temp", "high_temp"}) | {"quiet_below", "normal_at", "full_at"}
+DEFAULT_CONFIG = {"schema_version": 2, "channels": {
+    "cpu": {"mode": "vendor", "sources": [], "low_temp": 55, "high_temp": 70,
+            "quiet_percent": 55, "normal_percent": 75, "manual_percent": 70},
+    "system": {"mode": "vendor", "sources": [], "low_temp": 45, "high_temp": 55,
+               "quiet_percent": 55, "normal_percent": 75, "manual_percent": 70},
 }}
 
 
@@ -43,14 +44,21 @@ def _finite(value):
 
 
 def validate_config(value):
+    """Validate either public version completely, then return canonical v2.
+
+    Legacy cooling-only quiet_below is checked before it is discarded. Keeping
+    normal_at/full_at preserves the old rising boundaries without hysteresis.
+    """
     _require(isinstance(value, dict) and set(value) == {"schema_version", "channels"}, "风扇配置字段无效")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1, "不支持的风扇配置版本")
+    _require(type(value["schema_version"]) is int and value["schema_version"] in (1, 2), "不支持的风扇配置版本")
     _require(isinstance(value["channels"], dict) and set(value["channels"]) == set(CHANNELS), "需分别提供 CPU 和系统风扇配置")
+    legacy = value["schema_version"] == 1
+    fields = LEGACY_FIELDS if legacy else FIELDS
     result = copy.deepcopy(value)
     for name in CHANNELS:
         item = result["channels"][name]
-        allowed = FIELDS | ({"vendor_mode"} if name == "system" else set())
-        _require(isinstance(item, dict) and FIELDS <= set(item) <= allowed, "风扇通道配置字段无效")
+        allowed = fields | ({"vendor_mode"} if name == "system" else set())
+        _require(isinstance(item, dict) and fields <= set(item) <= allowed, "风扇通道配置字段无效")
         _require(item["mode"] in ("vendor", "manual", "temperature"), "风扇模式无效")
         if "vendor_mode" in item:
             # Absence means preserve the existing vendor policy, so old schema
@@ -63,12 +71,20 @@ def validate_config(value):
                          and not any(ord(c) < 32 for c in source) for source in sources)
                  and len(sources) == len(set(sources)), "温度来源需要是最多 32 项的不重复列表")
         _require(item["mode"] != "temperature" or sources, "自定义温控至少选择一个温度来源")
-        for key in ("quiet_below", "normal_at", "full_at"):
+        temperature_keys = ("quiet_below", "normal_at", "full_at") if legacy else ("low_temp", "high_temp")
+        for key in temperature_keys:
             _require(type(item[key]) is int and 15 <= item[key] <= 85, "温度阈值需要为 15–85°C 整数")
-        _require(item["quiet_below"] < item["normal_at"] < item["full_at"], "静音、普通、全速温度必须递增")
+        if legacy:
+            _require(item["quiet_below"] < item["normal_at"] < item["full_at"], "旧版静音、普通、全速温度必须递增")
+        else:
+            _require(item["low_temp"] < item["high_temp"], "低温阈值必须低于高温阈值")
         for key in ("quiet_percent", "normal_percent", "manual_percent"):
             _require(type(item[key]) is int and MIN_OUTPUT_PERCENT <= item[key] <= 100, "目标输出需要为 10–100% 整数")
         _require(item["quiet_percent"] <= item["normal_percent"], "普通档输出不能低于静音档")
+        if legacy:
+            item["low_temp"], item["high_temp"] = item.pop("normal_at"), item.pop("full_at")
+            item.pop("quiet_below")
+    result["schema_version"] = 2
     return result
 
 
@@ -104,7 +120,7 @@ def observed_sources(rows, now):
 
 
 def decide(policy, rows, previous=None):
-    """Raise immediately on a fresh sample; reduce with explicit hysteresis."""
+    """Use current temperature only; previous is accepted for caller compatibility."""
     if policy["mode"] == "vendor":
         return {"level": "vendor", "target_percent": None, "reference_c": None,
                 "source_id": None, "source_label": None, "reason": "原厂策略管理"}
@@ -142,19 +158,14 @@ def decide(policy, rows, previous=None):
         return {**base, "level": "quiet", "target_percent": policy["quiet_percent"],
                 "reason": "所选硬盘均报告休眠；不唤醒硬盘，CPU 保护持续有效"}
     temperature = hottest["temperature_c"]
-    prior = previous if previous in ("quiet", "normal", "full") else None
-    if temperature >= policy["full_at"]:
+    if temperature > policy["high_temp"]:
         level = "full"
-    elif prior == "full" and temperature >= policy["full_at"] - 3:
-        level = "full"
-    elif temperature >= policy["normal_at"]:
+    elif temperature >= policy["low_temp"]:
         level = "normal"
-    elif temperature <= policy["quiet_below"]:
-        level = "quiet"
     else:
-        level = "normal" if prior in ("normal", "full") else "quiet"
+        level = "quiet"
     duty = {"quiet": policy["quiet_percent"], "normal": policy["normal_percent"], "full": 100}[level]
-    return {**base, "level": level, "target_percent": duty, "reason": "所选有效来源取最高温；升温立即升档，降温使用迟滞"}
+    return {**base, "level": level, "target_percent": duty, "reason": "所选有效来源取最高温；低于低温静音，两阈值间普通，高于高温全速"}
 
 
 class FanPolicyController:
@@ -312,8 +323,7 @@ class FanPolicyController:
             if self.busy or self.stop_event.is_set() or not any(item["active"] for item in self.channels.values()):
                 return
             settings = copy.deepcopy(self.active_config)
-            previous = {name: self.channels[name]["level"] for name in CHANNELS}
-        states, targets = self._decisions(settings, catalog, previous)
+        states, targets = self._decisions(settings, catalog)
         try:
             self.adapter.write(targets)
         except Exception:
@@ -326,12 +336,12 @@ class FanPolicyController:
             self.last_error = None
 
     @staticmethod
-    def _decisions(settings, catalog, previous):
-        """Use the same CPU guard, freshness and hysteresis on ticks and edits."""
+    def _decisions(settings, catalog):
+        """Use the same CPU guard, freshness and two thresholds on ticks and edits."""
         states, targets = {}, {}
         for name in CHANNELS:
             policy = settings["channels"][name]
-            decision = decide(policy, catalog, previous[name])
+            decision = decide(policy, catalog)
             enabled = policy["mode"] != "vendor"
             raw = max(MIN_TARGET_RAW, min(255, round(decision["target_percent"] * 255 / 100))) if enabled else None
             states[name] = {**decision, "mode": policy["mode"], "active": enabled, "target_raw": raw, "rpm": None}
@@ -416,9 +426,7 @@ class FanPolicyController:
                     except Exception:
                         rows = []
                     catalog = observed_sources(rows, self.clock())
-                    with self.lock:
-                        previous = {name: self.channels[name]["level"] for name in CHANNELS}
-                    states, targets = self._decisions(config, catalog, previous)
+                    states, targets = self._decisions(config, catalog)
                     _require(not self.stop_event.is_set(), "风扇服务正在停止")
                     self.adapter.write(targets)
                 else:

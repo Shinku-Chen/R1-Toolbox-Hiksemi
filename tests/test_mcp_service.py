@@ -85,6 +85,34 @@ class McpServiceTests(unittest.TestCase):
         self.assertNotIn('exec', catalog)
         self.assertNotIn('execute_sql', catalog)
 
+    def test_fan_schema_advertises_two_thresholds_and_strict_legacy_input_shape(self):
+        catalog = {item['name']: item for item in tool_catalog()}
+        schema = catalog['set_fan_policy']['inputSchema']['properties']['config']
+        self.assertIn('无迟滞', schema['description'])
+        self.assertIn('响应与保存统一为 v2', schema['description'])
+        self.assertEqual([2, 1], [item['properties']['schema_version']['const'] for item in schema['oneOf']])
+        for version in schema['oneOf']:
+            number = version['properties']['schema_version']['const']
+            channels = version['properties']['channels']['properties']
+            self.assertEqual({'cpu', 'system'}, set(channels))
+            for channel, definition in channels.items():
+                fields = definition['properties']
+                self.assertFalse(definition['additionalProperties'])
+                temperatures = ('low_temp', 'high_temp') if number == 2 else ('quiet_below', 'normal_at', 'full_at')
+                excluded = ('quiet_below', 'normal_at', 'full_at') if number == 2 else ('low_temp', 'high_temp')
+                self.assertFalse(set(excluded) & set(fields))
+                self.assertTrue(set(temperatures) <= set(definition['required']))
+                for name in temperatures:
+                    self.assertEqual({'type': 'integer', 'minimum': 15, 'maximum': 85}, fields[name])
+                self.assertEqual(10, fields['quiet_percent']['minimum'])
+                self.assertEqual(channel == 'system', 'vendor_mode' in fields)
+                self.assertNotIn('vendor_mode', definition['required'])
+        schema['oneOf'][0]['properties']['channels']['properties']['cpu']['properties'].clear()
+        fresh = next(item for item in tool_catalog() if item['name'] == 'set_fan_policy')
+        self.assertIn('low_temp', fresh['inputSchema']['properties']['config']['oneOf'][0]
+                      ['properties']['channels']['properties']['cpu']['properties'])
+        self.assertEqual([], self.calls)
+
     def test_legacy_initialize_echoes_all_supported_legacy_versions(self):
         for version in LEGACY_VERSIONS:
             with self.subTest(version=version):
