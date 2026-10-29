@@ -18,8 +18,8 @@ MISSING = 'root_' + 'b' * 24
 
 
 def root_catalog(*, read_only=False):
-    return {'available': True, 'status': 'authorization_plan', 'roots': [
-        {'id': ROOT, 'label': '视频资源', 'mount': '/drives/fixture-data',
+    return {'available': True, 'status': 'authorization_plan', 'boundary_version': 2, 'roots': [
+        {'id': ROOT, 'label': '视频资源', 'mount': '/drives/fixture-data/Users',
          'read_only': read_only}]}
 
 
@@ -56,7 +56,7 @@ class FileReadinessTests(unittest.TestCase):
                 value = readiness.collect_file_access_readiness(panel)
             network.assert_not_called()
             commands.assert_not_called()
-            self.assertEqual(panel.mock_calls, [mock.call.overview()])
+            self.assertEqual(panel.mock_calls, [mock.call.overview(include_identity=True)])
             self.assertTrue(value['planning']['available'])
             self.assertTrue(value['capabilities']['root_metadata'])
             self.assertNotIn('FIXTURE-SERIAL', json.dumps(value))
@@ -74,6 +74,32 @@ class FileReadinessTests(unittest.TestCase):
         self.assertFalse(result['effects']['root_fallback_allowed'])
         self.assertTrue(result['planning']['selection']['verified'])
         self.assertFalse(result['planning']['selection']['grants'][0]['file_access_verified'])
+
+    def test_four_dual_partition_disks_and_external_bind_remain_metadata_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / 'self').mkdir()
+            disks, lines = [], []
+            for index, name in enumerate(('sda', 'sdb', 'sdc', 'sdd')):
+                mounts = [f'/drives/fixture_{name}_{part}' for part in (1, 2)]
+                for part, mount in enumerate(mounts, 1):
+                    lines.append(f'{100 + index * 2 + part} 1 8:{index * 16 + part} '
+                                 f'/ {mount} rw - ext4 /dev/{name}{part} rw\n')
+                disks.append({'name': name, 'serial': 'FIXTURE-' + name, 'mounts': mounts})
+            disks[-1]['mounts'].append('/home/openclaw')
+            lines.append('200 1 8:50 /Users/fixture-user/openclaw /home/openclaw rw - ext4 /dev/sdd2 rw\n')
+            (proc / 'self/mountinfo').write_text(''.join(lines), encoding='utf-8')
+            panel = mock.Mock(proc_root=proc)
+            panel.overview.return_value = {'disks_detail': disks}
+            value = readiness.collect_file_access_readiness(panel)
+        self.assertEqual(len(value['planning']['roots']), 8)
+        self.assertTrue(value['planning']['available'])
+        self.assertFalse(value['file_access_available'])
+        self.assertEqual(value['status'], 'metadata_only')
+        self.assertFalse(value['effects']['opens_user_files'])
+        self.assertFalse(value['effects']['grants_authorization'])
+        self.assertNotIn('/drives/', json.dumps(value))
+        self.assertNotIn('/home/openclaw', json.dumps(value))
 
     def test_unselected_scope_is_explicit_and_does_not_open_paths(self):
         for grants in (None, []):
@@ -116,6 +142,8 @@ class FileReadinessTests(unittest.TestCase):
         base = root_catalog()
         invalid = [None, [], {}, {'available': True, 'status': 'authorization_plan', 'roots': []},
                    dict(base, available=False), dict(base, available=1),
+                   dict(base, boundary_version=1), dict(base, boundary_version=True),
+                   {key: value for key, value in base.items() if key != 'boundary_version'},
                    dict(base, status='live_verified'), dict(base, roots=base['roots'] * 2),
                    dict(base, roots=base['roots'] * 129)]
         for raw in invalid:
@@ -125,6 +153,20 @@ class FileReadinessTests(unittest.TestCase):
                 self.assertFalse(value['planning']['available'])
                 self.assertFalse(value['planning']['selection']['verified'])
                 self.assertFalse(value['file_access_available'])
+
+    def test_only_exact_users_root_metadata_can_be_projected(self):
+        for path in ('/drives/fixture-data', '/drives/fixture-data/Users2',
+                     '/drives/fixture-data/users', '/drives/fixture-data/Users/alice',
+                     '/drives/fixture-data/Users/../Applications',
+                     '/drives/nested/data/Users'):
+            raw = root_catalog()
+            raw['roots'][0]['mount'] = path
+            with self.subTest(path=path):
+                value = self.collect([grant()], raw)
+                self.assertFalse(value['planning']['available'])
+                self.assertFalse(value['planning']['selection']['verified'])
+                self.assertEqual(value['planning']['roots'], [])
+                self.assertNotIn(path, json.dumps(value))
 
     def test_provider_failure_is_fixed_and_does_not_leak_exception(self):
         secret = 'fixture-secret-not-a-real-credential'

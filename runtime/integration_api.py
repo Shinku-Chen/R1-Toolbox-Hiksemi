@@ -6,6 +6,7 @@ operations, with their normal locks, fan preflight and cancellable power delay.
 """
 
 import copy
+from datetime import datetime, timezone
 import time
 
 from api_access import ApiAccessStore, AUDIT_OPERATIONS
@@ -15,6 +16,40 @@ from api_file_readiness import collect_file_access_readiness
 from api_file_roots import collect_file_roots, validate_file_grants
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
+from vendor_business import _result as project_business_category
+from vendor_media_snapshot import collect_media_snapshot
+
+
+# Each media domain receives only its own rows, never the whole media cache.
+BUSINESS_TOOLS = {
+    'get_app_status': ('applications', ()),
+    'get_download_status': ('downloads', ()),
+    'get_movie_status': ('media', ('scraper',)),
+    'get_album_status': ('media', ('face', 'ocr', 'thumbnail', 'similar', 'ai')),
+    'get_share_status': ('media', ('shared_album',)),
+}
+
+
+def _observed_time(value):
+    """Accept an aware cache timestamp; unknown/future age is never invented."""
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+        return stamp.astimezone(timezone.utc).isoformat() if stamp.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def _freshness(value):
+    stamp = _observed_time(value)
+    try:
+        elapsed = time.time() - datetime.fromisoformat(stamp).timestamp() if stamp else None
+    except (OSError, ValueError, OverflowError):
+        elapsed = None
+    return {'observed_at': stamp,
+            'age_seconds': int(elapsed) if elapsed is not None and elapsed >= 0 else None,
+            'live': False, 'refresh': 'not_requested'}
 
 
 class IntegrationApi:
@@ -81,7 +116,9 @@ class IntegrationApi:
             available = [tool['name'] for tool in tools
                          if tool['_meta'][META_REQUIRED_SCOPE] == domain['id']]
             implemented = domain.get('implemented') is not False
-            pending_enable = principal.get('policy_version', 1) < 3 and domain['id'] in ('files', 'docker')
+            pending_enable = (principal.get('policy_version', 1) < 3
+                              and domain['id'] in ('files', 'docker', 'apps', 'downloads',
+                                                   'movie', 'albums', 'sharing'))
             domains.append({'id': domain['id'], 'label': domain['label'],
                             'implemented': implemented, 'available_tools': available,
                             'status': 'pending_enable' if pending_enable else 'available' if available else 'not_granted' if implemented else 'backend_unverified',
@@ -248,14 +285,94 @@ class IntegrationApi:
             return self.docker_projects.get_summary(principal, arguments['project_id'])
         raise ValueError('不支持的资源读取')
 
+    def _cached_downloads(self):
+        """Copy only an already published snapshot; never run download/login RPC.
+
+        A refresh invalidates its epoch before publishing newer data. Missing or
+        invalidated data stays missing instead of initiating a collector here.
+        """
+        lock = getattr(self.web, 'business_state_lock', None)
+        if lock is None:
+            return None, None
+        with lock:
+            snapshot = getattr(self.web, '_business_cached', None)
+            if (not isinstance(snapshot, dict)
+                    or getattr(self.web, '_business_cached_epoch', None)
+                    != getattr(self.web, '_business_epoch', None)):
+                return None, None
+            categories = snapshot.get('categories')
+            value = categories.get('downloads') if isinstance(categories, dict) else None
+            return copy.deepcopy(value), snapshot.get('sampled_at')
+
+    def _read_business(self, name):
+        """Reuse passive provider projections, with no signed/native getter.
+
+        Applications and media have validated fixed Toolbox cache readers.
+        Downloads have no persistent task cache: only the owner's existing
+        business snapshot can supply them. The UI's projection fence is applied
+        again so future providers cannot accidentally disclose new fields.
+        """
+        category, selected = BUSINESS_TOOLS[name]
+        captured_at = None
+        if category == 'applications':
+            provider = lambda **unused: collect_applications(state_dir=self.web.state_dir)
+        elif category == 'media':
+            provider = lambda **unused: collect_media_snapshot(self.web.state_dir)
+        else:
+            cached, captured_at = self._cached_downloads()
+            provider = lambda **unused: cached if isinstance(cached, dict) else {
+                'available': False, 'status': 'not_collected',
+                'source': 'verified_local_download_engines', 'data': None,
+                'reason': '尚无已采集的下载业务快照；未自动联网刷新。'}
+        result = project_business_category(provider, '/', category)
+        data = result.get('data')
+        last_failure = None
+        if category == 'applications':
+            captured_at = result.get('sampled_at') or (data.get('cache_modified_at') if isinstance(data, dict) else None)
+            if result.get('error_code'):
+                last_failure = {'error_code': result['error_code'],
+                                'observed_at': _observed_time(result.get('latest_attempt_at') or captured_at)}
+        elif category == 'media' and isinstance(data, dict):
+            rows = data.get('results') if isinstance(data.get('results'), list) else []
+            rows = [row for row in rows if isinstance(row, dict) and row.get('id') in selected]
+            # Preserve unavailable/partial rows and per-item historical failures;
+            # no other domain's progress, timestamps or coverage counts escape.
+            for row in rows:
+                row['freshness'] = _freshness(row.get('captured_at'))
+            stamps = [_observed_time(row.get('captured_at')) for row in rows]
+            captured_at = max((stamp for stamp in stamps if stamp), default=None)
+            complete = (len(rows) == len(selected) and all(
+                row.get('status') == 'not_applicable' or row.get('status') == 'ok'
+                and row.get('available') is True and row.get('query_success') is True for row in rows))
+            available = any(row.get('available') is True for row in rows)
+            result.update(available=available,
+                          status='cached' if complete and available else 'partial' if available
+                          else 'not_applicable' if rows and all(row.get('status') == 'not_applicable' for row in rows)
+                          else 'not_collected' if not rows or all(row.get('status') == 'not_collected' for row in rows)
+                          else 'unavailable')
+            data = {'complete': complete, 'results': rows}
+            last_failure = [{'id': row['id'], **row['last_failure']} for row in rows
+                            if isinstance(row.get('last_failure'), dict)] or None
+        elif category == 'downloads':
+            failures = [row for row in result.get('engines', []) if isinstance(row, dict)
+                        and row.get('available') is False]
+            last_failure = [{'engine': row.get('engine'), 'status': row.get('status'),
+                             'observed_at': _observed_time(captured_at)} for row in failures] or None
+        return {'ok': True, 'read_only': True, 'cached': True,
+                'available': result['available'], 'status': result['status'],
+                'source': result.get('source'), 'reason': result.get('reason'),
+                'freshness': _freshness(captured_at), 'last_failure': last_failure,
+                'data': data, **({'engines': result['engines']} if 'engines' in result else {})}
+
     def execute(self, name, arguments, principal):
         """Fixed callbacks; short resource reads also recheck before disclosure."""
-        if name in IMPLEMENTED_TOOLS:
+        if name in IMPLEMENTED_TOOLS or name in BUSINESS_TOOLS:
             denied = {'ok': False, 'error': {'code': 'invalid_key',
                        'message': '读取期间授权已失效，请使用当前有效密钥。', 'retryable': False}}
             if not self.access.is_current(principal):
                 return denied
-            result = self._read_resource(name, arguments, principal)
+            result = (self._read_business(name) if name in BUSINESS_TOOLS
+                      else self._read_resource(name, arguments, principal))
             return result if self.access.is_current(principal) else denied
         if name == 'get_nas_status':
             return {'ok': True, 'section': arguments.get('section', 'overview'),

@@ -490,6 +490,8 @@ _CATALOG = {
         'credentials_or_host_paths_in_public_results': False,
         'arbitrary_action_shell_sql_or_url_proxy_allowed': False,
         'passive_polling_file_access_allowed': False,
+        'file_path_boundary': '/drives/*/Users/',
+        'legacy_whole_disk_grants_auto_migrate': False,
     },
     'http_contracts': [{
         'route_template': '/api/integration/files/transfers/{transfer_id}/content',

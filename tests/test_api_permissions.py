@@ -52,7 +52,8 @@ class ApiPermissionTests(unittest.TestCase):
         self.assertEqual(permissions.LEGACY_TOOLS, frozenset(TOOL_SCOPES))
         for row in permissions.SCOPE_CATALOG:
             with self.subTest(scope=row['id']):
-                self.assertEqual(row['implemented'], row['id'] in permissions.LEGACY_SCOPES)
+                self.assertEqual(row['implemented'], row['id'] in permissions.LEGACY_SCOPES
+                                 + ('apps', 'downloads', 'movie', 'albums', 'sharing'))
                 self.assertIn(row['min_role'], ROLES)
                 if not row['implemented']:
                     self.assertIn('待接入', row['description'])
@@ -160,8 +161,14 @@ class ApiPermissionTests(unittest.TestCase):
     def test_known_catalog_matches_reviewed_twenty_and_literal_legacy_ten(self):
         from api_contracts import contract_catalog
         declared = {tool['name']: (tool['scope'], tool['min_role']) for tool in contract_catalog()['tools']}
-        self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared))
+        business = {'get_app_status': 'apps', 'get_download_status': 'downloads',
+                    'get_movie_status': 'movie', 'get_album_status': 'albums',
+                    'get_share_status': 'sharing'}
+        self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared) | set(business))
         self.assertEqual(set(permissions.SCOPE_BY_TOOL), set(permissions.MIN_ROLE_BY_TOOL))
+        for name, scope in business.items():
+            self.assertEqual(permissions.SCOPE_BY_TOOL[name], scope)
+            self.assertEqual(permissions.MIN_ROLE_BY_TOOL[name], 'readonly')
         for name, (scope, role) in declared.items():
             self.assertEqual(permissions.SCOPE_BY_TOOL[name], scope)
             self.assertEqual(permissions.MIN_ROLE_BY_TOOL[name], role)

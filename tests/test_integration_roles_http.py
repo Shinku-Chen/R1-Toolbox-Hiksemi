@@ -19,12 +19,12 @@ ROOT_ID = 'root_' + '1' * 24
 OTHER_ROOT_ID = 'root_' + '2' * 24
 MISSING_ROOT_ID = 'root_' + '3' * 24
 ROOT_CATALOG = {
-    'available': True, 'status': 'authorization_plan',
+    'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
     'reason': '仅用于授权范围选择，当前未提供文件操作工具。',
     'roots': [
-        {'id': ROOT_ID, 'label': '主磁盘', 'mount': '/drives/data', 'read_only': False},
+        {'id': ROOT_ID, 'label': '主磁盘', 'mount': '/drives/data/Users', 'read_only': False},
         {'id': OTHER_ROOT_ID, 'label': '其它私有空间',
-         'mount': '/drives/private-unselected', 'read_only': True},
+         'mount': '/drives/private-unselected/Users', 'read_only': True},
     ],
 }
 
@@ -91,7 +91,8 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         self.assertEqual([], value['tools'])
         self.assertEqual([], value['file_roots'])
         self.assertEqual(['apps'], [row['id'] for row in value['domains']])
-        self.assertIs(value['domains'][0]['implemented'], False)
+        self.assertIs(value['domains'][0]['implemented'], True)
+        self.assertEqual(value['domains'][0]['status'], 'pending_enable')
         self.assertEqual([], value['domains'][0]['available_tools'])
         self.assertTrue(value['domains'][0]['reason'])
         denied = self.request('GET', '/api/integration/status',

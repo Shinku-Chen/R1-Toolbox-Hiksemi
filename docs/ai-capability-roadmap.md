@@ -1,6 +1,6 @@
 # AI 全功能接入路线
 
-目标：让局域网 AI 通过 Toolbox 的 MCP／REST 读取和操作海康 NAS 的文件、应用、容器、下载、影视、相册及系统能力。API 管理按只读、读写、管理员三级角色，功能域、精确工具及文件／项目范围共同授权。文档日期：2026-10-29。
+目标：让局域网 AI 通过 Toolbox 的 MCP／REST 读取和操作海康 NAS 的文件、应用、容器、下载、影视、相册及系统能力。API 管理按只读、读写、管理员三级角色，功能域、精确工具及文件／项目范围共同授权。文档日期：2026-10-30。
 
 Toolbox 以常驻容器监督宿主前台服务。网页承担健康、应用状态和简单控制；小屏接管与 MCP 独立可选，分别默认开启和关闭。首次访问无需网页口令，可在设置中启用；开发者模式必须配置局域网 IP／CIDR 白名单与有效窗口。MCP 使用独立访问密钥，支持编辑、停用、轮换及按功能、文件范围和可信来源授权，不能借用网页或开发者授权。
 
@@ -10,9 +10,9 @@ Toolbox 以常驻容器监督宿主前台服务。网页承担健康、应用状
 
 API 管理已支持具体工具勾选、同根多子目录无损编辑和已登记 Docker 项目选择；尚未实现的写工具不能勾选。`GET /api/integration/capabilities` 返回本键实际工具、所选域、文件与项目范围，不输出绝对挂载路径。新资源读取在前后调用 `is_current()`，核对授权修订、Token 代际、服务与键状态和自然到期；失效则不披露未发送结果。具体格式、兼容和边界见 [MCP 与 API 管理](mcp-api.md)。
 
-当前真实 MCP／REST 共十四工具：原十个监控与硬件工具，加 `list_file_roots` 和 `list_docker_projects/get_docker_project_status/get_docker_project_summary`。新增二十项合同中四项已接入、十六项仍待实现；查阅[JSON 定义](api/file-docker-contracts.json)或 owner-only `/api/access/contracts` 不等于获准执行。
+当前真实 MCP／REST 共十九工具：原十个监控与硬件工具、`list_file_roots`、三个固定 Docker 项目读取，以及应用、下载、影视、相册与分享五项缓存只读工具。业务工具按独立域和精确工具授权，返回来源、年龄及最近失败，不触发原厂或下载器采集；见[业务工具](mcp-business-tools.md)。文件与 Docker 二十项合同仍为四项已接入、十六项待实现；查阅[JSON 定义](api/file-docker-contracts.json)或 owner-only `/api/access/contracts` 不等于获准执行。
 
-文件根工具只投影缓存磁盘身份与挂载元数据，标明 `metadata_only`，不列盘内目录、不打开文件或传输内容。NAS 主体、Unix 身份、原厂 ACL、路径映射与安全打开尚未闭合；`GET /api/access/file-readiness` 报告缺失证据，不能据已有根规划宣称可读取文件，更不能回退到宿主 root 读取。
+文件总边界固定为 `/drives/*/Users/`，根工具只投影已有身份缓存、sysfs／udev 生命周期核验与挂载元数据，标明 `metadata_only`，不列盘内目录、不打开文件或传输内容。Users 根使用新摘要，旧整盘授权不自动升级。NAS 主体、Unix 身份、原厂 ACL、路径映射与安全打开尚未闭合；`GET /api/access/file-readiness` 报告缺失证据，不能据已有根规划宣称可读取文件，更不能回退到宿主 root 读取。
 
 固定项目由所有者通过 `/api/docker/projects` 的候选、登记、更新标签和撤销入口管理，Token 再选择具体登记 ID 的 `inspect`。登记不部署或启停项目。实际查询固定本机 Docker Unix socket 的允许 GET，核验 root `dockerd` peer，以共享八秒窗口及响应／并发上限读取；只使用配置文件身份，不读 Compose 原文。项目状态返回真实 `source:engine`，原厂 `native_status/pop_status` 为 `null`，摘要也使用引擎证据；私有路径、环境与命令不进入机器响应。来源和身份边界见[固定项目读取](docker-projects.md)。
 

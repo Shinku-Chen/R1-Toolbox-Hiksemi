@@ -146,6 +146,11 @@ def valid_outputs():
 
 
 class ApiContractsTests(unittest.TestCase):
+    def test_file_contracts_keep_the_users_boundary_and_do_not_migrate_old_grants(self):
+        boundaries = catalog()['boundaries']
+        self.assertEqual(boundaries['file_path_boundary'], '/drives/*/Users/')
+        self.assertIs(boundaries['legacy_whole_disk_grants_auto_migrate'], False)
+
     @classmethod
     def setUpClass(cls):
         cls.catalog = contract_catalog()
@@ -180,7 +185,7 @@ class ApiContractsTests(unittest.TestCase):
         self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 8)
         self.assertEqual(sum(t['category'] == 'docker_update' for t in self.tools.values()), 3)
         active = {item['name'] for item in tool_catalog()}
-        self.assertEqual(len(active), 14)
+        self.assertEqual(len(active), 19)
         self.assertEqual(active.intersection(self.tools), IMPLEMENTED_TOOLS)
         self.assertFalse(active.intersection(name for name, tool in self.tools.items() if not tool['implemented']))
 

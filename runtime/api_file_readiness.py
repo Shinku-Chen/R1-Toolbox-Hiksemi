@@ -8,7 +8,7 @@ turn this diagnostic into a file backend or a runtime authorization decision.
 import copy
 import re
 
-from api_file_roots import collect_file_roots
+from api_file_roots import collect_file_roots, is_users_root_path, valid_relative_file_path
 
 
 _ROOT_ID = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
@@ -35,20 +35,11 @@ def _plain(value, maximum, *, empty=False):
             and all(char.isprintable() for char in value))
 
 
-def _path(value):
-    if (not _plain(value, 1024, empty=True) or '\\' in value
-            or (value and any(part in ('', '.', '..') for part in value.split('/')))):
-        return False
-    try:
-        return len(value.encode('utf-8', 'strict')) <= 4096
-    except UnicodeError:
-        return False
-
-
 def _project_roots(raw):
     """Project bounded planner metadata; never copy mounts, secrets or extras."""
     if (not isinstance(raw, dict) or raw.get('available') is not True
             or raw.get('status') != 'authorization_plan'
+            or type(raw.get('boundary_version')) is not int or raw['boundary_version'] != 2
             or not isinstance(raw.get('roots'), list)
             or not 0 < len(raw['roots']) <= _MAX_ROOTS):
         return []
@@ -56,6 +47,7 @@ def _project_roots(raw):
     for row in raw['roots']:
         if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
                 or not _ROOT_ID.fullmatch(row['id']) or row['id'] in identities
+                or not is_users_root_path(row.get('mount'))
                 or type(row.get('read_only')) is not bool
                 or not _plain(row.get('label'), 128)):
             return []
@@ -78,7 +70,7 @@ def _selection(grants, roots):
         row = row if isinstance(row, dict) else {}
         root_id = row.get('id')
         root_id = root_id if isinstance(root_id, str) and _ROOT_ID.fullmatch(root_id) else None
-        path = row.get('path') if _path(row.get('path')) else None
+        path = row.get('path') if valid_relative_file_path(row.get('path')) else None
         access = row.get('access') if row.get('access') in ('readonly', 'readwrite') else None
         valid = (set(row) == {'id', 'path', 'access'} and root_id is not None
                  and path is not None and access is not None)
@@ -89,7 +81,7 @@ def _selection(grants, roots):
         elif identity in identities:
             reason = '文件范围重复；未合并或扩大授权。'
         elif root is None:
-            reason = '当前根规划无法确认此绑定；不按名称换绑其他盘。'
+            reason = '当前 Users 根规划无法确认此绑定；不换绑旧整盘授权或其他盘。'
         elif root['read_only'] and access == 'readwrite':
             reason = '当前挂载只读，不能确认原读写范围。'
         else:

@@ -23,9 +23,10 @@ from api_docker_projects import DockerProjectRegistry
 DOCKER_TOOLS = ['list_docker_projects', 'get_docker_project_status', 'get_docker_project_summary']
 ROOT = 'root_' + '1' * 24
 OTHER_ROOT = 'root_' + '2' * 24
-CATALOG = {'available': True, 'status': 'authorization_plan', 'reason': 'fixture metadata only', 'roots': [
-    {'id': ROOT, 'label': '测试主磁盘', 'mount': '/drives/owner-only-fixture', 'read_only': False},
-    {'id': OTHER_ROOT, 'label': '未选择的私有磁盘', 'mount': '/drives/unselected-fixture', 'read_only': True},
+CATALOG = {'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
+           'reason': 'fixture metadata only', 'roots': [
+    {'id': ROOT, 'label': '测试主磁盘', 'mount': '/drives/owner-only-fixture/Users', 'read_only': False},
+    {'id': OTHER_ROOT, 'label': '未选择的私有磁盘', 'mount': '/drives/unselected-fixture/Users', 'read_only': True},
 ]}
 
 
@@ -195,6 +196,59 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
             for transport in ('mcp', 'rest'):
                 arguments = {'project_id': 'project_' + 'f' * 24} if name.startswith('get_docker') else {}
                 self.denied(name, self.call(key, name, arguments, transport=transport), 'scope_denied')
+        self.assertEqual(len(self.engine.requests), before)
+
+    def test_whole_disk_token_stays_editable_until_explicit_users_regrant(self):
+        # Model a persisted key from the old planner through the storage layer;
+        # owner creation in this version must reject the same stale root ID.
+        old_root = 'root_' + 'f' * 24
+        old_grants = [{'id': old_root, 'path': '', 'access': 'readonly'}]
+        self.server.api_access.configure({'enabled': True})
+        key = self.server.api_access.create_key(self.key_body(
+            scopes=['files'], tool_grants=['list_file_roots'], file_roots=old_grants))
+        before = len(self.engine.requests)
+        status, _, updated = self.browser('POST', '/api/access/keys/update',
+            {'id': key['id'], 'name': '旧整盘绑定，只改名称', 'allowed_ips': ['127.0.0.1']})
+        self.assertEqual(status, 200, updated)
+        self.assertEqual(updated['key']['file_roots'], old_grants)
+        self.assertEqual(updated['key']['tool_grants'], ['list_file_roots'])
+        status, _, capabilities = self.request('GET', '/api/integration/capabilities',
+            headers={'Authorization': 'Bearer ' + key['token']})
+        self.assertEqual(status, 200)
+        self.assertFalse(capabilities['file_roots'][0]['available'])
+        self.assertEqual(capabilities['file_roots'][0]['id'], old_root)
+        self.assertIsNone(capabilities['file_roots'][0]['label'])
+        self.assertNotIn('/drives/', json.dumps(capabilities))
+        for transport in ('mcp', 'rest'):
+            root = self.valid('list_file_roots', self.call(key, 'list_file_roots',
+                                                       transport=transport))['roots'][0]
+            self.assertEqual(root['root_id'], old_root)
+            self.assertEqual(root['binding_status'], 'unavailable')
+            self.assertEqual(root['backend']['status'], 'resource_unavailable')
+            self.assertIsNone(root['label'])
+            arguments = {'root_id': old_root, 'path': ''}
+            if transport == 'mcp':
+                status, _, result = self.rpc(key, self.message('tools/call',
+                    {'name': 'list_directory', 'arguments': arguments}))
+                self.assertEqual(status, 400)
+                self.assertEqual(result['error']['code'], -32602)
+            else:
+                result = self.call(key, 'list_directory', arguments, transport=transport)
+                # A pending tool is not dispatched to its future contract.
+                self.assert_tool_error(result, 'unknown_tool')
+        status, _, _ = self.browser('POST', '/api/access/keys/update',
+            {'id': key['id'], 'file_roots': old_grants})
+        self.assertEqual(status, 400)
+        new_grants = [{'id': ROOT, 'path': '', 'access': 'readonly'}]
+        status, _, updated = self.browser('POST', '/api/access/keys/update',
+            {'id': key['id'], 'file_roots': new_grants})
+        self.assertEqual(status, 200, updated)
+        self.assertEqual(updated['key']['file_roots'], new_grants)
+        current = self.valid('list_file_roots', self.call(key, 'list_file_roots'))['roots'][0]
+        self.assertEqual(current['root_id'], ROOT)
+        self.assertEqual(current['binding_status'], 'present')
+        self.assertEqual(current['verification'], 'metadata_only')
+        self.assertEqual(current['backend']['status'], 'backend_unverified')
         self.assertEqual(len(self.engine.requests), before)
 
     def test_missing_domain_tool_or_cross_project_never_reads_backend(self):

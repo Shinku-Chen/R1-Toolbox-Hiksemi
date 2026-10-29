@@ -146,6 +146,19 @@ _TOOLS += tuple(
           contract['scope'], contract['inputSchema'], read_only=True)
     for contract in contract_catalog()['tools'] if contract['name'] in IMPLEMENTED_TOOLS
 )
+_TOOLS += tuple(
+    _tool(name, title,
+          description + '仅读取已有脱敏缓存，返回来源、观察时间和最近失败；'
+          '不自动查询原厂或联网刷新，缓存不代表当前状态。',
+          scope, _object_schema(), read_only=True)
+    for name, title, scope, description in (
+        ('get_app_status', '读取应用目录缓存', 'apps', '读取部分历史应用目录，不推断实时运行状态。'),
+        ('get_download_status', '读取下载状态缓存', 'downloads', '读取已采集的固定下载器状态，不包含文件名、路径或任务标识。'),
+        ('get_movie_status', '读取影视处理缓存', 'movie', '读取上次显式采集的影视刮削进度。'),
+        ('get_album_status', '读取相册处理缓存', 'albums', '读取人脸、文字、缩略图、相似图和 AI 配置的既有状态。'),
+        ('get_share_status', '读取共享相册处理缓存', 'sharing', '只读取管理员既有共享相册的处理状态，不代表分享清单。'),
+    )
+)
 _TOOLS_BY_NAME = {tool['name']: tool for tool in _TOOLS}
 
 
