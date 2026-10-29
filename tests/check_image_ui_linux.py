@@ -155,8 +155,10 @@ def check_resident_container(image, volume, unique, data_directory):
                 '--mount', 'type=volume,source=' + volume + ',target=/data', image)
         wait_for_status()
         assert command('docker', 'inspect', '--format', '{{.State.Running}}', container).stdout.strip() == 'true', '常驻容器启动后自行停止'
-        _, session = integration_request('/api/session')
-        assert isinstance(session, dict), '首次免密码网页不可读取设置'
+        code, session = integration_request('/api/auth/session')
+        assert (code == 200 and isinstance(session, dict)
+                and session.get('auth_required') is False and session.get('authorized') is True
+                and session.get('auth_mode') == 'password'), '首次进入应为未设密码、已授权的网页登录模式'
         deadline = time.monotonic() + 8
         while True:
             _, state = integration_request('/api/services')
