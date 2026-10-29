@@ -229,6 +229,8 @@ class InsightsCollector:
         self._previous_cpu = {}
         self._previous_network = {}
         self._previous_process = {}
+        self._disk_activity_lock = threading.Lock()
+        self._disk_activity_previous = None
         self._smart_cache = {}
         self._disk_name_context = {}
         # Serial identity survives a standby-only SMART response, independently
@@ -447,6 +449,209 @@ class InsightsCollector:
                 continue
         self._previous_process = previous
         return sorted(rows, key=lambda row: (row["cpu_percent"] or 0, row["memory_bytes"]), reverse=True)[:12]
+
+    def disk_activity_diagnostics(self, *, history_directory=None):
+        """Explicit proc/sys counter sample; never open a disk or a user file.
+
+        Deltas require two calls in the same boot and device/process lifetime.
+        Process accounting is not per-disk attribution or proof of spindle state.
+        No command lines, fd targets, container environment or file names leave
+        this collector. Sampling itself neither changes power policy nor SMART.
+        """
+        with self._disk_activity_lock:
+            deadline = time.monotonic() + 3
+            now = self.clock()
+            previous = self._disk_activity_previous
+            partial = []
+
+            def read(path, limit):
+                try:
+                    with path.open('r', encoding='utf-8', errors='strict') as stream:
+                        value = stream.read(limit + 1)
+                    return value if len(value) <= limit else None
+                except (OSError, ValueError, UnicodeError):
+                    return None
+
+            boot = (read(self.proc_root / 'sys/kernel/random/boot_id', 128) or '').strip()
+            if not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', boot):
+                boot = None
+                partial.append('boot_identity_unavailable')
+            interval = (now - previous['monotonic'] if previous and boot is not None
+                        and boot == previous['boot'] else None)
+            if interval is None or not 0 < interval <= 300:
+                interval, previous = None, None
+
+            def delta(current, old, identity):
+                if previous is None or old is None or identity is None or old['identity'] != identity:
+                    return None
+                before = old['counters']
+                if set(current) != set(before) or any(current[key] < before[key] for key in current):
+                    return None
+                return {key: current[key] - before[key] for key in current}
+
+            disks, disk_state, seen, lifetimes = [], {}, set(), {}
+            try:
+                with os.scandir(self.sys_root / 'block') as entries:
+                    for entry in entries:
+                        if len(lifetimes) == 128:
+                            partial.append('disk_limit')
+                            break
+                        lifetimes[entry.name] = self._disk_generation(self.sys_root / 'block' / entry.name)
+            except OSError:
+                partial.append('disk_identity_unavailable')
+            raw = read(self.proc_root / 'diskstats', 262144)
+            if raw is None:
+                partial.append('diskstats_unavailable')
+            for line in (raw or '').splitlines():
+                fields = line.split()
+                if len(fields) < 3 or not re.fullmatch(r'(?:sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)', fields[2]):
+                    continue
+                name = fields[2]
+                if name in seen:
+                    partial.append('duplicate_disk')
+                    disks = [row for row in disks if row['name'] != name]
+                    disk_state.pop(name, None)
+                    continue
+                seen.add(name)
+                if len(disks) >= 128:
+                    partial.append('disk_limit')
+                    break
+                try:
+                    if len(fields) < 14 or any(not re.fullmatch(r'[0-9]{1,20}', v) or int(v) > 2**64 - 1 for v in fields[:2] + fields[3:]):
+                        raise ValueError('invalid diskstats')
+                    counters = {'read_ops': int(fields[3]), 'write_ops': int(fields[7]),
+                                'read_bytes': int(fields[5]) * 512, 'write_bytes': int(fields[9]) * 512}
+                    if len(fields) >= 18:
+                        counters['discard_ops'] = int(fields[14])
+                    if len(fields) >= 20:
+                        counters['flush_ops'] = int(fields[18])
+                    folder = self.sys_root / 'block' / name
+                    generation = self._disk_generation(folder)
+                    dev = ':'.join(fields[:2])
+                    identity = ((dev, generation) if generation and generation == lifetimes.get(name)
+                                and (read(folder / 'dev', 64) or '').strip() == dev else None)
+                    if identity is None:
+                        partial.append('disk_identity_unverified')
+                    old = previous['disks'].get(name) if previous else None
+                    change = delta(counters, old, identity)
+                    disk_state[name] = {'identity': identity, 'counters': counters}
+                    disks.append({'name': name, 'device_number': dev, 'counters': counters,
+                                  'delta': change, 'in_flight': int(fields[11]),
+                                  'activity_observed': (True if int(fields[11]) > 0 else
+                                                        any(value > 0 for value in change.values())
+                                                        if change is not None else None)})
+                except (ValueError, OverflowError):
+                    partial.append('invalid_diskstats')
+
+            def process_stat(folder):
+                text = read(folder / 'stat', 8192)
+                if not text or '(' not in text or ')' not in text:
+                    return None
+                start, end = text.find('('), text.rfind(')')
+                if text[:start].strip() != folder.name:
+                    return None
+                fields = text[end + 1:].split()
+                try:
+                    ticks = int(fields[19])
+                    comm = text[start + 1:end]
+                    if not 0 <= ticks <= 2**64 - 1 or len(comm) > 128 or not comm or not all(c.isprintable() for c in comm):
+                        return None
+                    return ticks, comm
+                except (ValueError, IndexError):
+                    return None
+
+            processes, process_state = [], {}
+            try:
+                folders = []
+                with os.scandir(self.proc_root) as entries:
+                    for entry in entries:
+                        if entry.name.isascii() and entry.name.isdecimal():
+                            if len(folders) == 4096:
+                                partial.append('process_limit')
+                                break
+                            folders.append(self.proc_root / entry.name)
+            except OSError:
+                folders = []
+                partial.append('process_list_unavailable')
+            unreadable, changed = 0, 0
+            for folder in folders:
+                if time.monotonic() >= deadline:
+                    partial.append('time_limit')
+                    break
+                before = process_stat(folder)
+                if before is None:
+                    unreadable += 1
+                    continue
+                text = read(folder / 'io', 4096)
+                if text is None:
+                    unreadable += 1
+                    continue
+                counters = {}
+                for line in text.splitlines():
+                    key, separator, value = line.partition(':')
+                    if key in ('read_bytes', 'write_bytes', 'cancelled_write_bytes') and separator:
+                        if key in counters or not re.fullmatch(r'\s*[0-9]{1,20}\s*', value) or int(value) > 2**64 - 1:
+                            counters = {}
+                            break
+                        counters[key] = int(value)
+                after = process_stat(folder)
+                if after != before:
+                    changed += 1
+                    continue
+                if len(counters) != 3:
+                    unreadable += 1
+                    continue
+                pid = int(folder.name)
+                identity = (pid, before[0], before[1])
+                old = previous['processes'].get(pid) if previous else None
+                change = delta(counters, old, identity)
+                process_state[pid] = {'identity': identity, 'counters': counters}
+                processes.append({'pid': pid, 'name': before[1], 'start_ticks': before[0],
+                                  'toolbox_process': pid == os.getpid(), 'counters': counters,
+                                  'delta': change})
+            if unreadable:
+                partial.append('process_io_unavailable')
+            if changed:
+                partial.append('process_changed')
+            processes.sort(key=lambda row: sum((row['delta'] or {}).get(key, 0)
+                                               for key in ('read_bytes', 'write_bytes')), reverse=True)
+            history_storage = {'status': 'unverified', 'device_number': None,
+                               'source_device': None, 'filesystem': None}
+            if isinstance(history_directory, (str, Path)) and str(history_directory).startswith('/'):
+                # The installer supplies the canonical directory. Match only
+                # mount metadata; do not resolve/stat/open this storage path.
+                directory = str(history_directory).rstrip('/') or '/'
+                mountinfo = read(self.proc_root / 'self/mountinfo', 262144)
+                matches = []
+                for line in (mountinfo or '').splitlines():
+                    before, separator, after = line.partition(' - ')
+                    fields, tail = before.split(), after.split()
+                    if not separator or len(fields) < 6 or len(tail) < 2:
+                        continue
+                    mount = re.sub(r'\\(040|011|012|134)', lambda m: chr(int(m[1], 8)), fields[4])
+                    if mount == '/' or directory == mount or directory.startswith(mount + '/'):
+                        matches.append((len(mount), fields, tail))
+                if matches:
+                    matches.sort(key=lambda item: item[0], reverse=True)
+                    if len(matches) == 1 or matches[0][0] > matches[1][0]:
+                        _, fields, tail = matches[0]
+                        source = tail[1] if re.fullmatch(r'/dev/(?:sd[a-z]+[0-9]*|vd[a-z]+[0-9]*|xvd[a-z]+[0-9]*|nvme[0-9]+n[0-9]+(?:p[0-9]+)?|mmcblk[0-9]+(?:p[0-9]+)?)', tail[1]) else None
+                        if re.fullmatch(r'[0-9]+:[0-9]+', fields[2]) and re.fullmatch(r'[A-Za-z0-9_.-]{1,32}', tail[0]):
+                            history_storage = {'status': 'mount_metadata_only', 'device_number': fields[2],
+                                               'source_device': source, 'filesystem': tail[0]}
+            self._disk_activity_previous = {'monotonic': now, 'boot': boot,
+                                           'disks': copy.deepcopy(disk_state),
+                                           'processes': copy.deepcopy(process_state)}
+            return {'available': bool(disks), 'status': 'sampled' if interval is not None else 'baseline',
+                    'sampled_at': _timestamp(), 'interval_seconds': interval,
+                    'source': 'procfs_sysfs_counters', 'complete': not partial,
+                    'partial_reasons': sorted(set(partial)), 'disks': disks,
+                    'processes': processes[:32], 'processes_observed': len(process_state),
+                    'processes_omitted': max(0, len(processes) - 32),
+                    'unreadable_processes': unreadable, 'changed_processes': changed,
+                    'history_storage': history_storage,
+                    'attribution': 'process_totals_not_per_disk', 'power_state': None,
+                    'reason': '相隔至少五秒再次采样可比较增量；零 I/O 不证明休眠，进程总计不能直接归因到某块盘。'}
 
     def _ports(self):
         rows = []

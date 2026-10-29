@@ -1097,6 +1097,7 @@ class WebConfigServer:
                 'business': lambda: self._business_debug_snapshot()[:2],
                 'fan': lambda: (200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}),
                 'file_access_readiness': self._file_readiness_snapshot,
+                'disk_activity': self._disk_activity_snapshot,
                 'docker_project_readiness': lambda: (200, {'ok': True,
                     'discovery': self.integration.docker_projects.catalog(),
                     'registry': self.integration.docker_projects.metadata()}),
@@ -1108,6 +1109,24 @@ class WebConfigServer:
                          'snapshot': snapshot}, None
         finally:
             self.diagnostic_lock.release()
+
+    def _disk_activity_snapshot(self):
+        """Explicit passive counters, separate from storage RPC and SMART."""
+        collector = getattr(self.insights, 'disk_activity_diagnostics', None)
+        if not callable(collector):
+            return 503, {'ok': False}
+        directory = getattr(self.monitoring, 'state_dir', None)
+        activity = collector(history_directory=directory)
+        cached = self.monitoring.snapshot() if self.monitoring is not None else {}
+        settings = cached.get('settings', {}) if isinstance(cached, dict) else {}
+        history = cached.get('history', {}) if isinstance(cached, dict) else {}
+        activity['toolbox_history'] = {
+            'enabled': settings.get('history_enabled') if isinstance(settings, dict) else None,
+            'recording': history.get('recording') if isinstance(history, dict) else None,
+            'last_write_at': history.get('last_write_at') if isinstance(history, dict) else None,
+            'write_interval_seconds': 30,
+            'reason': '历史开启时每三十秒写入数据卷；是否影响机械盘休眠须结合实际所在设备和 I/O 增量判断。'}
+        return 200, {'ok': True, 'activity': activity}
 
     def _file_readiness_snapshot(self):
         """Share storage pressure control without opening user files."""

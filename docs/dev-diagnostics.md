@@ -51,9 +51,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"snapshot","checks":["device","storage"]}
 {"action":"snapshot","checks":["storage_identity"]}
 {"action":"snapshot","checks":["file_access_readiness","docker_project_readiness"]}
+{"action":"snapshot","checks":["disk_activity"]}
 ```
 
-不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号或新增就绪检查。目录共列七项，额外三项只有在 `checks` 中明确选择才采集。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
+不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号、新增就绪检查或磁盘活动采样。目录共列八项，额外四项只有在 `checks` 中明确选择才采集。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
 
@@ -66,6 +67,7 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `fan` | `FanDiagnostics.snapshot` 的被动预检与现场；不发送温控信号、不启动时间线、不应用策略、不重试接管 |
 | `file_access_readiness` | 只读可信根规划与固定安全证明清单；与存储诊断共用锁，不读用户文件或凭据、不执行 SMART。文件 ACL、安全打开未闭合时明确返回文件访问不可用，根规划不算内容读取通过 |
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
+| `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
 
 Docker 候选核验会访问配置所在文件系统的元数据，可能唤醒休眠磁盘，不能把它说成纯缓存或无磁盘访问；因此只允许显式选择，不加入默认采集或后台轮询。其 peer、引擎、配置身份和读取限额见[固定项目读取](docker-projects.md)。检测期间开发窗口到期或被关闭时，整次结果丢弃并返回 `403`，不续期，也不输出已采到的现场。
 

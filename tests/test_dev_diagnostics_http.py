@@ -46,6 +46,9 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.insights.snapshot.side_effect = lambda: copy.deepcopy(self.cached)
         self.insights.storage_name_diagnostics.return_value = {
             'available': True, 'source': 'fixture-storage', 'items': [], 'vendor': {}}
+        self.insights.disk_activity_diagnostics.return_value = {
+            'available': True, 'status': 'baseline', 'source': 'procfs_sysfs_counters',
+            'disks': [], 'processes': [], 'power_state': None}
         self.insights.storage_identity_diagnostics.return_value = {
             'available': True, 'source': 'insights_cache+hiksemi_storage_socket', 'items': [
                 {'id': 'sda', 'device': '/dev/sda', 'user_name': '测试盘名', 'space_names': [],
@@ -107,6 +110,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.insights.snapshot.assert_not_called()
         self.insights.storage_name_diagnostics.assert_not_called()
         self.insights.storage_identity_diagnostics.assert_not_called()
+        self.insights.disk_activity_diagnostics.assert_not_called()
         self.business.assert_not_called()
         self.fan.snapshot.assert_not_called()
         self.assert_no_controls()
@@ -131,7 +135,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertEqual(value['catalog']['schema_version'], 1)
         self.assertIs(value['catalog']['read_only'], True)
         self.assertEqual({row['id'] for row in value['catalog']['checks']},
-                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness'})
+                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity'})
         self.assertNotIn('set-cookie', headers)
         self.assert_no_sources()
 
@@ -152,10 +156,40 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.insights.storage_name_diagnostics.assert_called_once_with()
         self.insights.storage_identity_diagnostics.assert_not_called()
         self.assertNotIn('fixture-full-disk-serial', json.dumps(value))
+        self.insights.disk_activity_diagnostics.assert_not_called()
         self.business.assert_called_once_with(state_dir=self.server.state_dir)
         self.fan.snapshot.assert_called_once_with()
         self.assertNotIn('set-cookie', headers)
         self.assert_no_controls()
+
+    def test_disk_activity_is_explicit_and_does_not_query_storage_or_business(self):
+        self.server.monitoring = mock.Mock(state_dir='/drives/fixture/Users/admin/private-volume')
+        self.server.monitoring.snapshot.return_value = {
+            'settings': {'history_enabled': True},
+            'history': {'recording': True, 'last_write_at': 1234567890, 'private': 'not-exported'}}
+        status, _, value = self.request({'action': 'snapshot', 'checks': ['disk_activity']})
+        self.assertEqual(status, 200)
+        activity = value['snapshot']['checks']['disk_activity']['data']['activity']
+        self.assertEqual(activity['toolbox_history']['enabled'], True)
+        self.assertEqual(activity['toolbox_history']['write_interval_seconds'], 30)
+        self.assertIsNone(activity['power_state'])
+        self.insights.disk_activity_diagnostics.assert_called_once_with(
+            history_directory='/drives/fixture/Users/admin/private-volume')
+        self.insights.storage_name_diagnostics.assert_not_called()
+        self.insights.storage_identity_diagnostics.assert_not_called()
+        self.business.assert_not_called()
+        self.assertNotIn('not-exported', json.dumps(value))
+        self.assertNotIn('private-volume', json.dumps(value))
+        self.assert_no_controls()
+
+    def test_disk_activity_result_is_discarded_after_window_expires(self):
+        def expire(**kwargs):
+            self.server.dev_until = time.time() - 1
+            return {'disks': [{'private-marker': 'should-not-leave'}]}
+        self.insights.disk_activity_diagnostics.side_effect = expire
+        status, _, value = self.request({'action': 'snapshot', 'checks': ['disk_activity']})
+        self.assertEqual(status, 403)
+        self.assertNotIn('should-not-leave', json.dumps(value))
 
     def test_file_readiness_is_explicit_metadata_and_shares_the_storage_lock(self):
         provider = self._patch(self.server.integration, 'file_readiness', return_value={
