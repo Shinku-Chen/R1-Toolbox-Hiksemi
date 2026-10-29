@@ -98,17 +98,20 @@ const SHEETS = {
     build(b, arg, ctx) {
       b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">已用</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">%</span></div></div><div style="text-align:right"><div class="eyebrow">可用</div><b class="tnum" data-ref="avail"></b></div></div>
         <div class="card pad" data-dc="mem"><div class="stack" data-ref="st"><i></i><i class="hatch"></i><i style="background:var(--ink-3)"></i><i style="background:var(--fill-2)"></i></div><div class="legend" data-ref="leg"></div></div>
-        <div class="note info">${ic('info')}<span>“已用”为扣除可回收缓存后的实际占用；“缓存”是 Linux 用空闲内存加速读盘的部分，应用需要时会立即让出。</span></div>`;
+        <div class="note info">${ic('info')}<span data-ref="compositionNote"></span></div>`;
       sheetCharts(ctx, b, [{ title: '内存使用率', yMin: 0, yMax: 100, yTick: v => v + '%', series: [{ m: 'mem', label: '内存', color: M.mem, fmt: fPct }] }]);
       b.insertAdjacentHTML('beforeend', `${sec('内存占用较多的进程', '<span class="faint">取自 CPU 前 20 的进程</span>')}${rowsCard('<div data-ref="procs"></div>')}${sec('交换分区')}<div data-ref="swap"></div>${sec('内存插槽')}<div data-ref="slots"></div>`);
       const x = collect(b);
       return o => {
         const m = o.mem || {}; dnum(x.v, m.percent); inkTo(x.v, ok(m.percent) ? rampInk(m.percent, 'mem') : ''); setText(x.avail, gb(m.available) + ' GB');
         const mp = memParts(m), mc = ok(m.percent) ? rampAt(m.percent, 'mem') : 'var(--e-teal)';
-        [mp.app, mp.cache, mp.buf, mp.free].forEach((v, i) => { x.st.children[i].style.flexGrow = Math.max(0, v).toFixed(0); }); x.st.children[0].style.background = mc;
+        x.st.style.display = mp.available ? '' : 'none';
+        if (mp.available) { [mp.app, mp.cache, mp.buf, mp.free].forEach((v, i) => { x.st.children[i].style.flexGrow = Math.max(0, v).toFixed(0); }); x.st.children[0].style.background = mc; }
+        else [...x.st.children].forEach(el => el.style.removeProperty('flex-grow'));
         setHTML(x.leg, memLegHTML(mp, mc));
+        setText(x.compositionNote, mp.available ? '应用、缓存、缓冲与空闲为当前接口提供的内存构成统计。' : '当前仅有已用、可用与总量。应用／缓存／缓冲／空闲构成未采集，不按可用内存倒算。');
         setHTML(x.procs, procRows(((S.procs || {}).processes || []).slice().sort((a, c) => c.rss - a.rss).slice(0, 6), 'rss'));
-        setHTML(x.swap, +m.swap_total > 0 ? kvHTML([['已用', `${gb(m.swap_used)} GB（${F.d1(m.swap_percent)}%）`], ['总量', gb(m.swap_total) + ' GB']]) : kvHTML([['状态', '未启用交换分区']]));
+        setHTML(x.swap, +m.swap_total > 0 ? kvHTML([['已用', `${gb(m.swap_used)} GB（${F.d1(m.swap_percent)}%）`], ['总量', gb(m.swap_total) + ' GB']]) : kvHTML([['状态', ok(m.swap_total) ? '未启用交换分区' : '未知']]));
         const it = memItems(o);
         setHTML(x.slots, it.length ? kvHTML(it.map(i => [esc(i.locator || '插槽'), i.present ? esc([i.manufacturer, i.size, [i.type, i.speed].filter(Boolean).join('-'), i.part].filter(Boolean).join(' · ')) : '<span class="faint">空</span>'])) : `<div class="card pad">${emptyHTML('未读取到内存插槽信息', '需要 root 权限运行 dmidecode')}</div>`);
       };

@@ -336,6 +336,8 @@ class MappingTests(unittest.TestCase):
         data = self.panel.overview()
         self.assertEqual(data['mem']['available'], 5 * 1024 ** 3)
         self.assertIsNone(data['mem']['free'])
+        self.assertFalse(data['mem']['breakdown_available'])
+        self.assertIn('不由可用内存倒算', data['mem']['breakdown_reason'])
         cached = Insights().snapshot()
         cached['disks']['items'][0]['standby'] = None
         self.panel.insights.snapshot = lambda: copy.deepcopy(cached)

@@ -509,6 +509,79 @@ finally:
         await networkPage.locator('[data-mod="metrics"] [data-ref="netSt"]').innerText() === '空闲'
         && await networkPage.locator('[data-mod="metrics"] [data-ref="rxU"]').innerText() === 'B/s');
     } finally { await networkPage.close(); }
+    const memoryPage = await context.newPage();
+    const memorySample = { ...overview.body.mem, available: 5e9, cached: null, buffers: null, free: null,
+      breakdown_available: false, swap_total: null, swap_used: null, swap_percent: null };
+    try {
+      await memoryPage.route('**/api/overview', route => route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ...overview.body, mem: memorySample }) }));
+      await memoryPage.goto(origin + '/#/overview');
+      const compute = memoryPage.locator('[data-mod="compute"]');
+      await compute.scrollIntoViewIfNeeded();
+      await compute.locator('[data-memory-breakdown]').waitFor();
+      const missingLegend = (await compute.locator('[data-ref="mLeg"]').innerText()).replace(/\s+/g, ' ');
+      check('真实概览内存构成缺测不填应用缓存缓冲空闲零值', ['应用', '缓存', '缓冲', '空闲'].every(label => missingLegend.includes(label + ' -- GB'))
+        && await compute.locator('[data-ref="dimm"]').isHidden(), missingLegend);
+      check('内存构成缺测保留已用可用总量而不宣传零缓存可释放',
+        await compute.locator('[data-ref="mUsed"]').getAttribute('aria-label') !== '--'
+        && (await compute.locator('.mod-dek').innerText()).includes('可用')
+        && !(await compute.locator('.mod-dek').innerText()).includes('缓存可随时释放'));
+      check('概览交换分区缺测显示未知而非未启用', await compute.locator('[data-ref="swap"]').innerText() === '未知');
+      await compute.locator('[data-sheet="mem"]').click();
+      await memoryPage.locator('#sheet.on').waitFor();
+      const missingDetailLegend = (await memoryPage.locator('#sheet [data-ref="leg"]').innerText()).replace(/\s+/g, ' ');
+      check('真实内存详情隐藏缺测构成图且不把available倒算为空闲',
+        await memoryPage.locator('#sheet [data-ref="st"]').isHidden()
+        && ['应用', '缓存', '缓冲', '空闲'].every(label => missingDetailLegend.includes(label + ' -- GB'))
+        && (await memoryPage.locator('#sheet [data-ref="compositionNote"]').innerText()).includes('不按可用内存倒算'));
+      check('内存详情主用量保留且交换分区缺测显示未知',
+        !(await memoryPage.locator('#sheet [data-ref="avail"]').innerText()).includes('--')
+        && (await memoryPage.locator('#sheet [data-ref="swap"]').innerText()).includes('未知')
+        && !(await memoryPage.locator('#sheet [data-ref="swap"]').innerText()).includes('未启用'));
+      await memoryPage.keyboard.press('Escape');
+      Object.assign(memorySample, { cached: 0, buffers: 0, free: memorySample.total - memorySample.used,
+        swap_total: 0, swap_used: 0 });
+      delete memorySample.breakdown_available;
+      await memoryPage.locator('#btnRefresh').click();
+      await compute.scrollIntoViewIfNeeded();
+      await compute.locator('[data-ref="dimm"]').waitFor({ state: 'visible' });
+      const knownLegend = (await compute.locator('[data-ref="mLeg"]').innerText()).replace(/\s+/g, ' ');
+      check('完整上游构成中真实零缓存缓冲不误判缺测', knownLegend.includes('缓存 0.0 GB') && knownLegend.includes('缓冲 0.0 GB')
+        && !knownLegend.includes('--') && await compute.locator('[data-memory-breakdown]').count() === 0);
+      check('概览交换分区真实零仍显示未启用', await compute.locator('[data-ref="swap"]').innerText() === '未启用');
+      await compute.locator('[data-sheet="mem"]').click();
+      await memoryPage.locator('#sheet.on [data-ref="st"]').waitFor({ state: 'visible' });
+      const knownDetailLegend = (await memoryPage.locator('#sheet [data-ref="leg"]').innerText()).replace(/\s+/g, ' ');
+      check('完整上游内存详情保留构成图和真实零值', knownDetailLegend.includes('缓存 0.0 GB') && knownDetailLegend.includes('缓冲 0.0 GB')
+        && !knownDetailLegend.includes('--') && (await memoryPage.locator('#sheet [data-ref="swap"]').innerText()).includes('未启用交换分区'));
+      Object.assign(memorySample, { cached: null, buffers: null, free: null, breakdown_available: false, swap_total: null });
+      await memoryPage.locator('#sheet [data-memory-breakdown]').waitFor();
+      check('已知构成转为缺测时清除旧图例和旧段值',
+        await memoryPage.locator('#sheet [data-ref="st"]').isHidden()
+        && await memoryPage.locator('#sheet [data-ref="st"] > i').evaluateAll(nodes => nodes.every(node => !node.style.flexGrow))
+        && !(await memoryPage.locator('#sheet [data-ref="leg"]').innerText()).includes('0.0 GB')
+        && await compute.locator('[data-ref="dimm"] .seg').evaluateAll(nodes => nodes.every(node => node.getAttribute('width') === '0')));
+      Object.assign(memorySample, { cached: 0, buffers: 0, free: memorySample.total - memorySample.used, swap_total: 0 });
+      delete memorySample.breakdown_available;
+      await memoryPage.locator('#sheet [data-ref="st"]').waitFor({ state: 'visible' });
+      check('缺测后恢复完整构成时图表与真实零值恢复',
+        !(await memoryPage.locator('#sheet [data-ref="leg"]').innerText()).includes('--')
+        && await memoryPage.locator('#sheet [data-memory-breakdown]').count() === 0
+        && await compute.locator('[data-ref="dimm"]').isVisible());
+      await memoryPage.keyboard.press('Escape');
+      Object.assign(memorySample, { used: null, cached: null, buffers: null, free: null, breakdown_available: false });
+      await memoryPage.locator('#btnRefresh').click();
+      await compute.scrollIntoViewIfNeeded();
+      await compute.locator('[data-ref="mUsed"][aria-label="--"]').waitFor();
+      check('已知内存总量但已用缺测时主读数不伪造零', (await compute.locator('[data-ref="mTot"]').innerText()).includes('GB 已用'));
+      Object.assign(memorySample, { used: 0, percent: 0, available: memorySample.total,
+        cached: 0, buffers: 0, free: memorySample.total });
+      delete memorySample.breakdown_available;
+      await memoryPage.locator('#btnRefresh').click();
+      await compute.locator('[data-ref="mUsed"][aria-label="0.0"]').waitFor();
+      check('内存已用真实零值保留并恢复完整构成', await compute.locator('[data-ref="dimm"]').isVisible()
+        && (await compute.locator('[data-ref="mLeg"]').innerText()).includes('0.0 GB'));
+    } finally { await memoryPage.close(); }
     const system = await api('/api/system');
     check('固件版本来自官方元数据', !!system.body && system.body.fnos_version === 'V6.3.3_Build_260907');
     const sensors = await api('/api/sensors');

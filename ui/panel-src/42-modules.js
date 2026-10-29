@@ -95,7 +95,7 @@ const dimmLabel = (o) => {
   return [[a.type, a.speed].filter(Boolean).join('-'), a.size, [a.manufacturer, a.part].filter(Boolean).join(' '), it.length > 1 ? `× ${it.length}` : ''].filter(Boolean).join(' · ').toUpperCase();
 };
 const MEM_LEG = mp => [['应用', mp.app, 'var(--e-teal)'], ['缓存', mp.cache, 'hatch'], ['缓冲', mp.buf, 'var(--ink-3)'], ['空闲', mp.free, 'var(--fill-3)']];
-const memLegHTML = (mp, first) => MEM_LEG(mp).map(([l, v, c], i) => `<span><i ${c === 'hatch' ? 'class="hatch"' : `style="background:${i === 0 && first ? first : c}"`}></i>${l} <b>${gb(v)} GB</b></span>`).join('');
+const memLegHTML = (mp, first) => MEM_LEG(mp).map(([l, v, c], i) => `<span><i ${c === 'hatch' ? 'class="hatch"' : `style="background:${i === 0 && first ? first : c}"`}></i>${l} <b>${gb(v)} GB</b></span>`).join('') + (mp.available ? '' : '<span class="faint" data-memory-breakdown>构成明细未采集</span>');
 /* 每核点阵：cores 个 5×5 点阵，自下而上点亮 */
 function coreTiles(host, n) {
   host.style.setProperty('--cols', n <= 4 ? n : n <= 8 ? 4 : n <= 18 ? 6 : 8);
@@ -153,20 +153,21 @@ defineModule({
     setCores(m.tiles, pc);
     let mx = 0; pc.forEach((v, i) => { if (v > pc[mx]) mx = i; });
     const mem = o.mem || {}, mp = memParts(mem), T = +mem.total || 0;
-    dnum(x.mUsed, T ? mem.used / GiB : null, v => v.toFixed(1)); setText(x.mTot, T ? `/ ${gbT(T)} GB 已用` : '');
+    dnum(x.mUsed, T && ok(mem.used) ? mem.used / GiB : null, v => v.toFixed(1)); setText(x.mTot, T ? `/ ${gbT(T)} GB 已用` : '');
     inkTo(x.mUsed, ok(mem.percent) ? rampInk(mem.percent, 'mem') : '');
     setText(x.dimmT || (x.dimmT = x.dimm.querySelector('[data-ref="dimmT"]')), dimmLabel(o));
-    if (T) {
+    x.dimm.style.display = mp.available ? '' : 'none';
+    if (T && mp.available) {
       const a = mp.app / T, c = mp.cache / T, b = mp.buf / T;
       const seg = (el, f0, f1) => { const x0 = dimmX(f0), x1 = dimmX(f1); el.setAttribute('x', x0.toFixed(2)); el.setAttribute('width', Math.max(0, x1 - x0).toFixed(2)); };
       seg(m.sApp, 0, a); seg(m.sCache, a, a + c); seg(m.sBuf, a + c, a + c + b);
       const mc = rampAt(mem.percent, 'mem'); if (m.sApp.style.fill !== mc) m.sApp.style.fill = mc;
       const lm = LV.mem(mem.percent); if ((x.dimm.dataset.l || '') !== lm) x.dimm.dataset.l = lm;
       setHTML(x.mLeg, memLegHTML(mp, mc));
-    } else setHTML(x.mLeg, '<span>内存数据不可用</span>');
-    if (+mem.swap_total > 0) { setText(x.swap, `${gb(mem.swap_used)} / ${gb(mem.swap_total)} GB`); x.swapW.hidden = false; rampBar(x.swapBar, mem.swap_used / mem.swap_total * 100, 'gen'); }
-    else { setText(x.swap, '未启用'); x.swapW.hidden = true; }
-    setHTML(m.r.dek, `${pc.length ? `${pc.length} 个核心整体 <b>${F.int(cpu.percent)}%</b>，最忙的是 C${mx}（${F.int(pc[mx])}%）。` : ''}${T ? `内存实际占用 <b>${gb(mp.app)} GB</b>，另有 ${gb(mp.cache + mp.buf)} GB 缓存可随时释放。` : ''}`);
+    } else { [m.sApp, m.sCache, m.sBuf].forEach(el => el.setAttribute('width', '0')); setHTML(x.mLeg, T ? memLegHTML(mp) : '<span>内存数据不可用</span>'); }
+    if (+mem.swap_total > 0) { setText(x.swap, `${gb(mem.swap_used)} / ${gb(mem.swap_total)} GB`); x.swapW.hidden = !ok(mem.swap_used); if (ok(mem.swap_used)) rampBar(x.swapBar, mem.swap_used / mem.swap_total * 100, 'gen'); }
+    else { setText(x.swap, ok(mem.swap_total) ? '未启用' : '未知'); x.swapW.hidden = true; }
+    setHTML(m.r.dek, `${pc.length ? `${pc.length} 个核心整体 <b>${F.int(cpu.percent)}%</b>，最忙的是 C${mx}（${F.int(pc[mx])}%）。` : ''}${T ? mp.available ? `内存实际占用 <b>${gb(mp.app)} GB</b>，另有 ${gb(mp.cache + mp.buf)} GB 缓存可随时释放。` : `内存已用 <b>${gb(mem.used)} GB</b>，可用 ${gb(mem.available)} GB；构成明细未采集。` : ''}`);
   },
 });
 

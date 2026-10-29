@@ -672,6 +672,8 @@ class FnmonitorPanel:
             'total': total, 'used': used, 'available': available,
             'free': _number(memory.get('free_bytes'), 0),
             'percent': percent, 'cached': None, 'buffers': None,
+            'breakdown_available': False,
+            'breakdown_reason': '未采集应用／缓存／缓冲／MemFree 构成，不由可用内存倒算。',
             'swap_total': swap_total, 'swap_used': swap_used,
             'swap_free': swap_total - swap_used if swap_total is not None and swap_used is not None else None,
             'swap_percent': _number(memory.get('swap_usage_percent'), 0, 100),

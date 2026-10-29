@@ -167,7 +167,13 @@ function scanAgo() {
 }
 const cpuTemp = o => o && o.temp ? (ok(o.temp.cpu) ? +o.temp.cpu : null) : null;const mbTemp = o => o && o.temp && ok(o.temp.system) ? +o.temp.system : null;
 const diskTemps = o => disksOf(o).filter(d => ok(d.temp) && !isSleep(d));
-const memParts = m => { const T = +m.total || 0, app = +m.used || 0, cache = +m.cached || 0, buf = +m.buffers || 0; return { app, cache, buf, free: Math.max(0, T - app - cache - buf) }; };
+const memParts = m => {
+  const valid = v => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const T = m.total, app = m.used, cache = m.cached, buf = m.buffers;
+  if (m.breakdown_available === false || ![T, app, cache, buf].every(valid) || T <= 0 || app + cache + buf > T)
+    return { available: false, app: null, cache: null, buf: null, free: null };
+  return { available: true, app, cache, buf, free: valid(m.free) ? m.free : T - app - cache - buf };
+};
 const gb = b => ok(b) ? (b / GiB).toFixed(1) : '--';
 const gbT = b => ok(b) ? (b / GiB >= 10 ? Math.round(b / GiB) : (b / GiB).toFixed(1)) : '--';
 const pwrOk = o => !!(o && o.power && o.power.ok && ok(o.power.total));
