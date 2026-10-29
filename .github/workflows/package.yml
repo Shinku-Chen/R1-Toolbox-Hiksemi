@@ -24,6 +24,7 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Check generated files
         run: |
+          python scripts/build-api-contracts.py --check
           python tools/boot-once/build-compose.py
           git diff --exit-code -- composer.yml composer.dev.yml tools/boot-once/compose.yaml tools/boot-once/runner.sh
       - name: Check shell syntax

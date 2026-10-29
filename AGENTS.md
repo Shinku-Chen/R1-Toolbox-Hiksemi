@@ -33,6 +33,7 @@ docs/              功能、接口、温控、灯光、监控、面板说明
 
 ```bash
 python scripts/build-panel.py          # 修改 ui/panel-src/ 后必须执行
+python scripts/build-api-contracts.py  # 修改文件／Docker 接口定义后同步 JSON；CI 使用 --check
 python scripts/build-prototype.py      # 修改小屏样式或图标后同步离线原型
 python scripts/build-ui.py             # 打包 UI bundle（镜像构建也会执行）
 python -m unittest discover -s tests -v
@@ -82,6 +83,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 改代码必须同步新增或修改受影响的测试；没有自动化落点的改动要在汇报里说明缺口与手工验证路径。
 - 任何实际文件变更都要更新 `CHANGELOG.md`（本仓库已存在）。最终需求、架构边界、踩坑、运行/测试/发布方式写进本文件、README 或 docs，不要只留在会话记忆里。
 - 项目不使用 Redis，无 TTL 约定。
+- 文件／Docker 的二十项待接入合同维护在 `runtime/api_contracts.py`，同步到 `docs/api/file-docker-contracts.json`。`GET /api/access/contracts` 仅供所有者查阅，不能把 `implemented:false` 的定义加入 MCP 可调用目录或据此扩大旧 Token 权限；真实文件与项目后端仍须按 `docs/file-docker-api-plan.md` 闭合 ACL、句柄和资源授权后接入。
 - 中文正文、UI 文案与文档使用全角标点；代码、路径、标识符保持原样。
 
 ## 提交规范

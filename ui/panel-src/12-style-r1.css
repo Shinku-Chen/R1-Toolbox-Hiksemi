@@ -142,6 +142,8 @@
 .r1-api-dialog h2, .r1-api-dialog h3 { margin: 0; }
 .r1-api-dialog h3 { margin-top: 24px; margin-bottom: 12px; font-size: 16px; }
 .r1-api-dialog p { overflow-wrap: anywhere; }
+.r1-api-dialog details { margin-top: 16px; min-width: 0; }
+.r1-api-dialog summary { cursor: pointer; padding: 10px 0; }
 .r1-api-dialog .btn { min-height: 42px; }
 .r1-api-dialog .r1-api-head h3 { margin-bottom: 12px; }
 .r1-api-service { display: grid; gap: 6px; margin-top: 18px; }

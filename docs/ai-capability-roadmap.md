@@ -14,6 +14,8 @@ Toolbox 以常驻容器监督宿主前台服务。网页承担健康、应用状
 
 下一批方案包含文件浏览／下载、上传及文件管理，以及固定 Docker 项目的读取与管理员镜像更新，具体工具、角色、旧键兼容、流式传输和 ACL 门槛见[文件与 Docker 接口方案](file-docker-api-plan.md)。这些新增能力尚未实现；用户选择的只读范围仅适用于本次 NAS 实机验收，写工具仍属于实现目标。
 
+当前阶段已交付二十项输入／输出及授权的[JSON 定义](api/file-docker-contracts.json)和所有者查询入口 `/api/access/contracts`。可在网页 API 管理中查阅；真实执行、policy v3 存储和项目登记仍待接入，不出现在机器可调用列表。实机阶段先按[只读验收清单](file-docker-readonly-acceptance.md)核对定义、旧键与已有元数据，再验证真正就绪的后端。
+
 ## 原厂能力核对
 
 用户固件 `R1_X01_GML_STD_V6.3.3_Build_260907.zip` 包含对应处理逻辑。静态注册表见 [vendor-emhistor-interfaces.json](vendor-emhistor-interfaces.json)。数量指对应路由的注册项，不是已经验收的功能数。

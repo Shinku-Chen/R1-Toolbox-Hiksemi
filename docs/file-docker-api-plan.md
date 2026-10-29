@@ -1,8 +1,17 @@
 # 文件读写与固定 Docker 项目接口方案
 
-状态：设计方案，尚未实现或部署新增接口。日期：2026-10-29；代码基线：`928b3518a9615d7d053dda52b9a8090a8d76028f`。
+状态：接口定义已落地；文件操作、传输和固定项目工具的真实后端尚未接入。日期：2026-10-29；定义前代码基线：`4a6b3c3fe03fbf4d22d5c4f1933ea3e99e07a229`。
 
 本批方案覆盖文件读写，以及已登记 Docker 项目的读取和受控镜像更新。用户选择的“先只做文件读取和项目状态核对”仅限定本次 NAS 实机验收，不取消写能力设计，也不把写工具排除到未选范围。现有 MCP 工具继续有效；以下新增接口均尚未实现，须完成后端核验、测试和明确授权后才开放。
+
+## 0．已实现的定义入口
+
+- 机器可读定义：[file-docker-contracts.json](api/file-docker-contracts.json)，包含二十项新工具的输入／输出 JSON Schema、最低角色、功能域、资源条件、错误和传输约定。
+- 定义来源：`runtime/api_contracts.py`；运行 `python scripts/build-api-contracts.py` 同步 JSON，`--check` 拒绝未同步产物。测试使用开发依赖中的固定 JSON Schema 校验器；不增加 NAS 运行时依赖。
+- 所有者接口：`GET /api/access/contracts`，无查询参数；遵循原有 Web `password/pair/open` 授权、同源规则和 `no-store`，Bearer（即使同时带所有者 Cookie）与单独开发窗口不能使用。MCP 关闭时仍可由所有者查阅。
+- 网页“API 管理 → 文件与 Docker 接口定义”按需读取、展示和复制定义；不创建 Token、不更改权限、不访问文件或查询原厂服务。
+
+定义明确返回 `status:definitions_only`，所有二十项的 `implemented:false`。这不是 MCP `tools/list`；当前可调用目录仍为原十工具。`policy_version:3`、逐工具授权、项目登记和实时文件 ACL 是后端接入前的合同要求，本轮没有迁移密钥存储或启用这些未来权限。只读实机核对安排见[验收清单](file-docker-readonly-acceptance.md)。
 
 ## 1．能力范围与调用方式
 

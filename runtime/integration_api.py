@@ -9,6 +9,7 @@ import copy
 import time
 
 from api_access import ApiAccessStore, AUDIT_OPERATIONS
+from api_contracts import contract_catalog
 from api_file_roots import collect_file_roots, validate_file_grants
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
@@ -28,10 +29,16 @@ class IntegrationApi:
         return {'ok': True, **state,
                 'endpoints': {'mcp': '/mcp', 'status': '/api/integration/status',
                               'action': '/api/integration/action',
-                              'capabilities': '/api/integration/capabilities'},
+                              'capabilities': '/api/integration/capabilities',
+                              'contracts': '/api/access/contracts'},
                 'protocol_versions': list(SUPPORTED_VERSIONS),
                 'file_root_catalog': self.file_root_catalog(),
                 'tools': self.mcp.tool_catalog()}
+
+    @staticmethod
+    def contracts():
+        """Owner-only definitions; these do not grant or register operations."""
+        return {'ok': True, **contract_catalog()}
 
     def file_root_catalog(self):
         """Owner-only planning metadata; this never enumerates user files."""

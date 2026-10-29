@@ -1075,6 +1075,13 @@ function r1OpenApiManager() {
     <div data-ref="content" hidden>
       <div class="r1-api-service"><label class="check"><input type="checkbox" data-ref="enabled">启用局域网 API 服务</label><span class="sub" data-ref="serviceStatus"></span></div>
       <div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label><label>功能能力目录<input class="textfield mono" data-ref="restCapabilities" readonly aria-label="功能能力目录地址"></label></div>
+      <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
+        <p class="sub">只读、读写、管理员按工具和资源分别授权。以下接口仍待接入，查看定义不会启用工具或修改密钥。</p>
+        <button class="btn" type="button" data-ref="loadContracts">读取接口定义</button>
+        <p class="sub" data-ref="contractStatus" role="status"></p><div data-ref="contractList"></div>
+        <label class="r1-api-input" data-ref="contractJson" hidden>接口定义 JSON<textarea class="textfield mono" data-ref="contractDefinition" rows="10" readonly spellcheck="false" aria-label="接口定义 JSON"></textarea></label>
+        <button class="btn" type="button" data-ref="copyContracts" hidden>复制接口定义</button>
+      </details>
       <h3 data-ref="formTitle">创建访问密钥</h3><form data-ref="form" class="r1-api-create">
         <label class="r1-api-input">密钥名称<input class="textfield" data-ref="name" aria-label="密钥名称" placeholder="例如：客厅 AI" maxlength="64" required autocomplete="off"></label>
         <label class="r1-api-input">操作角色<select class="textfield" data-ref="role" aria-label="操作角色"></select><span class="sub" data-ref="roleDescription"></span></label>
@@ -1091,7 +1098,7 @@ function r1OpenApiManager() {
   const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media', 'files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing', 'backup', 'system'];
   const roleLevel = { readonly: 0, readwrite: 1, admin: 2 }, roleLabels = { readonly: '只读', readwrite: '读写', admin: '管理员' };
   const defaultMinRole = { read: 'readonly', fan: 'readwrite', light: 'readwrite', screen: 'readwrite', power: 'admin', media: 'readwrite' };
-  let state = null, busy = false, closed = false, editing = null, permissionDirty = false;
+  let state = null, busy = false, closed = false, editing = null, permissionDirty = false, contractsBusy = false;
   const close = () => {
     if ($('#r1ApiSecret')) return;
     closed = true; document.removeEventListener('keydown', onKey); el.remove();
@@ -1297,6 +1304,36 @@ function r1OpenApiManager() {
     } catch (error) { fail(error); return null; }
     finally { if (!closed) pending(false); }
   };
+  // Definitions are owner metadata, loaded separately from callable tools and keys.
+  x.loadContracts.onclick = async () => {
+    if (closed || contractsBusy) return;
+    contractsBusy = true; x.loadContracts.disabled = true;
+    x.contractList.replaceChildren(); x.contractDefinition.value = '';
+    x.contractJson.hidden = true; x.copyContracts.hidden = true;
+    setText(x.contractStatus, '正在读取接口定义…');
+    try {
+      const result = await API.get('/api/access/contracts');
+      if (closed) return;
+      if (!result || result.ok !== true) throw new Error(typeof (result && result.error) === 'string' ? result.error : '接口定义读取失败，请重试。');
+      if (result.schema_version !== 1 || result.status !== 'definitions_only'
+          || !Array.isArray(result.tools) || !result.tools.length || result.tools.length > 64
+          || !result.tools.every(tool => tool && tool.implemented === false && Object.hasOwn(roleLevel, tool.min_role)
+            && ['files', 'docker'].includes(tool.scope) && typeof tool.name === 'string'
+            && tool.inputSchema && tool.outputSchema)) throw new Error('接口定义暂不可用，请确认服务版本。');
+      for (const tool of result.tools) {
+        const row = mount('<article class="r1-api-audit r1-api-contract"><strong></strong><span class="mono"></span><span data-contract-role></span></article>');
+        setText(row.querySelector('strong'), String(tool.title || tool.name));
+        setText(row.querySelector('.mono'), tool.name);
+        setText(row.querySelector('[data-contract-role]'), `最低角色：${roleLabels[tool.min_role]}；功能：${tool.scope === 'files' ? '文件管理' : 'Docker 管理'}；待接入。`);
+        x.contractList.append(row);
+      }
+      x.contractDefinition.value = JSON.stringify(result, null, 2);
+      x.contractJson.hidden = false; x.copyContracts.hidden = false;
+      setText(x.contractStatus, `已读取 ${result.tools.length} 项接口定义，均待接入；未改变任何密钥权限。`);
+    } catch (error) { if (!closed) setText(x.contractStatus, String(error && error.message || '接口定义读取失败，请重试。')); }
+    finally { contractsBusy = false; if (!closed) x.loadContracts.disabled = false; }
+  };
+  x.copyContracts.onclick = () => r1ApiCopy(x.contractDefinition, x.contractStatus);
   x.enabled.onchange = async () => {
     if (busy || !state) return;
     const enabled = x.enabled.checked; x.enabled.checked = state.enabled === true;

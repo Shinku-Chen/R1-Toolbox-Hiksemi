@@ -46,7 +46,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const rotatedSecret = 'r1-fixture-rotated-ONLY-ONCE-<svg onload=x>';
   const unsafeName = '<img src=x onerror="window.apiNameInjected=1">客厅 AI';
   const calls = [];
-  let reads = 0, failCreate = false, failRead = false, failManage = false;
+  let reads = 0, contractReads = 0, failContracts = false, failCreate = false, failRead = false, failManage = false;
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
     role_catalog: [
@@ -90,6 +90,11 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       if (url.origin !== origin && url.protocol !== 'data:') return route.abort('blockedbyclient');
       if (url.pathname !== '/api/access' && !url.pathname.startsWith('/api/access/')) return route.continue();
       const reply = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      if (url.pathname === '/api/access/contracts') {
+        contractReads += 1;
+        if (failContracts) return reply(503, { error: 'fixture：接口定义读取失败' });
+        return route.continue();
+      }
       if (request.method() === 'GET') {
         reads += 1;
         if (failRead) return reply(503, { error: 'fixture：配置读取失败' });
@@ -149,6 +154,29 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('MCP 地址与当前设备一致', await manager.locator('[data-ref="mcp"]').inputValue() === origin + '/mcp');
     check('能力目录地址与当前设备一致', await manager.locator('[data-ref="restCapabilities"]').inputValue() === origin + '/api/integration/capabilities');
     check('安全调用记录可见', (await manager.locator('[data-ref="audit"]').innerText()).includes('192.168.31.100') && (await manager.locator('[data-ref="audit"]').innerText()).includes('get_status'));
+
+    check('接口定义按需读取且不混入当前密钥工具', contractReads === 0);
+    await page.evaluate(async code => {
+      const response = await fetch('/api/pair', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-FNM-Request': '1' },
+        body: JSON.stringify({ code }) });
+      if (!response.ok) throw new Error('fixture owner pairing failed');
+    }, fixture.primary.code);
+    await manager.locator('[data-ref="contracts"] summary').click();
+    failContracts = true;
+    await manager.locator('[data-ref="loadContracts"]').click();
+    await manager.locator('[data-ref="contractStatus"]').filter({ hasText: '读取失败' }).waitFor();
+    check('接口定义失败可重试且不保留旧JSON', await manager.locator('[data-ref="contractJson"]').isHidden() && !(await manager.locator('[data-ref="loadContracts"]').isDisabled()));
+    failContracts = false;
+    await manager.locator('[data-ref="loadContracts"]').click();
+    await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 20);
+    const definition = JSON.parse(await manager.locator('[data-ref="contractDefinition"]').inputValue());
+    check('真实服务返回20项待接入接口与输入输出schema', definition.status === 'definitions_only' && definition.tools.length === 20 && definition.tools.every(tool => tool.implemented === false && tool.inputSchema && tool.outputSchema));
+    check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === 0);
+    await page.setViewportSize({ width: 320, height: 960 });
+    check('320宽度接口定义无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await manager.locator('[data-ref="contracts"] summary').click();
 
     await manager.locator('[data-ref="enabled"]').click();
     await page.locator('.fullmask [data-yes]').click();

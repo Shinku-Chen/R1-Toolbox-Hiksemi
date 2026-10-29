@@ -63,7 +63,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/raidcard', '/api/processes', '/api/apps', '/api/modules', '/api/vms', '/api/history',
     '/api/history/diag', '/api/smart', '/api/disk_health', '/api/scan_log', '/api/notify',
     '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
-    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/services',
+    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/access/contracts', '/api/services',
     '/api/business',
 )) | PANEL_QUERY_ROUTES
 
@@ -726,12 +726,14 @@ class WebConfigServer:
     def panel_get(self, route, query, headers, peer=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
-        if route in ('/api/access', '/api/services'):
+        if route in ('/api/access', '/api/access/contracts', '/api/services'):
             if (headers.get('Authorization') is not None
                     or self.panel_authorized(headers, peer=peer) not in ('password', 'pair', 'open')):
                 return 403, {'ok': False, 'error': 'API 管理需要网页登录授权'}, 'application/json; charset=utf-8'
             if query:
                 raise ValueError('API 管理不接受查询参数')
+            if route == '/api/access/contracts':
+                return 200, self.integration.contracts(), 'application/json; charset=utf-8'
             return 200, (self.integration.snapshot() if route == '/api/access' else self.services_snapshot()), 'application/json; charset=utf-8'
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
@@ -1597,7 +1599,7 @@ class WebConfigServer:
                     if route in MACHINE_ROUTES:
                         self.machine(parsed)
                         return
-                    if route in ('/api/access', '/api/services') and parsed.fragment:
+                    if route in ('/api/access', '/api/access/contracts', '/api/services') and parsed.fragment:
                         self.send(400, {'error': 'API 管理不接受 URL 参数'})
                         return
                     public = route in PUBLIC_ROUTES
