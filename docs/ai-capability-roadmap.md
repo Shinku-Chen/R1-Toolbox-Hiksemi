@@ -12,6 +12,8 @@ Toolbox 以常驻容器监督宿主前台服务。网页承担健康、应用状
 
 当前仍只有原十个 MCP 工具，主要是监控与硬件控制。文件浏览／上传／下载、Docker 部署、应用安装、下载任务、影视库编辑和相册创建／分享尚未开放。
 
+下一批先实施文件读取／下载与固定 Docker 项目只读工具，具体请求、响应、旧键兼容、流式传输、ACL 门槛及只读实机验收见[文件与 Docker 接口方案](file-docker-api-plan.md)。方案中的后续项目更新不在首批目录或本次实机操作内。
+
 ## 原厂能力核对
 
 用户固件 `R1_X01_GML_STD_V6.3.3_Build_260907.zip` 包含对应处理逻辑。静态注册表见 [vendor-emhistor-interfaces.json](vendor-emhistor-interfaces.json)。数量指对应路由的注册项，不是已经验收的功能数。
