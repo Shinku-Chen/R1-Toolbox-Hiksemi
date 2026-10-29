@@ -588,7 +588,10 @@ class FnmonitorPanel:
             if len(fields) < 6 or len(extra) < 2:
                 continue
             source, mount = extra[1], fields[4]
-            match = re.fullmatch(r'/dev/((?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+))\d*', source)
+            # NVMe uses a pN partition suffix; treating it like SATA's numeric
+            # suffix loses mounted SSD roots from the authorization catalog.
+            match = (re.fullmatch(r'/dev/(sd[a-z]+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)\d*', source)
+                     or re.fullmatch(r'/dev/(nvme\d+n\d+)(?:p\d+)?', source))
             if not match or extra[0] in ('tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'proc', 'sysfs'):
                 continue
             result.setdefault(match[1], []).append(mount)

@@ -70,7 +70,8 @@ PANEL_POST_ROUTES = frozenset((
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
     '/api/dev/media', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
 ))
-MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action'))
+MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
+                            '/api/integration/capabilities'))
 ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/api/access/keys/revoke'))
 
 
@@ -1309,11 +1310,20 @@ class WebConfigServer:
                         self.send(status, {'ok': False, 'error': {'code': reason, 'message': 'API 访问未授权'}},
                                   extra_headers={'WWW-Authenticate': 'Bearer realm="r1-toolbox"'} if status == 401 else None)
                         return
-                    allowed = 'GET' if route == '/api/integration/status' else 'POST'
+                    allowed = 'GET' if route in ('/api/integration/status', '/api/integration/capabilities') else 'POST'
                     if self.command != allowed:
                         self.send(405, {'error': '请求方法不支持'}, extra_headers={'Allow': allowed})
                         return
                     started = time.monotonic()
+                    if route == '/api/integration/capabilities':
+                        try:
+                            payload = outer.integration.capabilities(principal)
+                            status = 200
+                        except Exception:
+                            status, payload = 503, {'ok': False, 'error': '能力目录暂不可用'}
+                        outer.integration.record(principal, 'integration/capabilities', peer, payload, started=started)
+                        self.send(status, payload)
+                        return
                     if route == '/api/integration/status':
                         try:
                             params = outer._panel_query(parsed.query, {'section'})

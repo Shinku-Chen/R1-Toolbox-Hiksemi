@@ -353,6 +353,21 @@ class MappingTests(unittest.TestCase):
         self.assertIsNone(rows[1]['user_name'])
         self.assertEqual(rows[1]['space_names'], ['共享 RAID'])
 
+    def test_mount_cache_keeps_nvme_partition_identity_for_file_root_planning(self):
+        with tempfile.TemporaryDirectory(prefix='r1-panel-nvme-') as temporary:
+            proc = Path(temporary)
+            (proc / 'self').mkdir()
+            (proc / 'self/mountinfo').write_text(
+                '100 1 259:2 / /drives/SSD rw - ext4 /dev/nvme0n1p2 rw\n'
+                '101 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n'
+                '102 1 259:0 / /drives/whole rw - xfs /dev/nvme1n1 rw\n'
+                '103 1 259:3 / /drives/bad rw - ext4 /dev/nvme0n1q1 rw\n',
+                encoding='utf-8')
+            self.panel.proc_root = proc
+            self.assertEqual(self.panel._mounts(), {
+                'nvme0n1': ['/drives/SSD'], 'sda': ['/drives/data'],
+                'nvme1n1': ['/drives/whole']})
+
     def test_volume_label_falls_back_to_udev_database(self):
         sys_root = Path(tempfile.mkdtemp(prefix='r1-panel-sys-'))
         dev = sys_root / 'block' / 'sda'

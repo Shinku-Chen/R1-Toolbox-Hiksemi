@@ -1,7 +1,7 @@
 """Stateless MCP messages and a fixed NAS tool catalog, without network access.
 
 The HTTP owner authenticates API keys, checks Host/Origin, limits bodies and logs
-calls. This module independently checks tool scopes and arguments before invoking
+calls. This module checks roles, feature scopes and arguments before invoking
 the injected hardware callback. It never opens a socket or reads vendor tokens.
 """
 
@@ -10,6 +10,8 @@ import copy
 import json
 import math
 import re
+
+from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
 
 
 MODERN_VERSION = '2026-07-28'
@@ -20,6 +22,7 @@ META_CLIENT_INFO = 'io.modelcontextprotocol/clientInfo'
 META_CLIENT_CAPABILITIES = 'io.modelcontextprotocol/clientCapabilities'
 META_SERVER_INFO = 'io.modelcontextprotocol/serverInfo'
 META_REQUIRED_SCOPE = 'io.github.shinku-chen.r1-toolbox/requiredScope'
+META_MINIMUM_ROLE = 'io.github.shinku-chen.r1-toolbox/minimumRole'
 READ_SECTIONS = ('overview', 'system', 'storage', 'temperatures', 'network',
                  'containers', 'apps', 'fans', 'lights', 'screen')
 _MISSING = object()
@@ -43,7 +46,8 @@ def _tool(name, title, description, scope, schema, *, read_only=False,
                             'destructiveHint': destructive,
                             'idempotentHint': idempotent,
                             'openWorldHint': False},
-            '_meta': {META_REQUIRED_SCOPE: scope}}
+            '_meta': {META_REQUIRED_SCOPE: scope,
+                      META_MINIMUM_ROLE: MIN_ROLE_BY_TOOL[name]}}
 
 
 _CONFIG = {'type': 'object', 'maxProperties': 64,
@@ -108,21 +112,17 @@ _TOOLS = (
 _TOOLS_BY_NAME = {tool['name']: tool for tool in _TOOLS}
 
 
-def _scopes(principal):
-    """A malformed or absent principal never grants a scope implicitly."""
-    if not isinstance(principal, dict):
-        return frozenset()
-    value = principal.get('scopes')
-    if not isinstance(value, (list, tuple, set, frozenset)):
-        return frozenset()
-    return frozenset(item for item in value if isinstance(item, str))
-
-
 def tool_catalog(principal=None):
-    """Return detached public metadata, optionally filtered by authenticated scope."""
-    granted = None if principal is None else _scopes(principal)
+    """Return metadata filtered by the same role/domain gate as tool execution.
+
+    Omitting the principal is only for the browser's authenticated management
+    catalog. Machine requests always supply an authenticated principal, including
+    legacy keys whose original ten-tool grants must not silently expand.
+    """
     return [copy.deepcopy(tool) for tool in _TOOLS
-            if granted is None or tool['_meta'][META_REQUIRED_SCOPE] in granted]
+            if principal is None or permission_allows(
+                principal, tool['_meta'][META_REQUIRED_SCOPE],
+                tool['_meta'][META_MINIMUM_ROLE], tool_name=tool['name'])]
 
 
 def _valid_id(value):
@@ -358,12 +358,17 @@ class McpService:
         return tool_catalog(principal)
 
     def call_tool(self, name, arguments, principal):
-        """Return a safe MCP tool result; REST uses this identical scope boundary."""
+        """Return a safe result; REST uses this identical role/domain boundary."""
         if not isinstance(name, str) or name not in _TOOLS_BY_NAME:
             return _tool_error('unknown_tool', '不支持的工具。')
         required = _TOOLS_BY_NAME[name]['_meta'][META_REQUIRED_SCOPE]
-        if required not in _scopes(principal):
-            return _tool_error('forbidden', 'API 密钥未获此工具的权限。')
+        minimum = _TOOLS_BY_NAME[name]['_meta'][META_MINIMUM_ROLE]
+        if not permission_allows(principal, required, minimum, tool_name=name):
+            # The shared helper also rejects malformed principals. Never echo
+            # submitted roles, scopes or arguments while explaining a denial.
+            if permission_allows(principal, required, 'readonly', tool_name=name):
+                return _tool_error('role_denied', 'API 密钥的角色等级不足。')
+            return _tool_error('scope_denied', 'API 密钥未获此功能域的权限。')
         normalized = _arguments(name, arguments)
         if normalized is None:
             return _tool_error('invalid_arguments', '工具参数不符合声明；请检查字段、范围和操作确认。')

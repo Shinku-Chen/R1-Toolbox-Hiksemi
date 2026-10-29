@@ -48,17 +48,30 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   let reads = 0, failCreate = false, failRead = false;
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
-    scope_catalog: [
-      { id: 'read', label: '读取状态', description: '读取监控与设备信息' },
-      { id: 'fan', label: '风扇策略', description: '设置风扇策略' },
-      { id: 'light', label: '机身灯光', description: '修改灯光' },
-      { id: 'screen', label: '小屏显示', description: '屏幕与亮度' },
-      { id: 'power', label: '电源操作', description: '关机或重启' },
-      { id: 'media', label: '媒体状态', description: '查询原厂媒体任务' },
+    role_catalog: [
+      { id: 'readonly', label: '只读', description: '读取已授权功能的数据；不会调用写工具。' },
+      { id: 'readwrite', label: '读写', description: '允许已授权功能的日常控制。' },
+      { id: 'admin', label: '管理员', description: '允许已授权的管理工具；不会自动勾选其他功能。' },
     ],
+    scope_catalog: [
+      { id: 'read', label: '读取状态', description: '读取监控与设备信息', min_role: 'readonly', implemented: true },
+      { id: 'fan', label: '风扇策略', description: '设置风扇策略', min_role: 'readwrite', implemented: true },
+      { id: 'light', label: '机身灯光', description: '修改灯光', min_role: 'readwrite', implemented: true },
+      { id: 'screen', label: '小屏显示', description: '屏幕与亮度', min_role: 'readwrite', implemented: true },
+      { id: 'power', label: '电源操作', description: '关机或重启', min_role: 'admin', implemented: true },
+      { id: 'media', label: '媒体状态', description: '查询原厂媒体任务', min_role: 'readwrite', implemented: true },
+      ...[['files', '文件管理'], ['docker', 'Docker 部署'], ['apps', '应用市场'], ['downloads', '下载器'],
+        ['movie', '影视墙'], ['albums', '相册'], ['sharing', '分享'], ['backup', '备份'], ['system', '系统管理']]
+        .map(([id, label]) => ({ id, label, description: '分领域授权', min_role: 'readonly', implemented: false })),
+      { id: 'unrecognized', label: '未知功能不可伪造', implemented: true },
+    ],
+    file_root_catalog: { available: true, status: 'ok', reason: null, roots: [
+      { id: 'root_' + '1'.repeat(24), label: '<img src=x onerror="window.apiRootInjected=1">视频资源', mount: '/drives/space_1', read_only: false },
+      { id: 'root_' + '2'.repeat(24), label: '备份磁盘', mount: '/drives/space_2', read_only: true },
+    ] },
     audit: [{ timestamp: 1793240000, key_id: 'fixture-key-1', key_name: unsafeName,
       operation: 'get_status', peer: '192.168.31.100', outcome: 'ok', duration_ms: 12 }],
-    endpoints: { mcp: '/mcp', status: '/api/integration/status', action: '/api/integration/action' },
+    endpoints: { mcp: '/mcp', status: '/api/integration/status', action: '/api/integration/action', capabilities: '/api/integration/capabilities' },
     protocol_versions: ['2025-03-26'],
   };
   try {
@@ -108,8 +121,16 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
     check('服务默认关闭', !(await manager.locator('[data-ref="enabled"]').isChecked()));
     check('默认仅勾选读取状态', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
+    check('默认只读角色与三级选项', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('select[data-ref="role"] option').evaluateAll(options => options.map(option => option.value))) === '["readonly","readwrite","admin"]');
+    check('十五项功能只显示已知领域', await manager.locator('[data-ref="scopes"] input').count() === 15 && await manager.locator('[data-ref="scopes"] input[value="unrecognized"]').count() === 0);
+    check('新增功能明确显示待接入', (await manager.locator('[data-ref="scopes"] label').filter({ hasText: '文件管理' }).innerText()).includes('待接入') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('仅预授权'));
+    check('未选择文件功能时隐藏范围', await manager.locator('[data-ref="fileRoots"]').isHidden());
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    check('管理员角色不自动新增功能授权', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
+    await manager.locator('select[data-ref="role"]').selectOption('readonly');
     check('默认有效期 90 天', await manager.locator('[data-ref="expiry"]').inputValue() === '90');
     check('MCP 地址与当前设备一致', await manager.locator('[data-ref="mcp"]').inputValue() === origin + '/mcp');
+    check('能力目录地址与当前设备一致', await manager.locator('[data-ref="restCapabilities"]').inputValue() === origin + '/api/integration/capabilities');
     check('安全调用记录可见', (await manager.locator('[data-ref="audit"]').innerText()).includes('192.168.31.100') && (await manager.locator('[data-ref="audit"]').innerText()).includes('get_status'));
 
     await manager.locator('[data-ref="enabled"]').click();
@@ -119,6 +140,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
 
     await manager.locator('input[data-ref="name"]').fill(unsafeName);
     await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
+    check('低角色保留功能选择但说明工具不可调用', (await manager.locator('[data-ref="roleStatus"]').innerText()).includes('当前角色不可调用') && await manager.locator('[data-ref="scopes"] input[value="fan"]').isChecked());
     await manager.locator('[data-ref="ips"]').fill('192.168.31.100\nfd00::2');
     await manager.locator('[data-ref="create"]').click();
     await page.locator('.fullmask [data-yes]').click();
@@ -129,7 +151,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     const config = JSON.parse(await secretDialog.locator('[data-ref="config"]').inputValue());
     check('MCP 配置包含对应 URL 和 Bearer 请求头', config.mcpServers.toolbox.url === origin + '/mcp' && config.mcpServers.toolbox.headers.Authorization === 'Bearer ' + secret);
     const created = calls.find(call => call.path === '/api/access/keys');
-    check('创建提交明确功能、来源与有效期', JSON.stringify(created.body.scopes) === '["read","fan"]' && created.body.allowed_ips.length === 2 && created.body.expires_days === 90);
+    check('创建提交明确角色、功能、空文件范围、来源与有效期', created.body.role === 'readonly' && JSON.stringify(created.body.file_roots) === '[]' && JSON.stringify(created.body.scopes) === '["read","fan"]' && created.body.allowed_ips.length === 2 && created.body.expires_days === 90);
     await secretDialog.locator('[data-ref="copyConfig"]').click();
     check('复制 MCP 配置', await page.evaluate(() => window.__apiCopied.some(text => JSON.parse(text).mcpServers.toolbox.url.endsWith('/mcp'))));
     await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }); document.execCommand = () => false; });
@@ -165,8 +187,80 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('读取失败反馈具体原因', !(await manager.locator('[data-ref="refresh"]').isDisabled()));
     failRead = false;
 
+    await manager.locator('input[data-ref="name"]').fill('文件范围 AI');
+    await manager.locator('[data-ref="scopes"] input[value="files"]').check();
+    check('文件功能显示真实根与待接入说明', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 2 && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('待接入，当前仅保存范围授权'));
+    const writesBeforeFiles = calls.length;
+    await manager.locator('[data-ref="create"]').click();
+    await manager.locator('[data-ref="error"]').filter({ hasText: '请至少勾选一个' }).waitFor();
+    check('文件权限不能省略真实范围', calls.length === writesBeforeFiles && await page.locator('#r1ApiSecret').count() === 0);
+    const writableRoot = manager.locator('.r1-api-file-root').first(), readonlyRoot = manager.locator('.r1-api-file-root').last();
+    await writableRoot.locator('[data-root-check]').check();
+    const initialFileGrant = await writableRoot.evaluate(element => ({ access: element.querySelector('[data-root-access]').value,
+      path: element.querySelector('[data-root-path]').value, writeDisabled: element.querySelector('option[value="readwrite"]').disabled,
+      role: document.querySelector('#r1ApiManager [data-ref="role"]').value }));
+    check('默认文件范围只读且子目录为空：' + JSON.stringify(initialFileGrant), initialFileGrant.access === 'readonly' && initialFileGrant.path === '' && initialFileGrant.writeDisabled);
+    check('子目录限制 1024 字符且根名称不注入 HTML', await writableRoot.locator('[data-root-path]').getAttribute('maxlength') === '1024' && await manager.locator('[data-ref="fileRootOptions"] img').count() === 0 && (await writableRoot.innerText()).includes('视频资源'));
+    await writableRoot.locator('[data-root-access]').evaluate(select => { select.value = 'readwrite'; });
+    await manager.locator('[data-ref="create"]').click();
+    await manager.locator('[data-ref="error"]').filter({ hasText: '只读角色或只读挂载' }).waitFor();
+    check('篡改禁用选项也不能授予只读角色写范围', calls.length === writesBeforeFiles);
+    await writableRoot.locator('[data-root-access]').selectOption('readonly');
+    for (const invalidPath of ['../私有', '/drives', '电影//2026', '电影/./2026', '电影/../2026', '电影\\2026', 'C:私有', '电影/\u0000', '电影/\u0001']) {
+      await writableRoot.locator('[data-root-path]').fill(invalidPath);
+      await manager.locator('[data-ref="create"]').click();
+      await manager.locator('[data-ref="error"]').filter({ hasText: '相对 POSIX 路径' }).waitFor();
+    }
+    await writableRoot.locator('[data-root-path]').evaluate(input => { input.value = 'a'.repeat(1025); });
+    await manager.locator('[data-ref="create"]').click();
+    await manager.locator('[data-ref="error"]').filter({ hasText: '相对 POSIX 路径' }).waitFor();
+    check('越界及非规范子目录均在本地拒绝且不提交', calls.length === writesBeforeFiles);
+    await writableRoot.locator('[data-root-path]').fill('电影/2026');
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    await writableRoot.locator('[data-root-access]').selectOption('readwrite');
+    await readonlyRoot.locator('[data-root-check]').check();
+    check('只读挂载在读写角色下仍不能写', await readonlyRoot.locator('option[value="readwrite"]').evaluate(option => option.disabled) && await readonlyRoot.locator('[data-root-access]').inputValue() === 'readonly' && (await readonlyRoot.innerText()).includes('只读挂载'));
+    await manager.locator('select[data-ref="role"]').selectOption('readonly');
+    check('降低角色立即收紧文件读写授权', await writableRoot.locator('[data-root-access]').inputValue() === 'readonly' && await writableRoot.locator('option[value="readwrite"]').evaluate(option => option.disabled));
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    await writableRoot.locator('[data-root-access]').selectOption('readwrite');
+    await manager.locator('[data-ref="create"]').click();
+    check('确认清楚列出角色与文件范围且不注入名称', (await page.locator('.fullmask').last().innerText()).includes('角色：读写') && (await page.locator('.fullmask').last().innerText()).includes('电影/2026') && await page.locator('.fullmask').last().locator('img').count() === 0);
+    await page.locator('.fullmask [data-yes]').click();
+    await page.locator('#r1ApiSecret').waitFor();
+    await page.locator('#r1ApiSecret [data-ref="close"]').click();
+    const fileRequest = calls.filter(call => call.path === '/api/access/keys').at(-1).body;
+    check('文件范围只提交稳定根标识相对路径与访问方式', fileRequest.role === 'readwrite' && JSON.stringify(fileRequest.file_roots) === JSON.stringify([
+      { id: 'root_' + '1'.repeat(24), path: '电影/2026', access: 'readwrite' },
+      { id: 'root_' + '2'.repeat(24), path: '', access: 'readonly' },
+    ]) && !JSON.stringify(fileRequest).includes('/drives'));
+    check('列表展示角色和范围预授权', (await manager.locator('.r1-api-item').last().innerText()).includes('读写') && (await manager.locator('.r1-api-item').last().innerText()).includes('电影/2026') && (await manager.locator('.r1-api-item').last().innerText()).includes('待接入'));
+
+    const rootsBeforeUnavailable = state.file_root_catalog;
+    state.file_root_catalog = { available: false, status: 'unavailable', reason: 'fixture：尚无可信挂载', roots: [] };
+    await manager.locator('[data-ref="refresh"]').click();
+    await manager.locator('[data-ref="fileRootsStatus"]').filter({ hasText: '尚无可信挂载' }).waitFor();
+    check('缺少可信根时不造占位盘并阻止文件密钥创建', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 0 && await manager.locator('[data-ref="create"]').isDisabled());
+    state.file_root_catalog = rootsBeforeUnavailable;
+    await manager.locator('[data-ref="refresh"]').click();
+    await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').last().waitFor();
+    check('挂载恢复不自动重新勾选文件范围', await manager.locator('[data-root-check]:checked').count() === 0);
+    await manager.locator('[data-ref="scopes"] input[value="files"]').uncheck();
+
+    state.keys.push({ id: 'fixture-legacy', name: '旧权限密钥', scopes: ['read', 'power'], allowed_ips: [], created_at: 1793240000,
+      expires_at: null, revoked_at: null, last_used_at: null, status: 'active' });
+    await manager.locator('[data-ref="refresh"]').click();
+    await manager.locator('.r1-api-item').filter({ hasText: '旧权限密钥' }).waitFor();
+    const legacy = manager.locator('.r1-api-item').filter({ hasText: '旧权限密钥' });
+    check('旧密钥按原有精确权限展示而不误标管理员', (await legacy.locator('[data-ref="role"]').innerText()) === '原有精确权限' && !(await legacy.locator('[data-ref="role"]').innerText()).includes('管理员'));
+    state.keys.find(key => key.id === 'fixture-legacy').role = 'legacy';
+    await manager.locator('[data-ref="refresh"]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    check('显式 legacy 也保持原有精确权限标签', (await legacy.locator('[data-ref="role"]').innerText()) === '原有精确权限');
+
     await manager.locator('input[data-ref="name"]').fill('长期 AI');
     await manager.locator('[data-ref="expiry"]').selectOption('0');
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
     await manager.locator('[data-ref="scopes"] input[value="power"]').check();
     await manager.locator('[data-ref="create"]').click();
     check('授予电源权限时明确说明', (await page.locator('.fullmask').last().innerText()).includes('电源权限可安排关机或重启'));
@@ -177,17 +271,24 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('Escape 清理密钥而保留管理页', await escapedField.inputValue() === '' && await manager.count() === 1 && await page.locator('#r1ApiSecret').count() === 0);
     await manager.locator('.r1-api-item').last().waitFor();
     check('长期有效期明确提交零值', calls.filter(call => call.path === '/api/access/keys').at(-1).body.expires_days === 0 && (await manager.locator('.r1-api-item').last().innerText()).includes('长期'));
+    check('管理员创建仍只携带明确勾选功能且不带未选文件授权', calls.filter(call => call.path === '/api/access/keys').at(-1).body.role === 'admin' && JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.scopes) === '["read","fan","power"]' && JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.file_roots) === '[]');
 
     await page.setViewportSize({ width: 320, height: 740 });
-    check('320px 管理页面不横向溢出', await manager.evaluate(element => [...element.querySelectorAll('.r1-api-dialog, .r1-api-item, input, textarea')].every(node => node.getBoundingClientRect().right <= 321 && node.getBoundingClientRect().left >= -1)));
+    await manager.locator('[data-ref="scopes"] input[value="files"]').check();
+    await manager.locator('.r1-api-file-root [data-root-check]').first().check();
+    check('320px 管理页面和文件范围不横向溢出', await manager.evaluate(element => [...element.querySelectorAll('.r1-api-dialog, .r1-api-item, input, textarea, select, fieldset')].every(node => node.getBoundingClientRect().right <= 321 && node.getBoundingClientRect().left >= -1)));
     await manager.locator('[data-ref="enabled"]').click();
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="serviceStatus"]').textContent === '已关闭');
     check('关闭服务可立即提交', calls.at(-1).path === '/api/access/settings' && calls.at(-1).body.enabled === false);
+    state.scope_catalog = state.scope_catalog.filter(scope => scope.id !== 'docker');
     await manager.locator('[data-ref="close"]').click();
     await page.locator('#set-r1-api [data-ref="open"]').click();
     await page.locator('#r1ApiManager [data-ref="content"]:not([hidden])').waitFor();
     check('重新打开只返回元数据', await page.locator('#r1ApiSecret').count() === 0 && !(await page.locator('#r1ApiManager').innerText()).includes(secret));
+    check('缺少领域元数据时不虚构授权选项', await page.locator('#r1ApiManager [data-ref="scopes"] input[value="docker"]').count() === 0);
+    check('重新打开恢复只读与默认状态域且不默认授予文件', await page.locator('#r1ApiManager select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await page.locator('#r1ApiManager [data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
     check('名称未执行脚本', await page.evaluate(() => !window.apiNameInjected));
+    check('文件根名称未执行脚本', await page.evaluate(() => !window.apiRootInjected));
     check('页面无脚本异常', pageErrors.length === 0);
     console.log(JSON.stringify({ ok: true, checks, fixture: fixtureDir, reads, writes: calls.length }, null, 2));
   } catch (error) {

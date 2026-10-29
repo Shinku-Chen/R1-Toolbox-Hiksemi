@@ -151,14 +151,23 @@
 .r1-api-dialog .textfield { display: block; width: 100%; min-width: 0; max-width: 100%; }
 .r1-api-dialog textarea { resize: vertical; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
 .r1-api-secret .r1-api-input { margin: 18px 0 10px; }
-.r1-api-scopes { border: 1px solid var(--line); border-radius: 12px; margin: 0; padding: 10px 14px; min-width: 0; }
-.r1-api-scopes legend { font-size: 13px; color: var(--ink-2); }
+.r1-api-scopes, .r1-api-file-roots { border: 1px solid var(--line); border-radius: 12px; margin: 0; padding: 10px 14px; min-width: 0; }
+.r1-api-scopes legend, .r1-api-file-roots legend { font-size: 13px; color: var(--ink-2); }
 .r1-api-scopes > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; }
 .r1-api-scope { display: flex; gap: 10px; align-items: flex-start; min-height: 48px; padding: 7px 0; cursor: pointer; }
 .r1-api-scope input, .r1-api-service input { width: 20px; height: 20px; flex: none; accent-color: var(--ink-1); }
 .r1-api-scope > span { min-width: 0; display: grid; gap: 3px; }
 .r1-api-scope b { font-size: 14px; font-weight: 550; }
 .r1-api-scope .sub { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.r1-api-permission-note { margin: 0; line-height: 1.6; }
+.r1-api-file-roots > div { display: grid; gap: 12px; }
+.r1-api-file-root { padding-top: 12px; min-width: 0; border-top: 1px solid var(--line); }
+.r1-api-file-root p, .r1-api-meta dd p { margin: 6px 0; overflow-wrap: anywhere; }
+.r1-api-root-choice { display: flex; align-items: flex-start; gap: 10px; min-height: 40px; font-size: 14px; cursor: pointer; }
+.r1-api-root-choice input { width: 20px; height: 20px; flex: none; accent-color: var(--ink-1); }
+.r1-api-root-choice span { min-width: 0; overflow-wrap: anywhere; }
+.r1-api-file-fields { display: grid; gap: 12px; min-width: 0; }
+.r1-api-file-fields[hidden], .r1-api-file-roots[hidden] { display: none; }
 .r1-api-list { display: grid; gap: 12px; }
 .r1-api-item { padding: 14px; border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
 .r1-api-item strong { min-width: 0; overflow-wrap: anywhere; }

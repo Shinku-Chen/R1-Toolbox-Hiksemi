@@ -11,10 +11,11 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 
 from mcp_service import (LEGACY_VERSIONS, META_CLIENT_CAPABILITIES,
-                         META_CLIENT_INFO, META_REQUIRED_SCOPE, META_SERVER_INFO,
+                         META_CLIENT_INFO, META_MINIMUM_ROLE, META_REQUIRED_SCOPE, META_SERVER_INFO,
                          META_VERSION, MODERN_VERSION, READ_SECTIONS,
                          SUPPORTED_VERSIONS, McpService, tool_catalog,
                          validate_http_metadata)
+from api_permissions import MIN_ROLE_BY_TOOL
 
 
 def modern_meta(version=MODERN_VERSION):
@@ -236,8 +237,125 @@ class McpServiceTests(unittest.TestCase):
                 result = self.service.call_tool('request_power', {'operation': 'reboot',
                                                                  'confirmed': True}, principal)
                 self.assertTrue(result['isError'])
-                self.assertEqual('forbidden', result['structuredContent']['error']['code'])
+                self.assertEqual('scope_denied', result['structuredContent']['error']['code'])
         self.assertEqual([], self.calls)
+
+    @staticmethod
+    def role_principal(role, scopes=None):
+        return {'key_id': 'role-fixture', 'name': 'fixture', 'policy_version': 2,
+                'role': role, 'scopes': list(scopes if scopes is not None else
+                    ('read', 'media', 'fan', 'light', 'screen', 'power')),
+                'file_roots': []}
+
+    def test_catalog_announces_exact_minimum_roles_for_existing_ten_tools(self):
+        metadata = {item['name']: item['_meta'][META_MINIMUM_ROLE]
+                    for item in tool_catalog()}
+        self.assertEqual(dict(MIN_ROLE_BY_TOOL), metadata)
+        self.assertEqual('readonly', metadata['get_nas_status'])
+        self.assertEqual('readwrite', metadata['get_media_status'])
+        self.assertEqual('admin', metadata['request_power'])
+        self.assertEqual('admin', metadata['cancel_power'])
+        self.assertEqual(10, len(metadata))
+
+    def test_catalog_combines_roles_with_explicit_domains(self):
+        expected = {
+            'readonly': {'get_nas_status'},
+            'readwrite': set(MIN_ROLE_BY_TOOL) - {'request_power', 'cancel_power'},
+            'admin': set(MIN_ROLE_BY_TOOL),
+        }
+        for role, names in expected.items():
+            with self.subTest(role=role):
+                principal = self.role_principal(role)
+                self.assertEqual(names, {item['name'] for item in tool_catalog(principal)})
+                for modern in (False, True):
+                    status, body = self.handle(request('tools/list', modern=modern),
+                        MODERN_VERSION if modern else None, principal)
+                    self.assertEqual(200, status)
+                    self.assertEqual(names, {item['name'] for item in body['result']['tools']})
+        self.assertEqual([], tool_catalog(self.role_principal('admin', ['files', 'docker'])))
+        self.assertEqual([], tool_catalog(self.role_principal('readonly', ['media', 'power'])))
+        self.assertEqual({'set_screen', 'update_screen_settings'}, {
+            item['name'] for item in tool_catalog(self.role_principal('admin', ['screen']))})
+        self.assertEqual([], self.calls)
+
+    def test_all_tool_calls_follow_same_role_matrix_as_catalog(self):
+        fixtures = {
+            'get_nas_status': {}, 'get_media_status': {},
+            'set_fan_policy': {'config': {}, 'confirmed': True},
+            'release_fan': {'confirmed': True},
+            'set_light_policy': {'config': {}},
+            'set_rgb': {'mode': 0, 'color': '#123456'},
+            'set_screen': {'action': 'wake'}, 'update_screen_settings': {'settings': {}},
+            'request_power': {'operation': 'reboot', 'confirmed': True}, 'cancel_power': {},
+        }
+        for role in ('readonly', 'readwrite', 'admin'):
+            principal = self.role_principal(role)
+            listed = {item['name'] for item in tool_catalog(principal)}
+            for name, arguments in fixtures.items():
+                with self.subTest(role=role, tool=name):
+                    self.calls.clear()
+                    result = self.service.call_tool(name, arguments, principal)
+                    if name in listed:
+                        self.assertFalse(result['isError'])
+                        self.assertEqual(1, len(self.calls))
+                        self.assertEqual(name, self.calls[0][0])
+                    else:
+                        self.assertTrue(result['isError'])
+                        self.assertEqual('role_denied', result['structuredContent']['error']['code'])
+                        self.assertEqual([], self.calls)
+        self.calls.clear()
+
+    def test_role_and_scope_denials_precede_argument_validation_without_echo(self):
+        secret = 'PRIVATE_INPUT_MUST_NOT_BE_REFLECTED'
+        cases = [
+            (self.role_principal('readonly', ['screen']), 'set_screen', 'role_denied'),
+            (self.role_principal('readwrite', ['power']), 'request_power', 'role_denied'),
+            (self.role_principal('admin', ['read']), 'request_power', 'scope_denied'),
+            (self.role_principal('admin', ['files']), 'get_nas_status', 'scope_denied'),
+        ]
+        for principal, tool, expected in cases:
+            with self.subTest(tool=tool, role=principal['role']):
+                result = self.service.call_tool(tool, {'invalid': secret}, principal)
+                self.assertTrue(result['isError'])
+                self.assertEqual(expected, result['structuredContent']['error']['code'])
+                self.assertNotIn(secret, json.dumps(result))
+        self.assertEqual([], self.calls)
+
+    def test_malformed_policy_principals_fail_closed(self):
+        valid = self.role_principal('admin')
+        malformed = [None, 'admin', [], {}, {'scopes': 'read'},
+                     dict(valid, role='ADMIN'), dict(valid, role=None),
+                     dict(valid, role='legacy'), dict(valid, policy_version=1),
+                     dict(valid, policy_version=True), dict(valid, scopes=['read', '*']),
+                     dict(valid, scopes=['read', 'read']), dict(valid, file_roots='all')]
+        for principal in malformed:
+            with self.subTest(principal=principal):
+                # None without an argument means the browser metadata catalog;
+                # an explicitly unauthenticated machine caller passes {}.
+                self.assertEqual([], tool_catalog(principal if principal is not None else {}))
+                result = self.service.call_tool('get_nas_status', {}, principal)
+                self.assertTrue(result['isError'])
+                self.assertEqual('scope_denied', result['structuredContent']['error']['code'])
+        self.assertEqual([], self.calls)
+
+    def test_legacy_keys_keep_original_scope_grants_without_implicit_upgrade(self):
+        variants = [self.principal,
+                    dict(self.principal, policy_version=1, role='legacy', file_roots=[])]
+        for principal in variants:
+            with self.subTest(explicit_legacy='role' in principal):
+                self.assertEqual(set(MIN_ROLE_BY_TOOL),
+                    {item['name'] for item in tool_catalog(principal)})
+                # New keys need admin for power, but existing flat power grants
+                # remain usable without rewriting an old key into an admin key.
+                result = self.service.call_tool('request_power',
+                    {'operation': 'reboot', 'confirmed': True}, principal)
+                self.assertFalse(result['isError'])
+                self.assertEqual('request_power', self.calls[-1][0])
+        self.calls.clear()
+        media_only = {'scopes': ['media']}
+        self.assertEqual(['get_media_status'], [item['name'] for item in tool_catalog(media_only)])
+        self.assertFalse(self.service.call_tool('get_media_status', {}, media_only)['isError'])
+        self.calls.clear()
 
     def test_unknown_tool_rest_result_is_safe(self):
         result = self.service.call_tool('shell\nSECRET', {}, self.principal)

@@ -278,10 +278,10 @@ class IntegrationHTTPTests(unittest.TestCase):
                 status, _, value = self.rpc(key,
                     self.message('tools/call', {'name': name, 'arguments': arguments}))
                 self.assertEqual(status, 200)
-                self.assert_tool_error(value['result'], 'forbidden')
+                self.assert_tool_error(value['result'], 'scope_denied')
                 status, _, value = self.rest_action(key, name, arguments)
                 self.assertEqual(status, 200)
-                self.assert_tool_error(value, 'forbidden')
+                self.assert_tool_error(value, 'scope_denied')
         self.assert_no_actions()
 
     def test_permitted_mcp_and_rest_screen_tools_use_the_original_controller(self):

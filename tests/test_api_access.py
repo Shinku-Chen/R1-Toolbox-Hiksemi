@@ -8,12 +8,14 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'runtime'))
 spec = importlib.util.spec_from_file_location('api_access', ROOT / 'runtime/api_access.py')
 access = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(access)
@@ -39,6 +41,15 @@ class ApiAccessTests(unittest.TestCase):
         self.store.path.write_text(json.dumps(value), encoding='utf-8')
         os.chmod(self.store.path, 0o600)
 
+    def v1_state(self, key):
+        """Construct old bytes from safe local fixtures, without native secrets."""
+        state = json.loads(self.store.path.read_text(encoding='utf-8'))
+        state['version'] = 1
+        for row in state['keys']:
+            for field in ('role', 'policy_version', 'file_roots'):
+                row.pop(field, None)
+        return state
+
     def test_default_is_disabled_without_creating_file(self):
         value = self.store.snapshot()
         self.assertFalse(value['enabled'])
@@ -46,6 +57,8 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(value['keys'], [])
         self.assertEqual(value['audit'], [])
         self.assertEqual([item['id'] for item in value['scope_catalog']], list(access.SCOPES))
+        self.assertEqual([item['id'] for item in value['role_catalog']],
+                         ['readonly', 'readwrite', 'admin'])
         self.assertEqual(self.store.authorize(None, '127.0.0.1'), (None, 'disabled'))
         self.assertFalse(self.store.path.exists())
 
@@ -72,7 +85,10 @@ class ApiAccessTests(unittest.TestCase):
         self.enable()
         principal, reason = self.authorize(key)
         self.assertEqual(reason, 'ok')
-        self.assertEqual(principal, {'key_id': key['id'], 'name': key['name'], 'scopes': ['read']})
+        self.assertEqual(principal, {
+            'key_id': key['id'], 'name': key['name'], 'scopes': ['read'],
+            'role': 'legacy', 'policy_version': 1, 'file_roots': [],
+        })
         other = access.ApiAccessStore(self.temp.name, clock=lambda: self.now)
         other.configure({'enabled': False})
         self.assertEqual(self.authorize(key), (None, 'disabled'))
@@ -297,6 +313,220 @@ class ApiAccessTests(unittest.TestCase):
         self.enable()
         for key in keys:
             self.assertEqual(self.authorize(key)[1], 'ok')
+
+    def test_explicit_roles_and_future_domains_are_preserved_without_implied_grants(self):
+        self.enable()
+        for role in ('readonly', 'readwrite', 'admin'):
+            key = self.create(role=role, scopes=['read', 'docker', 'apps', 'albums'])
+            principal, reason = self.authorize(key)
+            with self.subTest(role=role):
+                self.assertEqual(reason, 'ok')
+                self.assertEqual(key['policy_version'], 2)
+                self.assertEqual(principal['role'], role)
+                self.assertEqual(principal['policy_version'], 2)
+                self.assertEqual(principal['scopes'], ['read', 'docker', 'apps', 'albums'])
+                self.assertEqual(principal['file_roots'], [])
+                self.assertEqual(self.authorize(key, scope='docker')[1], 'ok')
+                self.assertEqual(self.authorize(key, scope='power'), (None, 'scope_denied'))
+                # Authorization checks the domain only. MCP separately applies
+                # the operation's minimum role; the store never promotes it.
+                self.assertNotIn('token', principal)
+                self.assertNotIn('digest', principal)
+
+    def test_legacy_create_keeps_original_scopes_and_rejects_new_domains(self):
+        key = self.create(scopes=['fan', 'light', 'power'])
+        self.assertEqual(key['role'], 'legacy')
+        self.assertEqual(key['policy_version'], 1)
+        self.assertEqual(key['file_roots'], [])
+        for body in ({'scopes': ['docker']}, {'role': 'legacy'},
+                     {'file_roots': [{'id': 'root_' + 'a' * 24, 'path': '', 'access': 'readonly'}]},
+                     {'file_roots': None}):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                self.create(**body)
+
+    def test_v1_reads_do_not_rewrite_and_first_write_migrates_without_grant_changes(self):
+        key = self.create(scopes=['read', 'fan', 'power'], allowed_ips=['192.168.31.22'])
+        self.enable()
+        old = self.v1_state(key)
+        self.write_state(old)
+        before = self.store.path.read_bytes()
+        snapshot = self.store.snapshot()
+        principal, reason = self.authorize(key)
+        self.assertEqual(reason, 'ok')
+        self.assertEqual(snapshot['keys'][0]['role'], 'legacy')
+        self.assertEqual(principal['policy_version'], 1)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.store.configure({'enabled': True})
+        migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
+        self.assertEqual(migrated['version'], 2)
+        self.assertEqual(migrated['keys'][0], {
+            **old['keys'][0], 'policy_version': 1, 'role': 'legacy', 'file_roots': [],
+        })
+        self.assertEqual(self.authorize(key), (principal, 'ok'))
+        self.assertEqual(self.authorize(key, scope='docker'), (None, 'scope_denied'))
+        self.assertEqual(self.authorize(key, peer='192.168.31.23'), (None, 'peer_not_allowed'))
+
+    def test_v1_audit_write_migrates_and_preserves_revocation_and_expiry(self):
+        valid = self.create(expires_days=1)
+        revoked = self.create()
+        self.store.revoke_key(revoked['id'])
+        self.enable()
+        old = self.v1_state(valid)
+        self.write_state(old)
+        principal, _ = self.authorize(valid)
+        self.store.record(principal, 'integration/capabilities', '192.168.31.22', 'success')
+        state = json.loads(self.store.path.read_text(encoding='utf-8'))
+        self.assertEqual(state['version'], 2)
+        self.assertTrue(all(row['role'] == 'legacy' for row in state['keys']))
+        self.assertEqual(self.authorize(revoked), (None, 'key_revoked'))
+        self.now += 86400
+        self.assertEqual(self.authorize(valid), (None, 'key_expired'))
+
+    def test_v1_revoke_write_and_new_key_creation_migrate_atomically(self):
+        for operation in ('revoke', 'create'):
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as folder:
+                    store = access.ApiAccessStore(folder, clock=lambda: self.now)
+                    created = store.create_key({'name': '旧键', 'scopes': ['power']})
+                    state = json.loads(store.path.read_text(encoding='utf-8'))
+                    state['version'] = 1
+                    for row in state['keys']:
+                        for field in ('role', 'policy_version', 'file_roots'):
+                            row.pop(field)
+                    store.path.write_text(json.dumps(state), encoding='utf-8')
+                    os.chmod(store.path, 0o600)
+                    if operation == 'revoke':
+                        store.revoke_key(created['id'])
+                    else:
+                        store.create_key({'name': '新键', 'role': 'readonly', 'scopes': ['read']})
+                    result = json.loads(store.path.read_text(encoding='utf-8'))
+                    self.assertEqual(result['version'], 2)
+                    self.assertEqual(result['keys'][0]['role'], 'legacy')
+                    self.assertEqual(result['keys'][0]['scopes'], ['power'])
+                    self.assertEqual(result['keys'][0]['digest'], state['keys'][0]['digest'])
+
+    def test_failed_v1_migration_preserves_original_bytes_and_latches_closed(self):
+        key = self.create(scopes=['read', 'power'])
+        self.enable()
+        self.write_state(self.v1_state(key))
+        before = self.store.path.read_bytes()
+        with mock.patch.object(access.os, 'replace', side_effect=OSError('private detail')):
+            with self.assertRaises(OSError):
+                self.store.configure({'enabled': True})
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+        self.assertEqual(list(Path(self.temp.name).glob('.api-access-*')), [])
+
+    def test_large_file_grants_cannot_write_a_state_exceeding_the_read_limit(self):
+        key = self.create(role='readonly')
+        self.enable()
+        roots = [{'id': 'root_' + 'a' * 24, 'path': ('视' * 1020) + str(number),
+                  'access': 'readonly'} for number in range(32)]
+        # Each body is structurally valid. Repeated keys must not produce a
+        # successful write that the next request rejects as an oversized file.
+        for number in range(10):
+            before = self.store.path.read_bytes()
+            try:
+                self.create(name='大范围%d' % number, role='readonly',
+                            scopes=['files'], file_roots=roots)
+            except OSError:
+                self.assertEqual(self.store.path.read_bytes(), before)
+                self.assertLessEqual(len(before), access._MAX_FILE_BYTES)
+                self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+                self.assertEqual(list(Path(self.temp.name).glob('.api-access-*')), [])
+                break
+        else:
+            self.fail('fixture did not exercise the state-size bound')
+
+    def test_v2_file_roots_are_canonical_detached_and_never_resolved_by_store(self):
+        roots = [{'id': 'root_' + 'a' * 24, 'path': '视频资源/电影', 'access': 'readonly'},
+                 {'id': 'root_' + 'b' * 24, 'path': '', 'access': 'readonly'}]
+        # These identifiers need not exist here. The integration owner verifies
+        # them against its cold storage-root snapshot before calling this store.
+        key = self.create(role='readonly', scopes=['read', 'files'], file_roots=roots)
+        self.enable()
+        roots[0]['path'] = 'changed'
+        self.assertEqual(key['file_roots'][0]['path'], '视频资源/电影')
+        principal, _ = self.authorize(key, scope='files')
+        principal['file_roots'][0]['path'] = 'changed again'
+        snapshot = self.store.snapshot()
+        self.assertEqual(snapshot['keys'][0]['file_roots'][0]['path'], '视频资源/电影')
+        snapshot['keys'][0]['file_roots'][0]['access'] = 'readwrite'
+        snapshot['role_catalog'][0]['label'] = 'changed'
+        self.assertEqual(self.authorize(key, scope='files')[0]['file_roots'][0]['access'], 'readonly')
+        self.assertEqual(self.store.snapshot()['role_catalog'][0]['label'], '只读')
+
+    def test_file_root_access_does_not_exceed_role(self):
+        root = {'id': 'root_' + 'a' * 24, 'path': '', 'access': 'readwrite'}
+        with self.assertRaises(ValueError):
+            self.create(role='readonly', scopes=['files'], file_roots=[root])
+        for role in ('readwrite', 'admin'):
+            for mode in ('readonly', 'readwrite'):
+                with self.subTest(role=role, mode=mode):
+                    key = self.create(role=role, scopes=['files'], file_roots=[{**root, 'access': mode}])
+                    self.assertEqual(key['file_roots'][0]['access'], mode)
+
+    def test_file_root_limit_duplicate_identity_and_invalid_paths_are_rejected(self):
+        root = {'id': 'root_' + 'a' * 24, 'path': '', 'access': 'readonly'}
+        bad_paths = ('/', '/photos', '../photos', 'a/../b', '.', './photos', 'a/./b',
+                     'a//b', 'a/', '\\photos', 'a\\b', 'a\x00b', 'a\nb', 'a\tb',
+                     'a' * 1025, '\ud800', None, [], 1)
+        invalid = (None, {}, [None], [{**root, 'id': 'root_' + 'A' * 24}],
+                   [{**root, 'id': 'root_' + 'a' * 23}], [{**root, 'id': 'arbitrary-path'}],
+                   [{**root, 'extra': True}], [{**root, 'access': 'admin'}],
+                   [{**root, 'access': []}], [root, {**root, 'access': 'readwrite'}],
+                   *([{**root, 'path': path}] for path in bad_paths),
+                   [{**root, 'path': str(number)} for number in range(33)])
+        for value in invalid:
+            with self.subTest(roots=value), self.assertRaises(ValueError):
+                self.create(role='admin', scopes=['files'], file_roots=value)
+        self.assertFalse(self.store.path.exists())
+        accepted = [{**root, 'path': str(number)} for number in range(32)]
+        self.assertEqual(len(self.create(role='admin', scopes=['files'], file_roots=accepted)['file_roots']), 32)
+
+    def test_file_scope_and_root_range_must_be_selected_together(self):
+        root = {'id': 'root_' + 'a' * 24, 'path': '', 'access': 'readonly'}
+        for updates in ({'scopes': ['files'], 'file_roots': []},
+                        {'scopes': ['files']}, {'scopes': ['read'], 'file_roots': [root]}):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                self.create(role='admin', **updates)
+        for role in (None, True, [], {}, 'READONLY', 'legacy'):
+            with self.subTest(role=role), self.assertRaises(ValueError):
+                self.create(role=role)
+
+    def test_malformed_v2_policy_fields_fail_closed_without_overwrite(self):
+        key = self.create(role='admin', scopes=['read'])
+        self.enable()
+        state = json.loads(self.store.path.read_text(encoding='utf-8'))
+        row = state['keys'][0]
+        bad_rows = ({**row, 'policy_version': 1}, {**row, 'policy_version': True},
+                    {**row, 'policy_version': 3}, {**row, 'role': 'legacy'},
+                    {**row, 'role': []}, {**row, 'role': 'superadmin'},
+                    {field: value for field, value in row.items() if field != 'file_roots'},
+                    {**row, 'file_roots': None},
+                    {**row, 'scopes': ['files'], 'file_roots': []},
+                    {**row, 'policy_version': 1, 'role': 'legacy', 'scopes': ['docker']},
+                    {**row, 'policy_version': 1, 'role': 'legacy',
+                     'file_roots': [{'id': 'root_' + 'a' * 24, 'path': '', 'access': 'readonly'}]})
+        for bad in bad_rows:
+            with self.subTest(row=bad):
+                self.write_state({**state, 'keys': [bad]})
+                before = self.store.path.read_bytes()
+                self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+                with self.assertRaises(OSError):
+                    self.store.configure({'enabled': True})
+                self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_v1_cannot_smuggle_role_fields_or_new_scopes(self):
+        key = self.create()
+        self.enable()
+        old = self.v1_state(key)
+        row = old['keys'][0]
+        for bad in ({**row, 'role': 'admin'}, {**row, 'scopes': ['docker']},
+                    {**row, 'policy_version': 2}, {**row, 'file_roots': []}):
+            with self.subTest(row=bad):
+                self.write_state({**old, 'keys': [bad]})
+                self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
 
 
 if __name__ == '__main__':

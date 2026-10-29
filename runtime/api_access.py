@@ -19,21 +19,15 @@ import tempfile
 import threading
 import time
 
+from api_permissions import (LEGACY_SCOPES, ROLE_CATALOG, SCOPES,
+                             SCOPE_CATALOG, valid_file_roots as _file_roots)
 
-SCOPES = ('read', 'fan', 'light', 'screen', 'power', 'media')
-SCOPE_CATALOG = (
-    {'id': 'read', 'label': '读取状态', 'description': '读取设备、磁盘、温度与策略状态。'},
-    {'id': 'fan', 'label': '风扇控制', 'description': '修改风扇策略或恢复原厂管理。'},
-    {'id': 'light', 'label': '灯光控制', 'description': '修改灯效与 RGB 设置。'},
-    {'id': 'screen', 'label': '屏幕控制', 'description': '控制小屏与屏幕保护设置。'},
-    {'id': 'power', 'label': '电源操作', 'description': '请求或取消带延时的重启与关机。'},
-    {'id': 'media', 'label': '媒体查询', 'description': '显式查询原厂媒体进度，可能写原厂完成状态。'},
-)
 AUDIT_OPERATIONS = frozenset((
     'get_nas_status', 'get_media_status', 'set_fan_policy', 'release_fan',
     'set_light_policy', 'set_rgb', 'set_screen', 'update_screen_settings',
     'request_power', 'cancel_power', 'initialize', 'server/discover', 'ping',
     'tools/list', 'tools/call', 'integration/status', 'integration/action',
+    'integration/capabilities',
     'config', 'key.create', 'key.revoke', 'authenticate',
 ))
 AUDIT_OUTCOMES = frozenset(('success', 'error', 'denied', 'busy', 'unavailable'))
@@ -42,6 +36,7 @@ _MAX_FILE_BYTES = 262144
 _TOKEN_RE = re.compile(r'r1_[A-Za-z0-9_-]{43}\Z', re.ASCII)
 _KEY_ID_RE = re.compile(r'[0-9a-f]{24}\Z', re.ASCII)
 _DIGEST_RE = re.compile(r'[0-9a-f]{64}\Z', re.ASCII)
+_ROLES = frozenset(item['id'] for item in ROLE_CATALOG)
 _PRIVATE_V4 = tuple(ipaddress.ip_network(value) for value in (
     '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8'))
 _PRIVATE_V6 = ipaddress.ip_network('fc00::/7')
@@ -49,6 +44,7 @@ _KEY_FIELDS = frozenset((
     'id', 'name', 'scopes', 'allowed_ips', 'created_at', 'expires_at',
     'revoked_at', 'last_used_at', 'digest',
 ))
+_POLICY_FIELDS = frozenset(('policy_version', 'role', 'file_roots'))
 _AUDIT_FIELDS = frozenset((
     'timestamp', 'key_id', 'operation', 'peer', 'outcome', 'duration_ms',
 ))
@@ -83,9 +79,9 @@ def _label(value):
             and all(character.isprintable() for character in value))
 
 
-def _scopes(value):
-    return (isinstance(value, list) and 1 <= len(value) <= len(SCOPES)
-            and all(isinstance(item, str) and item in SCOPES for item in value)
+def _scopes(value, allowed=SCOPES):
+    return (isinstance(value, list) and 1 <= len(value) <= len(allowed)
+            and all(isinstance(item, str) and item in allowed for item in value)
             and len(set(value)) == len(value))
 
 
@@ -134,17 +130,30 @@ class ApiAccessStore:
 
     @staticmethod
     def _empty():
-        return {'version': 1, 'enabled': False, 'keys': [], 'audit': []}
+        return {'version': 2, 'enabled': False, 'keys': [], 'audit': []}
 
     @staticmethod
-    def _valid_key(row):
-        return (isinstance(row, dict) and set(row) == _KEY_FIELDS
+    def _valid_key(row, version=2):
+        fields = _KEY_FIELDS if version == 1 else _KEY_FIELDS | _POLICY_FIELDS
+        valid = (isinstance(row, dict) and set(row) == fields
                 and isinstance(row['id'], str) and _KEY_ID_RE.fullmatch(row['id'])
                 and _label(row['name']) and _scopes(row['scopes']) and _ips(row['allowed_ips'])
                 and all(_timestamp(row[field], nullable=True) for field in (
                     'expires_at', 'revoked_at', 'last_used_at'))
                 and _timestamp(row['created_at'])
                 and isinstance(row['digest'], str) and _DIGEST_RE.fullmatch(row['digest']))
+        if not valid:
+            return False
+        if version == 1:
+            return _scopes(row['scopes'], LEGACY_SCOPES)
+        if type(row['policy_version']) is not int:
+            return False
+        if row['policy_version'] == 1:
+            return (row['role'] == 'legacy' and row['file_roots'] == []
+                    and _scopes(row['scopes'], LEGACY_SCOPES))
+        return (row['policy_version'] == 2 and isinstance(row['role'], str)
+                and row['role'] in _ROLES
+                and _file_roots(row['file_roots'], row['role'], row['scopes']))
 
     @staticmethod
     def _valid_audit(row):
@@ -179,10 +188,10 @@ class ApiAccessStore:
                     return self._empty(), False
                 data = json.loads(text, parse_constant=_reject_constants, object_pairs_hook=_unique_object)
             if (not isinstance(data, dict) or set(data) != {'version', 'enabled', 'keys', 'audit'}
-                    or type(data['version']) is not int or data['version'] != 1
+                    or type(data['version']) is not int or data['version'] not in (1, 2)
                     or type(data['enabled']) is not bool
                     or not isinstance(data['keys'], list) or len(data['keys']) > MAX_KEYS
-                    or not all(self._valid_key(row) for row in data['keys'])
+                    or not all(self._valid_key(row, data['version']) for row in data['keys'])
                     or len({row['id'] for row in data['keys']}) != len(data['keys'])
                     or len({row['digest'] for row in data['keys']}) != len(data['keys'])
                     or not isinstance(data['audit'], list) or len(data['audit']) > MAX_AUDIT
@@ -195,13 +204,19 @@ class ApiAccessStore:
     def _write(self, state):
         temporary = None
         try:
+            # Pure reads retain v1 bytes. A real write upgrades the complete
+            # state in the same fsync/replace transaction as the requested change.
+            state = dict(state, version=2, keys=[self._policy_row(row) for row in state['keys']])
+            serialized = json.dumps(state, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+            if len(serialized.encode('utf-8')) > _MAX_FILE_BYTES:
+                raise OSError('访问配置超出存储上限')
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.is_symlink():
                 raise OSError('访问配置不可写')
             descriptor, temporary = tempfile.mkstemp(prefix='.api-access-', dir=str(self.path.parent))
             with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
                 os.chmod(temporary, 0o600)
-                json.dump(state, stream, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+                stream.write(serialized)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
@@ -239,11 +254,19 @@ class ApiAccessStore:
 
     @classmethod
     def _public_key(cls, row, now):
+        row = cls._policy_row(row)
         result = {field: value for field, value in row.items() if field != 'digest'}
         result['scopes'] = list(row['scopes'])
         result['allowed_ips'] = list(row['allowed_ips'])
+        result['file_roots'] = [dict(root) for root in row['file_roots']]
         result['status'] = cls._key_status(row, now)
         return result
+
+    @staticmethod
+    def _policy_row(row):
+        """Project a validated v1 row without changing its effective grants."""
+        return ({**row, 'policy_version': 1, 'role': 'legacy', 'file_roots': []}
+                if 'policy_version' not in row else row)
 
     def snapshot(self):
         with self.lock:
@@ -253,6 +276,7 @@ class ApiAccessStore:
                 'enabled': bool(valid and data['enabled']), 'storage_ok': valid,
                 'keys': [self._public_key(row, now) for row in data['keys']],
                 'scope_catalog': [dict(item) for item in SCOPE_CATALOG],
+                'role_catalog': [dict(item) for item in ROLE_CATALOG],
                 'audit': [dict(row) for row in reversed(data['audit'])],
             }
 
@@ -266,14 +290,23 @@ class ApiAccessStore:
             return self.snapshot()
 
     def create_key(self, body):
-        if (not isinstance(body, dict) or set(body) - {'name', 'scopes', 'allowed_ips', 'expires_days'}
+        if (not isinstance(body, dict) or set(body) - {
+                'name', 'scopes', 'allowed_ips', 'expires_days', 'role', 'file_roots'}
                 or not _label(body.get('name'))):
             raise ValueError('密钥名称或字段无效')
         scopes = body.get('scopes', ['read'])
         days = body.get('expires_days', 90)
         supplied_ips = body.get('allowed_ips', [])
-        if not _scopes(scopes):
+        modern = 'role' in body
+        role = body.get('role') if modern else 'legacy'
+        roots = body.get('file_roots', [])
+        if (modern and (not isinstance(role, str) or role not in _ROLES)
+                or not modern and roots != []):
+            raise ValueError('密钥角色或文件范围无效')
+        if not _scopes(scopes, SCOPES if modern else LEGACY_SCOPES):
             raise ValueError('密钥权限无效')
+        if modern and not _file_roots(roots, role, scopes):
+            raise ValueError('文件范围或访问权限无效')
         if type(days) is not int or not 0 <= days <= 365:
             raise ValueError('有效天数须为 0 至 365 的整数')
         if not isinstance(supplied_ips, list) or len(supplied_ips) > 32:
@@ -302,6 +335,8 @@ class ApiAccessStore:
                 key_id = secrets.token_hex(12)
             row = {
                 'id': key_id, 'name': body['name'], 'scopes': list(scopes),
+                'policy_version': 2 if modern else 1, 'role': role,
+                'file_roots': [dict(root) for root in roots],
                 'allowed_ips': ips, 'created_at': now,
                 'expires_at': expires_at,
                 'revoked_at': None, 'last_used_at': None,
@@ -357,7 +392,11 @@ class ApiAccessStore:
                 return None, 'peer_not_allowed'
             if required_scope is not None and required_scope not in matched['scopes']:
                 return None, 'scope_denied'
-            return {'key_id': matched['id'], 'name': matched['name'], 'scopes': list(matched['scopes'])}, 'ok'
+            policy = self._policy_row(matched)
+            return {'key_id': matched['id'], 'name': matched['name'],
+                    'scopes': list(matched['scopes']), 'role': policy['role'],
+                    'policy_version': policy['policy_version'],
+                    'file_roots': [dict(root) for root in policy['file_roots']]}, 'ok'
 
     def record(self, principal, operation, peer, outcome, duration_ms=0):
         """Persist only a known operation, outcome and address, never its arguments."""

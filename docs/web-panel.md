@@ -179,6 +179,8 @@ console.log(await request({action: 'result', id: started.job.id}));
 
 ## 与 fnMonitor 的差异
 
+API 管理支持只读／读写／管理员角色、逐功能授权和文件范围，默认只读，角色提升不会自动勾选其他功能。现有密钥显示原有精确权限；文件、Docker 部署、应用、下载、影视、相册等新业务明确标记待接入，仅可保存预授权。能力自查和参数见 [MCP 与 API 管理](mcp-api.md)，实施顺序见 [AI 功能接入路线](ai-capability-roadmap.md)。
+
 - 品牌文字与“飞牛 / fnOS”提示改为 R1 Toolbox；渲染逻辑与样式未改写。
 - fnOS 专有的设置分组（服务端口、打开方式、功耗估算参数、通知、iDRAC、巡检、
   自更新）不显示；R1 用双路风扇、灯光、小屏、登录口令、连接分组替代。

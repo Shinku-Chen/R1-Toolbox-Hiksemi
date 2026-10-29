@@ -1426,14 +1426,23 @@ dd .diag-link{margin:0;height:24px}
 .r1-api-dialog .textfield{display:block;width:100%;min-width:0;max-width:100%}
 .r1-api-dialog textarea{resize:vertical;overflow-wrap:anywhere;white-space:pre-wrap;word-break:break-word}
 .r1-api-secret .r1-api-input{margin:18px 0 10px}
-.r1-api-scopes{border:1px solid var(--line);border-radius:12px;margin:0;padding:10px 14px;min-width:0}
-.r1-api-scopes legend{font-size:13px;color:var(--ink-2)}
+.r1-api-scopes,.r1-api-file-roots{border:1px solid var(--line);border-radius:12px;margin:0;padding:10px 14px;min-width:0}
+.r1-api-scopes legend,.r1-api-file-roots legend{font-size:13px;color:var(--ink-2)}
 .r1-api-scopes>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 18px}
 .r1-api-scope{display:flex;gap:10px;align-items:flex-start;min-height:48px;padding:7px 0;cursor:pointer}
 .r1-api-scope input,.r1-api-service input{width:20px;height:20px;flex:none;accent-color:var(--ink-1)}
 .r1-api-scope>span{min-width:0;display:grid;gap:3px}
 .r1-api-scope b{font-size:14px;font-weight:550}
 .r1-api-scope .sub{margin:0;overflow-wrap:anywhere;font-size:12px}
+.r1-api-permission-note{margin:0;line-height:1.6}
+.r1-api-file-roots>div{display:grid;gap:12px}
+.r1-api-file-root{padding-top:12px;min-width:0;border-top:1px solid var(--line)}
+.r1-api-file-root p,.r1-api-meta dd p{margin:6px 0;overflow-wrap:anywhere}
+.r1-api-root-choice{display:flex;align-items:flex-start;gap:10px;min-height:40px;font-size:14px;cursor:pointer}
+.r1-api-root-choice input{width:20px;height:20px;flex:none;accent-color:var(--ink-1)}
+.r1-api-root-choice span{min-width:0;overflow-wrap:anywhere}
+.r1-api-file-fields{display:grid;gap:12px;min-width:0}
+.r1-api-file-fields[hidden],.r1-api-file-roots[hidden]{display:none}
 .r1-api-list{display:grid;gap:12px}
 .r1-api-item{padding:14px;border:1px solid var(--line);border-radius:12px;min-width:0}
 .r1-api-item strong{min-width:0;overflow-wrap:anywhere}
@@ -5800,7 +5809,7 @@ x.pairing = a.pairing;
 card._sync();
 }
 function r1ApiSettings(card) {
-card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">管理 MCP 与 REST 的独立访问密钥。默认关闭，按功能授权；密钥仅在创建时显示一次。</p></div><button class="btn" type="button" data-ref="open">打开 API 管理</button></div>`;
+card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">管理 MCP 与 REST 的独立访问密钥、角色、功能和文件范围。默认关闭；密钥仅在创建时显示一次。</p></div><button class="btn" type="button" data-ref="open">打开 API 管理</button></div>`;
 card._r = collect(card);
 card._r.open.onclick = r1OpenApiManager;
 }
@@ -5853,14 +5862,17 @@ function r1OpenApiManager() {
 if ($('#r1ApiManager')) return;
 const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dialog" aria-modal="true" aria-labelledby="r1ApiTitle"><div class="card fm-card r1-api-dialog">
 <div class="r1-api-head"><h2 id="r1ApiTitle">API 管理</h2><button class="btn" type="button" data-ref="close" aria-label="关闭 API 管理">关闭</button></div>
-<p>仅允许持密钥的局域网客户端读取或操作 NAS。按功能授予权限，可随时撤销；普通网页登录权限不变。</p>
+<p>仅允许持密钥的局域网客户端读取或操作 NAS。角色限定操作等级，功能和文件范围分别授权，可随时撤销。</p>
 <p class="sub" data-ref="status" role="status">正在读取 API 设置…</p><p class="st-crit" data-ref="error" role="alert" hidden></p>
 <div data-ref="content" hidden>
 <div class="r1-api-service"><label class="check"><input type="checkbox" data-ref="enabled">启用局域网 API 服务</label><span class="sub" data-ref="serviceStatus"></span></div>
-<div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label></div>
+<div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label><label>功能能力目录<input class="textfield mono" data-ref="restCapabilities" readonly aria-label="功能能力目录地址"></label></div>
 <h3>创建访问密钥</h3><form data-ref="form" class="r1-api-create">
 <label class="r1-api-input">密钥名称<input class="textfield" data-ref="name" aria-label="密钥名称" placeholder="例如：客厅 AI" maxlength="64" required autocomplete="off"></label>
+<label class="r1-api-input">操作角色<select class="textfield" data-ref="role" aria-label="操作角色"></select><span class="sub" data-ref="roleDescription"></span></label>
 <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
+<p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
+<fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">待接入，当前仅保存范围授权；尚不能通过 AI 浏览、上传或下载文件。只会显示宿主已确认的存储根，不会自动授予全盘。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
 <label class="r1-api-input">允许的来源 IP（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="每行一个精确 IPv4 或 IPv6 地址"></textarea><span class="sub">留空允许持密钥的局域网客户端；不接受网段、域名或通配符。</span></label>
 <label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
 <button class="btn primary" type="submit" data-ref="create">创建密钥</button>
@@ -5868,7 +5880,9 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <div class="r1-api-head"><h3>访问密钥</h3><button class="btn" type="button" data-ref="refresh">刷新列表</button></div><div class="r1-api-list" data-ref="keys"></div>
 <h3>最近调用记录</h3><p class="sub">仅显示时间、密钥标识、来源、功能和结果，不记录令牌或请求内容。</p><div class="r1-api-list" data-ref="audit"></div>
 </div></div></div>`);
-const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media'];
+const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media', 'files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing', 'backup', 'system'];
+const roleLevel = { readonly: 0, readwrite: 1, admin: 2 }, roleLabels = { readonly: '只读', readwrite: '读写', admin: '管理员' };
+const defaultMinRole = { read: 'readonly', fan: 'readwrite', light: 'readwrite', screen: 'readwrite', power: 'admin', media: 'readwrite' };
 let state = null, busy = false, closed = false;
 const close = () => {
 if ($('#r1ApiSecret')) return;
@@ -5883,35 +5897,111 @@ setText(x.error, 'API 管理操作失败：' + message); x.error.hidden = false;
 const pending = value => {
 busy = value; el.setAttribute('aria-busy', String(value));
 x.enabled.disabled = value || !state || state.storage_ok !== true;
-x.create.disabled = value || !state || state.storage_ok !== true;
+x.create.disabled = value || !state || state.storage_ok !== true || (filesSelected() && !fileRoots().length);
 x.refresh.disabled = value;
 x.keys.querySelectorAll('button').forEach(button => { button.disabled = value || !state || state.storage_ok !== true; });
 };
 const names = () => new Map((Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []).map(scope => [scope.id, scope.label || scope.id]));
+const filesSelected = () => !!x.scopes.querySelector('input[value="files"]:checked');
+const fileRoots = () => state && state.file_root_catalog && state.file_root_catalog.available === true && Array.isArray(state.file_root_catalog.roots)
+? state.file_root_catalog.roots.filter(root => root && /^root_[0-9a-f]{24}$/.test(root.id) && typeof root.label === 'string' && typeof root.mount === 'string' && typeof root.read_only === 'boolean') : [];
+const roles = () => (Array.isArray(state && state.role_catalog) ? state.role_catalog : []).filter(role => Object.hasOwn(roleLevel, role.id));
+const scopeMinimum = scope => Object.hasOwn(roleLevel, scope.min_role) ? scope.min_role : (defaultMinRole[scope.id] || 'readonly');
+const scopeName = (id, labels) => {
+const scope = (Array.isArray(state.scope_catalog) ? state.scope_catalog : []).find(item => item.id === id);
+return (labels.get(id) || id) + (scope && scope.implemented === false ? '（待接入）' : '');
+};
+const validSubpath = value => typeof value === 'string' && value.length <= 1024 && !/[\\\u0000-\u001f\u007f]/.test(value) && !/^[A-Za-z]:/.test(value)
+&& (!value || value.split('/').every(part => part && part !== '.' && part !== '..'));
+const updatePermissions = () => {
+const role = x.role.value, level = roleLevel[role] ?? -1;
+const selected = new Set([...x.scopes.querySelectorAll('input:checked')].map(input => input.value));
+const limited = [];
+for (const scope of Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []) {
+const input = [...x.scopes.querySelectorAll('input')].find(item => item.value === scope.id);
+if (!input) continue;
+const minRole = scopeMinimum(scope), tooLow = level < roleLevel[minRole];
+const note = input.closest('label').querySelector('[data-scope-note]');
+note.textContent = scope.implemented === false ? '待接入，仅预授权；当前没有可调用工具。'
+: tooLow ? `当前角色不可调用此类工具；需要${roleLabels[minRole]}角色。` : '已接入；仍需同时满足所选功能权限。';
+if (selected.has(scope.id) && scope.implemented !== false && tooLow) limited.push(String(scope.label || scope.id));
+}
+const description = roles().find(item => item.id === role);
+setText(x.roleDescription, description ? String(description.description || '') : '未获得有效角色配置，请刷新后重试。');
+setText(x.roleStatus, limited.length ? `已选择${limited.join('、')}，当前角色不可调用这些工具。提高角色等级后仍只授予已勾选的功能。`
+: '提高角色等级不会自动勾选功能；待接入的功能只保存预授权。');
+x.fileRoots.hidden = !filesSelected();
+for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
+const checked = item.querySelector('[data-root-check]').checked;
+const access = item.querySelector('[data-root-access]');
+const writable = role !== 'readonly' && item.dataset.readOnly !== 'true';
+access.querySelector('option[value="readwrite"]').disabled = !writable;
+if (!writable) access.value = 'readonly';
+access.disabled = !checked;
+item.querySelector('[data-root-path]').disabled = !checked;
+item.querySelector('[data-root-fields]').hidden = !checked;
+setText(item.querySelector('[data-root-note]'), item.dataset.readOnly === 'true' ? '此存储根为只读挂载，只能授权读取。'
+: role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '仅对勾选的根与子目录保存授权。');
+}
+pending(busy);
+};
+const drawFileRoots = () => {
+const drafts = new Map([...x.fileRootOptions.querySelectorAll('.r1-api-file-root')].map(item => [item.dataset.rootId,
+{ checked: item.querySelector('[data-root-check]').checked, path: item.querySelector('[data-root-path]').value, access: item.querySelector('[data-root-access]').value }]));
+const roots = fileRoots();
+x.fileRootOptions.replaceChildren();
+const reason = state.file_root_catalog && state.file_root_catalog.reason;
+setText(x.fileRootsStatus, roots.length ? '请至少勾选一个存储根；子目录留空表示整个已选根。' : `没有已确认的存储根，不能创建文件权限。${reason ? '原因：' + String(reason) : '请确认磁盘已挂载后刷新。'}`);
+for (const root of roots) {
+const item = mount(`<article class="r1-api-file-root"><label class="r1-api-root-choice"><input type="checkbox" data-root-check><span data-root-label></span></label><p class="sub mono" data-root-mount></p><div class="r1-api-file-fields" data-root-fields hidden><label class="r1-api-input">子目录（可选）<input class="textfield" data-root-path maxlength="1024" placeholder="例如：电影／2026，请使用 / 分隔" autocomplete="off"><span class="sub">相对目录使用 / 分隔，不接受绝对路径、反斜杠、. 或 ..。</span></label><label class="r1-api-input">访问方式<select class="textfield" data-root-access><option value="readonly">只读</option><option value="readwrite">读写</option></select></label></div><p class="sub" data-root-note></p></article>`);
+item.dataset.rootId = root.id; item.dataset.readOnly = String(root.read_only);
+setText(item.querySelector('[data-root-label]'), root.label);
+setText(item.querySelector('[data-root-mount]'), root.mount);
+const checkbox = item.querySelector('[data-root-check]'), path = item.querySelector('[data-root-path]'), access = item.querySelector('[data-root-access]');
+checkbox.value = root.id; path.setAttribute('aria-label', root.label + '的子目录'); access.setAttribute('aria-label', root.label + '的访问方式');
+const draft = drafts.get(root.id);
+if (draft) { checkbox.checked = draft.checked; path.value = draft.path; access.value = draft.access; }
+checkbox.onchange = updatePermissions;
+x.fileRootOptions.append(item);
+}
+};
 const draw = () => {
 const labels = names();
 x.content.hidden = false; x.enabled.checked = state.enabled === true;
 setText(x.status, state.storage_ok === true ? '密钥只在创建时显示。关闭服务后，所有 MCP 与 REST 密钥立即停止访问。' : '访问配置存储不可用，暂不能启用服务或管理密钥。');
 setText(x.serviceStatus, state.enabled === true ? '已开启' : '已关闭');
-x.mcp.value = location.origin + '/mcp'; x.restStatus.value = location.origin + '/api/integration/status'; x.restAction.value = location.origin + '/api/integration/action';
-if (!x.scopes.children.length) {
+x.mcp.value = location.origin + '/mcp'; x.restStatus.value = location.origin + '/api/integration/status'; x.restAction.value = location.origin + '/api/integration/action'; x.restCapabilities.value = location.origin + '/api/integration/capabilities';
+const chosenRole = x.role.value || 'readonly';
+x.role.replaceChildren();
+for (const role of roles()) { const option = document.createElement('option'); option.value = role.id; option.textContent = String(role.label || roleLabels[role.id]); x.role.append(option); }
+x.role.value = roles().some(role => role.id === chosenRole) ? chosenRole : 'readonly';
+const chosenScopes = x.scopes.children.length ? new Set([...x.scopes.querySelectorAll('input:checked')].map(input => input.value)) : new Set(['read']);
+x.scopes.replaceChildren();
 for (const scope of Array.isArray(state.scope_catalog) ? state.scope_catalog : []) {
 if (!allowedScopes.includes(scope.id)) continue;
-const label = mount(`<label class="r1-api-scope"><input type="checkbox"><span><b></b><span class="sub"></span></span></label>`);
-const input = label.querySelector('input'); input.value = scope.id; input.checked = scope.id === 'read';
+const label = mount(`<label class="r1-api-scope"><input type="checkbox"><span><b></b><span class="sub" data-scope-description></span><span class="sub" data-scope-note></span></span></label>`);
+const input = label.querySelector('input'); input.value = scope.id; input.checked = chosenScopes.has(scope.id);
 label.querySelector('b').textContent = String(scope.label || scope.id);
-label.querySelector('.sub').textContent = String(scope.description || '');
+label.querySelector('[data-scope-description]').textContent = String(scope.description || '');
+input.onchange = updatePermissions;
 x.scopes.append(label);
-}
 }
 const keys = Array.isArray(state.keys) ? state.keys : [];
 x.keys.replaceChildren();
 if (!keys.length) x.keys.append(mount('<p class="sub">尚未创建访问密钥。</p>'));
 for (const key of keys) {
-const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></article>`);
+const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></article>`);
 const k = collect(item);
 setText(k.name, String(key.name || '未命名密钥')); setText(k.status, ({ active: '有效', expired: '已到期', revoked: '已撤销' })[key.status] || '状态未知');
-setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => labels.get(id) || id).join('、') || '未授予权限');
+setText(k.role, !key.role || key.role === 'legacy' ? '原有精确权限' : (roles().find(role => role.id === key.role) || {}).label || roleLabels[key.role] || '角色未知');
+setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => scopeName(id, labels)).join('、') || '未授予权限');
+const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
+if (!grants.length) setText(k.files, '未授予文件范围');
+for (const grant of grants) {
+const root = fileRoots().find(item => item.id === grant.id), row = document.createElement('p');
+setText(row, `${root ? root.label : '当前未确认的存储根（' + String(grant.id || '未知') + '）'} · ${grant.path ? '子目录：' + String(grant.path) : '整个已选根'} · ${({ readonly: '只读', readwrite: '读写' })[grant.access] || '权限未知'}`);
+k.files.append(row);
+}
 setText(k.ips, Array.isArray(key.allowed_ips) && key.allowed_ips.length ? key.allowed_ips.join('、') : '持密钥的局域网客户端');
 setText(k.created, r1ApiTime(key.created_at)); setText(k.expires, key.expires_at === null ? '长期' : r1ApiTime(key.expires_at)); setText(k.used, r1ApiTime(key.last_used_at));
 if (key.status === 'revoked') k.revoke.hidden = true;
@@ -5932,7 +6022,7 @@ setText(a.source, [record.key_name || record.key_id, record.peer || record.sourc
 setText(a.result, String(record.outcome || record.result || record.status || '结果未知'));
 x.audit.append(item);
 }
-pending(busy);
+drawFileRoots(); updatePermissions();
 };
 const refresh = async () => {
 const result = await API.get('/api/access');
@@ -5962,19 +6052,34 @@ await mutate('/api/access/settings', { enabled });
 };
 x.form.onsubmit = async event => {
 event.preventDefault(); if (busy) return;
-const name = x.name.value.trim(), scopes = [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
+const name = x.name.value.trim(), role = x.role.value, scopes = [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
 const allowed_ips = x.ips.value.split(/[\s,，;；]+/).map(value => value.trim()).filter(Boolean);
 if (!name || !scopes.length) { fail(new Error('请填写名称，并选择至少一项功能权限。')); return; }
+if (!Object.hasOwn(roleLevel, role)) { fail(new Error('请选择有效的操作角色。')); return; }
 if (new Set(allowed_ips).size !== allowed_ips.length || allowed_ips.some(ip => /[/\*]/.test(ip))) { fail(new Error('来源 IP 不可重复，也不接受网段或通配符。')); return; }
+const file_roots = [];
+if (scopes.includes('files')) {
+if (!fileRoots().length) { fail(new Error('没有已确认的存储根，不能创建文件权限。')); return; }
+for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
+if (!item.querySelector('[data-root-check]').checked) continue;
+const path = item.querySelector('[data-root-path]').value, access = item.querySelector('[data-root-access]').value;
+if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符。')); return; }
+if (!['readonly', 'readwrite'].includes(access) || (access === 'readwrite' && (role === 'readonly' || item.dataset.readOnly === 'true'))) { fail(new Error('只读角色或只读挂载不能授予文件读写权限。')); return; }
+file_roots.push({ id: item.dataset.rootId, path, access });
+}
+if (!file_roots.length) { fail(new Error('请至少勾选一个已确认的文件存储根。')); return; }
+}
 const labels = names(), grant = scopes.map(id => labels.get(id) || id).join('、');
-if (!(await R1.ask('创建访问密钥？', `将向「${esc(name)}」授予：${esc(grant)}。${scopes.includes('power') ? '电源权限可安排关机或重启。' : ''}`))) return;
-await mutate('/api/access/keys', { name, scopes, allowed_ips, expires_days: Number(x.expiry.value) });
+const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root.label) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。文件功能待接入，当前仅保存范围授权。` : '';
+if (!(await R1.ask('创建访问密钥？', `角色：${roleLabels[role]}。将向「${esc(name)}」授予：${esc(grant)}。${scopes.includes('power') ? '电源权限可安排关机或重启，需要管理员角色。' : ''}${rangeNote}`))) return;
+await mutate('/api/access/keys', { name, role, scopes, file_roots, allowed_ips, expires_days: Number(x.expiry.value) });
 };
 x.refresh.onclick = async () => {
 if (busy) return;
 pending(true); x.error.hidden = true;
 try { await refresh(); } catch (error) { fail(error); } finally { if (!closed) pending(false); }
 };
+x.role.onchange = updatePermissions;
 x.close.onclick = close; document.addEventListener('keydown', onKey);
 document.body.append(el); pending(true);
 refresh().catch(fail).finally(() => { if (!closed) pending(false); });
@@ -6033,7 +6138,7 @@ SET_SCHEMA.push(
 ...(R1_THRESHOLDS ? [R1_THRESHOLDS] : []),
 { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
 { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选，默认关闭）。启用后网页写操作需要先登录；也可通过 R1_WEB_AUTH_MODE=password 完全停用配对码。', custom: r1AuthSettings },
-{ id: 'r1-api', title: 'API 管理', icon: 'key', desc: '为局域网 AI 与自动化管理 MCP／REST 访问密钥、功能权限、来源限制和调用记录。', custom: r1ApiSettings },
+{ id: 'r1-api', title: 'API 管理', icon: 'key', desc: '为局域网 AI 与自动化管理 MCP／REST 密钥、操作角色、功能与文件范围、来源限制和调用记录。', custom: r1ApiSettings },
 { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
 { id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [
 { k: 'weatherAuto', label: '自动定位', type: 'toggle', hint: '按 NAS 公网 IP 估算城市；需要外网。关闭后可手动填写下方位置。',

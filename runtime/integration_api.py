@@ -9,7 +9,8 @@ import copy
 import time
 
 from api_access import ApiAccessStore, AUDIT_OPERATIONS
-from mcp_service import McpService, SUPPORTED_VERSIONS
+from api_file_roots import collect_file_roots, validate_file_grants
+from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
 
 
@@ -26,9 +27,56 @@ class IntegrationApi:
                           for row in state['audit']]
         return {'ok': True, **state,
                 'endpoints': {'mcp': '/mcp', 'status': '/api/integration/status',
-                              'action': '/api/integration/action'},
+                              'action': '/api/integration/action',
+                              'capabilities': '/api/integration/capabilities'},
                 'protocol_versions': list(SUPPORTED_VERSIONS),
+                'file_root_catalog': self.file_root_catalog(),
                 'tools': self.mcp.tool_catalog()}
+
+    def file_root_catalog(self):
+        """Owner-only planning metadata; this never enumerates user files."""
+        return collect_file_roots(self.web.panel)
+
+    def capabilities(self, principal):
+        """Expose this key's effective tools and selected domains, not NAS data.
+
+        Any authenticated key can introspect its permissions without the read
+        scope. Future domain grants are explicitly pending; they create no tool
+        callbacks and do not query native services or install dependencies.
+        """
+        from api_permissions import SCOPE_CATALOG
+        tools = self.mcp.tool_catalog(principal)
+        scopes = list(principal['scopes'])
+        domains = []
+        for domain in SCOPE_CATALOG:
+            if domain['id'] not in scopes:
+                continue
+            available = [tool['name'] for tool in tools
+                         if tool['_meta'][META_REQUIRED_SCOPE] == domain['id']]
+            implemented = domain.get('implemented') is not False
+            domains.append({'id': domain['id'], 'label': domain['label'],
+                            'implemented': implemented, 'available_tools': available,
+                            'reason': '待接入，当前没有可调用工具。' if not implemented
+                            else '当前角色没有可执行的工具。' if not available else None})
+        grants = []
+        selected = principal.get('file_roots', []) if 'files' in scopes else []
+        if selected:
+            roots = {row['id']: row for row in self.file_root_catalog()['roots']}
+            for grant in selected:
+                root = roots.get(grant['id'])
+                # Preserve the grant's configured mode, and report changed
+                # mount state separately; never silently broaden or downgrade.
+                can_use = root is not None and not (root['read_only'] and grant['access'] == 'readwrite')
+                grants.append({**copy.deepcopy(grant), 'available': can_use,
+                               'label': root['label'] if root else None,
+                               'mount': root['mount'] if root else None,
+                               'read_only': root['read_only'] if root else None,
+                               'reason': '根目录当前无法确认。' if root is None
+                               else '挂载已变为只读，原写入授权当前不可用。' if not can_use else None})
+        return {'ok': True, 'role': principal.get('role', 'legacy'),
+                'policy_version': principal.get('policy_version', 1),
+                'scopes': scopes, 'file_roots': grants,
+                'tools': tools, 'domains': domains}
 
     def manage(self, route, body):
         """Called only after the browser's existing session and CSRF gates."""
@@ -37,6 +85,8 @@ class IntegrationApi:
         if route == '/api/access/settings':
             return {'ok': True, **self.access.configure(body)}
         if route == '/api/access/keys':
+            if body.get('file_roots'):
+                validate_file_grants(body['file_roots'], self.file_root_catalog())
             created = self.access.create_key(body)
             token = created.pop('token')
             return {'ok': True, 'key': created, 'token': token}
@@ -58,7 +108,7 @@ class IntegrationApi:
             structured = result.get('structuredContent')
             if isinstance(structured, dict) and isinstance(structured.get('error'), dict):
                 code = structured['error'].get('code')
-            if code in ('scope_denied', 'permission_denied', 'forbidden'):
+            if code in ('scope_denied', 'role_denied', 'permission_denied', 'forbidden'):
                 outcome = 'denied'
         try:
             self.access.record(principal, operation, peer, outcome,
