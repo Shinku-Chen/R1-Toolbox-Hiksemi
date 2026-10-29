@@ -26,6 +26,7 @@ from fnm_auth import AuthStore, COOKIE as AUTH_COOKIE
 from fnm_compat import FnmonitorPanel
 from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
+from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
                       'saver_brightness', 'saver_content', 'saver_items', 'brightness',
@@ -62,7 +63,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/idrac/refresh', '/api/disk_scan/now', '/api/scan_log/clear', '/api/update/install',
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
-    '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business',
+    '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
 ))
 
 
@@ -230,6 +231,7 @@ class WebConfigServer:
         self.operation_lock = threading.RLock()
         self.storage_diagnostic_lock = threading.Lock()
         self.business_diagnostic_lock = threading.Lock()
+        self.diagnostic_lock = threading.Lock()
         self.server = self.thread = None
         self.reason = None
         self.pair_hash, self.pair_until = None, 0
@@ -703,6 +705,8 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
+        if route == '/api/dev/diagnostics':
+            return self._diagnostic_post(body, ip)
         if route == '/api/dev/business':
             return self._business_debug_post(body, headers, ip)
         if route == '/api/dev/storage':
@@ -770,6 +774,56 @@ class WebConfigServer:
         finally:
             self.operation_lock.release()
 
+    def _diagnostic_post(self, body, ip):
+        """Explicit developer IP access grants passive checks without a login.
+
+        This grant is local to this fixed route. Control, retry and command
+        routes retain their existing password and command permissions.
+        """
+        if not self._dev_authorized(ip):
+            return 403, {'ok': False, 'error': '开发者检测未启用、已过期或客户端不在白名单'}, None
+        try:
+            action, checks = parse_diagnostic_request(body)
+        except ValueError:
+            return 400, {'ok': False, 'error': '仅支持固定检测目录或不重复的检测项目列表'}, None
+        access = {'client_ip': str(ip), 'expires_in': max(0, int(self.dev_until - time.time()))}
+        if action == 'catalog':
+            return 200, {'ok': True, 'version': self.version, 'access': access,
+                         'catalog': diagnostic_catalog()}, None
+        if not self.diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有开发者检测正在进行'}, None
+        try:
+            collectors = {
+                'device': self._device_diagnostic_snapshot,
+                'storage': lambda: self._storage_debug_snapshot()[:2],
+                'business': lambda: self._business_debug_snapshot()[:2],
+                'fan': lambda: (200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}),
+            }
+            return 200, {'ok': True, 'version': self.version, 'access': access,
+                         'snapshot': collect_diagnostics(checks, collectors)}, None
+        finally:
+            self.diagnostic_lock.release()
+
+    def _device_diagnostic_snapshot(self):
+        """Project identity fields from the existing cache; never refresh hardware."""
+        if self.insights is None:
+            return 503, {'ok': False}
+        cached = self.insights.snapshot()
+        identity = cached.get('device', {}).get('identity', {})
+        if not isinstance(identity, dict) or not identity:
+            return 503, {'ok': False}
+
+        def text(value):
+            return value[:256] if isinstance(value, str) and value else None
+
+        device = {key: text(identity.get(key)) for key in ('name', 'name_source', 'name_reason', 'hostname', 'kernel')}
+        firmware = identity.get('firmware', {})
+        if not isinstance(firmware, dict):
+            firmware = {}
+        device['firmware'] = {key: text(firmware.get(key)) for key in
+                              ('version', 'firmware_version', 'build', 'build_date', 'build_time', 'model')}
+        return 200, {'ok': True, 'source': 'insights_cache', 'device': device}
+
     def _business_debug_post(self, body, headers, ip):
         """Fixed passive business snapshot; never a general factory API bridge."""
         if not self._dev_authorized(ip) or not self.dev_commands:
@@ -778,6 +832,10 @@ class WebConfigServer:
             return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
         if not isinstance(body, dict) or body != {'action': 'snapshot'}:
             return 400, {'ok': False, 'error': '仅支持固定只读 snapshot 查询'}, None
+        return self._business_debug_snapshot()
+
+    def _business_debug_snapshot(self):
+        """Shared bounded collector; authorization belongs to each HTTP route."""
         if not self.business_diagnostic_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有业务诊断正在进行'}, None
         try:
@@ -799,6 +857,10 @@ class WebConfigServer:
             return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
         if not isinstance(body, dict) or body != {'action': 'snapshot'}:
             return 400, {'ok': False, 'error': '仅支持固定只读 snapshot 查询'}, None
+        return self._storage_debug_snapshot()
+
+    def _storage_debug_snapshot(self):
+        """Reuse name evidence and the same IPC lock for both private routes."""
         if self.insights is None or not callable(getattr(self.insights, 'storage_name_diagnostics', None)):
             return 503, {'ok': False, 'error': '存储名称采集器暂不可用'}, None
         # A single in-flight request bounds IPC pressure without touching the
@@ -1215,9 +1277,13 @@ class WebConfigServer:
                         self.send(404, {'error': '接口不存在'})
 
                 def do_POST(self):
-                    route = urllib.parse.urlsplit(self.path).path
+                    parsed = urllib.parse.urlsplit(self.path)
+                    route = parsed.path
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
+                        return
+                    if route == '/api/dev/diagnostics' and (parsed.query or parsed.fragment):
+                        self.send(400, {'error': '开发者检测不接受 URL 参数'})
                         return
                     try:
                         body = self.body(limit=65536 if panel else 8192)

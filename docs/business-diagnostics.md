@@ -2,6 +2,8 @@
 
 `POST /api/dev/business` 一次采集三个业务类别的受限只读结果和真实运行现场。它不代理原厂 REST，不接收命令、路径、URL、端口、令牌、用户 ID 或任务 ID。
 
+白名单 IP 需要免登录检测时，可改用统一 `POST /api/dev/diagnostics`，请求 `{"action":"snapshot","checks":["business"]}`。它复用同一个业务采集器及并发锁；仅统一入口接受开发者白名单授权，不改变本页旧接口的口令与命令开关要求。见[开发者白名单检测](dev-diagnostics.md)。
+
 ## 请求及授权
 
 需要 `R1_DEV_NO_PAIRING=1`、精确客户端 `R1_DEV_ALLOW_IPS`、有效的 `R1_DEV_MINUTES` 窗口及 `R1_DEV_ALLOW_COMMANDS=1`。已启用登录口令时还需要正常登录会话；开发者身份不替代口令，同源、JSON 和 CSRF 检查继续生效。接口没有公开 GET 或 CORS 放行。

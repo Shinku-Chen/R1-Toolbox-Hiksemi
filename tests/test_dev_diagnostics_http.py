@@ -1,0 +1,338 @@
+"""The passive developer grant is confined to a fixed, private HTTP route."""
+import copy
+import http.client
+import ipaddress
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
+import web_config
+
+
+_DEFAULT = object()
+CHECKS = {'device', 'storage', 'business', 'fan'}
+ROUTE = '/api/dev/diagnostics'
+
+
+class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
+    """Real HTTP requests; every device/provider read is an isolated mock."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='r1-dev-diagnostics-http-')
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        self.controller = mock.Mock(state_dir=directory)
+        self.policy = mock.Mock()
+        self.insights = mock.Mock()
+        self.cached = {'device': {'identity': {
+            'name': '测试设备昵称', 'name_source': 'histor.dev_info.dev_name',
+            'name_reason': None, 'hostname': 'R1-fixture', 'kernel': 'fixture-kernel',
+            'serial': 'private-device-serial', 'credentials': 'private-credentials',
+            'firmware': {'version': 'fixture-version', 'build': 'fixture-build',
+                         'model': 'HikSemi R1', 'token': 'private-firmware-token'},
+        }}, 'containers': {'secret': 'private-unrelated-data'}}
+        self.insights.snapshot.side_effect = lambda: copy.deepcopy(self.cached)
+        self.insights.storage_name_diagnostics.return_value = {
+            'available': True, 'source': 'fixture-storage', 'items': [], 'vendor': {}}
+        environment = {'R1_WEB_AUTH_MODE': 'password', 'R1_DEV_NO_PAIRING': '1',
+                       'R1_DEV_ALLOW_IPS': '127.0.0.1', 'R1_DEV_MINUTES': '60',
+                       'R1_DEV_ALLOW_COMMANDS': '0'}
+        with mock.patch.dict(os.environ, environment):
+            self.server = web_config.WebConfigServer(
+                self.controller, self.insights, fan_policy=self.policy,
+                host='127.0.0.1', port=0, state_dir=directory / 'web',
+                version='fixture-diagnostics').start()
+        self.addCleanup(self.server.stop)
+        self.fan = mock.Mock()
+        self.fan.snapshot.return_value = {'available': True, 'source': 'fixture-fan'}
+        self.server.fan_diagnostics = self.fan
+        business_patch = mock.patch.object(web_config, 'collect_business_diagnostics',
+            return_value={'schema_version': 1, 'categories': {}})
+        self.business = business_patch.start()
+        self.addCleanup(business_patch.stop)
+        self.login = self.server.auth.setup('fixture-diagnostics-password')
+        self.assertTrue(self.login['ok'])
+        self.cookie = web_config.AUTH_COOKIE + '=' + self.login['sid']
+        self.host = '127.0.0.1:' + str(self.server.port)
+
+    def request(self, body=_DEFAULT, *, path=ROUTE, method='POST', headers=None,
+                remove=(), duplicates=()):
+        """Build exact headers, including duplicates browsers normally suppress."""
+        if body is _DEFAULT:
+            body = {'action': 'snapshot'} if method == 'POST' else None
+        payload = body if isinstance(body, bytes) else (
+            json.dumps(body, ensure_ascii=False).encode('utf-8') if body is not None else None)
+        values = {'Host': self.host, 'Origin': 'http://' + self.host,
+                  'Content-Type': 'application/json', 'X-FNM-Request': '1',
+                  'Connection': 'close'}
+        if payload is not None:
+            values['Content-Length'] = str(len(payload))
+        values.update(headers or {})
+        for key in remove:
+            values.pop(key, None)
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.port, timeout=5)
+        try:
+            connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for key, value in list(values.items()) + list(duplicates):
+                connection.putheader(key, value)
+            connection.endheaders(payload)
+            response = connection.getresponse()
+            response_headers = {key.lower(): value for key, value in response.getheaders()}
+            response_body = json.loads(response.read().decode('utf-8'))
+            self.assertEqual(response_headers.get('cache-control'), 'no-store')
+            self.assertNotIn('access-control-allow-origin', response_headers)
+            return response.status, response_headers, response_body
+        finally:
+            connection.close()
+
+    def assert_no_sources(self):
+        self.insights.snapshot.assert_not_called()
+        self.insights.storage_name_diagnostics.assert_not_called()
+        self.business.assert_not_called()
+        self.fan.snapshot.assert_not_called()
+        self.assert_no_controls()
+
+    def assert_no_controls(self):
+        self.insights._smart.assert_not_called()
+        self.insights._disks.assert_not_called()
+        self.controller.action.assert_not_called()
+        self.policy.action.assert_not_called()
+        self.fan.start.assert_not_called()
+
+    def test_catalog_needs_no_password_cookie_or_command_flag_and_does_not_collect(self):
+        self.assertTrue(self.server.auth.required())
+        self.assertFalse(self.server.dev_commands)
+        status, headers, value = self.request({'action': 'catalog'})
+        self.assertEqual(status, 200)
+        self.assertTrue(value['ok'])
+        self.assertEqual(value['version'], 'fixture-diagnostics')
+        self.assertEqual(value['access']['client_ip'], '127.0.0.1')
+        self.assertGreater(value['access']['expires_in'], 0)
+        self.assertLessEqual(value['access']['expires_in'], 3600)
+        self.assertEqual(value['catalog']['schema_version'], 1)
+        self.assertIs(value['catalog']['read_only'], True)
+        self.assertEqual({row['id'] for row in value['catalog']['checks']}, CHECKS)
+        self.assertNotIn('set-cookie', headers)
+        self.assert_no_sources()
+
+    def test_default_snapshot_runs_all_fixed_sources_without_enabling_controls(self):
+        status, headers, value = self.request()
+        self.assertEqual(status, 200)
+        self.assertTrue(value['ok'])
+        snapshot = value['snapshot']
+        self.assertEqual(snapshot['schema_version'], 1)
+        self.assertIs(snapshot['read_only'], True)
+        self.assertEqual(set(snapshot['checks']), CHECKS)
+        self.assertIs(snapshot['all_checks_completed'], True)
+        for result in snapshot['checks'].values():
+            self.assertEqual(result['http_status'], 200)
+            self.assertIs(result['ok'], True)
+            self.assertIsInstance(result['data'], dict)
+            self.assertIsNone(result['error'])
+        self.insights.storage_name_diagnostics.assert_called_once_with()
+        self.business.assert_called_once_with()
+        self.fan.snapshot.assert_called_once_with()
+        self.assertNotIn('set-cookie', headers)
+        self.assert_no_controls()
+
+    def test_selected_check_executes_only_its_fixed_source(self):
+        for selected in sorted(CHECKS):
+            with self.subTest(check=selected):
+                self.insights.reset_mock()
+                self.business.reset_mock()
+                self.fan.reset_mock()
+                status, _, value = self.request({'action': 'snapshot', 'checks': [selected]})
+                self.assertEqual(status, 200)
+                self.assertEqual(set(value['snapshot']['checks']), {selected})
+                self.assertTrue(value['snapshot']['checks'][selected]['ok'])
+                self.assertEqual(self.insights.snapshot.call_count,
+                                 1 if selected in ('device', 'storage') else 0)
+                self.assertEqual(self.insights.storage_name_diagnostics.call_count,
+                                 int(selected == 'storage'))
+                self.assertEqual(self.business.call_count, int(selected == 'business'))
+                self.assertEqual(self.fan.snapshot.call_count, int(selected == 'fan'))
+                self.assert_no_controls()
+
+    def test_flag_ip_and_expiry_are_checked_before_catalog_or_snapshot(self):
+        for attribute, denied in (('dev_no_pairing', False), ('dev_allow_ips', set()),
+                                 ('dev_allow_ips', {ipaddress.ip_address('192.0.2.5')}),
+                                 ('dev_until', time.time() - 1)):
+            for action in ('catalog', 'snapshot'):
+                with self.subTest(attribute=attribute, action=action), \
+                        mock.patch.object(self.server, attribute, denied):
+                    self.assertEqual(self.request({'action': action})[0], 403)
+        self.assert_no_sources()
+
+    def test_nonallowlisted_peer_cannot_use_password_or_spoof_forwarded_headers(self):
+        self.server.dev_allow_ips = {ipaddress.ip_address('192.0.2.5')}
+        headers = {'Cookie': self.cookie, 'Forwarded': 'for=192.0.2.5',
+                   'X-Forwarded-For': '192.0.2.5', 'X-Real-IP': '192.0.2.5'}
+        for action in ('catalog', 'snapshot'):
+            with self.subTest(action=action):
+                self.assertEqual(self.request({'action': action}, headers=headers)[0], 403)
+        self.assert_no_sources()
+
+    def test_same_origin_json_marker_and_unique_fields_precede_sources(self):
+        cases = (({'headers': {'Host': 'foreign.invalid'}}, 403),
+                 ({'headers': {'Origin': 'http://foreign.invalid'}}, 403),
+                 ({'remove': ('Origin',)}, 403),
+                 ({'remove': ('X-FNM-Request',)}, 403),
+                 ({'headers': {'X-FNM-Request': '0'}}, 403),
+                 ({'headers': {'Content-Type': 'text/plain'}}, 400),
+                 ({'body': b'{'}, 400),
+                 ({'body': b'{"action":"snapshot","action":"snapshot"}'}, 400),
+                 ({'body': b'{"action":"snapshot","checks":[NaN]}'}, 400))
+        for kwargs, expected in cases:
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(self.request(**kwargs)[0], expected)
+        self.assert_no_sources()
+
+    def test_duplicate_security_headers_are_rejected_before_sources(self):
+        headers = (('Host', self.host), ('Origin', 'http://' + self.host),
+                   ('Cookie', self.cookie), ('Content-Length', '21'),
+                   ('Connection', 'close'), ('X-R1-CSRF', 'x' * 43),
+                   ('X-FNM-Request', '1'))
+        for key, value in headers:
+            with self.subTest(header=key):
+                extra = {key: value} if key in ('Cookie', 'X-R1-CSRF') else {}
+                self.assertEqual(self.request(headers=extra, duplicates=((key, value),))[0], 400)
+        self.assert_no_sources()
+
+    def test_fixed_schema_rejects_empty_unknown_duplicate_checks_and_extra_fields(self):
+        bodies = ({}, [], 'snapshot', {'action': []}, {'action': 'retry'},
+                  {'action': 'snapshot', 'checks': []},
+                  {'action': 'snapshot', 'checks': 'device'},
+                  {'action': 'snapshot', 'checks': ['device', 'device']},
+                  {'action': 'snapshot', 'checks': ['unknown']},
+                  {'action': 'snapshot', 'checks': [1]},
+                  {'action': 'snapshot', 'checks': [None]},
+                  {'action': 'snapshot', 'checks': [['device']]},
+                  {'action': 'catalog', 'checks': ['device']})
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual(self.request(body)[0], 400)
+        for field, value in (('path', '/etc/shadow'), ('cmd', 'id'), ('command', 'id'),
+                             ('url', 'http://127.0.0.1'), ('port', 7788),
+                             ('confirmed', True), ('duration_seconds', 60)):
+            with self.subTest(field=field):
+                self.assertEqual(self.request({'action': 'snapshot', field: value})[0], 400)
+        self.assert_no_sources()
+
+    def test_route_has_no_get_cors_or_write_methods_and_rejects_url_arguments(self):
+        for method in ('GET', 'OPTIONS', 'PUT', 'PATCH', 'DELETE', 'HEAD'):
+            with self.subTest(method=method):
+                if method == 'HEAD':
+                    # HEAD has no response body by HTTP definition.
+                    connection = http.client.HTTPConnection('127.0.0.1', self.server.port, timeout=5)
+                    try:
+                        connection.request('HEAD', ROUTE, headers={'Host': self.host})
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 405)
+                        self.assertIsNone(response.getheader('Access-Control-Allow-Origin'))
+                        response.read()
+                    finally:
+                        connection.close()
+                else:
+                    self.assertEqual(self.request(method=method)[0], 401 if method == 'GET' else 405)
+        for suffix in ('?checks=device', '?cmd=id', '#device'):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(self.request(path=ROUTE + suffix)[0], 400)
+        self.assertIn(ROUTE, web_config.PANEL_POST_ROUTES)
+        self.assertNotIn(ROUTE, web_config.PANEL_GET_ROUTES)
+        self.assertNotIn(ROUTE, web_config.PUBLIC_ROUTES)
+        self.assert_no_sources()
+
+    def test_new_grant_does_not_unlock_old_debug_routes_or_normal_writes(self):
+        self.server.dev_commands = True
+        for path, body, expected in (
+                ('/api/dev/storage', {'action': 'snapshot'}, 401),
+                ('/api/dev/business', {'action': 'snapshot'}, 401),
+                ('/api/dev/fan', {'action': 'snapshot'}, 401),
+                ('/api/dev/fan', {'action': 'retry', 'confirmed': True}, 401),
+                ('/api/dev/exec', {'name': 'identity'}, 403),
+                ('/api/r1/settings', {'brightness': 50}, 401),
+                ('/api/r1/power', {'action': 'reboot', 'confirmed': True}, 401)):
+            with self.subTest(path=path, body=body):
+                self.assertEqual(self.request(body, path=path)[0], expected)
+        status, _, session = self.request(path='/api/auth/session', method='GET')
+        self.assertEqual(status, 200)
+        self.assertFalse(session['authorized'])
+        self.assertFalse(session['dev_mode'])
+        self.assert_no_sources()
+
+    def test_old_debug_routes_still_need_command_flag_with_valid_password_cookie(self):
+        for path in ('/api/dev/storage', '/api/dev/business', '/api/dev/fan'):
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path=path, headers={'Cookie': self.cookie})[0], 403)
+        self.assertEqual(self.request({'name': 'identity'}, path='/api/dev/exec',
+                                     headers={'Cookie': self.cookie})[0], 403)
+        self.assert_no_sources()
+
+    def test_device_check_projects_only_fixed_cached_identity_fields(self):
+        status, _, value = self.request({'action': 'snapshot', 'checks': ['device']})
+        self.assertEqual(status, 200)
+        data = value['snapshot']['checks']['device']['data']
+        self.assertEqual(data['source'], 'insights_cache')
+        device = data['device']
+        self.assertEqual(set(device), {'name', 'name_source', 'name_reason', 'hostname', 'kernel', 'firmware'})
+        self.assertEqual(device['name'], '测试设备昵称')
+        self.assertIsNone(device['name_reason'])
+        self.assertEqual(set(device['firmware']), {
+            'version', 'firmware_version', 'build', 'build_date', 'build_time', 'model'})
+        self.assertNotIn('private-', json.dumps(value))
+        self.insights.snapshot.assert_called_once_with()
+        self.assert_no_controls()
+
+    def test_shared_source_locks_report_busy_without_calling_either_provider(self):
+        with self.server.storage_diagnostic_lock, self.server.business_diagnostic_lock:
+            status, _, value = self.request({'action': 'snapshot', 'checks': ['storage', 'business']})
+        self.assertEqual(status, 200)
+        self.assertFalse(value['snapshot']['all_checks_completed'])
+        for result in value['snapshot']['checks'].values():
+            self.assertEqual(result['http_status'], 409)
+            self.assertFalse(result['ok'])
+            self.assertIsNone(result['data'])
+        self.assert_no_sources()
+        self.assertEqual(self.request({'action': 'snapshot', 'checks': ['storage', 'business']})[0], 200)
+        self.insights.storage_name_diagnostics.assert_called_once_with()
+        self.business.assert_called_once_with()
+
+    def test_global_busy_does_not_collect_and_catalog_stays_available(self):
+        with self.server.diagnostic_lock:
+            self.assertEqual(self.request()[0], 409)
+            self.assertEqual(self.request({'action': 'catalog'})[0], 200)
+        self.assert_no_sources()
+
+    def test_source_errors_stay_private_release_locks_and_allow_other_checks(self):
+        private = '/private/credentials-token'
+        self.insights.storage_name_diagnostics.side_effect = OSError(private)
+        self.business.side_effect = OSError(private)
+        self.fan.snapshot.side_effect = OSError(private)
+        status, _, value = self.request()
+        self.assertEqual(status, 200)
+        self.assertFalse(value['snapshot']['all_checks_completed'])
+        self.assertTrue(value['snapshot']['checks']['device']['ok'])
+        for name in ('storage', 'business', 'fan'):
+            result = value['snapshot']['checks'][name]
+            self.assertEqual(result['http_status'], 503)
+            self.assertFalse(result['ok'])
+            self.assertIsNone(result['data'])
+        self.assertNotIn(private, json.dumps(value))
+        self.assertFalse(self.server.diagnostic_lock.locked())
+        self.assertFalse(self.server.storage_diagnostic_lock.locked())
+        self.assertFalse(self.server.business_diagnostic_lock.locked())
+        self.insights.storage_name_diagnostics.side_effect = None
+        self.business.side_effect = None
+        self.fan.snapshot.side_effect = None
+        self.assertTrue(self.request()[2]['snapshot']['all_checks_completed'])
+        self.assert_no_controls()
+
+
+if __name__ == '__main__':
+    unittest.main()
