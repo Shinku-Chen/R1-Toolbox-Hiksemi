@@ -75,12 +75,16 @@ class VendorAppDiagnosticsTests(unittest.TestCase):
             self.write([{"module_name": "应用", "version": "1", "status": status}])
             self.assertIsNone(self.collect()["data"])
 
-    def test_unknown_schema_duplicate_names_and_row_limit_are_rejected(self):
+    def test_unknown_schema_and_row_limit_fail_but_duplicate_rows_are_isolated(self):
         for value in ({}, [], {"list": {}}, {"list": [None]}):
             self.path.write_text(json.dumps(value), encoding="utf-8")
             self.assertIsNone(self.collect()["data"])
         self.write([{"module_name": "same", "version": "1", "status": 0}] * 2)
-        self.assertIsNone(self.collect()["data"])
+        duplicate = self.collect()
+        self.assertEqual(duplicate['status'], 'cached_partial')
+        self.assertEqual(duplicate['data']['cached_entries'], 1)
+        self.assertEqual(duplicate['data']['rejected_entries'], 1)
+        self.assertEqual(duplicate['data']['rejections'], [{'code': 'duplicate_application_name', 'count': 1}])
         self.write([{"module_name": str(i), "version": "1", "status": 0} for i in range(apps.MAX_APPS + 1)])
         self.assertIsNone(self.collect()["data"])
 
@@ -96,6 +100,23 @@ class VendorAppDiagnosticsTests(unittest.TestCase):
             self.assertIsNone(self.collect()["data"])
         self.write([{"module_name": "x" * 63, "version": "温" * 21, "status": 0}])
         self.assertTrue(self.collect()["available"])
+
+    def test_bad_cached_entries_do_not_hide_valid_unknown_application_names(self):
+        self.write([{'module_name': '陌生插件 β', 'version': '1.0', 'status': 4},
+                    {'module_name': '', 'version': '1', 'status': 0},
+                    {'module_name': '/private/never-return', 'version': '1', 'status': 0},
+                    {'module_name': 'unknown-status', 'version': '1', 'status': 3}, None])
+        result = self.collect()
+        self.assertTrue(result['available'])
+        self.assertEqual(result['status'], 'cached_partial')
+        self.assertEqual([row['name'] for row in result['data']['apps']], ['陌生插件 β'])
+        self.assertIsNone(result['data']['apps'][0]['running'])
+        self.assertEqual(result['data']['rejected_entries'], 4)
+        self.assertEqual(result['data']['rejections'], [
+            {'code': 'unsupported_application_label', 'count': 2},
+            {'code': 'unsupported_application_entry', 'count': 1},
+            {'code': 'unsupported_cached_status', 'count': 1}])
+        self.assertNotIn('never-return', json.dumps(result))
 
     def test_file_bounds_permissions_and_mutation_fail_without_exception_text(self):
         self.write()
@@ -258,10 +279,56 @@ class VendorAppDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(data['apps'][1]['version'])
         self.assertIsNone(data['apps'][1]['installation_status_code'])
         self.assertTrue(all(row['running'] is None for row in data['apps']))
-        for malformed in ({}, {'list': [None]}, {'list': [
-                {'module_name': 'same'}, {'module_name': 'same'}]}):
+        for malformed in ({}, {'list': [None]}):
             with self.assertRaises(ValueError):
                 apps.project_application_list(malformed, self.probe()['sampled_at'])
+
+    def test_partial_query_survives_snapshot_reprojection_without_rejection_loss_or_raw_labels(self):
+        frame = {'list': [{'module_name': '新应用 α', 'version': '2', 'status': 4},
+                          {'module_name': '', 'version': '1', 'status': 0},
+                          {'module_name': 'https://private.invalid/never-return'},
+                          {'module_name': '新应用 α'}, None]}
+        data = apps.project_application_list(frame, self.probe()['sampled_at'])
+        self.assertTrue(data['partial'])
+        self.assertEqual(data['cached_entries'], 1)
+        self.assertEqual(data['rejected_entries'], 4)
+        state = self.root / 'toolbox-state'
+        value = self.probe()
+        value.update(status='partial', data=data)
+        self.assertTrue(apps.record_application_snapshot(state, value))
+        result = apps.collect(self.root, state_dir=state)
+        self.assertEqual(result['status'], 'cached_partial')
+        self.assertEqual(result['data'], data)
+        self.assertFalse(result['data']['complete'])
+        self.assertTrue(apps.record_application_snapshot(state, result))
+        self.assertEqual(apps.collect(self.root, state_dir=state)['data'], data)
+        self.assertNotIn('never-return', (state / apps.SNAPSHOT_FILE).read_text(encoding='utf-8'))
+
+    def test_all_rejected_query_is_not_an_empty_success(self):
+        for rows in ([{'module_name': ''}], [None, {'module_name': '/private/never-return'}]):
+            with self.subTest(rows=len(rows)), self.assertRaises(apps._CacheError):
+                apps.project_application_list({'list': rows}, self.probe()['sampled_at'])
+
+    def test_snapshot_rejection_metadata_is_bounded_exact_and_never_trusted_as_raw_text(self):
+        state = self.root / 'toolbox-state'
+        good = self.probe()
+        invalid = [
+            {'partial': True, 'rejected_entries': True, 'rejections': []},
+            {'partial': True, 'rejected_entries': 1, 'rejections': []},
+            {'partial': False, 'rejected_entries': 1,
+             'rejections': [{'code': 'unsupported_application_label', 'count': 1}]},
+            {'partial': True, 'rejected_entries': 1,
+             'rejections': [{'code': '/private/never-return', 'count': 1}]},
+            {'partial': True, 'rejected_entries': 1,
+             'rejections': [{'code': 'unsupported_application_label', 'count': 1, 'raw': 'never-return'}]},
+            {'partial': True, 'rejected_entries': apps.MAX_APPS,
+             'rejections': [{'code': 'unsupported_application_label', 'count': apps.MAX_APPS}]},
+        ]
+        for metadata in invalid:
+            with self.subTest(metadata=metadata):
+                candidate = {**good, 'data': {**good['data'], **metadata}}
+                self.assertFalse(apps.record_application_snapshot(state, candidate))
+        self.assertFalse(state.exists())
 
 
 if __name__ == "__main__":

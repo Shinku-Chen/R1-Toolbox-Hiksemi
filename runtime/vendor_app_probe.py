@@ -132,8 +132,9 @@ def collect_application_probe(root='/', *, session_reader=None, transport=None):
                 result.update(status='native_error', error_code='native_request_rejected')
                 return result
         data = project_application_list(frame, sampled_at)
-        result.update(available=True, status='ok', data=data,
-                      reason='已显式读取原厂应用目录；运行状态与未知安装状态保持未知')
+        result.update(available=True, status='partial' if data['partial'] else 'ok', data=data,
+                      reason='部分原厂目录条目未通过校验，仅保留有效条目；运行状态保持未知' if data['partial']
+                      else '已显式读取原厂应用目录；运行状态与未知安装状态保持未知')
     except _CacheError as error:
         result.update(status='invalid_response', error_code=str(error))
     except wire.MediaProbeError as error:

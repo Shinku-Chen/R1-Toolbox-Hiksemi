@@ -13,7 +13,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 import web_config
 import vendor_business
+import vendor_app_diagnostics
+import vendor_app_probe
 from vendor_media_snapshot import collect_media_snapshot
+from test_vendor_media_probe import SAFE_CREDENTIAL, Session
 
 
 class BusinessSourcesHTTPTests(unittest.TestCase):
@@ -93,6 +96,40 @@ class BusinessSourcesHTTPTests(unittest.TestCase):
         self.apps.assert_called_once_with()
         record.assert_called_once_with(self.state_dir, self.apps.return_value)
         self.media.assert_not_called()
+
+    def test_partial_application_refresh_keeps_valid_names_through_snapshot_and_passive_business_http(self):
+        transport = mock.Mock(return_value=(200, {'list': [
+            {'module_name': '陌生插件 β', 'version': '1.0', 'status': 4},
+            {'module_name': ''}, {'module_name': '/private/must-not-leak'}, None]}))
+        self.apps.return_value = vendor_app_probe.collect_application_probe(
+            session_reader=lambda **_: (Session(), SAFE_CREDENTIAL), transport=transport)
+        status, refreshed = self.refresh('applications')
+        self.assertEqual(status, 200)
+        self.assertTrue(refreshed['result']['available'])
+        self.assertEqual(refreshed['result']['status'], 'partial')
+        self.assertTrue(refreshed['cache']['stored'])
+        empty = lambda **_: {'available': False, 'status': 'unavailable', 'data': None}
+        self.collector.side_effect = lambda **_: vendor_business.collect_business_diagnostics(
+            applications=lambda **_: vendor_app_diagnostics.collect(self.state_dir, state_dir=self.state_dir),
+            downloads=empty, media=empty,
+            runtime=lambda **_: {'available': False, 'processes': [], 'listeners': []})
+        for _ in range(2):
+            status, passive = self.request()
+            self.assertEqual(status, 200)
+            apps = passive['snapshot']['categories']['applications']
+            self.assertEqual(apps['status'], 'cached_partial')
+            self.assertTrue(apps['data']['partial'])
+            self.assertEqual(apps['data']['rejected_entries'], 3)
+            self.assertEqual(apps['data']['rejections'], [
+                {'code': 'unsupported_application_label', 'count': 2},
+                {'code': 'unsupported_application_entry', 'count': 1}])
+            self.assertEqual(apps['data']['apps'][0]['name'], '陌生插件 β')
+            self.assertIsNone(apps['data']['apps'][0]['running'])
+            self.assertNotIn('must-not-leak', json.dumps(passive))
+        self.apps.assert_called_once_with()
+        transport.assert_called_once()
+        self.media.assert_not_called()
+        self.assertEqual(self.collector.call_count, 1)
 
     def test_native_failure_is_saved_without_claiming_business_success(self):
         self.media.return_value = {'schema_version': 1, 'available': False, 'results': [

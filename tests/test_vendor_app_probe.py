@@ -53,6 +53,33 @@ class VendorAppProbeTests(unittest.TestCase):
         self.assertEqual(result['data']['apps'], [])
         transport.assert_called_once()
 
+    def test_one_invalid_catalog_label_does_not_fail_valid_entries_or_relax_label_validation(self):
+        frame = {'list': [{'module_name': '新插件 β', 'version': '2.0', 'status': 2},
+                          {'module_name': ''}, {'module_name': '/private/' + SECRET},
+                          {'module_name': 'bad\nlabel'}, None], 'token': SECRET}
+        result, _, transport = self.collect(frame=frame)
+        self.assertTrue(result['available'])
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['data']['apps'], [{'name': '新插件 β', 'version': '2.0',
+            'installation_status_code': None, 'running': None}])
+        self.assertEqual(result['data']['rejected_entries'], 4)
+        self.assertEqual(result['data']['rejections'], [
+            {'code': 'unsupported_application_label', 'count': 3},
+            {'code': 'unsupported_application_entry', 'count': 1}])
+        self.assertTrue(result['data']['partial'])
+        self.assertFalse(result['data']['complete'])
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn('bad\nlabel', json.dumps(result))
+        transport.assert_called_once()
+
+    def test_all_invalid_labels_still_fail_instead_of_a_fake_zero_entry_success(self):
+        result, _, transport = self.collect(frame={'list': [{'module_name': ''}, {'module_name': '/private/' + SECRET}]})
+        self.assertFalse(result['available'])
+        self.assertEqual(result['error_code'], 'unsupported_application_label')
+        self.assertIsNone(result['data'])
+        self.assertNotIn(SECRET, json.dumps(result))
+        transport.assert_called_once()
+
     def test_auth_unavailable_wrong_owner_and_reader_error_never_invoke_transport(self):
         for session, credential in ((None, {'available': False, 'status': 'no_session'}),
                                     (mock.Mock(user_id=123), SAFE_CREDENTIAL),

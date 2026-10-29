@@ -50,6 +50,19 @@ class BusinessSnapshotTests(unittest.TestCase):
         self.assertNotIn('do-not-export', json.dumps(result))
         self.assertEqual(result['readable_sources'], 1)
 
+    def test_rejected_application_metadata_survives_business_field_projection(self):
+        value = json.loads(self.cache.read_text(encoding='utf-8'))
+        value['list'].extend([{'module_name': ''}, {'module_name': '/private/do-not-export', 'status': 4}])
+        self.cache.write_text(json.dumps(value), encoding='utf-8')
+        result = self.snapshot()['categories']['applications']
+        self.assertTrue(result['available'])
+        self.assertEqual(result['status'], 'cached_partial')
+        self.assertTrue(result['data']['partial'])
+        self.assertEqual(result['data']['cached_entries'], 1)
+        self.assertEqual(result['data']['rejected_entries'], 2)
+        self.assertEqual(result['data']['rejections'], [{'code': 'unsupported_application_label', 'count': 2}])
+        self.assertNotIn('do-not-export', json.dumps(result))
+
     def test_media_runtime_is_observed_but_task_progress_remains_unknown(self):
         with mock.patch('socket.create_connection', side_effect=AssertionError('no RPC')), \
                 mock.patch('subprocess.run', side_effect=AssertionError('no command')):

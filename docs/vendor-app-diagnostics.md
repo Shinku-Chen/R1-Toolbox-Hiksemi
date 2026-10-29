@@ -1,6 +1,6 @@
 # 原厂应用数据：显式刷新与被动快照
 
-本页依据 `V6.3.3 Build_260907` 的 `emhistor`、独立 `appcenter` 静态反汇编及 Toolbox fixture，复核日期为 2026-10-29。没有执行固件程序、安装应用或修改 NAS 设置。下列地址为样本链接虚拟地址，不能跨固件版本作为 ABI 使用；实机当前响应仍须通过显式刷新验收。
+本页依据 `V6.3.3 Build_260907` 的 `emhistor`、独立 `appcenter` 静态反汇编及 Toolbox fixture，复核日期为 2026-10-30。静态核对不执行本地厂商 ELF，不安装应用。下列地址为样本链接虚拟地址，不能跨固件版本作为 ABI 使用；实机当前响应仍须通过显式刷新验收。
 
 ## 两条数据来源
 
@@ -25,12 +25,19 @@ GET https://127.0.0.1:20443/rest/1.1/applycenter?action=get_apply_list&opttype=0
 
 `data.apps` 仅投影 `name`、`version`、`installation_status_code`、始终为 `null` 的 `running`。当前只保留已在持久缓存证实出现的原始状态代码 `0/4`，其含义不翻译成“正在运行”；其他状态枚举和未确认的版本保持 `null`。`cached_entries` 为实际投影条目数，`live:false`、`complete:false`；不输出 `apply_id`、`vid`、安装路径、URL、用户 ID、账号名称或原始消息。目录响应本身不能作为安装成功、后台运行或全部 APP 功能均已接入的证据。
 
+目录按条目隔离非法名称、非对象和重复名称，不再由一条不合法目录项使全部应用不可用。
+有有效条目时，显式结果为 `available:true/status:partial`，快照／原厂缓存读取为 `cached_partial`；`data.partial:true`、`rejected_entries` 和 `rejections:[{"code":"固定原因","count":整数}]` 记录拒绝数量。
+固定原因仅允许 `unsupported_application_label`、`unsupported_application_entry`、`duplicate_application_name` 和原厂缓存的 `unsupported_cached_status`，不会附带被拒绝的名称、原文或字段值。
+统计在自有快照写入、再次读取和业务字段投影中保持不变，不因重新投影已保留的好条目而归零。旧快照没有统计时兼容为未拒绝；部分统计的类型、总和、唯一原因和上限必须重新校验。
+真正空的 `list` 可返回已观察到的空目录；非空目录全部被拒绝仍为不可用与 `data:null`，不伪装零应用成功。顶层不是列表、超过 256 项或文件身份／JSON 不可信仍整体拒绝。
+`partial:false` 只表示没有条目因校验被拒绝，**不**改变目录始终 `complete:false`、运行状态未知的边界。未知但合法的新插件名称正常显示，不按固定应用名称表过滤。
+
 `runtime/vendor_app_diagnostics.py` 提供：
 
 - `record_application_snapshot(state_dir, probe) -> bool`：仅把脱敏后的这一次结果原子写入 Toolbox 已有持久目录下的固定 `application-snapshot.json`，包括失败结果。不会向原厂缓存写数据。失败刷新覆盖旧成功，不把旧成功标成新成功；持久化本身失败返回 `false`，调用方必须报告存储失败。写入和读取都重新投影，文件不存会话、请求地址、原始 native 消息或异常文本。
 - `collect(root="/", *, state_dir=None)`：只读上述快照；没有快照时读固定原厂缓存。最近刷新失败时，若原厂缓存可读，只回退该部分历史缓存，并在 `reason` 明确说明刷新失败、保留固定 `error_code`；两者均不可用时 `data:null`。损坏快照不会变成空目录或触发联网重试。无 `state_dir` 保留原先仅读原厂缓存的行为。
 
-读取自有成功快照时，来源为 `toolbox.application_snapshot`、状态为 `cached`，`sampled_at` 和 `data.cache_modified_at` 均为该次显式查询时间，不是页面请求时间；原厂 fallback 的 `cache_modified_at` 仍为原厂文件的修改时间。刷新失败返回 `refresh_failed`，损坏快照为 `snapshot_invalid`，不会把此前的应用项伪装为本次结果。无需也没有隐含的 TTL 或后台刷新。
+读取自有成功快照时，来源为 `toolbox.application_snapshot`、状态为 `cached` 或 `cached_partial`，`sampled_at` 和 `data.cache_modified_at` 均为该次显式查询时间，不是页面请求时间；原厂 fallback 的 `cache_modified_at` 仍为原厂文件的修改时间。刷新失败返回 `refresh_failed`，损坏快照为 `snapshot_invalid`，不会把此前的应用项伪装为本次结果。无需也没有隐含的 TTL 或后台刷新。
 
 上述 `root`、`state_dir`、reader 和 transport 都是内部配置／测试注入，不能变成 HTTP 文件路径或任意调用参数。调用方负责沿用 owner 授权、同源／CSRF 和业务采集锁；它们不是机器密钥权限豁免。
 
@@ -38,7 +45,7 @@ GET https://127.0.0.1:20443/rest/1.1/applycenter?action=get_apply_list&opttype=0
 
 原厂缓存来源为 `histor.app_center.conf`、成功状态为 `cached`。有效文件内确实为空 `list` 时才返回空数组；缺少文件为 `cache_missing`、`data:null`。不遍历用户盘，不读取安装目录，不连接 8888 生成缓存。
 
-解析限制为：普通文件、固定路径、拒绝符号链接／reparse 路径、文件不超过 1 MiB、最多 256 条、名称和版本各不超过 63 个 UTF-8 字节；拒绝重复 JSON 键、非标准常量、控制字符、路径／URL 冒充标签、未知 schema、重复名称及未经确认的缓存状态代码。读取前后对比文件身份和修改时间，期间变化则拒绝该结果。
+解析限制为：普通文件、固定路径、拒绝符号链接／reparse 路径、文件不超过 1 MiB、最多 256 条、名称和版本各不超过 63 个 UTF-8 字节。重复 JSON 键、非标准常量、未知顶层 schema 和不可信文件身份整体拒绝；条目内控制字符、路径／URL 冒充标签、重复名称及未经确认的缓存状态代码按上述规则逐项隔离。读取前后对比文件身份和修改时间，期间变化则拒绝该结果。
 
 缓存不可用时提供固定 `error_code`，帮助一次采样区分原因，不返回原始文件或异常内容：
 
@@ -66,6 +73,7 @@ GET https://127.0.0.1:20443/rest/1.1/applycenter?action=get_apply_list&opttype=0
 | 读取器 `0x1916a`，`0x191b1 / 0x192fe` | 普通 `open64(O_RDONLY)`／`read`，没有解密或解压；终止换行／NUL 加在内存缓冲区 |
 | `0x18575 / 0x18678` | 直接 `json_tokener_parse` 并读取顶层 `list` |
 | `0x1879c / 0x18ab6 / 0x18c7b` | 缓存读取 `module_name`、`version`、`status`；版本在 `0x18af5–0x18b00` 通过 `strncpy(...,0x3f)` 读取 |
+| `0x177a1–0x177be`、`0x187ce–0x187e0` | 实时目录把节点首个字段经 `json_object_new_string` 输出为 `module_name`；缓存读取向该字段 `strncpy(...,0x3f)`，支持保留 63 字节界限，不能因错误而任意扩大名称或接受路径 |
 | `getListJsonBufV2 @ 0x17bda`，`0x17c73–0x17c8a` | 持久化时只序列化状态为 `0/4` 的节点；与实时目录未过滤的遍历不同 |
 | `0x17f78` | 缓存 `count` 统计全部内存节点，不能按它推断 `list` 完整性 |
 | `get_install_progress_request @ 0x4aff` | 会修改完成状态、同步插件，并在 `0x504d–0x506c` 写 `app_center.conf`，还可触发应用列表更新；禁止拿它补全实时数据 |
@@ -78,3 +86,5 @@ GET https://127.0.0.1:20443/rest/1.1/applycenter?action=get_apply_list&opttype=0
 ## 实机验收
 
 部署包含上述实现的新镜像后，通过 owner 授权的业务刷新入口执行一次应用刷新，核对 `attempted`、固定 `native` 信息、HTTP 状态、应用 `name/version` 及脱敏结果；同时核对 `application-snapshot.json` 的写入结果。随后只读业务页应复用同一次快照时间，不再触发原厂请求。查询失败必须看到固定错误码与 `data:null` 或明确标注的原厂历史缓存 fallback；不能以进程监听、Docker 列表或空列表代替原厂应用数据。
+
+2026-10-30 实机已有 `unsupported_application_label`，旧实现会在首条不合法名称处拒绝整表；仅凭该错误不能确定实际名称是空值、超长、路径还是其它类型。本次以静态边界和混合条目 fixture 修复整表失败扩散，不放宽名称规则。部署后需对照一次显式刷新与随后两次业务缓存读取：有好条目时显示真实名称、`partial` 和一致拒绝统计；全坏时继续报告不可用，不宣称实机已修复。若仍全坏，下一步需一次受限的字段形状诊断，仅返回类型、长度和固定拒绝原因统计，不能输出签名、会话或原始应用条目。

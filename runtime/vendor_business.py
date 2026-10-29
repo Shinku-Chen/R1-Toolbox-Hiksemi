@@ -22,7 +22,8 @@ _PORTS = {'applications': frozenset((8888,)), 'downloads': frozenset((6800, 5050
 # user paths, torrent identifiers or raw upstream JSON by accident.
 _DATA_FIELDS = {
     'applications': frozenset(('apps', 'name', 'version', 'installation_status_code', 'running',
-                              'cached_entries', 'live', 'complete', 'cache_modified_at')),
+                              'cached_entries', 'live', 'complete', 'cache_modified_at',
+                              'partial', 'rejected_entries', 'rejections', 'code', 'count')),
     'downloads': frozenset(('version', 'complete', 'engine', 'engines', 'data', 'available',
                            'reason', 'source', 'error_code', 'connection_status',
                            'tasks', 'counts', 'limits',

@@ -21,6 +21,8 @@ SNAPSHOT_FILE = "application-snapshot.json"
 MAX_CACHE_BYTES = 1024 * 1024
 MAX_APPS = 256
 MAX_TEXT_BYTES = 63
+REJECTION_CODES = ("unsupported_application_label", "unsupported_application_entry",
+                   "duplicate_application_name", "unsupported_cached_status")
 
 
 class _CacheError(ValueError):
@@ -74,23 +76,70 @@ def _project(value, modified):
     rows = value.get("list") if isinstance(value, dict) else None
     if not isinstance(rows, list) or len(rows) > MAX_APPS:
         raise _CacheError("unsupported_cache_list")
-    apps, seen = [], set()
-    for row in rows:
-        if not isinstance(row, dict):
-            raise _CacheError("unsupported_application_entry")
-        name = _text(row.get("module_name"))
-        version = _text(row.get("version"), empty=True)
-        status_code = row.get("status")
-        if type(status_code) is not int or status_code not in (0, 4) or name in seen:
-            raise _CacheError("unsupported_cached_status" if name not in seen else "duplicate_application_name")
-        seen.add(name)
-        apps.append({"name": name, "version": version,
-                     "installation_status_code": status_code, "running": None})
     # The vendor counts every in-memory node but serializes status 0/4 only.
     # Therefore its stored `count` is neither a completeness proof nor len(list).
-    return {"apps": apps, "cached_entries": len(apps), "live": False,
-            "complete": False,
-            "cache_modified_at": datetime.fromtimestamp(modified, timezone.utc).isoformat()}
+    return _project_entries(rows, datetime.fromtimestamp(modified, timezone.utc).isoformat(), cached=True)
+
+
+def _project_entries(rows, sampled_at, *, cached=False):
+    """Isolate bad catalog nodes without widening the approved label grammar.
+
+    Rejection summaries contain fixed codes and counts only. A genuinely empty
+    list is observable; a nonempty list with no accepted node remains a failure.
+    """
+    accepted, seen, rejected = [], set(), {}
+    for row in rows:
+        try:
+            if not isinstance(row, dict):
+                raise _CacheError("unsupported_application_entry")
+            name = _text(row.get("module_name"))
+            if name in seen:
+                raise _CacheError("duplicate_application_name")
+            try:
+                version = _text(row.get("version"), empty=True)
+            except _CacheError:
+                if cached:
+                    raise
+                version = None
+            code = row.get("status")
+            if cached and (type(code) is not int or code not in (0, 4)):
+                raise _CacheError("unsupported_cached_status")
+            seen.add(name)
+            accepted.append({"name": name, "version": version,
+                             "installation_status_code": code if type(code) is int and code in (0, 4) else None,
+                             "running": None})
+        except _CacheError as error:
+            code = str(error)
+            rejected[code] = rejected.get(code, 0) + 1
+    if rows and not accepted:
+        raise _CacheError(next(iter(rejected)))
+    return {"apps": accepted, "cached_entries": len(accepted), "live": False,
+            "complete": False, "cache_modified_at": sampled_at,
+            "partial": bool(rejected), "rejected_entries": sum(rejected.values()),
+            "rejections": [{"code": code, "count": rejected[code]}
+                           for code in REJECTION_CODES if code in rejected]}
+
+
+def _previous_rejections(data, accepted_count):
+    """Validate persisted partial metadata; repeated projection cannot erase it."""
+    fields = {"partial", "rejected_entries", "rejections"}
+    if not fields.intersection(data):
+        return {}  # Previously valid snapshots did not have rejection metadata.
+    count, rows = data.get("rejected_entries"), data.get("rejections")
+    if (not fields <= set(data) or type(data.get("partial")) is not bool
+            or type(count) is not int or not 0 <= count <= MAX_APPS - accepted_count
+            or not isinstance(rows, list) or len(rows) > len(REJECTION_CODES)):
+        raise _CacheError("invalid_application_snapshot")
+    result = {}
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {"code", "count"}
+                or row.get("code") not in REJECTION_CODES or row["code"] in result
+                or type(row.get("count")) is not int or not 1 <= row["count"] <= MAX_APPS):
+            raise _CacheError("invalid_application_snapshot")
+        result[row["code"]] = row["count"]
+    if sum(result.values()) != count or data["partial"] != (count > 0) or count and not accepted_count:
+        raise _CacheError("invalid_application_snapshot")
+    return result
 
 
 def _read_json(path):
@@ -137,8 +186,9 @@ def _collect_cache(root="/"):
         path = Path(root).absolute() / "tmp/nand_config/app_center.conf"
         value, modified = _read_json(path)
         data = _project(value, modified)
-        return {"available": True, "status": "cached", "source": SOURCE,
-                "reason": "仅有原厂应用持久缓存；不代表完整实时清单或当前运行状态", "data": data}
+        return {"available": True, "status": "cached_partial" if data["partial"] else "cached", "source": SOURCE,
+                "reason": "部分原厂缓存条目未通过校验，仅保留有效历史条目；不代表当前运行状态" if data["partial"]
+                else "仅有原厂应用持久缓存；不代表完整实时清单或当前运行状态", "data": data}
     except FileNotFoundError:
         result.update(status="cache_missing", error_code="cache_missing", reason="原厂应用持久缓存不存在；未触发原厂查询")
     except PermissionError:
@@ -160,26 +210,9 @@ def project_application_list(frame, sampled_at):
     rows = frame.get("list") if isinstance(frame, dict) else None
     if not isinstance(rows, list) or len(rows) > MAX_APPS:
         raise _CacheError("unsupported_application_list")
-    apps, seen = [], set()
-    for row in rows:
-        if not isinstance(row, dict):
-            raise _CacheError("unsupported_application_entry")
-        name = _text(row.get("module_name"))
-        if name in seen:
-            raise _CacheError("duplicate_application_name")
-        seen.add(name)
-        try:
-            version = _text(row.get("version"), empty=True)
-        except _CacheError:
-            version = None
-        code = row.get("status")
-        apps.append({"name": name, "version": version,
-                     "installation_status_code": code if type(code) is int and code in (0, 4) else None,
-                     "running": None})
     # count/support_ecloud, IDs, paths, vendor IDs, guest flags and URLs do not
     # escape. A one-time catalog observation is not a complete live inventory.
-    return {"apps": apps, "cached_entries": len(apps), "live": False,
-            "complete": False, "cache_modified_at": sampled_at}
+    return _project_entries(rows, sampled_at)
 
 
 def _stamp(value):
@@ -211,12 +244,13 @@ def _snapshot_projection(value):
         if type(code) is str and code in APPLICATION_ERRORS:
             result["error_code"] = code
         return result
-    if value.get("status") not in ("ok", "cached"):
+    if value.get("status") not in ("ok", "partial", "cached", "cached_partial"):
         raise _CacheError("invalid_application_snapshot")
     data = value.get("data")
     rows = data.get("apps") if isinstance(data, dict) else None
     if not isinstance(rows, list) or len(rows) > MAX_APPS:
         raise _CacheError("invalid_application_snapshot")
+    previous = _previous_rejections(data, len(rows))
     native_rows = []
     for row in rows:
         if not isinstance(row, dict):
@@ -224,9 +258,16 @@ def _snapshot_projection(value):
         native_rows.append({"module_name": row.get("name"),
                             "version": row.get("version") or "",
                             "status": row.get("installation_status_code")})
-    result.update(available=True, status="cached", error_code=None,
-                  reason="仅为最近一次显式刷新的应用目录快照；不代表完整清单或当前运行状态",
-                  data=project_application_list({"list": native_rows}, sampled_at))
+    projected = project_application_list({"list": native_rows}, sampled_at)
+    for row in projected["rejections"]:
+        previous[row["code"]] = previous.get(row["code"], 0) + row["count"]
+    projected.update(partial=bool(previous), rejected_entries=sum(previous.values()),
+                     rejections=[{"code": code, "count": previous[code]}
+                                 for code in REJECTION_CODES if code in previous])
+    result.update(available=True, status="cached_partial" if projected["partial"] else "cached", error_code=None,
+                  reason="部分原厂目录条目未通过校验，仅保留有效快照；不代表当前运行状态" if projected["partial"]
+                  else "仅为最近一次显式刷新的应用目录快照；不代表完整清单或当前运行状态",
+                  data=projected)
     return result
 
 
