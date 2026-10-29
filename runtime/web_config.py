@@ -27,6 +27,7 @@ from fnm_compat import FnmonitorPanel
 from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
 from vendor_media_probe import collect_media_probe
+from vendor_media_batch import collect_media_batch
 from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
@@ -782,16 +783,18 @@ class WebConfigServer:
     def _media_debug_post(self, body, ip):
         """Explicit media probe; credentials stay on the host, never in the API.
 
-        Unlike passive diagnostics this invokes one native status query, whose
+        Unlike passive diagnostics this invokes native status queries, whose
         completion branch may update vendor state. It is never auto-polled.
         """
         if not self._dev_authorized(ip):
             return 403, {'ok': False, 'error': '媒体测试未启用、已过期或客户端不在白名单'}, None
-        if not isinstance(body, dict) or body != {'action': 'probe'}:
-            return 400, {'ok': False, 'error': '仅支持固定媒体 probe 测试，不接受账号、令牌或路径参数'}, None
+        if not isinstance(body, dict) or body not in ({'action': 'probe'}, {'action': 'probe_all'}):
+            return 400, {'ok': False, 'error': '仅支持固定媒体 probe 或 probe_all 测试，不接受账号、令牌或路径参数'}, None
         if not self.media_probe_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有媒体测试正在进行'}, None
         try:
+            if body['action'] == 'probe_all':
+                return 200, {'ok': True, 'batch': collect_media_batch()}, None
             return 200, {'ok': True, 'probe': collect_media_probe()}, None
         except Exception:
             return 503, {'ok': False, 'error': '媒体测试暂不可确认'}, None

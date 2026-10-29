@@ -25,7 +25,7 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
                **{'runtime/' + name: root / 'runtime' / name
                   for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'disk_names.py', 'device_info.py', 'vendor_device.py', 'histor.py', 'web_config.py',
                                'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py',
-                               'vendor_media_auth.py', 'vendor_media_probe.py',
+                               'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
                                'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py',
                                'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
                                'light_policy.py', 'monitoring.py')}}

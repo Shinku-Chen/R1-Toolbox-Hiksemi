@@ -108,7 +108,8 @@ class FakeSocket:
 
 
 class TransportTests(unittest.TestCase):
-    def run_transport(self, chunks, *, cert=CERT, token=SECRET, wire=None):
+    def run_transport(self, chunks, *, cert=CERT, token=SECRET, wire=None, query_id=None,
+                      parameters=None):
         raw = FakeSocket()
         wire = wire or FakeSocket(chunks)
         context = Mock()
@@ -119,7 +120,11 @@ class TransportTests(unittest.TestCase):
             stack.enter_context(patch.object(probe.ssl, 'SSLContext', return_value=context))
             stack.enter_context(patch.object(probe.socket, 'getaddrinfo', side_effect=AssertionError('DNS forbidden')))
             try:
-                result = probe.query_first_face_frame(token, root='/fixture-root')
+                if query_id is None:
+                    result = probe.query_first_face_frame(token, root='/fixture-root')
+                else:
+                    result = probe.query_first_media_frame(token, query_id, root='/fixture-root',
+                                                           parameters=parameters)
             finally:
                 self.assertTrue(raw.closed)
                 self.assertTrue(wire.closed)
@@ -140,6 +145,111 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(request.startswith('GET /rest/1.1/fcabm?action=get_face_ai_status&access_token='))
         self.assertIn('Host: 127.0.0.1:20443\r\n', request)
         self.assertNotIn('Authorization:', request)
+
+    def test_each_media_query_sends_only_its_fixed_native_route_and_action(self):
+        expected = {
+            'face': '/rest/1.1/fcabm?action=get_face_ai_status',
+            'ocr': '/rest/1.1/file?action=get_ocr_status',
+            'thumbnail': '/rest/1.1/file?action=get_thumb_convert_process',
+            'similar': '/rest/1.1/file?action=get_similar_status',
+            'ai': '/rest/1.1/fcabm?action=get_ai_status',
+            'scraper': '/rest/1.1/scraper?action=lib_scan_status',
+            'shared_album': '/rest/1.1/album?action=share_album_progress&album_id=share_5000&type=1',
+            'shared_album_catalog': '/rest/1.1/album?action=get_share_album_list',
+        }
+        header, body = multipart()
+        for query_id, target in expected.items():
+            with self.subTest(query_id=query_id):
+                parameters = {'album_id': 'share_5000', 'type': '1'} if query_id == 'shared_album' else None
+                result, wire, _ = self.run_transport(
+                    [header + body, AssertionError('later frame forbidden')], query_id=query_id,
+                    parameters=parameters)
+                self.assertEqual(result, (200, FRAME))
+                self.assertEqual(wire.events, ['pin', 'request'])
+                self.assertEqual(len(wire.sent), 1)
+                method = 'POST' if query_id == 'scraper' else 'GET'
+                self.assertEqual(wire.sent[0].split(b'\r\n', 1)[0],
+                                 (method + ' ' + target + '&access_token=' + SECRET
+                                  + ' HTTP/1.1').encode('ascii'))
+                headers, payload = wire.sent[0].split(b'\r\n\r\n', 1)
+                if query_id == 'scraper':
+                    self.assertIn(b'Content-Type: application/json', headers)
+                    self.assertIn(b'Content-Length: 2', headers)
+                    self.assertEqual(payload, b'{}')
+                else:
+                    self.assertNotIn(b'Content-Length:', headers)
+                    self.assertEqual(payload, b'')
+                self.assertEqual(len(wire.chunks), 1)
+
+    def test_unknown_query_is_rejected_before_certificate_tls_network_or_token_use(self):
+        class UntouchableToken:
+            def __str__(self):
+                raise AssertionError('unsupported query touched its token')
+
+        unknown = ('', 'Face', 'face&action=erase', '/rest/1.1/login',
+                   'http://private.invalid', None, False, 1, [], {}, b'face')
+        for query_id in unknown:
+            with self.subTest(query_id=query_id), \
+                    patch.object(probe, '_certificate') as certificate, \
+                    patch.object(probe.socket, 'socket') as factory, \
+                    patch.object(probe, 'ssl', None), \
+                    patch.object(probe.time, 'monotonic') as clock:
+                with self.assertRaises(probe.MediaProbeError) as raised:
+                    probe.query_first_media_frame(UntouchableToken(), query_id)
+                self.assertEqual(raised.exception.reason, 'unsupported_query')
+                certificate.assert_not_called()
+                factory.assert_not_called()
+                clock.assert_not_called()
+
+    def test_shared_parameters_are_quoted_without_changing_the_fixed_action(self):
+        header, body = multipart()
+        _, wire, _ = self.run_transport([header + body], query_id='shared_album', parameters={
+            'album_id': 'share_5000', 'type': '1&access_token=other',
+        })
+        target = (b'GET /rest/1.1/album?action=share_album_progress'
+                  b'&album_id=share_5000'
+                  b'&type=1%26access_token%3Dother&access_token=' + SECRET.encode('ascii')
+                  + b' HTTP/1.1')
+        self.assertEqual(wire.sent[0].split(b'\r\n', 1)[0], target)
+
+    def test_shared_missing_extra_or_unsafe_parameters_fail_before_certificate_and_network(self):
+        valid = {'album_id': 'share_5000', 'type': '1'}
+        cases = [None, {}, [], 'share_owned', {'album_id': 'share_owned'},
+                 {'type': '1'}, dict(valid, action='erase'), dict(valid, path='/private'),
+                 dict(valid, album_id=''), dict(valid, album_id='share_'),
+                 dict(valid, album_id='other_owner'), dict(valid, album_id='share_' + 'a' * 251),
+                 dict(valid, album_id='share_owned'), dict(valid, album_id='share_12345678901'),
+                 dict(valid, type='中文'), dict(valid, type='1' * 32),
+                 dict(valid, album_id=None), dict(valid, album_id=1), dict(valid, album_id=[]),
+                 dict(valid, type=''), dict(valid, type='1' * 33),
+                 dict(valid, type=None), dict(valid, type=1), dict(valid, type=[])]
+        for key in ('album_id', 'type'):
+            for control in ('\x00', '\t', '\n', '\r', '\x7f', '\x85', '\u2028', '\u200b'):
+                cases.append(dict(valid, **{key: valid[key] + control}))
+        for parameters in cases:
+            with self.subTest(parameters=parameters), \
+                    patch.object(probe, '_certificate') as certificate, \
+                    patch.object(probe.socket, 'socket') as factory, \
+                    patch.object(probe, 'ssl', None), \
+                    patch.object(probe.time, 'monotonic') as clock:
+                with self.assertRaises(probe.MediaProbeError) as raised:
+                    probe.query_first_media_frame(object(), 'shared_album', parameters=parameters)
+                self.assertEqual(raised.exception.reason, 'invalid_parameters')
+                certificate.assert_not_called()
+                factory.assert_not_called()
+                clock.assert_not_called()
+
+    def test_non_shared_queries_reject_all_extra_parameters_before_certificate_and_network(self):
+        for query_id in ('face', 'ocr', 'thumbnail', 'similar', 'ai', 'scraper', 'shared_album_catalog'):
+            for parameters in ({}, {'album_id': 'share_owned', 'type': '1'}, {'action': 'erase'}, False):
+                with self.subTest(query_id=query_id, parameters=parameters), \
+                        patch.object(probe, '_certificate') as certificate, \
+                        patch.object(probe.socket, 'socket') as factory:
+                    with self.assertRaises(probe.MediaProbeError) as raised:
+                        probe.query_first_media_frame(object(), query_id, parameters=parameters)
+                    self.assertEqual(raised.exception.reason, 'invalid_parameters')
+                    certificate.assert_not_called()
+                    factory.assert_not_called()
 
     def test_fragmented_and_http_chunked_first_part(self):
         _, body = multipart()

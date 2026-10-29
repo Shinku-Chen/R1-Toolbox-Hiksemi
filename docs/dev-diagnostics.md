@@ -4,7 +4,7 @@
 
 这个授权只适用于本接口。原有 `/api/dev/storage`、`/api/dev/business`、`/api/dev/fan` 和 `/api/dev/exec` 保持各自的授权规则。风扇接管重试、配置修改、应用控制和电源操作不属于本接口的检测项目。
 
-相册识别的签名验证另用明确发起的 `POST /api/dev/media`，请求 `{"action":"probe"}`；它会访问原厂媒体数据库并可能写完成状态，不会随本页的被动快照自动执行。见[媒体验证](media-probe.md)。
+媒体签名验证另用明确发起的 `POST /api/dev/media`，请求 `{"action":"probe"}` 验证相册识别，或 `{"action":"probe_all"}` 逐项验证七类媒体状态；它会访问原厂媒体数据库并可能写完成状态，不会随本页的被动快照自动执行。见[媒体验证](media-probe.md)。
 
 ## 开启与调用
 

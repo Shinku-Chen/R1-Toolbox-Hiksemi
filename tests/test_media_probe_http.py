@@ -18,6 +18,7 @@ import web_config
 
 _DEFAULT = object()
 ROUTE = '/api/dev/media'
+ACTIONS = ('probe', 'probe_all')
 
 
 class MediaProbeHTTPTests(unittest.TestCase):
@@ -41,6 +42,13 @@ class MediaProbeHTTPTests(unittest.TestCase):
                                         return_value=self.result)
         self.probe = probe_patch.start()
         self.addCleanup(probe_patch.stop)
+        self.batch_result = {'schema_version': 1, 'available': True,
+                             'results': [{'id': 'face', 'available': True},
+                                         {'id': 'ocr', 'available': False}]}
+        batch_patch = mock.patch.object(web_config, 'collect_media_batch',
+                                        return_value=self.batch_result)
+        self.batch = batch_patch.start()
+        self.addCleanup(batch_patch.stop)
         business_patch = mock.patch.object(web_config, 'collect_business_diagnostics',
             return_value={'schema_version': 1, 'categories': {}})
         self.business = business_patch.start()
@@ -82,7 +90,9 @@ class MediaProbeHTTPTests(unittest.TestCase):
             connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
             for key, value in list(values.items()) + list(duplicates):
                 connection.putheader(key, value)
-            connection.endheaders(payload)
+            # With no length header HTTP/1.1 has no request body. Sending
+            # unframed bytes can turn an early 400 into a Windows TCP reset.
+            connection.endheaders(payload if 'Content-Length' in values else None)
             response = connection.getresponse()
             response_headers = {key.lower(): value for key, value in response.getheaders()}
             raw = response.read()
@@ -105,6 +115,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
 
     def assert_no_sources(self):
         self.probe.assert_not_called()
+        self.batch.assert_not_called()
         self.insights.snapshot.assert_not_called()
         self.insights.storage_name_diagnostics.assert_not_called()
         self.business.assert_not_called()
@@ -118,9 +129,36 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIs(value['ok'], True)
         self.assertEqual(value['probe'], self.result)
+        self.assertNotIn('batch', value)
         self.probe.assert_called_once_with()
+        self.batch.assert_not_called()
         self.insights.snapshot.assert_not_called()
         self.business.assert_not_called()
+        self.assert_no_controls()
+
+    def test_explicit_batch_works_without_cookie_and_dispatches_only_the_batch(self):
+        self.assertTrue(self.server.auth.required())
+        self.assertFalse(self.server.dev_commands)
+        status, _, value = self.request({'action': 'probe_all'})
+        self.assertEqual(status, 200)
+        self.assertIs(value['ok'], True)
+        self.assertEqual(value['batch'], self.batch_result)
+        self.assertNotIn('probe', value)
+        self.batch.assert_called_once_with()
+        self.probe.assert_not_called()
+        self.insights.snapshot.assert_not_called()
+        self.business.assert_not_called()
+        self.assert_no_controls()
+
+    def test_http_success_preserves_unavailable_batch_items(self):
+        self.batch_result.update(available=False, status='unavailable')
+        status, _, value = self.request({'action': 'probe_all'})
+        self.assertEqual(status, 200)
+        self.assertIs(value['ok'], True)
+        self.assertEqual(value['batch'], self.batch_result)
+        self.assertIs(value['batch']['available'], False)
+        self.batch.assert_called_once_with()
+        self.probe.assert_not_called()
         self.assert_no_controls()
 
     def test_http_success_preserves_an_unavailable_vendor_result(self):
@@ -132,6 +170,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assertEqual(value['probe']['status'], 'unavailable')
         self.assertIsNone(value['probe']['data'])
         self.probe.assert_called_once_with()
+        self.batch.assert_not_called()
         self.assert_no_controls()
 
     def test_flag_exact_peer_and_expiry_are_required_before_collection(self):
@@ -141,15 +180,21 @@ class MediaProbeHTTPTests(unittest.TestCase):
         for attribute, denied in cases:
             with self.subTest(attribute=attribute), \
                     mock.patch.object(self.server, attribute, denied):
-                self.assertEqual(self.request()[0], 403)
-                self.assertEqual(self.request(headers={'Cookie': self.cookie})[0], 403)
+                for action in ACTIONS:
+                    with self.subTest(action=action):
+                        body = {'action': action}
+                        self.assertEqual(self.request(body)[0], 403)
+                        self.assertEqual(self.request(body,
+                            headers={'Cookie': self.cookie})[0], 403)
         self.assert_no_sources()
 
     def test_forwarded_headers_and_password_cookie_cannot_replace_actual_peer(self):
         self.server.dev_allow_ips = {ipaddress.ip_address('192.0.2.15')}
         headers = {'Cookie': self.cookie, 'Forwarded': 'for=192.0.2.15',
                    'X-Forwarded-For': '192.0.2.15', 'X-Real-IP': '192.0.2.15'}
-        self.assertEqual(self.request(headers=headers)[0], 403)
+        for action in ACTIONS:
+            with self.subTest(action=action):
+                self.assertEqual(self.request({'action': action}, headers=headers)[0], 403)
         self.assert_no_sources()
 
     def test_origin_json_and_csrf_guards_precede_collection(self):
@@ -163,9 +208,10 @@ class MediaProbeHTTPTests(unittest.TestCase):
                  ({'headers': {'Content-Type': 'text/plain'}}, 400),
                  ({'remove': ('Content-Type',)}, 400),
                  ({'remove': ('Content-Length',)}, 400))
-        for kwargs, expected in cases:
-            with self.subTest(kwargs=kwargs):
-                self.assertEqual(self.request(**kwargs)[0], expected)
+        for action in ACTIONS:
+            for kwargs, expected in cases:
+                with self.subTest(action=action, kwargs=kwargs):
+                    self.assertEqual(self.request({'action': action}, **kwargs)[0], expected)
         self.assert_no_sources()
 
     def test_duplicate_security_headers_are_rejected_before_collection(self):
@@ -173,14 +219,18 @@ class MediaProbeHTTPTests(unittest.TestCase):
                    ('Cookie', self.cookie), ('Content-Length', '19'),
                    ('Connection', 'close'), ('X-R1-CSRF', 'x' * 43),
                    ('X-FNM-Request', '1'))
-        for key, value in headers:
-            with self.subTest(header=key):
-                extra = {key: value} if key in ('Cookie', 'X-R1-CSRF') else {}
-                self.assertEqual(self.request(headers=extra, duplicates=((key, value),))[0], 400)
+        for action in ACTIONS:
+            for key, value in headers:
+                with self.subTest(action=action, header=key):
+                    extra = {key: value} if key in ('Cookie', 'X-R1-CSRF') else {}
+                    self.assertEqual(self.request({'action': action}, headers=extra,
+                        duplicates=((key, value),))[0], 400)
         self.assert_no_sources()
 
     def test_malformed_duplicate_and_nonfinite_json_is_rejected(self):
         bodies = (b'{', b'null', b'{"action":"probe","action":"probe"}',
+                  b'{"action":"probe_all","action":"probe_all"}',
+                  b'{"action":"probe","action":"probe_all"}',
                   b'{"action":NaN}', b'{"action":Infinity}', b'\xff',
                   b'{"action":"probe"}\n{}')
         for body in bodies:
@@ -188,29 +238,37 @@ class MediaProbeHTTPTests(unittest.TestCase):
                 self.assertEqual(self.request(body)[0], 400)
         self.assert_no_sources()
 
-    def test_request_body_is_exactly_the_fixed_probe_action(self):
+    def test_request_body_is_exactly_one_of_the_two_fixed_probe_actions(self):
         bodies = ({}, [], 'probe', 1, True, {'action': None}, {'action': []},
                   {'action': {}}, {'action': 1}, {'action': 'probe '},
                   {'action': 'snapshot'}, {'action': 'catalog'},
-                  {'action': 'retry'}, {'action': 'querynativefaceprogress'})
+                  {'action': 'retry'}, {'action': 'querynativefaceprogress'},
+                  {'action': 'probe_all '}, {'action': 'PROBE_ALL'},
+                  {'action': ['probe', 'probe_all']})
         for body in bodies:
             with self.subTest(body=body):
                 self.assertEqual(self.request(body)[0], 400)
-        for field, value in (('sql', 'SELECT token FROM users'),
-                             ('path', '/private/vendor.db'), ('root', '/private'),
-                             ('token', 'private-token'), ('user_id', 1), ('source_id', 1),
-                             ('source', 'custom'), ('confirmed', True),
-                             ('url', 'http://127.0.0.1'), ('cmd', 'id'),
-                             ('command', 'id'), ('timeout', 60)):
-            with self.subTest(field=field):
-                self.assertEqual(self.request({'action': 'probe', field: value})[0], 400)
+        for action in ACTIONS:
+            for field, value in (('sql', 'SELECT token FROM users'),
+                                 ('path', '/private/vendor.db'), ('root', '/private'),
+                                 ('token', 'private-token'), ('user_id', 1), ('source_id', 1),
+                                 ('source', 'custom'), ('confirmed', True),
+                                 ('url', 'http://127.0.0.1'), ('cmd', 'id'),
+                                 ('command', 'id'), ('timeout', 60), ('ids', ['ocr']),
+                                 ('action_ids', ['ocr']), ('actions', ['get_ocr_status']),
+                                 ('params', {'album_id': 1}), ('account', 'admin'),
+                                 ('host', '127.0.0.1'), ('port', 20443)):
+                with self.subTest(action=action, field=field):
+                    self.assertEqual(self.request({'action': action, field: value})[0], 400)
         self.assert_no_sources()
 
     def test_nonempty_url_query_or_fragment_cannot_change_the_probe(self):
-        for suffix in ('?action=probe', '?token=private', '?confirmed=1', '#probe',
-                       '?=ignored', '?action=probe#other'):
-            with self.subTest(suffix=suffix):
-                self.assertEqual(self.request(path=ROUTE + suffix)[0], 400)
+        for action in ACTIONS:
+            for suffix in ('?action=probe', '?action=probe_all', '?token=private',
+                           '?confirmed=1', '#probe', '?=ignored', '?action=probe#other'):
+                with self.subTest(action=action, suffix=suffix):
+                    self.assertEqual(self.request({'action': action},
+                        path=ROUTE + suffix)[0], 400)
         self.assert_no_sources()
 
     def test_route_is_private_post_only_and_has_no_cors_preflight(self):
@@ -224,43 +282,58 @@ class MediaProbeHTTPTests(unittest.TestCase):
                 self.assertEqual(self.request(method=method)[0], 405)
         self.assert_no_sources()
 
-    def test_concurrent_probe_is_busy_without_a_second_vendor_request(self):
-        entered, release = threading.Event(), threading.Event()
+    def test_single_and_batch_probes_share_one_nonblocking_lock(self):
+        for running in ACTIONS:
+            for incoming in ACTIONS:
+                with self.subTest(running=running, incoming=incoming):
+                    entered, release = threading.Event(), threading.Event()
+                    collector = self.probe if running == 'probe' else self.batch
+                    other = self.batch if running == 'probe' else self.probe
+                    result = self.result if running == 'probe' else self.batch_result
 
-        def collect():
-            entered.set()
-            if not release.wait(5):
-                raise TimeoutError('fixture was not released')
-            return self.result
+                    def collect():
+                        entered.set()
+                        if not release.wait(5):
+                            raise TimeoutError('fixture was not released')
+                        return result
 
-        self.probe.side_effect = collect
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            pending = executor.submit(self.request)
-            try:
-                self.assertTrue(entered.wait(3))
-                status, _, value = self.request()
-                self.assertEqual(status, 409)
-                self.assertIs(value['ok'], False)
-                self.probe.assert_called_once_with()
-            finally:
-                release.set()
-            self.assertEqual(pending.result(timeout=5)[0], 200)
-        self.assertFalse(self.server.media_probe_lock.locked())
+                    collector.side_effect = collect
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        pending = executor.submit(self.request, {'action': running})
+                        try:
+                            self.assertTrue(entered.wait(3))
+                            status, _, value = self.request({'action': incoming})
+                            self.assertEqual(status, 409)
+                            self.assertIs(value['ok'], False)
+                            collector.assert_called_once_with()
+                            other.assert_not_called()
+                        finally:
+                            release.set()
+                        self.assertEqual(pending.result(timeout=5)[0], 200)
+                    self.assertFalse(self.server.media_probe_lock.locked())
+                    self.probe.reset_mock(side_effect=True)
+                    self.batch.reset_mock(side_effect=True)
         self.assert_no_controls()
 
-    def test_collector_exception_is_private_and_releases_lock_for_the_next_probe(self):
+    def test_each_collector_exception_is_private_and_releases_the_shared_lock(self):
         private = '/private/USER_AUTH_DB_101?token=private-credential'
-        self.probe.side_effect = OSError(private)
-        status, _, value = self.request()
-        self.assertEqual(status, 503)
-        self.assertIs(value['ok'], False)
-        self.assertNotIn(private, json.dumps(value))
-        self.assertNotIn('private-credential', json.dumps(value))
-        self.assertNotIn('USER_AUTH_DB_101', json.dumps(value))
-        self.assertFalse(self.server.media_probe_lock.locked())
-        self.probe.side_effect = None
-        self.assertEqual(self.request()[0], 200)
-        self.assertEqual(self.probe.call_count, 2)
+        for action in ACTIONS:
+            with self.subTest(action=action):
+                collector = self.probe if action == 'probe' else self.batch
+                collector.side_effect = OSError(private)
+                status, _, value = self.request({'action': action})
+                self.assertEqual(status, 503)
+                self.assertIs(value['ok'], False)
+                self.assertNotIn(private, json.dumps(value))
+                self.assertNotIn('private-credential', json.dumps(value))
+                self.assertNotIn('USER_AUTH_DB_101', json.dumps(value))
+                self.assertFalse(self.server.media_probe_lock.locked())
+                collector.side_effect = None
+                for next_action in ACTIONS:
+                    self.assertEqual(self.request({'action': next_action})[0], 200)
+                self.assertEqual(collector.call_count, 2)
+                self.probe.reset_mock(side_effect=True)
+                self.batch.reset_mock(side_effect=True)
         self.assert_no_controls()
 
     def test_passive_diagnostics_and_session_reads_never_probe_media(self):
@@ -276,10 +349,12 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assertIs(value['authorized'], False)
         self.assertIs(value['dev_mode'], False)
         self.probe.assert_not_called()
+        self.batch.assert_not_called()
         self.assert_no_controls()
 
     def test_media_grant_does_not_unlock_old_debug_routes_or_normal_writes(self):
-        self.assertEqual(self.request()[0], 200)
+        for action in ACTIONS:
+            self.assertEqual(self.request({'action': action})[0], 200)
         # Even enabling old diagnostic commands must not bypass their login gate.
         self.server.dev_commands = True
         for path, body, expected in (
@@ -294,6 +369,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
             with self.subTest(path=path, body=body):
                 self.assertEqual(self.request(body, path=path)[0], expected)
         self.probe.assert_called_once_with()
+        self.batch.assert_called_once_with()
         self.insights.snapshot.assert_not_called()
         self.insights.storage_name_diagnostics.assert_not_called()
         self.business.assert_not_called()

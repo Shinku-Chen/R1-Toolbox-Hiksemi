@@ -38,7 +38,7 @@ class BundleTests(unittest.TestCase):
         for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
                      'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py', 'disk_names.py', 'vendor_device.py',
                      'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py',
-                     'vendor_media_auth.py', 'vendor_media_probe.py'):
+                     'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py'):
             (self.root / 'runtime' / name).write_text('# fixture only\n')
         (self.root / 'ui/web').mkdir()
         for name in ('index.html', 'login.html'):
@@ -80,6 +80,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn('runtime/dev_diagnostics.py', files)
         self.assertIn('runtime/vendor_media_auth.py', files)
         self.assertIn('runtime/vendor_media_probe.py', files)
+        self.assertIn('runtime/vendor_media_batch.py', files)
         self.assertIn('runtime/disk_names.py', files)
         self.assertIn('runtime/vendor_device.py', files)
         for name in ('vendor_business', 'vendor_runtime', 'vendor_app_diagnostics', 'vendor_download_diagnostics'):

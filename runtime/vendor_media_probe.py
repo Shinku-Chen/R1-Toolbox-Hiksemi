@@ -13,6 +13,7 @@ import re
 import socket
 import stat
 import time
+from types import MappingProxyType
 from urllib.parse import quote
 
 try:
@@ -26,6 +27,17 @@ HOST = '127.0.0.1'
 PORT = 20443
 ACTION = 'get_face_ai_status'
 REQUEST_PATH = '/rest/1.1/fcabm?action=' + ACTION + '&access_token='
+# 调用方只能选择经审计的状态查询；路径与原厂动作均不能来自请求参数。
+MEDIA_QUERIES = MappingProxyType({
+    'face': ('/rest/1.1/fcabm', ACTION),
+    'ocr': ('/rest/1.1/file', 'get_ocr_status'),
+    'thumbnail': ('/rest/1.1/file', 'get_thumb_convert_process'),
+    'similar': ('/rest/1.1/file', 'get_similar_status'),
+    'ai': ('/rest/1.1/fcabm', 'get_ai_status'),
+    'scraper': ('/rest/1.1/scraper', 'lib_scan_status'),
+    'shared_album': ('/rest/1.1/album', 'share_album_progress'),
+    'shared_album_catalog': ('/rest/1.1/album', 'get_share_album_list'),
+})
 TOTAL_TIMEOUT = 10.0
 MAX_HEADERS = 32 * 1024
 MAX_BODY = 64 * 1024
@@ -48,6 +60,8 @@ _ERRORS = frozenset((
     'invalid_multipart', 'incomplete_response', 'invalid_json',
     'redirect_refused', 'http_error', 'invalid_transport_result',
     'credential_unavailable', 'credential_read_failed', 'token_unavailable',
+    'unsupported_query',
+    'invalid_parameters',
 ))
 
 
@@ -387,12 +401,33 @@ def _first_frame(wire, headers, header_budget=MAX_HEADERS):
     return _strict_json(body.exact(length))
 
 
-def query_first_face_frame(access_token, *, root='/'):
+def _query_parameters(query_id, parameters):
+    """共享相册参数只由宿主同账户目录发现传入，不接受通用参数转发。"""
+    if query_id != 'shared_album':
+        if parameters is not None:
+            raise MediaProbeError('invalid_parameters')
+        return ''
+    if type(parameters) is not dict or set(parameters) != {'album_id', 'type'}:
+        raise MediaProbeError('invalid_parameters')
+    album_id, album_type = parameters['album_id'], parameters['type']
+    if (type(album_id) is not str or not re.fullmatch(r'share_[0-9]{1,10}', album_id)
+            or type(album_type) is not str or not 1 <= len(album_type) <= 31
+            or not all(32 <= ord(char) <= 126 for char in album_type)):
+        raise MediaProbeError('invalid_parameters')
+    return '&album_id=' + quote(album_id, safe='') + '&type=' + quote(album_type, safe='')
+
+
+def query_first_media_frame(access_token, query_id, *, root='/', parameters=None):
     """固定连接和叶证书 pin；返回 (HTTP 状态, 首个 JSON 对象)。
 
     access_token 只存在内存中。测试可将本函数整体替换为相同签名的 transport，
     或使用自有 socket fixture；不得向调用者开放 host、端口、动作或路径参数。
+    parameters 仅供宿主传入已发现的共享相册 ID／类型，不得接受网页输入。
     """
+    if type(query_id) is not str or query_id not in MEDIA_QUERIES:
+        raise MediaProbeError('unsupported_query')
+    route, action = MEDIA_QUERIES[query_id]
+    query_parameters = _query_parameters(query_id, parameters)
     deadline = time.monotonic() + TOTAL_TIMEOUT
     if ssl is None:
         raise MediaProbeError('tls_unavailable')
@@ -412,9 +447,14 @@ def query_first_face_frame(access_token, *, root='/'):
         if not isinstance(access_token, str) or not 1 <= len(access_token) <= 4096:
             raise MediaProbeError('token_unavailable')
         # 证书匹配之前不构造或发送带签名的请求；quote 禁止头注入。
-        request = ('GET ' + REQUEST_PATH + quote(access_token, safe='') + ' HTTP/1.1\r\n'
+        request_path = route + '?action=' + action + query_parameters + '&access_token='
+        # 刮削状态 handler 要求 JSON 对象；空对象查询默认状态，不接受库 ID。
+        method = 'POST' if query_id == 'scraper' else 'GET'
+        payload = 'Content-Type: application/json\r\nContent-Length: 2\r\n' if query_id == 'scraper' else ''
+        request = (method + ' ' + request_path + quote(access_token, safe='') + ' HTTP/1.1\r\n'
                    'Host: 127.0.0.1:20443\r\nAccept: multipart/x-mixed-replace, application/json\r\n'
-                   'Accept-Encoding: identity\r\nConnection: close\r\n\r\n').encode('ascii')
+                   'Accept-Encoding: identity\r\nConnection: close\r\n' + payload
+                   + '\r\n' + ('{}' if query_id == 'scraper' else '')).encode('ascii')
         connection.settimeout(_remaining(deadline))
         connection.sendall(request)
         wire = _WireReader(connection, deadline)
@@ -443,6 +483,11 @@ def query_first_face_frame(access_token, *, root='/'):
                 raw.close()
             except OSError:
                 pass
+
+
+def query_first_face_frame(access_token, *, root='/'):
+    """保留原有单项探测传输契约，固定转发到 face 状态查询。"""
+    return query_first_media_frame(access_token, 'face', root=root)
 
 
 def _safe_credential(value):

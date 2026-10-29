@@ -1,6 +1,6 @@
 # 原厂相册识别实机验证
 
-`POST /api/dev/media` 在宿主内部只读复用管理员已有会话，对原厂相册识别接口进行一次签名查询，仅返回首帧进度和验证状态。它用于明确发起的实机验证，不属于自动轮询或 `/api/dev/diagnostics` 的被动快照。
+`POST /api/dev/media` 在宿主内部只读复用管理员已有会话，对固定原厂媒体状态接口进行签名查询，仅返回首帧数据和验证状态。它用于明确发起的实机验证，不属于自动轮询或 `/api/dev/diagnostics` 的被动快照。原有 `probe` 验证相册识别，`probe_all` 逐项验证下表七类状态。
 
 ## 请求与授权
 
@@ -13,9 +13,29 @@ const response = await fetch('/api/dev/media', {
 console.log(await response.json());
 ```
 
-接口只接受 `{"action":"probe"}`，需要 `R1_DEV_NO_PAIRING=1`、精确实际客户端 `R1_DEV_ALLOW_IPS` 和有效 `R1_DEV_MINUTES` 窗口。开发者白名单授权可直接测试，不依赖浏览器登录或 `R1_DEV_ALLOW_COMMANDS`；同源、JSON 和 CSRF 校验继续生效。没有公开 GET、CORS 或任意参数转发。
+接口仅接受 `{"action":"probe"}` 或 `{"action":"probe_all"}`，需要 `R1_DEV_NO_PAIRING=1`、精确实际客户端 `R1_DEV_ALLOW_IPS` 和有效 `R1_DEV_MINUTES` 窗口。开发者白名单授权可直接测试，不依赖浏览器登录或 `R1_DEV_ALLOW_COMMANDS`；同源、JSON 和 CSRF 校验继续生效。没有公开 GET、CORS 或任意参数转发。
 
 请求不能指定用户、SQL、文件路径、令牌、原厂动作、地址或端口。同一时间只接受一个测试，重复请求返回 `409`。控制、风扇重试及原有诊断接口的授权不变。
+
+## 七类状态批量验证
+
+把示例中的 `action` 改成 `probe_all`。一次读取已有会话，每项重新签名；一次最多八个原厂请求，包含共享相册发现。每个请求总时限十秒，全部超时时约八十一秒，客户端应允许至少九十秒。单项异常、认证拒绝或超时保存在各自结果内，后续项继续执行；不换账号或换凭据重试。
+
+| 结果 ID | 原厂动作 | 固定请求及公开数据 |
+|---|---|---|
+| `face` | `fcabm/get_face_ai_status` | GET；图片／视频的已处理数、总数及明确区分的同步字段 |
+| `ocr` | `file/get_ocr_status` | GET；`totalpic`、`processedpic`、`remainpic`，有效正分母时计算完成比 |
+| `thumbnail` | `file/get_thumb_convert_process` | GET；仅五个原始整数 `b/st/pt/sc/cc`，单位／状态未核验，不计算百分比 |
+| `similar` | `file/get_similar_status` | GET；原始计数和 `pending_hashes`；原厂总数等于剩余数的缺陷使其不适合作为完成率 |
+| `ai` | `fcabm/get_ai_status` | GET；配置状态与识别范围数量，隐藏用户名和范围路径 |
+| `scraper` | `scraper/lib_scan_status` | 固定 POST、JSON `{}`；`scaned/total/timestamp/num` 和原始数值状态，不传 `lid`，不猜聚合范围 |
+| `shared_album` | `album/share_album_progress` | GET；仅一个已有相册的 `status/scan_num/failed_num/await_num`，相册标识留在宿主 |
+
+共享相册先固定 GET `album/get_share_album_list`。原厂列表 SQL 限定当前 creator，Toolbox 还要求 `creater` 为整数 `1`，只接受 `share_[0-9]{1,10}` 和列表原有的 1～31 字符安全 ASCII `type`。标识不由网页传入，不回传相册名、封面、路径、共享链接或 ID。没有可用的既有相册时返回 `not_applicable`，不会创建或导入样本。发现失败或同 ID 上下文冲突时不调用进度接口。
+
+批量结果在外层 `batch` 中；`results` 始终含七项。每项分别给出 `attempted`、`query_success`、`available`、`status`、`reason`、耗时、原厂 HTTP／业务码及安全数据。`coverage` 分别统计调用、响应成功、数据可用和字段完整数量，`discovery` 仅给出相册发现的安全状态。只有所有项字段完整时顶层 `status` 才为 `ok`；`all_queries_succeeded` 单独表示是否七项都返回预期接口结构。HTTP 200／外层 `ok:true` 表示批量请求已处理，不能代替逐项成功。
+
+缩略图和共享进度正常没有 `code`，必须核对完整整数结构；其余动作要求原厂 `code=0`。负计数投影为 `null`，未知状态不推断运行或空闲。`query_success` 表示返回了预期接口结构，`available` 表示有可用字段；字段缺失或无效时保留 `partial`，不能把接口响应有效解释为数据全都可靠。共享计数的部分数据库错误被原厂吞为零，即使四字段都是零也不能独立证明没有任务。
 
 ## 实际执行范围
 
@@ -42,6 +62,10 @@ HTTP `200`、外层 `ok:true` 表示测试请求已处理。应继续检查 `pro
 
 令牌读取是只读操作，但原厂相册状态查询本身可能初始化用户资源、访问媒体数据库、上报计数或写识别完成标记。该接口按需调用，不宣传为全程无副作用的后台采集。它不调用正常登录，因此不走登录 handler 的校时逻辑；不发送媒体扫描、重新识别或其他控制动作。
 
+批量验证还可能触发 OCR 完成事件和共享相册完成标记；原厂共享列表 getter 在数据库故障时有修复／重新打开资源的内部路径。刮削扩展的 `refresh_status` 下游实现未包含在固件中，其内部写入与聚合语义仍未知。Toolbox 只发固定状态请求，不额外调用修复、扫描、导入、重试或取消动作。这些接口不得加入被动快照轮询。
+
 静态依据见[媒体接口审计](vendor-media-diagnostics.md)。本实现针对 `V6.3.3 Build_260907`；数据库、会话和接口结构不符时保持不可用。
 
-本地测试仅使用隔离 SQLite、固定证书和本地协议 fixture，不接触 NAS 的真实凭据。镜像发布并部署后，才能用这个入口完成真实的“读现有令牌 → 签名 → 原厂认可 → 返回识别进度”验收。测试或镜像发布成功不等于已经读取了实机令牌。
+2026-10-29，`b30e27a` 已在“小可爱NAS”上通过相册识别实机验证：只读取得已有会话，原厂 HTTP 200、`code=0`，图片 `69380/69380`、视频 `5236/5237`，请求约 211 毫秒。这个结果仅证明 `probe` 的相册识别链路，不代表其他六项已经通过。
+
+本地测试仅使用隔离 SQLite、固定证书和本地协议 fixture，不接触 NAS 的真实凭据。批量版本发布并部署后，才能用 `probe_all` 完成其他接口的实机验收；测试或镜像发布成功不等于实机全部验证成功。
