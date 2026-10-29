@@ -460,6 +460,32 @@ class VendorRuntimeTests(unittest.TestCase):
         with mock.patch.object(runtime.os, 'fstat', side_effect=directory):
             self.assert_partial()
 
+    def test_emhistor_business_gate_requires_exact_executable_and_fixed_tls_port(self):
+        self.table(HEADER + tcp(port=20443))
+        self.process(pid=456, comm='emhistor', exe='/histor/bin/emhistor', inodes=('12345',))
+        self.links[self.proc / '123/fd/0'] = 'socket:[54321]'
+        result = runtime.require_emhistor_listener(self.root)
+        self.assertEqual(result, {'available': True, 'status': 'verified', 'pid': 456,
+            'start_ticks': 100, 'socket_inode': '12345', 'connect_host': '127.0.0.1'})
+        self.links[self.proc / '456/exe'] = '/untrusted/emhistor'
+        self.assertEqual(runtime.require_emhistor_listener(self.root)['status'], 'owner_unverified')
+        self.assertFalse(runtime.require_emhistor_listener(self.root)['available'])
+        for port in (80, 8181, '20443', True):
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                runtime.require_emhistor_listener(self.root, port)
+
+    def test_emhistor_gate_rejects_competitors_and_uses_verified_ipv6_family(self):
+        self.table(HEADER)
+        (self.proc / 'net/tcp6').write_text(HEADER6 + tcp6(port=20443), encoding='ascii')
+        self.process(pid=456, comm='emhistor', exe='/histor/bin/emhistor', inodes=('12345',))
+        self.links[self.proc / '123/fd/0'] = 'socket:[54321]'
+        self.assertEqual(runtime.require_emhistor_listener(self.root)['connect_host'], '::1')
+        self.table(HEADER + tcp(port=20443, inode='777'))
+        self.assertEqual(runtime.require_emhistor_listener(self.root)['status'], 'ambiguous')
+        self.table(HEADER)
+        self.links[self.proc / '123/fd/0'] = 'socket:[12345]'
+        self.assertEqual(runtime.require_emhistor_listener(self.root)['status'], 'owner_unverified')
+
 
 @unittest.skipUnless(sys.platform.startswith('linux'), '需要 Linux 原生 /proc 网络表头')
 class NativeProcHeaderTests(unittest.TestCase):

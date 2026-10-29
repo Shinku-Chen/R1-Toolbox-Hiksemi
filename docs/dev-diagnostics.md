@@ -1,10 +1,12 @@
 # 开发者白名单检测
 
-`POST /api/dev/diagnostics` 是开发用的固定只读检测入口。开启开发模式、真实连接来源命中局域网 IP／CIDR 白名单且处于有效窗口时，可以查看目录、采集原四项现场，或显式选择硬盘身份、文件访问就绪及固定 Docker 项目证据；无需机器 Token、登录口令会话或 `R1_DEV_ALLOW_COMMANDS`。
+`POST /api/dev/diagnostics` 是开发用的固定检测入口。开启开发模式、真实连接来源命中局域网 IP／CIDR 白名单且处于有效窗口时，可以查看目录、采集原四项现场，或显式选择硬盘身份、文件访问就绪、文件后端上下文及固定 Docker 项目证据；无需机器 Token、登录口令会话或 `R1_DEV_ALLOW_COMMANDS`。这里的元数据读取不执行业务控制，但部分显式项目可能唤盘，不能把全部检测统称为纯缓存快照。
 
 这个授权只适用于本接口。原有 `/api/dev/storage`、`/api/dev/business`、`/api/dev/fan` 和 `/api/dev/exec` 保持各自的授权规则。风扇接管重试、配置修改、应用控制和电源操作不属于本接口的检测项目。
 
 媒体签名验证另用明确发起的 `POST /api/dev/media`，请求 `{"action":"probe"}` 验证相册识别，或 `{"action":"probe_all"}` 逐项验证七类媒体状态；它会访问原厂媒体数据库并可能写完成状态，不会随本页的被动快照自动执行。见[媒体验证](media-probe.md)。
+
+新增业务目录检测使用同一路由及严格请求 `{"action":"probe_business","confirm":true}`，只依次查询普通相册、共享相册、影视库三个固定目录，各一次，逐项隔离错误；不创建相册、不修改影视库、不创建或撤销分享。它可能触发原厂初始化、共享修复及磁盘唤醒，必须明确确认，结果标记 `native_query_may_update_state` 与 `may_wake_disks`；不加入默认检测、业务后台轮询或旧媒体缓存。没有账号、令牌、对象、路径或任意 action 输入，详见[媒体业务执行器](media-business-operations.md)。
 
 APP 空间管理验证另用 `POST /api/dev/storage/probe`，严格请求 `{"action":"probe","confirm":true}`。它复用宿主已有原厂认证，通过回环 `emhistor:80` 取得 `disk_sn`；原厂查询可能改变 SMART／设备链接并唤盘，不属于本页被动项目。见[空间管理显式验证](storage-probe.md)。
 
@@ -52,9 +54,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"snapshot","checks":["storage_identity"]}
 {"action":"snapshot","checks":["file_access_readiness","docker_project_readiness"]}
 {"action":"snapshot","checks":["disk_activity"]}
+{"action":"snapshot","checks":["file_backend_context"]}
 ```
 
-不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号、新增就绪检查或磁盘活动采样。目录共列八项，额外四项只有在 `checks` 中明确选择才采集。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
+不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号、新增就绪检查、文件上下文或磁盘活动采样。目录共列九项，额外五项只有在 `checks` 中明确选择才采集；独立媒体 `probe_business` 不属于这个目录。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
 
@@ -66,10 +69,11 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `business` | 原厂应用已有缓存或 Toolbox 上次显式查询、身份确认的 aria2／qB 有界任务队列、上次显式媒体脱敏结果及真实服务现场；与原业务诊断共用采集锁，具体限制见[业务状态](business-diagnostics.md) |
 | `fan` | `FanDiagnostics.snapshot` 的被动预检与现场；不发送温控信号、不启动时间线、不应用策略、不重试接管 |
 | `file_access_readiness` | 只读可信根规划与固定安全证明清单；与存储诊断共用锁，不读用户文件或凭据、不执行 SMART。文件 ACL、安全打开未闭合时明确返回文件访问不可用，根规划不算内容读取通过 |
+| `file_backend_context` | 仅显式选择：核对固定管理员逻辑身份、Unix 映射候选、受限 Users 根的句柄／生命周期元数据及固定 emhistor 监听证据。`effects.may_wake_disks:true`；不列用户目录、不读内容或凭据、不签原厂请求、不发原厂文件动作。`file_access_available:false`，上下文证据不证明 ACL 与最终安全对象已经绑定 |
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
 | `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
 
-Docker 候选核验会访问配置所在文件系统的元数据，可能唤醒休眠磁盘，不能把它说成纯缓存或无磁盘访问；因此只允许显式选择，不加入默认采集或后台轮询。其 peer、引擎、配置身份和读取限额见[固定项目读取](docker-projects.md)。检测期间开发窗口到期或被关闭时，整次结果丢弃并返回 `403`，不续期，也不输出已采到的现场。
+Docker 候选核验和文件后端上下文会访问文件系统元数据，可能唤醒休眠磁盘，不能把它们说成纯缓存或无磁盘访问；因此只允许显式选择，不加入默认采集或后台轮询。文件边界仍为 `/drives/*/Users/`；元数据句柄或映射候选不能用作注册十三项文件内容工具的依据。Docker 的 peer、引擎、配置身份和读取限额见[固定项目读取](docker-projects.md)。检测期间开发窗口到期或被关闭时，整次结果丢弃并返回 `403`，不续期，也不输出已采到的现场。
 
 读取到的应用缓存不等于完整实时安装列表；下载来源不可用或需要授权时数据保持未知；媒体读取上次显式采集结果和逐项时间，不自动发起原厂媒体查询。白名单授权并不改变这些数据来源的限制。
 
@@ -107,4 +111,4 @@ Docker 候选核验会访问配置所在文件系统的元数据，可能唤醒�
 
 同一时刻只运行一个统一快照，重叠请求返回 `409`；某个来源忙碌或失败时，其他选中项目继续采集。`started_at` 和 `finished_at` 是 UTC 时间，顺序采样不代表全机原子快照。接口不进行自动重试。
 
-实机验收时，先查询目录和返回的 IP，再按项检查来源状态及名称映射，最后运行一次全项快照。验证结束后关闭开发模式。自动化测试使用本地 HTTP 和隔离采集器，不等于已经完成 NAS 实机验收。
+实机验收时，先查询目录和返回的 IP，再明确选择所需项目；涉及元数据唤盘或原厂业务状态变更的检查单独发起，不盲目运行全部项目。验证结束后关闭开发模式。自动化测试使用本地 HTTP 和隔离采集器；新增文件上下文与媒体业务目录的可用性仍须部署后核对，不等于已经完成 NAS 实机验收。

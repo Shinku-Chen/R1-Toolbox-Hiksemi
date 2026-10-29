@@ -116,7 +116,7 @@ def _invalid_constant(_value):
     raise _Failure("invalid_response")
 
 
-def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, host=HOST, return_headers=False):
+def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, host=HOST, return_headers=False, before_send=None):
     """Fixed caller-built requests; reject redirects, compression and streaming.
 
     A monotonic deadline applies before every socket operation, so a server
@@ -124,6 +124,8 @@ def _http_exchange(request, port, ceiling, deadline, clock, socket_factory, *, h
     """
     sock = socket_factory((host, port), timeout=_remaining(deadline, clock))
     try:
+        if before_send is not None:
+            before_send()
         sock.settimeout(_remaining(deadline, clock))
         sock.sendall(request)
         data = bytearray()
@@ -187,17 +189,17 @@ def _json(content):
         raise _Failure("invalid_response") from None
 
 
-def _http_rpc(payload, deadline, clock, socket_factory):
+def _http_rpc(payload, deadline, clock, socket_factory, *, before_send=None):
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     request = (f"POST {PATH} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\n"
                "Content-Type: application/json\r\nAccept: application/json\r\n"
                "Accept-Encoding: identity\r\nConnection: close\r\n"
                f"Content-Length: {len(body)}\r\n\r\n").encode("ascii") + body
     ceiling = 4096 if payload["method"] == "aria2.getVersion" else MAX_BODY
-    return _json(_http_exchange(request, PORT, ceiling, deadline, clock, socket_factory))
+    return _json(_http_exchange(request, PORT, ceiling, deadline, clock, socket_factory, before_send=before_send))
 
 
-def _qb_get(path, deadline, clock, socket_factory, *, host=HOST, sid=None):
+def _qb_get(path, deadline, clock, socket_factory, *, host=HOST, sid=None, before_send=None):
     if path not in QB_PATHS or host not in (HOST, '::1'):
         raise ValueError("仅允许固定的 qB 只读查询")
     authority = ('[::1]' if host == '::1' else HOST) + ':' + str(QB_PORT)
@@ -210,7 +212,7 @@ def _qb_get(path, deadline, clock, socket_factory, *, host=HOST, sid=None):
                "Accept: application/json, text/plain\r\nAccept-Encoding: identity\r\n"
                "Connection: close\r\n\r\n").encode("ascii")
     return _http_exchange(request, QB_PORT, 4096 if path == QB_PATHS[0] else MAX_BODY,
-                          deadline, clock, socket_factory, host=host)
+                          deadline, clock, socket_factory, host=host, before_send=before_send)
 
 
 def _qb_credentials(value):
@@ -261,7 +263,7 @@ def _qb_sid(headers):
     return first[4:]
 
 
-def _qb_login(credentials, deadline, clock, socket_factory, *, host):
+def _qb_login(credentials, deadline, clock, socket_factory, *, host, before_send=None):
     if host not in (HOST, '::1'):
         raise _Failure('owner_unverified')
     authority = ('[::1]' if host == '::1' else HOST) + ':' + str(QB_PORT)
@@ -273,7 +275,7 @@ def _qb_login(credentials, deadline, clock, socket_factory, *, host):
                f"Content-Length: {len(body)}\r\n\r\n").encode('ascii') + body
     try:
         content, headers = _http_exchange(request, QB_PORT, 4096, deadline, clock,
-                                          socket_factory, host=host, return_headers=True)
+                                          socket_factory, host=host, return_headers=True, before_send=before_send)
     except _Failure as error:
         if error.status == 'auth_required':
             raise _Failure('auth_banned' if error.http_status == 403 else 'auth_rejected') from None
@@ -453,7 +455,7 @@ def _project_qb(transfer, rows, version):
 
 
 def _qb_snapshot(identity, sid, verify, deadline, clock, socket_factory):
-    version = _qb_get(QB_PATHS[0], deadline, clock, socket_factory, host=identity[3], sid=sid)
+    version = _qb_get(QB_PATHS[0], deadline, clock, socket_factory, host=identity[3], sid=sid, before_send=verify)
     verify()
     try:
         version = version.decode("ascii").strip()
@@ -461,10 +463,10 @@ def _qb_snapshot(identity, sid, verify, deadline, clock, socket_factory):
         raise _Failure("invalid_response") from None
     if not re.fullmatch(r"v[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?(?:[A-Za-z0-9.+_-]{0,24})", version):
         raise _Failure("invalid_response")
-    transfer = _qb_get(QB_PATHS[1], deadline, clock, socket_factory, host=identity[3], sid=sid)
+    transfer = _qb_get(QB_PATHS[1], deadline, clock, socket_factory, host=identity[3], sid=sid, before_send=verify)
     verify()
     transfer = _json(transfer)
-    tasks = _qb_get(QB_PATHS[2], deadline, clock, socket_factory, host=identity[3], sid=sid)
+    tasks = _qb_get(QB_PATHS[2], deadline, clock, socket_factory, host=identity[3], sid=sid, before_send=verify)
     verify()
     return _project_qb(transfer, _json(tasks), version)
 
@@ -521,7 +523,7 @@ def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, 
             _remaining(deadline, clock)
             login_attempted = True
             try:
-                sid = _qb_login(credentials, deadline, clock, socket_factory, host=identity[3])
+                sid = _qb_login(credentials, deadline, clock, socket_factory, host=identity[3], before_send=verify)
             except (_Failure, OSError):
                 verify()
                 raise

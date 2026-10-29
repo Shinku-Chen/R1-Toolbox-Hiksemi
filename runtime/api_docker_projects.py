@@ -305,11 +305,11 @@ class LocalDockerReader:
         finally:
             connection.close()
 
-    def snapshot(self):
+    def snapshot(self, *, deadline=None):
         if not _READ_LOCK.acquire(blocking=False):
             raise ProjectError('resource_busy')
         try:
-            deadline = self._clock() + NETWORK_SECONDS
+            deadline = min(self._clock() + NETWORK_SECONDS, deadline) if deadline is not None else self._clock() + NETWORK_SECONDS
             context = {'bytes': 0, 'peer': None}
             info = self._get('/info', deadline, context)
             if not isinstance(info, dict) or not isinstance(info.get('ID'), str) or not _ENGINE.fullmatch(info['ID']):
@@ -715,10 +715,42 @@ class DockerProjectRegistry:
         for grant in principal['docker_projects']:
             if (not isinstance(grant, dict) or set(grant) != {'id', 'operations'}
                     or not isinstance(grant['id'], str) or not _PROJECT.fullmatch(grant['id'])
-                    or grant['id'] in ids or grant['operations'] != ['inspect']):
+                    or grant['id'] in ids or not isinstance(grant['operations'], list)
+                    or not 1 <= len(grant['operations']) <= 3
+                    or any(not isinstance(item, str) for item in grant['operations'])
+                    or len(set(grant['operations'])) != len(grant['operations'])
+                    or any(item not in ('inspect', 'control', 'update_image') for item in grant['operations'])
+                    or 'inspect' not in grant['operations']
+                    or any(item != 'inspect' for item in grant['operations']) and principal['role'] != 'admin'):
                 raise ProjectError('permission_denied')
             ids.add(grant['id'])
         return ids
+
+    def _adopt_verified_update(self, project_id, previous_binding, live, *, previous_revision=None):
+        """Internal CAS after an image-only update; never an owner HTTP mutation.
+
+        The executor has already verified the replacement CID/config/image. Keep
+        the registered project ID so existing exact grants do not migrate to an
+        unrelated same-name project or silently gain another service.
+        """
+        with self._lock:
+            data = self._read()
+            rows = [row for row in data['projects'] if row['id'] == project_id and not row['revoked']]
+            if (len(rows) != 1 or rows[0]['protected'] or rows[0]['binding'] != previous_binding
+                    or previous_revision is not None and rows[0]['revision'] != previous_revision):
+                raise ProjectError('project_binding_changed')
+            row = rows[0]
+            identity = live.get('identity') if isinstance(live, dict) else None
+            old = row['identity']
+            if (not _valid_identity(identity) or live.get('protected') is not False
+                    or live.get('binding') != _hash(identity)
+                    or identity['engine'] != old['engine'] or identity['name'] != old['name']
+                    or identity['configuration']['path'] != old['configuration']['path']
+                    or [item['name'] for item in identity['services']] != [item['name'] for item in old['services']]):
+                raise ProjectError('project_binding_changed')
+            row.update(identity=copy.deepcopy(identity), binding=live['binding'], revision=row['revision'] + 1)
+            data['revision'] += 1
+            self._write(data)
 
     @_locked
     def list_projects(self, principal):

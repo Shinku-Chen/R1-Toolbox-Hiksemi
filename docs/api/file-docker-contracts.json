@@ -5959,7 +5959,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "image_reference": {
@@ -6200,18 +6200,9 @@
         ]
       },
       "scope": "docker",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "规划固定项目镜像更新",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_project_identity",
-          "image_repository_and_digest",
-          "single_service_compose_audit",
-          "concurrency_boundary"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -6258,7 +6249,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "idempotency_key": {
@@ -6520,20 +6511,9 @@
         ]
       },
       "scope": "docker",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "执行已绑定镜像更新计划",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_project_identity",
-          "compose_readback",
-          "cross_client_concurrency",
-          "atomic_plan_consumption",
-          "image_digest_layer_verification",
-          "update_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -6579,7 +6559,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "project_id": {
@@ -6837,18 +6817,9 @@
         ]
       },
       "scope": "docker",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "查询本键项目更新任务",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_contract",
-          "live_resource_identity",
-          "runtime_authorization",
-          "automated_and_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     }
   ]
 }

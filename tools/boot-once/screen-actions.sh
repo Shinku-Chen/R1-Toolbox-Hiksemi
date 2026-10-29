@@ -95,11 +95,11 @@ def read_bundle(tar_path, expected_sha):
                              'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                              'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
                              'runtime/vendor_media_snapshot.py', 'runtime/vendor_app_probe.py', 'runtime/vendor_storage_probe.py',
-                             'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_contracts.py', 'runtime/api_docker_projects.py', 'runtime/api_file_readiness.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
+                             'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_contracts.py', 'runtime/api_docker_projects.py', 'runtime/api_docker_operations.py', 'runtime/api_file_operations.py', 'runtime/api_file_transfers.py', 'runtime/api_file_readiness.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
                              'runtime/service_settings.py', 'runtime/network_access.py', 'runtime/screen_manager.py',
                              'runtime/light_policy.py', 'runtime/monitoring.py',
                              'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
-                             'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')
+                             'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py', 'runtime/download_operations.py', 'runtime/vendor_media_operations.py', 'runtime/vendor_business_transport.py')
                     or name.startswith('frontend/assets/'), 'ui.tar 包含不支持的文件：' + name)
             require(len(files) < MAX_FILES, 'ui.tar 文件数超过 512')
             limit = MAX_MANIFEST if name == 'manifest.json' else MAX_FILE
@@ -135,11 +135,11 @@ def read_bundle(tar_path, expected_sha):
                                            'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                                            'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
                                            'runtime/vendor_media_snapshot.py', 'runtime/vendor_app_probe.py', 'runtime/vendor_storage_probe.py',
-                                           'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_contracts.py', 'runtime/api_docker_projects.py', 'runtime/api_file_readiness.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
+                                           'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_contracts.py', 'runtime/api_docker_projects.py', 'runtime/api_docker_operations.py', 'runtime/api_file_operations.py', 'runtime/api_file_transfers.py', 'runtime/api_file_readiness.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
                                            'runtime/service_settings.py', 'runtime/network_access.py', 'runtime/screen_manager.py',
                                            'runtime/light_policy.py', 'runtime/monitoring.py',
                                            'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
-                                           'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')),
+                                           'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py', 'runtime/download_operations.py', 'runtime/vendor_media_operations.py', 'runtime/vendor_business_transport.py')),
             '内置界面缺少页面、采集或控制模块')
     return manifest, files
 

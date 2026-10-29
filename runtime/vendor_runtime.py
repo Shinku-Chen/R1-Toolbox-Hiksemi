@@ -13,7 +13,7 @@ import time
 
 SERVICES = frozenset(('emhistor', 'appcenter', 'aria2c-nox', 'qbittorrent-nox',
                       'intelligent', 'image_ocr', 'image_convert', 'image_similar'))
-PORTS = frozenset((5050, 6800, 8181, 8888, 9660, 7786, 7778, 7769, 7799))
+PORTS = frozenset((5050, 6800, 8181, 8888, 9660, 7786, 7778, 7769, 7799, 20443))
 MAX_PROCESSES, MAX_FDS, MAX_BYTES = 4096, 32768, 1024 * 1024
 
 
@@ -312,4 +312,51 @@ def require_one_listener(root='/', port=6800, comm='aria2c-nox'):
         # Connect to IPv6 loopback directly. The system-wide bindv6only value
         # cannot prove the per-socket option and is deliberately not inferred.
         result['connect_host'] = '::1'
+    return result
+
+
+def require_emhistor_listener(root='/', port=20443):
+    """Require the unique factory TLS listener and exact executable pathname.
+
+    This dedicated gate does not authorize a request. Its identity is compared
+    before credential transmission and after a fixed business operation; the
+    peer certificate is independently pinned by the transport.
+    """
+    if type(port) is not int or port != 20443:
+        raise ValueError('仅允许原厂固定 TLS 监听')
+    state = collect_runtime(root)
+    result = {'available': False, 'status': 'proc_unavailable', 'pid': None,
+              'start_ticks': None, 'socket_inode': None, 'connect_host': None}
+    if not state.get('available'):
+        return result
+    if not state.get('complete'):
+        result['status'] = 'proc_partial'
+        return result
+    listeners = [row for row in state['listeners'] if row['port'] == port]
+    if not listeners:
+        result['status'] = 'not_listening'
+        return result
+    if len(listeners) != 1:
+        result['status'] = 'ambiguous'
+        return result
+    listener = listeners[0]
+    matches = [row for row in state['processes'] if row['name'] == 'emhistor'
+               and row['identity_confirmed'] and row['pid'] in listener['owner_pids']]
+    if len(matches) != 1 or listener['owner_pids'] != [matches[0]['pid']]:
+        result['status'] = 'owner_unverified'
+        return result
+    process = matches[0]
+    folder = Path(root).absolute() / 'proc' / str(process['pid'])
+    try:
+        executable = os.readlink(folder / 'exe')
+    except (OSError, ValueError):
+        executable = None
+    identity = _kernel_identity(folder)
+    if (executable != '/histor/bin/emhistor'
+            or identity != (process['pid'], b'emhistor', process['start_ticks'])):
+        result['status'] = 'owner_unverified'
+        return result
+    result.update(available=True, status='verified', pid=process['pid'],
+                  start_ticks=process['start_ticks'], socket_inode=listener['socket_inode'],
+                  connect_host='::1' if listener['address'] in ('::', '::1') else '127.0.0.1')
     return result

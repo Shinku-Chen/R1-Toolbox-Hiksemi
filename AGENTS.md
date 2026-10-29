@@ -87,7 +87,9 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 项目不使用 Redis，无 TTL 约定。
 - 手动温控的标准配置为 schema v2，每路只有 `low_temp/high_temp` 两个递增阈值：低于低温静音、两阈值之间（含端点）普通、高于高温全速，不附加隐式迟滞。旧 schema v1 严格校验后按 `normal_at/full_at` 迁移，保留输出、来源、原厂档位和开机恢复意图；所有入口使用相同归一化规则。独立 CPU 过热、缺测及租约保护始终优先。
 - 小屏与网页的系统自动／高／中／低必须同义，明确请求原厂档位，不能把退出接管但保留高档显示成自动；CPU 高／中／低仍是独立固定输出。真实系统接管尚未释放时，配置 `fan_mode=5` 不能省略交接。恢复前保留安全全速，原厂初始化并同步自动后不得再写全速覆盖；恢复失败保留未确认原因和安全保护。原厂 `/tmp/fan` 是控制用档位缓存，不是 PWM 或 RPM 读回；原厂同档可能不重复写入，不能用配置或 ACK 证明物理调速。
-- 文件／Docker 的二十项合同维护在 `runtime/api_contracts.py`，同步到 `docs/api/file-docker-contracts.json`。当前四项已接入（授权根元数据和三个固定项目读取），其余十六项不得注册假回调。所有者查定义不授执行权；policy v1／v2 固定原十工具，v3 才按精确工具及资源授权，存储 v4 读取不强制重写。机器根信息不返回宿主绝对挂载路径。Docker 固定 Unix GET 必须验证 peer／引擎／配置及服务身份，原文不出宿主；根规划与 O_PATH 项目配置元数据都不能代替真实文件 ACL、安全打开或内容读取证明。见 `docs/docker-projects.md` 与 `docs/file-docker-api-plan.md`。
+- 文件／Docker 的二十项合同维护在 `runtime/api_contracts.py`，同步到 `docs/api/file-docker-contracts.json`。当前七项已接入（授权根元数据、三个固定项目读取及三项更新工具），其余十三项文件操作不得注册假回调。所有者查定义不授执行权；policy v1／v2 固定原十工具，v3 才按精确工具及资源授权，存储 v4 读取不强制重写。机器根信息不返回宿主绝对挂载路径。Docker 固定 Unix GET 必须验证 peer／引擎／配置及服务身份，原文不出宿主；管理员写入只用已登记项目、精确 `control/update_image` 和固定传输，不提供任意 Compose／命令代理。根规划与 O_PATH 元数据都不能代替真实文件 ACL、安全打开或内容读取证明。见 `docs/docker-projects.md`、`docs/docker-project-operations.md` 与 `docs/file-docker-api-plan.md`。
+- MCP 当前三十六工具。显式下载任务操作与被动业务缓存分开；qB／aria2 均核验固定唯一监听，连接完成后、发送前复验授权、进程和剩余时间。写操作须当前任务版本、确认和本键幂等标识，移除任务始终保留文件，不接收地址、Cookie、任意 RPC 或目标目录。继续原生任务属于下载器委托，不声称将整个原生进程沙箱化到 Users 文件范围；文件内容和新增目标仍须文件后端安全证明。
+- 新原厂相册／影视库目录也可能初始化或修复内部状态，最低读写，不能标记只读或无副作用；原缓存五工具保持只读。固定七操作复用管理员已有会话、20443 叶证书 pin 和严格 emhistor 监听身份。写入须确认与本键幂等，原厂 ACK 不是异步完成；不明结果不重放。新目录验证仅显式 `/api/dev/media` 的 `probe_business`＋`confirm:true`；`file_backend_context` 仅显式统一开发诊断，目录元数据可能唤盘，不加入默认四项。详见 `docs/mcp-business-operations.md`。
 - 中文正文、UI 文案与文档使用全角标点；代码、路径、标识符保持原样。
 
 ## 提交规范

@@ -302,7 +302,9 @@ class QbittorrentDiagnosticsTests(unittest.TestCase):
         self.assertEqual(value["data"]["tasks"][0]["progress_percent"], 25.0)
         self.assertEqual(value["data"]["tasks"][0]["upload_bytes_per_second"], 0)
         self.assertFalse(value["data"]["complete"])
-        self.assertEqual(len(harness.owner_calls), 4)
+        # Initial identity plus an actual pre-send and post-response check for
+        # each connection, including the time spent inside connect().
+        self.assertEqual(len(harness.owner_calls), 7)
         self.assertTrue(all(call == {"root": "/fixture", "port": 8181, "comm": "qbittorrent-nox"}
                             for call in harness.owner_calls))
         self.assertEqual([address for address, _ in harness.calls], [("127.0.0.1", 8181)] * 3)
@@ -360,7 +362,7 @@ class QbittorrentDiagnosticsTests(unittest.TestCase):
 
     def test_owner_change_after_each_stage_discards_all_data(self):
         for index in range(1, 4):
-            harness = QbHarness(owners=[OWNER] * index + [dict(OWNER, socket_inode="99999")])
+            harness = QbHarness(owners=[OWNER] * (index * 2) + [dict(OWNER, socket_inode="99999")])
             value = harness.collect()
             self.assertEqual(value["status"], "identity_changed")
             self.assertIsNone(value["data"])
@@ -427,7 +429,7 @@ class QbittorrentDiagnosticsTests(unittest.TestCase):
 
         def owner(**kwargs):
             value = original(**kwargs)
-            if len(harness.owner_calls) == 3:
+            if len(harness.owner_calls) == 5:
                 now[0] = 4.1
             return value
 

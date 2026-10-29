@@ -34,7 +34,8 @@ def explicit_principal(role, tools, scopes=None):
     scopes = scopes or ['read']
     value = principal(role, scopes)
     value.update(policy_version=3, tool_grants=list(tools), docker_projects=[
-        {'id': PROJECT_ID, 'operations': ['inspect'] if role == 'readonly' else ['inspect', 'update_image']}
+        {'id': PROJECT_ID, 'operations': ['inspect'] if role == 'readonly' else
+         ['inspect', 'update_image', 'control'] if role == 'admin' else ['inspect', 'update_image']}
     ] if 'docker' in scopes else [])
     if role != 'readonly' and value['file_roots']:
         value['file_roots'][0]['access'] = 'readwrite'
@@ -164,7 +165,11 @@ class ApiPermissionTests(unittest.TestCase):
         business = {'get_app_status': 'apps', 'get_download_status': 'downloads',
                     'get_movie_status': 'movie', 'get_album_status': 'albums',
                     'get_share_status': 'sharing'}
-        self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared) | set(business))
+        operations = {'list_download_tasks', 'get_download_task', 'pause_download_task',
+            'resume_download_task', 'remove_download_task', 'set_download_task_limits',
+            'list_albums', 'list_shared_albums', 'create_album', 'rename_album',
+            'list_movie_libraries', 'rename_movie_library', 'revoke_share', 'control_docker_project'}
+        self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared) | set(business) | operations)
         self.assertEqual(set(permissions.SCOPE_BY_TOOL), set(permissions.MIN_ROLE_BY_TOOL))
         for name, scope in business.items():
             self.assertEqual(permissions.SCOPE_BY_TOOL[name], scope)

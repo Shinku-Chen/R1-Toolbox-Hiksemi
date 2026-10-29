@@ -1454,6 +1454,7 @@ dd .diag-link{margin:0;height:24px}
 .r1-api-scope .sub{margin:0;overflow-wrap:anywhere;font-size:12px}
 .r1-api-permission-note{margin:0;line-height:1.6}
 .r1-api-file-roots>div{display:grid;gap:12px}
+.r1-api-project-operations{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin:0 0 12px 24px}
 .r1-api-file-root{padding-top:12px;min-width:0;border-top:1px solid var(--line)}
 .r1-api-file-root p,.r1-api-meta dd p{margin:6px 0;overflow-wrap:anywhere}
 .r1-api-root-choice{display:flex;align-items:flex-start;gap:10px;min-height:40px;font-size:14px;cursor:pointer}
@@ -6214,9 +6215,17 @@ setText(item.querySelector('[data-root-note]'), item.dataset.readOnly === 'true'
 : item.dataset.available === 'false' ? '原范围当前失效；元数据编辑仍保留绑定，不按名称换盘。' : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '授权仅限 Users 目录内已勾选的根与子目录；仍须选择已接入的具体工具。');
 }
 x.dockerProjects.hidden = !selected.has('docker');
-x.dockerProjectOptions.querySelectorAll('input').forEach(input => { input.disabled = !exactPolicy() || input.dataset.available !== 'true'; });
+for (const row of x.dockerProjectOptions.querySelectorAll('[data-project-row]')) {
+const selectedProject = row.querySelector('[data-project-check]');
+selectedProject.disabled = !exactPolicy() || selectedProject.dataset.available !== 'true';
+for (const input of row.querySelectorAll('[data-project-operation]')) {
+const writable = input.value !== 'inspect';
+input.disabled = selectedProject.disabled || !selectedProject.checked || (writable && role !== 'admin');
+if (writable && role !== 'admin' && input.checked) { input.checked = false; if (editing) dirty.projects = true; }
+}
+}
 setText(x.dockerProjectsStatus, projectRows().some(row => row.available === true && row.revoked !== true)
-? '仅选择已登记项目的 inspect 读取范围，不会授予更新权限。' : '暂无可用的已登记项目；请在下方读取候选并登记，不能凭名称创建授权。');
+? '逐项目选择读取、启停重启和镜像更新；后两项需要管理员及对应具体工具，默认不选。' : '暂无可用的已登记项目；请在下方读取候选并登记，不能凭名称创建授权。');
 pending(busy);
 };
 const appendRange = (item, draft = {}) => {
@@ -6269,14 +6278,26 @@ x.toolOptions.append(row);
 }
 };
 const drawProjects = (chosen = null) => {
-const selected = chosen || new Set([...x.dockerProjectOptions.querySelectorAll('input:checked')].map(input => input.value));
+const previous = new Map([...x.dockerProjectOptions.querySelectorAll('[data-project-row]')].map(row =>
+[row.querySelector('[data-project-check]').value, [...row.querySelectorAll('[data-project-operation]:checked')].map(input => input.value)]));
+const selected = chosen || new Set([...x.dockerProjectOptions.querySelectorAll('[data-project-check]:checked')].map(input => input.value));
 x.dockerProjectOptions.replaceChildren();
 for (const project of projectRows()) {
-const row = mount('<label class="r1-api-scope"><input type="checkbox"><span><b></b><span class="sub" data-project-note></span></span></label>');
-const input = row.querySelector('input'); input.value = project.id; input.checked = selected.has(project.id);
+const row = mount('<div data-project-row><label class="r1-api-scope"><input type="checkbox" data-project-check><span><b></b><span class="sub" data-project-note></span></span></label><div class="r1-api-project-operations" data-project-operations></div></div>');
+const input = row.querySelector('[data-project-check]'); input.value = project.id; input.checked = selected.has(project.id);
 input.dataset.available = String(project.available === true && project.revoked !== true);
-setText(row.querySelector('b'), project.label); setText(row.querySelector('[data-project-note]'), input.dataset.available === 'true' ? 'inspect：读取项目状态和脱敏摘要。' : project.reason || '登记已撤销或项目绑定暂不可用。');
-input.onchange = () => { dirty.projects = true; };
+setText(row.querySelector('b'), project.label); setText(row.querySelector('[data-project-note]'), input.dataset.available === 'true' ? '只授权当前登记绑定；新工具与写操作须另行勾选。' : project.reason || '登记已撤销或项目绑定暂不可用。');
+const saved = chosen !== null ? (editing && (editing.docker_projects || []).find(grant => grant.id === project.id) || {}).operations
+: previous.get(project.id);
+for (const [operation, label] of [['inspect', '读取状态与摘要'], ['control', '启停／重启（管理员）'], ['update_image', '镜像更新（管理员）']]) {
+const option = mount('<label class="r1-api-scope"><input type="checkbox" data-project-operation><span></span></label>');
+const check = option.querySelector('input'); check.value = operation;
+check.checked = Array.isArray(saved) ? saved.includes(operation) : operation === 'inspect';
+option.querySelector('span').textContent = label;
+check.onchange = () => { dirty.projects = true; };
+row.querySelector('[data-project-operations]').append(option);
+}
+input.onchange = () => { dirty.projects = true; updatePermissions(); };
 x.dockerProjectOptions.append(row);
 }
 };
@@ -6551,9 +6572,11 @@ if (file_roots.length > 32) { fail(new Error('文件范围最多 32 条。')); r
 const changeProjects = !editing || dirty.projects || upgrade;
 const docker_projects = changeProjects ? [] : (Array.isArray(editing.docker_projects) ? editing.docker_projects : []);
 if (exactPolicy() && changeProjects && scopes.includes('docker')) {
-for (const input of x.dockerProjectOptions.querySelectorAll('input:checked')) {
+for (const input of x.dockerProjectOptions.querySelectorAll('[data-project-check]:checked')) {
 if (input.dataset.available !== 'true') { fail(new Error('所选项目登记已失效，请明确移除后重新选择已登记项目。')); return; }
-docker_projects.push({ id: input.value, operations: ['inspect'] });
+const operations = [...input.closest('[data-project-row]').querySelectorAll('[data-project-operation]:checked')].map(option => option.value);
+if (!operations.length || (role !== 'admin' && operations.some(operation => operation !== 'inspect'))) { fail(new Error('请为项目选择当前角色允许的具体操作。')); return; }
+docker_projects.push({ id: input.value, operations });
 }
 if (!docker_projects.length) { fail(new Error('请至少选择一个可用的已登记 Docker 项目。')); return; }
 }

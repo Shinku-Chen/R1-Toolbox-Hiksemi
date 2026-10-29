@@ -41,13 +41,13 @@ SCOPE_CATALOG = (
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取脱敏应用目录缓存；安装、卸载与应用市场操作待接入。'},
     {'id': 'downloads', 'label': '下载管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '读取已有下载器状态快照；创建、暂停与删除任务待接入。'},
+     'description': '读取缓存或显式任务明细；可逐任务暂停、继续、移除及限速，移除始终保留文件；新增任务待接入。'},
     {'id': 'movie', 'label': '影视管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '读取上次显式采集的影视刮削状态；媒体库浏览与配置待接入。'},
+     'description': '读取刮削缓存、显式影视库目录并修改库名；来源、成员与新建媒体库待接入。'},
     {'id': 'albums', 'label': '相册管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '读取上次显式采集的相册处理状态；照片浏览与相册创建待接入。'},
+     'description': '读取处理缓存、列出相册、创建和重命名普通相册；照片浏览和文件操作待接入。'},
     {'id': 'sharing', 'label': '分享管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '读取上次显式采集的共享相册处理状态；创建与撤销分享待接入。'},
+     'description': '读取共享相册处理缓存并撤销当前管理员的既有单个分享；新建外链待接入。'},
     {'id': 'backup', 'label': '备份管理', 'implemented': False, 'min_role': 'readonly',
      'description': '待接入；可预授权备份任务管理，目前没有对应操作工具。'},
     {'id': 'system', 'label': '系统管理', 'implemented': False, 'min_role': 'admin',
@@ -60,6 +60,13 @@ MIN_ROLE_BY_TOOL = {
     'get_movie_status': 'readonly',
     'get_album_status': 'readonly',
     'get_share_status': 'readonly',
+    'list_download_tasks': 'readonly', 'get_download_task': 'readonly',
+    'pause_download_task': 'readwrite', 'resume_download_task': 'readwrite',
+    'remove_download_task': 'readwrite', 'set_download_task_limits': 'readwrite',
+    'list_albums': 'readwrite', 'list_shared_albums': 'readwrite',
+    'create_album': 'readwrite', 'rename_album': 'readwrite',
+    'list_movie_libraries': 'readwrite', 'rename_movie_library': 'readwrite',
+    'revoke_share': 'readwrite', 'control_docker_project': 'admin',
     'get_media_status': 'readwrite',
     'set_fan_policy': 'readwrite',
     'release_fan': 'readwrite',
@@ -103,6 +110,13 @@ SCOPE_BY_TOOL = {
     'get_app_status': 'apps', 'get_download_status': 'downloads',
     'get_movie_status': 'movie', 'get_album_status': 'albums',
     'get_share_status': 'sharing',
+    'list_download_tasks': 'downloads', 'get_download_task': 'downloads',
+    'pause_download_task': 'downloads', 'resume_download_task': 'downloads',
+    'remove_download_task': 'downloads', 'set_download_task_limits': 'downloads',
+    'list_albums': 'albums', 'list_shared_albums': 'albums',
+    'create_album': 'albums', 'rename_album': 'albums',
+    'list_movie_libraries': 'movie', 'rename_movie_library': 'movie',
+    'revoke_share': 'sharing', 'control_docker_project': 'docker',
     'set_fan_policy': 'fan', 'release_fan': 'fan',
     'set_light_policy': 'light', 'set_rgb': 'light',
     'set_screen': 'screen', 'update_screen_settings': 'screen',
@@ -176,11 +190,12 @@ def valid_docker_projects(value, role, scopes):
         if (not isinstance(row, dict) or set(row) != {'id', 'operations'}
                 or not isinstance(row['id'], str) or not _PROJECT_ID_RE.fullmatch(row['id'])
                 or row['id'] in identities or not isinstance(row['operations'], list)
-                or not 1 <= len(row['operations']) <= 2
-                or any(not isinstance(item, str) or item not in ('inspect', 'update_image')
+                or not 1 <= len(row['operations']) <= 3
+                or any(not isinstance(item, str) or item not in ('inspect', 'control', 'update_image')
                        for item in row['operations'])
                 or len(set(row['operations'])) != len(row['operations'])
-                or role == 'readonly' and 'update_image' in row['operations']):
+                or role == 'readonly' and any(item != 'inspect' for item in row['operations'])
+                or role == 'readwrite' and 'control' in row['operations']):
             return False
         identities.add(row['id'])
     return bool(value) == ('docker' in scopes)
@@ -207,7 +222,9 @@ def valid_tool_grants(value, role, scopes, file_roots, docker_projects):
                 or _ROLE_LEVELS[role] < _ROLE_LEVELS[MIN_ROLE_BY_TOOL[name]]
                 or name in _WRITE_FILE_TOOLS and not writable
                 or name in _UPDATE_PROJECT_TOOLS and 'update_image' not in project_operations
+                or name == 'control_docker_project' and 'control' not in project_operations
                 or SCOPE_BY_TOOL[name] == 'docker' and name not in _UPDATE_PROJECT_TOOLS
+                   and name != 'control_docker_project'
                    and 'inspect' not in project_operations
                 or name in _TOOL_DEPENDENCIES and _TOOL_DEPENDENCIES[name] not in value):
             return False

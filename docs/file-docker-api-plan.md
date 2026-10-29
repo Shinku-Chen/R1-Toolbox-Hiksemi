@@ -1,17 +1,17 @@
 # 文件读写与固定 Docker 项目接口方案
 
-状态：逐工具授权、文件根元数据和固定 Docker 项目读取已接入；真实文件内容操作与项目更新仍待接入。日期：2026-10-29；本批前代码基线：`4328137fb862fbc9fce9e921d9b3b075d41e10d6`。
+状态：逐工具授权、文件根元数据、固定 Docker 项目读取及受控项目操作已接入；十三项文件内容合同尚未开放。更新于 2026-10-30；原始方案基线为 `4328137fb862fbc9fce9e921d9b3b075d41e10d6`，下文已区分当前实现与后续文件合同，不以原始基线代替现状。
 
-本方案覆盖文件读写，以及已登记 Docker 项目的读取和受控镜像更新。用户选择的“先只做文件读取和项目状态核对”仅限定 NAS 实机验收，不取消写能力设计。二十项新增合同中，`list_file_roots` 与三个 Docker 读取工具已有实际回调；其余十六项仍待接入，须完成后端核验、测试和明确授权后才开放。
+本方案覆盖文件读写，以及已登记 Docker 项目的读取和受控镜像更新。用户选择的“先只做文件读取和项目状态核对”仅限定 NAS 实机验收，不取消写能力设计。二十项合同中，`list_file_roots`、三个 Docker 读取工具及三个更新／任务工具已有实际回调，共七项；其余十三项文件内容合同仍待后端核验，不注册或授予假工具。项目启停／重启另有独立注册工具。
 
 ## 0．已实现的定义入口
 
 - 机器可读定义：[file-docker-contracts.json](api/file-docker-contracts.json)，包含二十项新工具的输入／输出 JSON Schema、最低角色、功能域、资源条件、错误和传输约定。
 - 定义来源：`runtime/api_contracts.py`；运行 `python scripts/build-api-contracts.py` 同步 JSON，`--check` 拒绝未同步产物。测试使用开发依赖中的固定 JSON Schema 校验器；不增加 NAS 运行时依赖。
 - 所有者接口：`GET /api/access/contracts`，无查询参数；遵循原有 Web `password/pair/open` 授权、同源规则和 `no-store`，Bearer（即使同时带所有者 Cookie）与单独开发窗口不能使用。MCP 关闭时仍可由所有者查阅。
-- 网页“API 管理 → 文件与 Docker 接口定义”按需读取、展示和复制定义；不创建 Token、不更改权限、不访问文件或查询原厂服务。
+- 网页“API 管理 → Token 操作 → 文件与 Docker 接口定义”按需读取、展示和复制定义；不创建 Token、不更改权限、不访问文件或查询原厂服务。
 
-定义目录仍返回 `status:definitions_only`、`execution_allowed:false`，因为查阅定义本身不授予执行权；逐项 `implemented` 反映四项已接入、十六项待接入。这不是 MCP `tools/list`。当前全量可调用目录为十四项，policy v1／v2 仍冻结原十项。`policy_version:3`、逐工具授权、项目登记和存储 v4 已落地；真实文件 ACL 与安全打开尚未闭合。Docker 实现边界见[固定项目读取](docker-projects.md)，只读实机核对见[验收清单](file-docker-readonly-acceptance.md)。
+定义目录仍返回 `status:definitions_only`、`execution_allowed:false`，因为查阅定义本身不授予执行权；逐项 `implemented` 反映七项已接入、十三项文件内容合同待接入。这不是 MCP `tools/list`。当前全量注册目录为 36 项，实际目录按 Token 过滤，policy v1／v2 仍冻结原十项。`policy_version:3`、逐工具授权、项目登记和存储 v4 已落地；真实文件 ACL 与安全打开尚未闭合。Docker 实现边界见[项目读取](docker-projects.md)与[项目操作](docker-project-operations.md)，只读实机核对见[验收清单](file-docker-readonly-acceptance.md)。
 
 ## 1．能力范围与调用方式
 
@@ -19,13 +19,15 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 | 角色 | 可授权能力 | 资源限制 |
 |---|---|---|
-| `readonly` | 文件浏览、属性、下载；项目状态与脱敏摘要 | 只读文件范围；已登记项目的 `inspect` |
-| `readwrite` | 继承读取；上传、新建目录、改名、复制、移动、回收站删除 | `files` 域、具体工具及对应源／目标范围 |
-| `admin` | 继承已授读写；固定 Docker 项目更新规划与执行 | `docker` 域、具体工具、项目／服务／镜像范围及有效计划 |
+| `readonly` | 当前文件根元数据、项目状态与脱敏摘要；文件浏览、属性、下载为待实现合同 | 只读文件范围；已登记项目的 `inspect` |
+| `readwrite` | 继承读取；上传、新建目录、改名、复制、移动、回收站删除为待实现合同 | `files` 域、具体工具及对应源／目标范围；未实现操作不能授予 |
+| `admin` | 继承已授读写；固定项目启停／重启及受控镜像更新规划、执行 | `docker` 域、具体工具、项目 `control`／`update_image` 及所需有效计划 |
 
 角色只是权限上限，选择管理员不会自动授予全部工具或全部文件。只读角色仅授只读范围；读写／管理员角色的读取工具也可读取其已授读写范围。普通文件写操作在预授权范围内执行，不增加每次 Web 审批；覆盖和删除等操作仍须提交对应的明确确认。
 
-### 读取工具
+### 读取合同与当前可用范围
+
+下表中的 `list_file_roots` 和三个 Docker 读取工具已接入，其余五项文件内容读取／传输工具仅为合同，不出现在可执行目录。
 
 | 工具名 | 参数 | 最低角色／域 | 作用 |
 |---|---|---|---|
@@ -36,7 +38,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 | `get_file_transfer` | `transfer_id` | `readonly`／`files` | 查询本键下载的状态及实际已发送字节 |
 | `cancel_file_transfer` | `transfer_id` | `readonly`／`files` | 取消本键的下载，关闭句柄并释放名额 |
 | `list_docker_projects` | `{}` | `readonly`／`docker` | 只列本键获授的已登记项目 |
-| `get_docker_project_status` | `project_id` | `readonly`／`docker` | 查询该项目的原厂状态及可确认的运行状态 |
+| `get_docker_project_status` | `project_id` | `readonly`／`docker` | 查询该项目可确认的引擎运行／健康状态，原厂未核验状态保持未知 |
 | `get_docker_project_summary` | `project_id` | `readonly`／`docker` | 返回服务、镜像、端口等白名单摘要 |
 
 所有参数对象拒绝额外字段；`readwrite`、`admin` 仍须满足工具与资源范围。上述九工具是读取部分，文件写工具见第 5 节，Docker 更新工具见第 7 节。取消自己的下载不需要文件写权限；上传查询与取消须继续满足上传授权。
@@ -77,7 +79,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 当前持久格式为 v4，兼容读取 v1／v2／v3；权限策略为 policy v1／v2／v3，两者不同。以下为 policy v3 的结构合同：
 
-以下为本批四项新读取工具的授权结构示例，实际根和项目 ID 必须由所有者选择已核验的资源。当前所有者接口只接受已接入的十四项工具，尚未接入的文件内容操作拒绝授权。后续写入键须另选具体写工具并获得目录读写范围；Docker 更新还须 `update_image`，不能仅凭 `inspect` 执行，本批所有者接口只开放项目 `inspect`。
+以下保留文件根元数据与三个项目读取工具的只读授权示例，实际根和项目 ID 必须由所有者选择已核验的资源。所有者接口仅接受当前已注册工具，尚未接入的十三项文件内容操作拒绝授权。项目操作已区分 `inspect`、`control`、`update_image`；后两项同时要求管理员及对应具体工具，不能仅凭 `inspect` 执行。新增操作默认不选，降级须收紧超出等级的操作。
 
 ```json
 {
@@ -117,7 +119,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 ### 网页 API 管理
 
-在功能域下增加具体操作选择；新增操作默认不勾选。文件范围支持同根多条子目录的无损编辑，不能只保留第一条。Docker 另选已登记项目，区分“读取项目”和管理员“更新镜像”；未通过后端核验的操作显示原因并禁止勾选，不能假装已可用。
+功能域下已有具体操作选择，新增操作默认不勾选。文件范围支持同根多条子目录的无损编辑；Docker 逐已登记项目选择读取、管理员启停／重启及镜像更新操作。具体界面和降级行为见[API 管理](mcp-management-ui.md)。未实现文件操作不授予，不能假装已可用。
 
 同根多范围按明确允许范围的并集授权，源和目标分别完整匹配；精确重复拒绝。子目录只读范围不会收窄已经授予的上级读写范围，网页须提示重叠授权的实际效果。
 
@@ -127,7 +129,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 ### 路径语义
 
-- `root_id` 沿用 `root_<24hex>`，绑定物理盘、分区、文件系统和挂载；`path` 始终相对物理根。上限 1024 个 Unicode 字符，并另设有界 UTF-8 字节上限。
+- `root_id` 沿用 `root_<24hex>`，绑定物理盘、分区、文件系统、挂载及固定 `/drives/*/Users/` 根；`path` 始终相对该 Users 根，不相对整盘。上限 1024 个 Unicode 字符，并另设有界 UTF-8 字节上限。
 - 路径须等于已授予子目录或位于其后代，按组件比较。例如授权 `Movies/私人` 不允许访问 `""`、`Movies` 或 `Movies/私人备份`。
 - 拒绝绝对路径、`.`／`..`、反斜杠、重复斜杠、控制字符和无效 UTF-8。保持名称原有大小写和 Unicode，不替用户改名或归一化。
 - 不接受原厂路径、用户 ID、端口、URL、原厂 action 或 shell 参数。JSON 路径与原厂 URI 的编解码必须逐层确认，不允许二次解码形成另一条路径。
@@ -137,7 +139,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 ### 必须先补齐的实现门槛
 
-现有 `api_file_roots.py` 只生成授权规划。principal 没有 NAS 账户映射，也没有安全文件句柄。本批文件读取和写入上线前须完成：
+现有 `api_file_roots.py` 只生成授权规划；新增固定 `file_backend_context` 也只补逻辑管理员身份、Unix 映射候选与 Users 句柄元数据，显式调用可能唤盘，不读取目录或文件内容。它不授予权限，尚不能证明 NAS ACL 与最终打开对象绑定。十三项文件内容工具开放前仍须完成：
 
 1. 明确所有者委托的 NAS 主体，以及原厂虚拟目录与可信 `/drives` 根之间的一一映射。现有会话 UID `100000` 是原厂逻辑身份，不能直接当作 Linux uid 或任意用户目录的读取许可。
 2. 核验账号状态、实际 uid/gid／附加组及原厂共享／虚拟 ACL；需要时同时核验 POSIX ACL。权限证明必须对应最终对象，不能仅凭管理员签名请求成功。
@@ -145,11 +147,11 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 4. 使用经过证明的原厂安全对象／句柄机制，或在 NAS ACL 与内核身份映射闭合后使用受限身份的 fd 读取服务。只处理安全打开返回的同一对象。
 5. 原厂若只按路径重新打开，Toolbox 先 `stat/open` 再发路径不能证明对象相同。`realpath`、前后 `stat` 和建议锁也不能闭合竞态；没有等价机制则保持不可用，不退回宿主 root 读取，不用 `/proc/.../fd` 绕过原厂授权。
 
-门槛未满足分别返回 `acl_unverified`、`secure_open_unavailable`、`root_unavailable`，不返回成功空目录。根规划可单独可用；尚未具备真实文件能力的工具在能力目录中标明原因，不宣传已实现文件读取。
+未满足的门槛须在就绪证据中报告 `acl_unverified`、`secure_open_unavailable`、`root_unavailable` 等原因，不返回成功空目录。根规划可单独可用；十三项文件内容合同在定义目录标为未实现，不出现在 MCP 可执行工具列表，不宣传已实现文件读取。
 
 文件操作是显式盘访问，可能唤醒硬盘；不加入网页监控、被动开发诊断、自动目录预读或 SMART 采集。
 
-## 4．目录与属性响应
+## 4．目录与属性合同（文件后端未开放）
 
 `list_directory` 默认 `limit:50`，范围 1～200；只返回当前主体与文件范围允许、且后端已核验的条目。按固定规则排序，游标按相同顺序续页，不跨目录或跨键使用。
 
@@ -179,7 +181,7 @@ MCP `/mcp` 和 `POST /api/integration/action` 共用工具目录、参数校验�
 
 不暴露未经授权过滤的 `count/totalpage`，不能确认的总数为 `null`。过滤后为空只表示没有可返回条目，不证明物理目录为空。`get_file_info` 返回同类最小属性和可下载状态，目录大小为 `null`；不递归统计，不读内容算哈希，不返回 ACL 原文或链接目标。
 
-## 5．文件传输与写入
+## 5．文件传输与写入合同（文件后端未开放）
 
 ### 下载准备与传输
 
@@ -273,77 +275,38 @@ HTTP Range 与 HEAD 语义依据 [RFC 9110，第 9.3.2、14 节](https://www.rfc
 
 本次 NAS 实机验收不执行这些写工具。自动化使用隔离 fixture 覆盖写入、覆盖冲突、回收站不可用、撤权、竞态和部分失败；后续写入实机验收使用明确指定的专用目录及样本，不能把只读验收通过写成写入已通过。
 
-## 6．Docker 固定项目与只读工具
+## 6．固定 Docker 项目读取与登记
 
-### 所有者登记
-
-新增所有者接口，沿用网页登录、同源、JSON、CSRF，拒绝 Bearer 或开发白名单代管：
+所有者登记接口沿用网页登录、同源、JSON、CSRF，拒绝 Bearer 或开发白名单代管：
 
 | 接口 | 作用 |
 |---|---|
-| `GET /api/docker/projects/catalog` | 读取有界结构化 Docker 元数据，生成安全候选；不调用原厂 `project_list` |
-| `GET /api/docker/projects` | 列出 Toolbox 已登记策略与可确认的状态 |
-| `POST /api/docker/projects/register` | 按候选 ID 登记，生成 `project_<24hex>` |
-| `POST /api/docker/projects/update` | 修改标签等登记元数据，不修改原 Docker 项目 |
-| `POST /api/docker/projects/revoke` | 撤销登记，不删除或停止原项目 |
+| `GET /api/docker/projects/catalog` | 显式读取固定引擎元数据，生成有完整身份的候选 |
+| `GET /api/docker/projects` | 核对已登记项目及当前绑定 |
+| `POST /api/docker/projects/register` | 按候选登记已有项目，只修改 Toolbox 私有注册表 |
+| `POST /api/docker/projects/update` | 修改 Toolbox 标签，不修改业务项目 |
+| `POST /api/docker/projects/revoke` | 撤销登记，不停止或删除原项目 |
 
-登记保存可信项目名、引擎身份、配置文件位置及文件身份、服务身份、修订号；这些由后端取得，不接受机器传入。候选不含原始环境变量、命令行或日志。候选 ID 只定位，登记时重新验证。
+读取器使用固定本机 Docker Unix GET，核验 dockerd peer、引擎、Compose 标签及配置／服务身份，不使用 shell 或原厂 `project_list`。配置仅核验元数据，不读正文；来源不完整、身份变化或同名重建不自动换绑。发现配置所在文件系统的元数据可能唤盘，仅在显式调用时访问。项目状态的 `native_status/pop_status` 仍为 `null`，不冒充原厂 App 状态。
 
-通过固定本机 Docker 通道读取允许的 Compose 标签，交叉确认项目与配置来源。若信息不足，只能显示不可登记原因，不从同名猜测。机器只提交 `project_id`；换引擎、配置路径或项目重建后旧绑定失效，不自动绑定同名资源。
+列表与摘要只返回当前键获授项目的白名单数据，不输出环境、命令、任意标签、Compose 原文或真实路径。读取要求具体工具、`docker` 域及项目 `inspect`，不借管理员等级扩大范围。`GET /api/access` 只读注册表元数据，不自动连接引擎。完整读取约束见[固定项目读取与授权](docker-projects.md)。
 
-登记默认只允许 `inspect`；所有者可另行登记第 7 节的 `update_image` 服务及镜像范围，只有通过后端门槛才可启用。本次实机验收只登记 `inspect`。`r1-toolbox` 等自身项目可在所有者明确选择后提供只读摘要；机器更新始终受实际容器／项目身份保护，不能靠改名绕过。MCP 本身不登记资源。
+## 7．管理员项目控制与受控更新
 
-### 实际读取来源与原厂备选合同
+以下工具已有执行器；自动化验证不表示 NAS 新版本已验收。当前实现以[固定项目操作执行器](docker-project-operations.md)为准，不采用原始方案中的原厂脚本／配置写回路径。
 
-本批实际走固定本机 Docker Unix socket 的受限 GET，并核验 dockerd peer、引擎与已登记配置／服务身份；项目状态和摘要只声称引擎证据，不读取 Compose 正文。`native_status/pop_status` 为 `null`，摘要明确配置尚未完整解析。下述原厂签名 HTTP 读取仍为备选合同，未作为本批生产适配器开放，不能把静态证据当成已实测。
-
-后端将登记 ID 映射至固定项目，调用已审计的：
-
-```http
-POST /rest/1.1/docker?action=get_project_status
-Content-Type: application/json
-
-{"name":"后端已核验的项目名"}
-```
-
-配置摘要使用同一路由的 `get_project_compose`；固定本机原厂认证，令牌和签名留宿主。不向机器开放原始 Compose、真实路径、任意 name、SQL、shell 或原厂 action。
-
-原厂读取器可能通过 shell 使用项目名，本批名称须匹配 `^[a-z0-9][a-z0-9_-]{0,63}$`，拒绝选项前缀、空白、引号、控制字符及 shell 元字符；不通过大小写折叠或重写名称匹配另一个项目。配置文件还须核验为有界普通文件；拒绝符号链接、模糊的多来源和失效身份。多服务项目可提供只读摘要。
-
-`get_docker_project_status` 返回 `project_id/label/native_status/pop_status/running/health/observed_at/source`；`running/health` 必须有真实引擎证据，否则为 `null`，原厂内存状态单独保留。找不到项目的 `code:0,status:-1` 不当成功存在。
-
-`get_docker_project_summary` 返回服务名、有效字面量镜像、可确认的端口、挂载类型及授权标签、重启策略和风险标记。绝对宿主路径、环境变量值、敏感标签、原始 Compose、命令与日志不输出。插值或无法解析字段为 `null`，不展开 `.env` 后把秘密拼进摘要。安全解析拒绝自定义 YAML 构造及无界 alias。
-
-列表与 capabilities 只返回当前键获授的登记 ID；未授权项目统一拒绝，不用错误差异探测存在性。原有 `read` 域全局监控语义保持；需要只看固定项目的键只授予 `docker` 及本批工具。
-
-### 原厂末尾换行的精确修正
-
-此前实机看见读回多一个 LF，进一步反汇编确认来源为 `docker_read_file@0x42b2c6`：`0x42b4a1` 在读取结果末尾无条件附加一个合成 LF。不是已证明的保存器追加行为。
-
-对已核验版本，只能移除恰好一个合成 LF 后计算原文 hash／生成差异；不能 `rstrip()` 去掉原有空行，也不能把 getter 响应原样反复保存。版本或响应约定无法确认时保持不可用。首批摘要不写回 Compose。
-
-## 7．管理员受控更新工具
-
-本节属于本批读写方案，仍待实现和后端核验；本次 NAS 验收不执行更新。
-
-| 工具名 | 参数要点 | 最低角色／资源 |
+| 工具 | 最低角色／项目操作 | 当前作用 |
 |---|---|---|
-| `plan_docker_project_update` | `project_id,service_id,image_reference` | `admin`＋`docker`＋具体工具＋项目 `update_image`；目标须在所有者预登记的服务及镜像仓库范围内 |
-| `execute_docker_project_update` | `plan_id,idempotency_key,confirmed:true` | 同上；只执行本键生成、未失效且未消费的绑定计划 |
-| `get_docker_project_task` | `project_id,task_id` | `readonly`＋`docker`＋具体工具＋项目 `inspect`；只读本键任务的脱敏状态 |
+| `control_docker_project` | `admin`＋`docker`＋具体工具＋`control` | 仅启停／重启已登记项目，须确认及幂等键 |
+| `plan_docker_project_update` | `admin`＋`docker`＋具体工具＋`update_image` | 按已有项目、服务与受限镜像引用规划更新 |
+| `execute_docker_project_update` | 同上；须仍有规划工具权限 | 只执行有效的本键计划，须确认及幂等键 |
+| `get_docker_project_task` | `readonly`＋`docker`＋具体工具＋`inspect` | 查询本键、同凭据代际和授权修订的脱敏任务 |
 
-计划和任务 ID 分别为 `plan_<32hex>`、`task_<32hex>`；输入均有界且拒绝额外字段。执行只接受计划 ID，不允许替换项目、服务、镜像或附加 Compose。任务查询权限不包含执行权限。
+`control_docker_project` 不计入本页二十项文件／Docker 合同；三个更新／任务工具计入已实现的七项合同。任一项目操作都须所有者明确选择，新增默认不勾选，提高角色不追加权限；降级时清除超出等级的操作。
 
-- 所有者预登记允许更新的项目、服务与精确镜像仓库；Token 另授予具体规划／执行工具及项目操作。范围内 admin＋docker＋有效计划＋`confirmed:true` 即可执行，不额外增加每次 Web 审批。
-- 更新镜像是在容器现有挂载、设备和特权下运行新代码，执行最低 `admin`，不是普通 `readwrite` 设置。文件工具的目录范围不能限制该代码的宿主权限。Toolbox 自更新首批机器流程禁止。
-- 只允许服务 image 差异；镜像标签必须解析并绑定可信不可变 digest。计划绑定键代际、授权修订、项目修订、引擎／配置身份、原文 hash、服务与目标 digest，十分钟内首次执行；重启使未执行计划失效。
-- 已审原厂 `project_update_all` 执行整个项目的 `up -d --pull always`，不能选择一个服务。首轮执行只支持单服务、单 Compose 文件；多服务、`build/include/extends`、未闭合的插值、hooks 或外部配置先拒绝，避免顺带更新其他服务或执行未知步骤。
-- 同一计划原子消费并绑定幂等键，重复只返回原任务。未知、断线或重启后先读取现状，不自动重发。任务需要私有有界恢复记录，不能泄漏原文或凭据。
-- 原厂 `set_project_compose` 为非原子 `O_TRUNC` 且没有 CAS。Toolbox 项目锁不能排除原厂 APP 并发；保存前后核验，检测冲突停止，不声称具备跨客户端事务，也不自动覆盖回滚。并发边界未审定前不开放执行。
-- 保存与读回不符时不能调用更新。原厂取消含强杀／`down` 分支，先不开放取消部署工具。
-- 成功需核对 pinned 引用、平台 manifest／config digest、实际容器 image ID、运行／健康及原挂载；`container.Image` 是 config ID，不与 registry manifest digest 直接比较。原厂 `code:0/status:1/pop_status:7` 不能代替验收。
+更新只接受已核验的固定项目和受限镜像变更，不开放任意 Compose、命令、部署目录或原厂 action。执行前后的服务身份、计划、授权和资源条件继续核验；原厂或 Engine 接受请求不等于异步结果完成。异步任务、配置并发冲突保留、挂载限制、网络与健康有界核验统一由执行器文档说明；不能证明的配置或状态保持不可用，不自动重放结果未知的写请求。
 
-镜像身份层次依据 [OCI image manifest](https://github.com/opencontainers/image-spec/blob/main/manifest.md)。Compose 的重建、依赖与卷行为见 [Docker Compose up](https://docs.docker.com/reference/cli/docker/compose/up/)；厂商具体命令及副作用仍以本固件审计为准。
+文件范围无法把 Docker 新镜像变成 Users 沙箱，项目更新始终要求管理员，并保护 Toolbox 本身和原数据卷。验收先做已登记项目只读核对，启停／更新需用户指定对象和单独授权；不为测试创建业务服务。
 
 ## 8．错误、隐私和并发
 
@@ -365,16 +328,16 @@ JSON REST 参数错误为 400，未认证为 401，越权为 403，已授权范�
 
 ## 9．实现、发布与只读 NAS 验收
 
-实施顺序：
+当前进展与后续验收顺序：
 
-1. 完成 policy v3、旧键冻结、精确工具和项目资源登记；更新 API 管理 UI，验证同根多范围无损保存。
+1. 已实现 policy v3、旧键冻结、精确工具、项目登记及 API 管理逐资源选择；继续保留同根多范围与降级收紧回归。
 2. 审定原厂 `file/get_list/get_info/download` 的方法、虚拟路径、ACL、编解码、分页和实际打开链。固定有界诊断可一次返回全部证据状态，不能反复只加少量错误字段打包试探。
 3. 实现满足门槛的安全文件后端、下载／上传通道及逐项写操作。若 ACL／句柄或写入语义证据不足，对应能力保持未开放并给出结构化原因；不能用 Mock 或根目录列表证明真实访问安全。
-4. 实现原厂固定项目读取、投影、登记、Token 范围校验及管理员镜像更新计划／任务；不调用 `project_list`，并发与安全执行门槛未通过则禁止更新执行。
+4. 项目读取、Token 范围校验及管理员控制／更新计划／任务已有执行器，实际使用受各自前置门槛约束；以执行器文档核对，不调用原厂 `project_list`。
 5. 定向与完整 Linux 检查通过后发布一个功能镜像，复用原 NAS 项目及 `r1-toolbox-data` 部署；镜像构建和部署成功都不代表实机验收通过。
-6. 所有者在 API 管理中明确选择文件目录与已有项目，创建短期只读 Token。实机先读取、下载比对和项目状态，不更新项目、不创建样本服务、不修改已有业务文件。当前未指定真实验收目录和文件名，不在方案中虚构或替用户选择私人文件。
+6. 所有者明确选择已有项目，创建短期只读 Token，先核对项目元数据。文件内容工具开放后才能按用户指定样本做字节比对；当前不为验收读取私人文件、更新项目、创建服务或修改业务文件。
 
-建议新增测试文件：`test_api_file_io.py`、`test_file_transfer_http.py`、`test_docker_project_reads.py`、`test_docker_project_updates.py`、`test_integration_resources_http.py`；扩展 `test_api_access.py`、`test_api_permissions.py`、`test_mcp_service.py`、`test_api_file_roots.py`、`test_bundle.py` 和 `check_api_management.cjs`。实现时按最终模块名调整，新增运行时同步所有 RAM 缓存白名单。
+当前项目与业务回归包括 `test_api_docker_projects.py`、`test_api_docker_operations.py`、`test_mcp_business_operations_http.py` 及相关权限／界面测试。文件内容开放后仍需独立的安全打开、真实字节传输、写入和撤权续验回归；新增运行时须同步所有 RAM 缓存白名单。
 
 | 验收范围 | 必测内容 |
 |---|---|
@@ -390,13 +353,15 @@ JSON REST 参数错误为 400，未认证为 401，越权为 403，已授权范�
 
 验收记录分开列自动化、固定后端实测、Token 真实调用及未通过门槛。只有实际取得可信响应和样本字节比对，才把文件读取／下载标为通过；写入与项目更新须单独列实现和实测状态，不以本次只读结果代替。
 
-## 10．依据与当前代码缺口
+## 10．当前证据与剩余门槛
 
-- `api_permissions.permission_allows()` 的 policy v2 只判角色、域和文件范围，增加新工具前须加精确工具约束。
-- `api_file_roots.collect_file_roots()` 只读挂载元数据和已有身份缓存，不能作为实际打开的安全证明。
-- `api_access.authorize()` 只返回请求开始时的 principal，需补授权修订、Token 代际和传输续验。
-- `web_config.Handler.send()` 会整段缓冲，HEAD 当前统一拒绝；下载必须有专门路由和发送器。
-- API 管理当前同根只选首条 grant 的展示逻辑需要修复，权限脏状态不能与名称／IP 编辑混用。
+- `api_permissions.permission_allows()` 已按 policy v3 校验角色、功能域、具体工具和资源；旧 policy v1／v2 仍固定原十工具。资源预授权不会生成未实现能力。
+- 授权修订、凭据代际和当前状态复验已有实现；真实文件字节传输尚无执行器，不能把调用前后复验当作传输续验已经完成。
+- `api_file_roots.collect_file_roots()` 与显式 `file_backend_context` 提供规划和上下文证据；目录句柄元数据不等于最终文件 ACL、安全打开、原厂写索引／配额及原子性证明。
+- 文件浏览、下载、上传和写操作十三项合同仍未开放。第 4～5 节的 Range、HEAD、传输句柄及写入行为是后续必须实现的合同，不是当前可调用端点。
+- API 管理已支持同根多范围、逐工具及逐项目操作；权限编辑与元数据编辑分开，不把降级或改名变成扩权。
+- 当前另有五个只读业务缓存、六个既有下载任务工具和七个原厂媒体工具。三个媒体目录查询同样要求读写，可能改变原厂内部状态；下载委托不接受新目标路径或内容，也不保证整个原生下载器被沙箱到 Users。Toolbox 文件接口仍严格限定 `/drives/*/Users/`。
+- 固定开发媒体 `probe_business` 及文件上下文只用于显式取证，不默认轮询。固件动作名、静态审计、本地 fixture、HTTP 集成或镜像发布都不能代替 NAS 实机验收。
 - 原厂接口证据与范围见[完整注册表](vendor-emhistor-interfaces.md)、[网页后端](vendor-web-interfaces.md)、[MCP 现状](mcp-api.md)及[AI 接入路线](ai-capability-roadmap.md)。
 
-方案由主代理汇总；原生子代理分别复核文件传输、固定项目合同和权限迁移。静态审计及已保存的实机证据不代替本批新增接口的部署验收。
+方案由主代理汇总；原生子代理分别复核文件传输、固定项目合同、权限迁移和业务集成。本轮新增业务与项目操作的 NAS 验收尚待明确对象及部署后核对。

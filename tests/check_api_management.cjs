@@ -55,6 +55,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     ['request_power', 'power', 'admin'], ['cancel_power', 'power', 'admin'],
     ['list_file_roots', 'files', 'readonly'], ['list_docker_projects', 'docker', 'readonly'],
     ['get_docker_project_status', 'docker', 'readonly'], ['get_docker_project_summary', 'docker', 'readonly'],
+    ['control_docker_project', 'docker', 'admin'], ['plan_docker_project_update', 'docker', 'admin'],
+    ['execute_docker_project_update', 'docker', 'admin'], ['get_docker_project_task', 'docker', 'readonly'],
     ['get_app_status', 'apps', 'readonly'], ['get_download_status', 'downloads', 'readonly'],
     ['get_movie_status', 'movie', 'readonly'], ['get_album_status', 'albums', 'readonly'], ['get_share_status', 'sharing', 'readonly'],
   ].map(([name, scope, min_role]) => ({ name, title: name, scope, min_role }));
@@ -258,7 +260,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="loadContracts"]').click();
     await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 20);
     const definition = JSON.parse(await manager.locator('[data-ref="contractDefinition"]').inputValue());
-    check('真实服务返回20项定义并区分4项已接入与16项待接入', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.filter(tool => tool.implemented === true).length === 4 && definition.tools.filter(tool => tool.implemented === false).length === 16 && definition.tools.every(tool => tool.inputSchema && tool.outputSchema));
+    check('真实服务返回20项定义并区分7项已接入与13项待接入', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.filter(tool => tool.implemented === true).length === 7 && definition.tools.filter(tool => tool.implemented === false).length === 13 && definition.tools.every(tool => tool.inputSchema && tool.outputSchema));
     check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === serviceWrites);
     await page.setViewportSize({ width: 320, height: 960 });
     check('320宽度接口定义无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
@@ -507,13 +509,35 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="projectCandidates"] [data-register]').click();
     check('登记确认明确不部署或启停', (await page.locator('.fullmask').last().innerText()).includes('不部署、更新或启停 Docker'));
     await page.locator('.fullmask [data-yes]').click();
-    await manager.locator('[data-ref="dockerProjectOptions"] input').waitFor();
-    await manager.locator('[data-ref="dockerProjectOptions"] input').check();
+    await manager.locator('[data-ref="dockerProjectOptions"] [data-project-check]').waitFor();
+    await manager.locator('[data-ref="dockerProjectOptions"] [data-project-check]').check();
+    const projectControl = manager.locator('[data-project-operation][value="control"]');
+    const projectUpdate = manager.locator('[data-project-operation][value="update_image"]');
+    check('项目默认仅选读取且写范围需要管理员', !(await projectControl.isChecked()) && !(await projectUpdate.isChecked()) && await projectControl.isDisabled() && await projectUpdate.isDisabled());
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    await projectControl.check(); await projectUpdate.check();
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    check('降级角色清除并禁用项目写操作', !(await projectControl.isChecked()) && !(await projectUpdate.isChecked()) && await projectControl.isDisabled());
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    check('提高角色不恢复项目写操作', !(await projectControl.isChecked()) && !(await projectUpdate.isChecked()));
+    await manager.locator('select[data-ref="role"]').selectOption('readonly');
     await manager.locator('[data-ref="toolOptions"] input[value="get_docker_project_status"]').check();
     await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
     await page.locator('#r1ApiSecret').waitFor(); await page.locator('#r1ApiSecret [data-ref="close"]').click();
     const projectKey = calls.filter(call => call.path === '/api/access/keys').at(-1).body;
     check('项目键只发送已登记inspect和显式读取工具', JSON.stringify(projectKey.docker_projects) === JSON.stringify([{ id: projectId, operations: ['inspect'] }]) && JSON.stringify(projectKey.tool_grants) === '["get_nas_status","get_docker_project_status"]');
+    await view('manage');
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    for (const operation of ['control', 'update_image']) await manager.locator(`[data-project-operation][value="${operation}"]`).check();
+    for (const tool of ['control_docker_project', 'plan_docker_project_update', 'execute_docker_project_update']) await manager.locator(`[data-ref="toolOptions"] input[value="${tool}"]`).check();
+    await page.setViewportSize({ width: 320, height: 960 });
+    check('320宽度项目操作授权无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('.r1-api-item').last().locator('[data-ref="role"]').filter({ hasText: '管理员' }).waitFor();
+    const writeProject = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('管理员逐项目显式提交三项操作且保持具体工具授权', JSON.stringify(writeProject.docker_projects) === JSON.stringify([{ id: projectId, operations: ['inspect', 'control', 'update_image'] }]) && writeProject.tool_grants.includes('execute_docker_project_update'));
     await view('create');
     await manager.locator('[data-ref="registeredProjects"] [data-project-label]').fill('片库新标签');
     await manager.locator('[data-ref="registeredProjects"] [data-update]').click(); await page.locator('.fullmask [data-yes]').click();
@@ -521,7 +545,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('项目标签更新只修改元数据且保留授权ID', state.keys.at(-1).docker_projects[0].id === projectId && calls.some(call => call.path === '/api/docker/projects/update' && call.body.project_id === projectId));
     await manager.locator('[data-ref="registeredProjects"] [data-revoke]').click(); await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-ref="registeredProjects"] [data-project-reason]').filter({ hasText: '已撤销登记' }).waitFor();
-    check('撤销登记不调用部署/停止且失效项目不可勾选', await manager.locator('[data-ref="dockerProjectOptions"] input').isDisabled() && calls.filter(call => call.path.startsWith('/api/docker')).every(call => ['/api/docker/projects/register','/api/docker/projects/update','/api/docker/projects/revoke'].includes(call.path)));
+    check('撤销登记不调用部署/停止且失效项目不可勾选', await manager.locator('[data-ref="dockerProjectOptions"] [data-project-check]').isDisabled() && calls.filter(call => call.path.startsWith('/api/docker')).every(call => ['/api/docker/projects/register','/api/docker/projects/update','/api/docker/projects/revoke'].includes(call.path)));
     check('项目管理没有执行动态名称脚本', await page.evaluate(() => !window.apiProjectInjected));
     await manager.locator('[data-ref="scopes"] input[value="docker"]').uncheck();
     await manager.locator('[data-ref="projectManager"] summary').click();

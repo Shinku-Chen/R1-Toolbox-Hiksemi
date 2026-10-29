@@ -640,7 +640,9 @@ class IntegrationHTTPTests(unittest.TestCase):
         self.assertIn(metadata['id'], serialized)
         self.assertNotIn(token, serialized)
         self.assertNotIn(hashlib.sha256(token.encode('ascii')).hexdigest(), serialized)
-        self.assertNotIn('digest', serialized)
+        for row in later['keys']:
+            self.assertNotIn('digest', row)
+        self.assertNotIn('"digest":', json.dumps(later['audit']))
         self.assertEqual(self.browser('POST', '/api/access/keys/revoke', {'id': metadata['id']})[0], 200)
         self.assert_denied(self.rpc({'token': token}))
 

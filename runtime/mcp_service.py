@@ -11,7 +11,7 @@ import json
 import math
 import re
 
-from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
+from api_permissions import LEGACY_TOOLS, MIN_ROLE_BY_TOOL, permission_allows
 from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
 
 
@@ -142,8 +142,13 @@ _TOOLS = (
 )
 _TOOLS += tuple(
     _tool(contract['name'], contract['title'],
-          '查询明确授权的文件根元数据或固定 Docker 项目；不执行文件读写或项目更新。',
-          contract['scope'], contract['inputSchema'], read_only=True)
+          ('查询明确授权的文件根元数据或固定 Docker 项目，不读取用户文件内容。'
+           if contract['idempotency']['mode'] == 'read_only' else
+           '按登记项目、服务和同仓库镜像 digest 规划或执行管理员更新；须具体工具与项目更新授权，不自动重试。'),
+          contract['scope'], contract['inputSchema'],
+          read_only=contract['idempotency']['mode'] == 'read_only',
+          destructive=contract['name'] == 'execute_docker_project_update',
+          idempotent=contract['idempotency']['mode'] == 'read_only')
     for contract in contract_catalog()['tools'] if contract['name'] in IMPLEMENTED_TOOLS
 )
 _TOOLS += tuple(
@@ -157,6 +162,63 @@ _TOOLS += tuple(
         ('get_movie_status', '读取影视处理缓存', 'movie', '读取上次显式采集的影视刮削进度。'),
         ('get_album_status', '读取相册处理缓存', 'albums', '读取人脸、文字、缩略图、相似图和 AI 配置的既有状态。'),
         ('get_share_status', '读取共享相册处理缓存', 'sharing', '只读取管理员既有共享相册的处理状态，不代表分享清单。'),
+    )
+)
+_DOWNLOAD_ENGINE = {'type': 'string', 'enum': ['qbittorrent', 'aria2']}
+_TASK_ID = {'type': 'string', 'minLength': 16, 'maxLength': 64,
+            'pattern': r'^(?:[0-9a-f]{16}|[0-9a-f]{40}|[0-9a-f]{64})$'}
+_IDEMPOTENCY_KEY = {'type': 'string', 'minLength': 1, 'maxLength': 128,
+                    'pattern': r'^[A-Za-z0-9][A-Za-z0-9._:-]*$'}
+_MUTATION = {'confirmed': _CONFIRMED, 'idempotency_key': _IDEMPOTENCY_KEY}
+_TASK_LOCATION = {'engine': _DOWNLOAD_ENGINE, 'task_id': _TASK_ID}
+_TASK_MUTATION = {**_TASK_LOCATION, **_MUTATION,
+                  'expected_version': {'type': 'string', 'pattern': r'^download_[0-9a-f]{32}$'}}
+_TOOLS += (
+    _tool('control_docker_project', '启停或重启已登记项目',
+          '管理员确认后操作已登记项目；逐步核验引擎、配置与容器身份，保护 Toolbox，不删除容器或数据卷。',
+          'docker', _object_schema({'project_id': {'type': 'string', 'pattern': r'^project_[0-9a-f]{24}$'},
+              'operation': {'type': 'string', 'enum': ['start', 'stop', 'restart']},
+              **_MUTATION}, ('project_id', 'operation', 'confirmed', 'idempotency_key')),
+          destructive=True, idempotent=False),
+    _tool('list_download_tasks', '列出下载任务',
+          '显式查询已核验本机 qB／aria2 任务；只返回受限元数据，不返回宿主路径、Tracker 或凭据。',
+          'downloads', _object_schema({'engine': _DOWNLOAD_ENGINE,
+              'offset': {'type': 'integer', 'minimum': 0, 'maximum': 300, 'default': 0},
+              'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 50}}, ('engine',)), read_only=True),
+    _tool('get_download_task', '读取单个下载任务',
+          '读取精确任务及版本；后续修改须使用该版本，不能使用 all 或批量选择器。',
+          'downloads', _object_schema(_TASK_LOCATION, tuple(_TASK_LOCATION)), read_only=True),
+)
+_TOOLS += tuple(
+    _tool(name, title, description + '需要明确确认、当前任务版本和本键幂等标识；不会自动重放未确认的写请求。',
+          'downloads', _object_schema({**_TASK_MUTATION, **extra}, tuple(_TASK_MUTATION)))
+    for name, title, description, extra in (
+        ('pause_download_task', '暂停单个下载任务', '暂停已核验引擎中的一个任务。', {}),
+        ('resume_download_task', '继续单个下载任务', '继续已核验引擎中的一个任务。', {}),
+        ('remove_download_task', '移除单个下载任务', '只移除任务，始终保留已下载文件。', {}),
+        ('set_download_task_limits', '设置单任务限速', '以字节／秒设置单任务限速，0 表示不限速。',
+         {field: {'type': 'integer', 'minimum': 0, 'maximum': 2 ** 40}
+          for field in ('download_limit_bps', 'upload_limit_bps')}),
+    )
+)
+_TOOLS += tuple(
+    _tool(name, title, description + '使用已有原厂管理员会话和固定接口，签名不离开宿主。',
+          scope, _object_schema(props, tuple(props)), read_only=False,
+          destructive=name == 'revoke_share', idempotent=False)
+    for name, title, scope, props, writing, description in (
+        ('list_albums', '列出原厂相册', 'albums', {}, False, '显式查询原厂目录，可能初始化资源或更新内部状态，需要读写权限；不返回照片内容和宿主路径。'),
+        ('list_shared_albums', '列出共享相册', 'albums', {}, False, '显式查询当前管理员共享目录，原厂可能修复内部状态，需要读写权限。'),
+        ('list_movie_libraries', '列出影视库', 'movie', {}, False, '显式查询影视库名称与标识，可能更新原厂内部状态，需要读写权限；不返回源路径或成员。'),
+        ('create_album', '创建普通相册', 'albums',
+         {**_MUTATION, 'name': {'type': 'string', 'minLength': 1, 'maxLength': 255}}, True, '确认后创建普通相册。'),
+        ('rename_album', '重命名普通相册', 'albums',
+         {**_MUTATION, 'album_id': {'type': 'string', 'pattern': r'^[1-9][0-9]{0,9}$'},
+          'name': {'type': 'string', 'minLength': 1, 'maxLength': 255}}, True, '确认后修改已有普通相册名称，系统相册不可修改。'),
+        ('rename_movie_library', '重命名影视库', 'movie',
+         {**_MUTATION, 'library_id': {'type': 'integer', 'minimum': 1, 'maximum': _SAFE_INTEGER},
+          'name': {'type': 'string', 'minLength': 1, 'maxLength': 255}}, True, '仅修改已有影视库名称，不改变来源与成员。'),
+        ('revoke_share', '撤销原厂分享', 'sharing',
+         {**_MUTATION, 'share_id': {'type': 'string', 'minLength': 1, 'maxLength': 127, 'pattern': r'^[A-Za-z0-9_-]+$'}}, True, '确认后撤销当前管理员拥有的单个分享。'),
     )
 )
 _TOOLS_BY_NAME = {tool['name']: tool for tool in _TOOLS}
@@ -357,20 +419,79 @@ def _tool_result(value):
             'structuredContent': value, 'isError': value.get('ok') is False}
 
 
+def _schema_matches(value, schema, definitions=None, depth=0):
+    """Validate the bounded JSON-schema subset used by our fixed input catalog.
+
+    No external references, formats, code or schema supplied by an HTTP caller
+    are evaluated. Controllers still validate native semantics and resources.
+    """
+    if depth > 32 or not isinstance(schema, dict):
+        return False
+    definitions = definitions if definitions is not None else schema.get('$defs', {})
+    if '$ref' in schema:
+        reference = schema['$ref']
+        if not isinstance(reference, str) or not reference.startswith('#/$defs/'):
+            return False
+        return _schema_matches(value, definitions.get(reference[8:]), definitions, depth + 1)
+    descend = lambda branch: _schema_matches(value, branch, definitions, depth + 1)
+    if ('allOf' in schema and not all(descend(branch) for branch in schema['allOf'])
+            or 'anyOf' in schema and not any(descend(branch) for branch in schema['anyOf'])
+            or 'oneOf' in schema and sum(descend(branch) for branch in schema['oneOf']) != 1
+            or 'not' in schema and descend(schema['not'])):
+        return False
+    if 'if' in schema:
+        branch = schema.get('then' if descend(schema['if']) else 'else')
+        if branch is not None and not descend(branch):
+            return False
+    kind = schema.get('type')
+    if kind == 'null' and value is not None:
+        return False
+    if kind == 'boolean' and type(value) is not bool:
+        return False
+    if kind == 'integer' and (type(value) is not int or not schema.get('minimum', -_SAFE_INTEGER) <= value <= schema.get('maximum', _SAFE_INTEGER)):
+        return False
+    if kind == 'string':
+        if not isinstance(value, str) or not schema.get('minLength', 0) <= len(value) <= schema.get('maxLength', 16384):
+            return False
+        if 'pattern' in schema and re.search(schema['pattern'], value) is None:
+            return False
+    if kind == 'array':
+        if not isinstance(value, list) or not schema.get('minItems', 0) <= len(value) <= schema.get('maxItems', 256):
+            return False
+        if schema.get('uniqueItems') and len({json.dumps(item, sort_keys=True) for item in value}) != len(value):
+            return False
+        if 'items' in schema and not all(_schema_matches(item, schema['items'], definitions, depth + 1) for item in value):
+            return False
+    if kind == 'object' or 'properties' in schema or 'required' in schema:
+        if not isinstance(value, dict) or not schema.get('minProperties', 0) <= len(value) <= schema.get('maxProperties', 64):
+            return False
+        properties = schema.get('properties', {})
+        if set(schema.get('required', ())) - set(value):
+            return False
+        if schema.get('additionalProperties') is False and set(value) - set(properties):
+            return False
+        if any(not _schema_matches(item, properties[key], definitions, depth + 1)
+               for key, item in value.items() if key in properties):
+            return False
+    if 'const' in schema and (type(value) is not type(schema['const']) or value != schema['const']):
+        return False
+    if 'enum' in schema and not any(type(value) is type(item) and value == item for item in schema['enum']):
+        return False
+    return True
+
+
 def _arguments(name, arguments):
     """Check the advertised fixed outer schema; controllers own policy internals."""
     if not isinstance(arguments, dict) or not _json_tree(arguments):
         return None
     if name in IMPLEMENTED_TOOLS:
-        if name in ('list_file_roots', 'list_docker_projects'):
-            return {} if not arguments else None
-        project = arguments.get('project_id')
-        return ({'project_id': project} if set(arguments) == {'project_id'}
-                and isinstance(project, str)
-                and re.fullmatch(r'project_[0-9a-f]{24}', project, re.ASCII) else None)
+        contract = next(item for item in contract_catalog()['tools'] if item['name'] == name)
+        return copy.deepcopy(arguments) if _schema_matches(arguments, contract['inputSchema']) else None
     spec = _TOOLS_BY_NAME[name]['inputSchema']
     props = spec['properties']
     if set(arguments) - set(props) or set(spec.get('required', ())) - set(arguments):
+        return None
+    if name not in LEGACY_TOOLS and not _schema_matches(arguments, spec):
         return None
     result = copy.deepcopy(arguments)
     for field, schema in props.items():

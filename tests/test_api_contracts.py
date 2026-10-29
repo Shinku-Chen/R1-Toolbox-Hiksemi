@@ -178,14 +178,14 @@ class ApiContractsTests(unittest.TestCase):
         self.assertEqual(contract_catalog(), self.catalog)
         self.assertEqual(catalog(), self.catalog)
 
-    def test_exact_twenty_definitions_register_only_four_read_callbacks(self):
+    def test_twenty_definitions_register_seven_real_callbacks(self):
         self.assertEqual(set(self.tools), set(valid_inputs()))
         self.assertEqual(len(self.catalog['tools']), 20)
         self.assertEqual(sum(t['category'] == 'read' for t in self.tools.values()), 9)
         self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 8)
         self.assertEqual(sum(t['category'] == 'docker_update' for t in self.tools.values()), 3)
         active = {item['name'] for item in tool_catalog()}
-        self.assertEqual(len(active), 19)
+        self.assertEqual(len(active), 36)
         self.assertEqual(active.intersection(self.tools), IMPLEMENTED_TOOLS)
         self.assertFalse(active.intersection(name for name, tool in self.tools.items() if not tool['implemented']))
 

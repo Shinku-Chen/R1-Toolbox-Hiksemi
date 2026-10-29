@@ -270,7 +270,7 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
                 self.denied('get_docker_project_status', result)
         self.assertEqual(len(self.engine.requests), before)
 
-    def test_owner_rejects_missing_role_pending_tools_unregistered_or_write_grants(self):
+    def test_owner_rejects_missing_role_pending_tools_and_unsupported_resource_grants(self):
         project = self.register()
         before = len(self.engine.requests)
         no_role = self.key_body(project)
@@ -280,7 +280,7 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
                  self.key_body(scopes=['files'], tool_grants=['list_directory'],
                                file_roots=[{'id': ROOT, 'path': '', 'access': 'readonly'}]),
                  self.key_body('project_' + 'f' * 24),
-                 self.key_body(project, role='admin', docker_projects=[{'id': project, 'operations': ['inspect', 'update_image']}])]
+                 self.key_body(project, role='admin', docker_projects=[{'id': project, 'operations': ['inspect', 'arbitrary_exec']}])]
         for body in cases:
             with self.subTest(tools=body['tool_grants'], role=body.get('role')):
                 status, _, result = self.browser('POST', '/api/access/keys', body)
@@ -290,7 +290,7 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
         key = self.key(project)
         updates = [{'tool_grants': ['plan_docker_project_update'], 'role': 'admin'},
                    {'docker_projects': [{'id': 'project_' + 'e' * 24, 'operations': ['inspect']}]},
-                   {'docker_projects': [{'id': project, 'operations': ['inspect', 'update_image']}], 'role': 'admin'}]
+                   {'docker_projects': [{'id': project, 'operations': ['inspect', 'arbitrary_exec']}], 'role': 'admin'}]
         for update in updates:
             self.assertEqual(self.browser('POST', '/api/access/keys/update', {'id': key['id'], **update})[0], 400)
         self.assertEqual(len(self.engine.requests), before)

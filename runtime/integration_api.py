@@ -12,12 +12,16 @@ import time
 from api_access import ApiAccessStore, AUDIT_OPERATIONS
 from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
 from api_docker_projects import DockerProjectRegistry
+from api_docker_operations import DockerProjectOperations
 from api_file_readiness import collect_file_access_readiness
 from api_file_roots import collect_file_roots, validate_file_grants
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
 from vendor_business import _result as project_business_category
 from vendor_media_snapshot import collect_media_snapshot
+from download_operations import DownloadOperations, TOOLS as DOWNLOAD_TOOLS
+from vendor_media_operations import MediaOperations, TOOLS as MEDIA_OPERATION_TOOLS
+from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
 
 
 # Each media domain receives only its own rows, never the whole media cache.
@@ -55,9 +59,37 @@ def _freshness(value):
 class IntegrationApi:
     def __init__(self, web, *, state_dir, version='dev'):
         self.web = web
+        self._closed = False
+        self._service_generation = 1
         self.access = ApiAccessStore(state_dir)
         self.docker_projects = DockerProjectRegistry(state_dir)
+        self.docker_operations = DockerProjectOperations(self.docker_projects, authorizer=self._is_current)
+        self.download_operations = DownloadOperations(authorizer=self._is_current)
+        self.media_operations = MediaOperations()
         self.mcp = McpService(self.execute, version=version)
+
+    def _is_current(self, principal):
+        """An in-flight operation cannot outlive the resident Web service."""
+        generation = principal.get('_service_generation', self._service_generation) if isinstance(principal, dict) else None
+        return (not self._closed and type(generation) is int
+                and generation == self._service_generation and self.access.is_current(principal))
+
+    def close(self):
+        self._closed = True
+        # A later open must never revive the authorization of a blocked call.
+        self._service_generation += 1
+        closer = getattr(self.docker_operations, 'close', None)
+        if callable(closer):
+            closer()
+
+    def open(self):
+        if self._closed:
+            # Closed workers and their plans never become active again when a
+            # test or embedder restarts this Web object in the same process.
+            self.docker_operations = DockerProjectOperations(self.docker_projects, authorizer=self._is_current)
+            self.download_operations = DownloadOperations(authorizer=self._is_current)
+            self.media_operations = MediaOperations()
+            self._closed = False
 
     def snapshot(self):
         state = self.access.snapshot()
@@ -84,7 +116,7 @@ class IntegrationApi:
             if item['id'] == 'files':
                 item.update(implemented=True, description='仅提供已授权根的绑定元数据；浏览、上传和下载待接入。')
             elif item['id'] == 'docker':
-                item.update(implemented=True, description='读取已登记项目的状态和脱敏摘要；部署、启停与更新待接入。')
+                item.update(implemented=True, description='读取已登记项目；管理员可在逐项目授权后启停、重启及执行同仓库 digest 镜像更新。新建部署待接入。')
         return result
 
     def file_readiness(self):
@@ -159,8 +191,10 @@ class IntegrationApi:
                           if item.get('revoked') is not True}
             if (not isinstance(projects, list) or any(not isinstance(row, dict)
                     or not isinstance(row.get('id'), str) or row['id'] not in registered
-                    or row.get('operations') != ['inspect'] for row in projects)):
-                raise ValueError('Docker 范围只能选择已登记项目的读取权限。')
+                    or not isinstance(row.get('operations'), list) or not row['operations']
+                    or any(operation not in ('inspect', 'control', 'update_image') for operation in row['operations'])
+                    for row in projects)):
+                raise ValueError('Docker 范围只能选择已登记项目及其明确操作。')
 
     def manage(self, route, body):
         """Called only after the browser's existing session and CSRF gates."""
@@ -366,14 +400,53 @@ class IntegrationApi:
 
     def execute(self, name, arguments, principal):
         """Fixed callbacks; short resource reads also recheck before disclosure."""
+        if not isinstance(principal, dict):
+            return {'ok': False, 'error': {'code': 'invalid_key', 'message': 'MCP 授权无效。', 'retryable': False}}
+        principal = dict(principal)
+        principal.setdefault('_service_generation', self._service_generation)
+        if (self._closed or type(principal['_service_generation']) is not int
+                or principal['_service_generation'] != self._service_generation):
+            return {'ok': False, 'error': {'code': 'invalid_key', 'message': 'MCP 服务已停止。', 'retryable': False}}
+        if name == 'control_docker_project':
+            return self.docker_operations.control(principal, arguments['project_id'], arguments['operation'],
+                                                  arguments['confirmed'], arguments['idempotency_key'])
+        if name == 'plan_docker_project_update':
+            return self.docker_operations.plan_update(principal, arguments['project_id'], arguments['service_id'], arguments['image_reference'])
+        if name == 'execute_docker_project_update':
+            return self.docker_operations.execute_update(principal, arguments['plan_id'], arguments['confirmed'], arguments['idempotency_key'])
+        if name == 'get_docker_project_task':
+            return self.docker_operations.get_task(principal, arguments['project_id'], arguments['task_id'])
+        if name in DOWNLOAD_TOOLS:
+            return self.download_operations.execute(name, arguments, principal)
+        if name in MEDIA_OPERATION_TOOLS:
+            metadata = MEDIA_OPERATION_TOOLS[name]
+            def authorize(operation_id, parameters, body):
+                return (operation_id == metadata['operation']
+                        and permission_allows(principal, metadata['scope'], MIN_ROLE_BY_TOOL[name], tool_name=name)
+                        and self._is_current(principal))
+            if not authorize(metadata['operation'], {}, {}):
+                return {'ok': False, 'error': {'code': 'invalid_key', 'message': '当前密钥未授权此媒体操作。', 'retryable': False}}
+            if not self.web.media_probe_lock.acquire(blocking=False):
+                return {'ok': False, 'error': {'code': 'operation_busy', 'message': '已有媒体查询或操作正在进行。', 'retryable': True}}
+            try:
+                result = self.media_operations.execute(name, arguments, authorizer=authorize, principal=principal)
+                result['ok'] = result.get('available') is True
+                if not result['ok']:
+                    result['error'] = {'code': result.get('reason') or 'native_unavailable',
+                        'message': '原厂媒体操作未完成，请查看具体原因。', 'retryable': False}
+                if not self._is_current(principal):
+                    return {'ok': False, 'error': {'code': 'invalid_key', 'message': '操作期间授权已失效，请读取当前状态。', 'retryable': False}}
+                return result
+            finally:
+                self.web.media_probe_lock.release()
         if name in IMPLEMENTED_TOOLS or name in BUSINESS_TOOLS:
             denied = {'ok': False, 'error': {'code': 'invalid_key',
                        'message': '读取期间授权已失效，请使用当前有效密钥。', 'retryable': False}}
-            if not self.access.is_current(principal):
+            if not self._is_current(principal):
                 return denied
             result = (self._read_business(name) if name in BUSINESS_TOOLS
                       else self._read_resource(name, arguments, principal))
-            return result if self.access.is_current(principal) else denied
+            return result if self._is_current(principal) else denied
         if name == 'get_nas_status':
             return {'ok': True, 'section': arguments.get('section', 'overview'),
                     'data': self._status(arguments.get('section', 'overview'))}

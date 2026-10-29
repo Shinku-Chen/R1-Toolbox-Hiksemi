@@ -191,7 +191,9 @@ class IntegrationTokenHTTPTests(unittest.TestCase):
             self.assertNotIn(token, serialized)
             self.assertNotIn(token, persisted)
             self.assertNotIn(hashlib.sha256(token.encode('ascii')).hexdigest(), serialized)
-        self.assertNotIn('digest', serialized)
+        for row in state['keys']:
+            self.assertNotIn('digest', row)
+        self.assertNotIn('"digest":', json.dumps(state['audit']))
         self.assert_no_actions()
 
     def test_rotating_a_paused_key_keeps_it_paused_and_revocation_cannot_be_reversed(self):

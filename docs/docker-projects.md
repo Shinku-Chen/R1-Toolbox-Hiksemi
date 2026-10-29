@@ -1,6 +1,6 @@
-# 固定 Docker 项目读取
+# 固定 Docker 项目读取与授权
 
-本批真实接入 `list_docker_projects`、`get_docker_project_status` 和 `get_docker_project_summary`。文件侧新增 `list_file_roots`，仅返回当前键的根绑定元数据。合计十四项真实 MCP 工具；原有 policy v1／v2 键继续冻结原十项，不能凭预授权自动获得新工具。
+读取工具为 `list_docker_projects`、`get_docker_project_status` 和 `get_docker_project_summary`。另已注册管理员启停／重启、镜像更新规划与执行，以及本键任务查询，具体执行边界见[固定项目操作](docker-project-operations.md)。当前全量 MCP 目录共 36 项，实际可见和可调用集合始终按 Token 过滤；原有 policy v1／v2 键继续冻结原十项，不自动扩权。
 
 ## 所有者登记和授权
 
@@ -16,7 +16,9 @@
 
 `GET /api/access` 仅加载注册表元数据，不自动连接 Docker。元数据的 `available:null`、`verification:not_checked` 不表示实际项目可用。显式发现、项目状态及摘要才读取引擎；源不可用返回真实原因，不能凭空列表推断没有容器。
 
-新键按 policy v3 选择具体工具、`docker` 域及 `docker_projects:[{id,operations:["inspect"]}]`。最低角色为只读；管理员仍须相同工具和资源授权。机器不能提交真实项目名、配置路径、Compose、原厂 action、命令或 URL；只能提交后端分配的项目 ID。
+新键按 policy v3 选择具体工具、`docker` 域和逐项目操作：`inspect` 用于读取，最低角色为只读；`control` 用于已登记项目启停／重启，`update_image` 用于受控镜像更新，后两项同时要求管理员及对应具体工具。网页按项目展示三种操作，新增默认不选，降级时清除不满足等级的操作；管理员仍不能绕过资源范围。
+
+机器不能提交真实项目名、配置路径、Compose、原厂 action、命令或任意 URL；项目只能通过后端分配的 ID 选择。更新规划额外接受已授权服务 ID 与受限镜像引用，不等于开放任意配置编辑。所有者登记本身只改 Toolbox 元数据，不执行这些机器操作。
 
 原十工具仍受各自角色和域限制。旧键只有所有者明确选择逐工具授权才升级；纯改名、IP、有效期和轮换保留原策略。真实权限变化推进授权修订，轮换推进凭据代际。新读取回调在取数据前后复验当前键，读取期间暂停、撤销、轮换、到期或改范围后丢弃尚未发送的结果。
 
@@ -40,10 +42,10 @@
 
 摘要只包含服务 ID／名称、可核验镜像引用、端口、挂载类型与读写属性、重启策略和固定风险标记。不输出环境、命令、日志、宿主路径、容器内私有路径、任意标签或 Compose 原文。镜像或配置无法确认的字段保持 `null`。`unresolved_configuration` 明确指出未解析 Compose 全部语义，不能把当前容器集合说成已证明的完整项目配置。
 
-本批不注册项目更新、文件浏览／下载或写入工具。定义目录中的 `execution_allowed:false` 只说明“读取合同不授予执行权”，逐项 `implemented` 标注四项已接入与十六项待接入。MCP 是否可调用以当前 Token 的能力目录及实际授权结果为准。
+二十项文件／Docker 合同中，文件根元数据、三个项目读取及三个更新／任务合同已有实现，共七项；十三项文件内容合同尚未实现，不注册浏览、下载或写入假工具。项目启停／重启另有独立工具。定义目录中的 `execution_allowed:false` 说明读取合同不授予执行权；是否可调用仍以当前 Token 的能力目录及实际授权结果为准。更新的异步任务、冲突保留和安全执行要求统一见[执行器说明](docker-project-operations.md)，不由本页读取结果证明更新通过。
 
 ## 开发和只读实机核对
 
-有效开发窗口和真实来源白名单下，固定 `/api/dev/diagnostics` 可显式选择 `docker_project_readiness` 与 `file_access_readiness`；不需要机器 Token，也不能借此登记项目或管理密钥。前者只发现可信候选并读取注册表元数据，后者逐项列根规划、账号映射、ACL 与安全打开的缺失证明。默认四项被动检查不扩展，过期后丢弃结果。
+有效开发窗口和真实来源白名单下，固定 `/api/dev/diagnostics` 可显式选择 `docker_project_readiness`、`file_access_readiness` 或 `file_backend_context`；不需要机器 Token，也不能借此登记项目或管理密钥。前两项分别检查可信项目候选、注册表及文件访问就绪状态；最后一项补充固定管理员逻辑身份、Unix 映射候选与 Users 目录句柄元数据，不列目录、不读用户内容，仍可能唤盘。默认四项被动检查不扩展，过期后丢弃结果。
 
-自动化使用隔离 Unix HTTP fixture，证明协议和权限边界，不代表 NAS 实机通过。部署复用原项目及 `r1-toolbox-data`，按[只读验收清单](file-docker-readonly-acceptance.md)核对；当前没有用户指定的样本文件和非 Toolbox 项目，不能为验收创建业务服务或读取私人文件。
+自动化使用隔离 Unix／HTTP fixture，证明协议和权限边界，不代表新增能力已在 NAS 实机通过。部署复用原项目及 `r1-toolbox-data`，先按[只读验收清单](file-docker-readonly-acceptance.md)核对。没有用户指定的样本文件和非 Toolbox 项目时，不为验收创建业务服务或读取私人文件；启停与更新须另有明确对象和授权，不能用只读验收替代。

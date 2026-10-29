@@ -2,7 +2,7 @@
 
 海康 R1 NAS 的常驻 Docker 工具箱：网页提供设备监控与管理，小屏默认开启，可在“设置 → 服务与开发”关闭并恢复官方界面；网页继续运行。MCP 默认关闭，可单独开启；首次默认没有网页登录口令，可在设置中添加。
 
-局域网 AI 接入：网页“设置 → API 管理”直接开关 MCP／REST，并分为添加 Token、Token 管理和 Token 操作三个入口。按只读／读写／管理员角色选择功能、具体工具、文件与项目范围，限制来源 IP／CIDR，可编辑、停用、轮换或撤销。MCP 地址为 `http://NAS_IP:18732/mcp`，目前提供十九项工具，新增应用、下载、影视、相册及分享缓存只读状态；旧密钥不自动扩权。文件总边界为 `/drives/*/Users/`，当前只提供授权元数据，文件内容、Docker 部署及业务写操作仍待接入。详见[MCP 与 API 管理](docs/mcp-api.md)与[全功能接入路线](docs/ai-capability-roadmap.md)。
+局域网 AI 接入：网页“设置 → API 管理”直接开关 MCP／REST，并分为添加 Token、Token 管理和 Token 操作三个入口。按只读／读写／管理员角色选择功能、具体工具、文件与项目范围，限制来源 IP／CIDR，可编辑、停用、轮换或撤销。MCP 地址为 `http://NAS_IP:18732/mcp`，目前提供三十六项工具，包括业务缓存、显式下载任务操作、相册／影视库管理、分享撤销和受控固定 Docker 项目操作；旧密钥不自动扩权。文件内容仍缺原厂 ACL 的生产证明，保持仅授权元数据；通用 Docker 部署、应用安装及其它业务能力继续接入。详见[MCP 与 API 管理](docs/mcp-api.md)、[显式业务操作](docs/mcp-business-operations.md)与[全功能接入路线](docs/ai-capability-roadmap.md)。
 
 最终产物为 **`composer.yml` 与 Docker 镜像**，另提供同一镜像的 `docker save` 离线包。源码仓库保持私有，GHCR 镜像可以公开拉取。
 

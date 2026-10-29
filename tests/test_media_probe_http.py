@@ -387,5 +387,31 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assert_no_sources()
 
 
+    def test_explicit_business_probe_has_fixed_action_and_confirmation(self):
+        with mock.patch('vendor_media_operations.collect_media_operations_probe', return_value={
+                'items': [], 'may_wake_disks': True, 'native_query_may_update_state': True}) as provider:
+            for body in ({'action': 'probe_business'}, {'action': 'probe_business', 'confirm': 1},
+                         {'action': 'probe_business', 'confirm': True, 'album_id': '8'}):
+                self.assertEqual(400, self.request(body)[0])
+            provider.assert_not_called()
+            status, _, value = self.request({'action': 'probe_business', 'confirm': True})
+            self.assertEqual(200, status)
+            self.assertTrue(value['probe']['may_wake_disks'])
+            self.assertEqual(set(provider.call_args.kwargs), {'authorizer'})
+            self.assertTrue(provider.call_args.kwargs['authorizer']('albums_list', {}, {}))
+        self.assert_no_sources()
+
+    def test_business_probe_discards_results_when_window_expires(self):
+        def expire(**kwargs):
+            self.server.dev_until = time.time() - 1
+            self.assertFalse(kwargs['authorizer']('albums_list', {}, {}))
+            return {'private-marker': 'never-disclose'}
+        with mock.patch('vendor_media_operations.collect_media_operations_probe', side_effect=expire):
+            status, _, value = self.request({'action': 'probe_business', 'confirm': True})
+        self.assertEqual(403, status)
+        self.assertNotIn('never-disclose', json.dumps(value))
+        self.assert_no_sources()
+
+
 if __name__ == '__main__':
     unittest.main()

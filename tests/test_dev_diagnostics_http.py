@@ -135,7 +135,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertEqual(value['catalog']['schema_version'], 1)
         self.assertIs(value['catalog']['read_only'], True)
         self.assertEqual({row['id'] for row in value['catalog']['checks']},
-                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity'})
+                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context'})
         self.assertNotIn('set-cookie', headers)
         self.assert_no_sources()
 
@@ -524,6 +524,35 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.business.side_effect = None
         self.fan.snapshot.side_effect = None
         self.assertTrue(self.request()[2]['snapshot']['all_checks_completed'])
+        self.assert_no_controls()
+
+
+    def test_file_backend_context_is_explicit_locked_and_expiry_fenced(self):
+        import api_file_operations
+        provider = self._patch(api_file_operations, 'collect_file_backend_context', return_value={
+            'available': False, 'may_wake_disks': True, 'file_access_available': False})
+        self.request()
+        provider.assert_not_called()
+        body = {'action': 'snapshot', 'checks': ['file_backend_context']}
+        status, _, value = self.request(body)
+        self.assertEqual(200, status)
+        self.assertTrue(value['snapshot']['checks']['file_backend_context']['data']['context']['may_wake_disks'])
+        provider.assert_called_once_with(self.server.panel)
+        provider.reset_mock()
+        self.server.storage_diagnostic_lock.acquire()
+        try:
+            result = self.request(body)[2]['snapshot']['checks']['file_backend_context']
+            self.assertEqual(result['http_status'], 409)
+            provider.assert_not_called()
+        finally:
+            self.server.storage_diagnostic_lock.release()
+        def expire(*args, **kwargs):
+            self.server.dev_until = time.time() - 1
+            return {'private-marker': 'never-disclose'}
+        provider.side_effect = expire
+        status, _, value = self.request(body)
+        self.assertEqual(403, status)
+        self.assertNotIn('never-disclose', json.dumps(value))
         self.assert_no_controls()
 
 

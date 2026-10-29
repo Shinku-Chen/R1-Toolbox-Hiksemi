@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 CHECKS = ('device', 'storage', 'business', 'fan')
 # Identity serials require an explicit selection; the default snapshot remains
 # the original four checks even as the discovery catalog grows.
-ALLOWED_CHECKS = CHECKS + ('storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity')
+ALLOWED_CHECKS = CHECKS + ('storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context')
 _CHECK_DETAILS = {
     'device': ('设备信息', '只读现有监控中的设备身份缓存。'),
     'storage': ('存储信息', '固定名称查询与现有身份缓存，不运行 SMART 或唤醒磁盘。'),
@@ -20,6 +20,7 @@ _CHECK_DETAILS = {
     'file_access_readiness': ('文件访问就绪证据', '只读可信根规划与缺失安全证明，不读取用户文件、凭据或 SMART。'),
     'docker_project_readiness': ('固定项目就绪证据', '显式读取已核验本机 Docker 元数据和登记绑定，不部署、启停或读取 Compose 原文。'),
     'disk_activity': ('磁盘活动现场', '仅显式读取 proc/sys 磁盘和进程 I/O 计数；再次采样比较增量，不执行 SMART 或休眠命令。'),
+    'file_backend_context': ('文件后端上下文', '显式核对固定管理员身份摘要与 Users 句柄元数据；不读取目录内容，但路径元数据访问可能唤盘。'),
 }
 _INVALID_REQUEST = '诊断操作或参数无效。'
 _INVALID_CHECKS = '诊断项目必须是非空且不重复的固定项目列表。'

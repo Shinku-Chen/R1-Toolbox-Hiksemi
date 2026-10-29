@@ -186,7 +186,11 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         public = json.dumps(state, ensure_ascii=False)
         self.assertNotIn(marker, public)
         self.assertNotIn(key['token'], public)
-        self.assertNotIn('digest', public)
+        for item in state['keys']:
+            self.assertNotIn('digest', item)
+        stored = json.loads(self.server.api_access.path.read_text(encoding='utf-8'))
+        for item in stored['keys']:
+            self.assertNotIn(item['digest'], public)
         self.assert_no_actions()
 
     def test_v1_persistent_keys_keep_their_original_scope_grants(self):

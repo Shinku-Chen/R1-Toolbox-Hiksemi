@@ -965,11 +965,19 @@ class WebConfigServer:
         """
         if not self._dev_authorized(ip):
             return 403, {'ok': False, 'error': '媒体测试未启用、已过期或客户端不在白名单'}, None
-        if not isinstance(body, dict) or body not in ({'action': 'probe'}, {'action': 'probe_all'}):
-            return 400, {'ok': False, 'error': '仅支持固定媒体 probe 或 probe_all 测试，不接受账号、令牌或路径参数'}, None
+        if not isinstance(body, dict) or body not in ({'action': 'probe'}, {'action': 'probe_all'}, {'action': 'probe_business', 'confirm': True}):
+            return 400, {'ok': False, 'error': '仅支持固定媒体 probe、probe_all 或确认后的 probe_business，不接受账号、令牌或路径参数'}, None
+        if body['action'] == 'probe_business' and body.get('confirm') is not True:
+            return 400, {'ok': False, 'error': '业务检测需要明确确认可能的原厂状态更新与磁盘唤醒。'}, None
         if not self.media_probe_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有媒体测试正在进行'}, None
         try:
+            if body['action'] == 'probe_business':
+                from vendor_media_operations import collect_media_operations_probe
+                value = collect_media_operations_probe(authorizer=lambda operation, parameters, native_body: self._dev_authorized(ip))
+                if not self._dev_authorized(ip):
+                    return 403, {'ok': False, 'error': '开发窗口已失效，未返回业务检测结果'}, None
+                return 200, {'ok': True, 'probe': value}, None
             if body['action'] == 'probe_all':
                 value = collect_media_batch()
                 receipt = self._save_media_snapshot(value, 'batch')
@@ -1097,6 +1105,7 @@ class WebConfigServer:
                 'business': lambda: self._business_debug_snapshot()[:2],
                 'fan': lambda: (200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}),
                 'file_access_readiness': self._file_readiness_snapshot,
+                'file_backend_context': self._file_backend_context_snapshot,
                 'disk_activity': self._disk_activity_snapshot,
                 'docker_project_readiness': lambda: (200, {'ok': True,
                     'discovery': self.integration.docker_projects.catalog(),
@@ -1134,6 +1143,16 @@ class WebConfigServer:
             return 409, {'ok': False, 'error': '已有存储查询正在进行'}
         try:
             return 200, self.integration.file_readiness()
+        finally:
+            self.storage_diagnostic_lock.release()
+
+    def _file_backend_context_snapshot(self):
+        """Explicit metadata probe; path resolution may wake a sleeping disk."""
+        if not self.storage_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有存储查询正在进行'}
+        try:
+            from api_file_operations import collect_file_backend_context
+            return 200, {'ok': True, 'context': collect_file_backend_context(self.panel)}
         finally:
             self.storage_diagnostic_lock.release()
 
@@ -1463,6 +1482,7 @@ class WebConfigServer:
                 'fan_policy': result.get('fan_policy'), 'light_policy': result.get('light_policy')}
 
     def start(self):
+        self.integration.open()
         with self.lock:
             if self.server:
                 return self
@@ -1600,6 +1620,10 @@ class WebConfigServer:
                         self.send(status, {'ok': False, 'error': {'code': reason, 'message': 'API 访问未授权'}},
                                   extra_headers={'WWW-Authenticate': 'Bearer realm="r1-toolbox"'} if status == 401 else None)
                         return
+                    # Private transport binding for future transfer handles;
+                    # never populated from JSON, Origin or forwarding headers.
+                    principal['_peer'] = peer
+                    principal['_service_generation'] = outer.integration._service_generation
                     allowed = 'GET' if route in ('/api/integration/status', '/api/integration/capabilities') else 'POST'
                     if self.command != allowed:
                         self.send(405, {'error': '请求方法不支持'}, extra_headers={'Allow': allowed})
@@ -1839,6 +1863,7 @@ class WebConfigServer:
             return self
 
     def stop(self):
+        self.integration.close()
         with self.operation_lock:
             with self.lock:
                 server, thread = self.server, self.thread

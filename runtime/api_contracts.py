@@ -17,6 +17,7 @@ _SAFE_INTEGER = 2 ** 53 - 1
 IMPLEMENTED_TOOLS = frozenset((
     'list_file_roots', 'list_docker_projects',
     'get_docker_project_status', 'get_docker_project_summary',
+    'plan_docker_project_update', 'execute_docker_project_update', 'get_docker_project_task',
 ))
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',

@@ -179,6 +179,7 @@
 .r1-api-scope .sub { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
 .r1-api-permission-note { margin: 0; line-height: 1.6; }
 .r1-api-file-roots > div { display: grid; gap: 12px; }
+.r1-api-project-operations { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0 0 12px 24px; }
 .r1-api-file-root { padding-top: 12px; min-width: 0; border-top: 1px solid var(--line); }
 .r1-api-file-root p, .r1-api-meta dd p { margin: 6px 0; overflow-wrap: anywhere; }
 .r1-api-root-choice { display: flex; align-items: flex-start; gap: 10px; min-height: 40px; font-size: 14px; cursor: pointer; }
