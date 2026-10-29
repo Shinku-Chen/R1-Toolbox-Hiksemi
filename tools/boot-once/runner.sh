@@ -1,8 +1,13 @@
 #!/bin/sh
-# Docker PID 1. Stop through the Engine API; a normal exit would restart us.
+# Foreground supervisor. Container lifetime is the actual host runtime lifetime.
 set -u
-task_rc=1
-trap 'exit "$task_rc"' TERM INT
+child_pid=
+stopping=0
+request_stop() {
+  stopping=1
+  if [ -n "$child_pid" ]; then kill -TERM "$child_pid" 2>/dev/null || true; fi
+}
+trap request_stop TERM INT
 
 host_docker() {
   chroot /host /bin/sh -c '
@@ -13,15 +18,14 @@ host_docker() {
 }
 
 host_shell() {
-  chroot /host /bin/sh -c '
+  exec chroot /host /bin/sh -c '
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/histor/bin:/histor/sbin
     export PATH
-    exec nsenter --target 1 --mount --uts --pid --cgroup --root=/proc/1/root --wd=/ -- /bin/sh -s
+    exec nsenter --no-fork --target 1 --mount --uts --pid --cgroup --root=/proc/1/root --wd=/ -- /bin/sh -s
   '
 }
 
 # Allow Docker to finish starting and monitoring this container.
-sleep 12
 ready=0
 attempt=0
 while [ "$attempt" -lt 10 ]; do
@@ -30,73 +34,20 @@ while [ "$attempt" -lt 10 ]; do
     break
   fi
   attempt=$((attempt + 1))
+  if [ "$stopping" -eq 1 ]; then exit 0; fi
   sleep 2
 done
 if [ "$ready" -ne 1 ]; then
   echo '[ERROR] 无法调用宿主 Docker 或找不到本容器；未执行任务。'
-  echo '[ERROR] 保持等待以避免反复执行，请查看宿主 docker 命令和容器名称。'
-  exec sleep infinity
+  echo '[ERROR] 常驻服务未启动，容器以失败状态退出。'
+  exit 1
 fi
 
-if host_shell <<'R1_HOST_JOB'
+host_shell <<'R1_HOST_JOB' &
 #!/bin/sh
-# Runs in the NAS host namespaces, with the host filesystem as its root.
+# The verified runtime lives in host namespaces until the container stops.
+# Do not wait for /screen: Web and MCP must also work without a GUI or DISPLAY.
 set -eu
-command -v mountpoint >/dev/null || {
-  echo '[ERROR] 宿主缺少 mountpoint，未执行任务。'
-  exit 1
-}
-attempt=0
-until mountpoint -q /screen; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 60 ]; then
-    echo '[ERROR] 等待 /screen 持久分区挂载超时，未执行任务。'
-    exit 1
-  fi
-  sleep 2
-done
-
-state_dir=/run/r1-toolbox
-mkdir -p "$state_dir"
-command -v sha256sum >/dev/null || {
-  echo '[ERROR] 宿主缺少 sha256sum，未执行任务。'
-  exit 1
-}
-TASK_CONTAINER=${TASK_CONTAINER:-r1-toolbox}
-boot_id=$(cat /proc/sys/kernel/random/boot_id)
-ui_mode=${UI_MODE:-}
-if [ -z "$ui_mode" ]; then
-  if [ -n "${UI_DIR:-}" ]; then ui_mode=directory; else ui_mode=diagnostic; fi
-fi
-UI_MODE=$ui_mode
-export UI_MODE
-image_id=$(docker --host unix:///var/run/docker.sock inspect --format '{{.Image}}' "$TASK_CONTAINER") || {
-  echo '[ERROR] 无法读取当前镜像 ID，未执行任务。'
-  exit 1
-}
-image_hash=${image_id#sha256:}
-if [ "$image_id" = "$image_hash" ] || [ "${#image_hash}" -ne 64 ]; then
-  echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1
-fi
-case "$image_hash" in
-  *[!0123456789abcdef]*) echo '[ERROR] 当前镜像 ID 格式异常，未执行任务。'; exit 1 ;;
-esac
-config_fingerprint=$(printf '%s\n' "$TASK_CONTAINER" "$ui_mode" "${UI_DIR:-}" "${R1_WEB_BIND:-0.0.0.0}" "${R1_WEB_PORT:-18732}" "${R1_WEB_AUTH_MODE:-password}" "${R1_DEV_NO_PAIRING:-0}" "${R1_DEV_ALLOW_IPS:-}" "${R1_DEV_MINUTES:-60}" "${R1_DEV_ALLOW_COMMANDS:-0}" | sha256sum)
-config_fingerprint=${config_fingerprint%% *}
-run_key="$boot_id:$config_fingerprint:$image_id:$ui_mode:${UI_DIR:-}:${R1_WEB_BIND:-0.0.0.0}:${R1_WEB_PORT:-18732}"
-last_key=$(cat "$state_dir/last-success" 2>/dev/null || true)
-if [ "$last_key" = "$run_key" ]; then
-  echo '[SKIP] 本次 NAS 启动已经成功执行过当前任务版本。'
-  exit 0
-fi
-if [ -f "$state_dir/last-success" ]; then
-  # A failed update may restore the official app. Re-selecting the previous
-  # image must run again instead of trusting that image's earlier success.
-  mv "$state_dir/last-success" "$state_dir/last-success.previous"
-fi
-
-echo '[START] 开始执行宿主任务。'
-(
 #!/bin/sh
 # Runs in the host namespaces/root. UI is private to the new screen service.
 set -eu
@@ -193,6 +144,7 @@ def read_bundle(tar_path, expected_sha):
                              'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                              'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
                              'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
+                             'runtime/service_settings.py', 'runtime/network_access.py', 'runtime/screen_manager.py',
                              'runtime/light_policy.py', 'runtime/monitoring.py',
                              'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
                              'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')
@@ -231,6 +183,7 @@ def read_bundle(tar_path, expected_sha):
                                            'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                                            'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
                                            'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
+                                           'runtime/service_settings.py', 'runtime/network_access.py', 'runtime/screen_manager.py',
                                            'runtime/light_policy.py', 'runtime/monitoring.py',
                                            'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
                                            'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')),
@@ -328,7 +281,7 @@ def settings_directory(container, required=False):
         require(not os.statvfs(source).f_flag & os.ST_RDONLY, 'Docker 数据卷所在文件系统只读')
         require(source != runtime_root and runtime_root not in source.parents,
                 '设置卷不能位于 Toolbox 的易失运行目录')
-        official = app.resolve(strict=True)
+        official = app.resolve(strict=False)
         require(source != pathlib.Path('/') and source != official and source not in official.parents
                 and official not in source.parents and not any(c in str(source) for c in '\n\r\x00'),
                 'Docker 设置数据卷必须与官方程序目录独立')
@@ -648,7 +601,10 @@ def main():
                     raise SystemExit('开发者免配对模式需要设置 R1_DEV_ALLOW_IPS（仅允许指定客户端 IP）')
                 for item in dev_ips:
                     try:
-                        ipaddress.ip_address(item)
+                        network = ipaddress.ip_network(item, strict=False)
+                        trusted = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8') if network.version == 4 else ('fc00::/7', '::1/128')
+                        require(any(network.subnet_of(ipaddress.ip_network(value)) for value in trusted),
+                                '开发者来源只能是局域网或回环地址范围')
                     except ValueError:
                         raise SystemExit('R1_DEV_ALLOW_IPS 包含无效 IP') from None
                 try:
@@ -724,28 +680,92 @@ def main():
         return 1
 
 
+def resident_environment(container):
+    """Forward fixed bootstrap settings; persisted Web settings remain authoritative."""
+    environment = dict(base_env)
+    environment['R1_TOOLBOX_DATA_DIR'] = str(settings_directory(container, required=True))
+    environment['R1_TOOLBOX_VERSION'] = os.environ.get('TOOLBOX_VERSION', 'dev')
+    web_bind, web_port = os.environ.get('R1_WEB_BIND', '0.0.0.0'), os.environ.get('R1_WEB_PORT', '18732')
+    require(web_bind in ('0.0.0.0', '127.0.0.1'), 'R1_WEB_BIND 只能是 0.0.0.0 或 127.0.0.1')
+    require(web_port.isascii() and web_port.isdigit() and len(web_port) <= 5 and 1024 <= int(web_port) <= 65535,
+            '常驻 Web 的 R1_WEB_PORT 需要为 1024–65535')
+    environment.update(R1_WEB_BIND=web_bind, R1_WEB_PORT=web_port)
+    auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'password')
+    require(auth_mode in ('pair', 'password'), 'R1_WEB_AUTH_MODE 只能是 pair 或 password')
+    environment['R1_WEB_AUTH_MODE'] = auth_mode
+    small_screen = os.environ.get('R1_SMALL_SCREEN_ENABLED', '1')
+    require(small_screen in ('0', '1'), 'R1_SMALL_SCREEN_ENABLED 只能是 0 或 1')
+    environment['R1_SMALL_SCREEN_ENABLED'] = small_screen
+    developer = os.environ.get('R1_DEV_NO_PAIRING', '0')
+    require(developer in ('0', '1', ''), 'R1_DEV_NO_PAIRING 只能是 0 或 1')
+    if developer == '1':
+        ips = [value.strip() for value in os.environ.get('R1_DEV_ALLOW_IPS', '').split(',') if value.strip()]
+        require(bool(ips), '开发模式需要设置局域网来源 IP 或 CIDR')
+        for value in ips:
+            network = ipaddress.ip_network(value, strict=False)
+            trusted = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8') if network.version == 4 else ('fc00::/7', '::1/128')
+            require(any(network.subnet_of(ipaddress.ip_network(item)) for item in trusted),
+                    '开发模式来源必须完整位于局域网或回环范围')
+        minutes = int(os.environ.get('R1_DEV_MINUTES', '60'))
+        require(1 <= minutes <= 1440, 'R1_DEV_MINUTES 需要在 1–1440 分钟')
+        commands = os.environ.get('R1_DEV_ALLOW_COMMANDS', '0')
+        require(commands in ('0', '1', ''), 'R1_DEV_ALLOW_COMMANDS 只能是 0 或 1')
+        environment.update(R1_DEV_NO_PAIRING='1', R1_DEV_ALLOW_IPS=','.join(ips),
+                           R1_DEV_MINUTES=str(minutes), R1_DEV_ALLOW_COMMANDS=commands or '0')
+    return environment
+
+
+def resident_main():
+    """Provision a verified RAM bundle, then replace this process with the core."""
+    descriptor = None
+    try:
+        mode, source = select_mode(dict(os.environ, UI_MODE=os.environ.get('UI_MODE') or 'image'))
+        container = os.environ.get('TASK_CONTAINER', 'r1-toolbox')
+        cache = prepare_image_bundle(container)
+        environment = resident_environment(container)
+        frontend = None if mode == 'diagnostic' else resolve_source(source if mode == 'directory' else str(cache / 'frontend'))
+        if mode == 'diagnostic':
+            environment['R1_SMALL_SCREEN_ENABLED'] = '0'
+        runtime = cache / 'runtime'
+        sys.path.insert(0, str(runtime))
+        from ui_service import acquire_runtime_lock
+        from screen_manager import migrate_legacy_runtime
+        descriptor = acquire_runtime_lock()
+        migrate_legacy_runtime()
+        os.set_inheritable(descriptor, True)
+        environment['R1_TOOLBOX_RUNTIME_LOCK_FD'] = str(descriptor)
+        command = [shutil.which('python3'), '-B', str(runtime / 'ui_service.py'), '--resident']
+        if frontend is not None:
+            command += ['--frontend', str(frontend)]
+        print('[OK] 已准备常驻 Web／控制服务；小屏按独立开关管理。', flush=True)
+        os.execve(command[0], command, environment)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError, tarfile.TarError) as error:
+        print('[ERROR] 常驻服务准备失败：', error, flush=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        return 1
+
+
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(resident_main())
 PY
-)
-
-# Record success only after all actions finish. Failed runs remain retryable.
-printf '%s\n' "$run_key" > "$state_dir/last-success.new"
-mv "$state_dir/last-success.new" "$state_dir/last-success"
-sync
-echo '[OK] 已记录本次启动的成功状态。'
 R1_HOST_JOB
-then
-  task_rc=0
-  echo '[OK] 本次任务完成，正在停止容器。'
-else
-  task_rc=$?
-  echo "[ERROR] 本次任务失败（状态 ${task_rc}），停止容器，不自动循环执行。"
+child_pid=$!
+if [ "$stopping" -eq 1 ]; then kill -TERM "$child_pid" 2>/dev/null || true; fi
+task_rc=0
+wait "$child_pid" || task_rc=$?
+# POSIX wait may be interrupted by the signal trap while the child is cleaning
+# up hardware. Reap it before allowing Docker to consider the container stopped.
+if [ "$stopping" -eq 1 ]; then
+  while kill -0 "$child_pid" 2>/dev/null; do
+    wait "$child_pid" || true
+    if kill -0 "$child_pid" 2>/dev/null; then sleep 0.05; fi
+  done
+  exit 0
 fi
-
-# Background + interruptible wait lets PID 1 handle the stop signal immediately.
-host_docker stop --time 5 "$TASK_CONTAINER" &
-stop_pid=$!
-wait "$stop_pid" || true
-echo '[ERROR] 自停请求未能终止容器；保持等待，不重复执行任务。'
-exec sleep infinity
+if [ "$task_rc" -eq 0 ]; then
+  echo '[ERROR] 常驻服务意外退出，交由 Docker 重启。'
+  exit 1
+fi
+echo "[ERROR] 常驻服务退出（状态 ${task_rc}），交由 Docker 重启。"
+exit "$task_rc"

@@ -43,9 +43,10 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const checks = [], pageErrors = [];
   const check = (name, condition) => { assert.ok(condition, name); checks.push(name); };
   const secret = 'r1-fixture-secret-ONLY-ONCE-<img src=x>';
+  const rotatedSecret = 'r1-fixture-rotated-ONLY-ONCE-<svg onload=x>';
   const unsafeName = '<img src=x onerror="window.apiNameInjected=1">客厅 AI';
   const calls = [];
-  let reads = 0, failCreate = false, failRead = false;
+  let reads = 0, failCreate = false, failRead = false, failManage = false;
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
     role_catalog: [
@@ -99,7 +100,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       if (url.pathname === '/api/access/settings') { state.enabled = body.enabled; return reply(200, { ok: true }); }
       if (url.pathname === '/api/access/keys') {
         if (failCreate) return reply(429, { error: 'fixture：密钥创建失败' });
-        const key = { id: 'fixture-key-' + (state.keys.length + 1), ...body, created_at: 1793240000,
+        const key = { id: 'fixture-key-' + (state.keys.length + 1), ...body, created_at: 1793240000, enabled: true, disabled: false,
           expires_at: body.expires_days === 0 ? null : 1801016000, revoked_at: null, last_used_at: null, status: 'active' };
         state.keys.push(key); return reply(200, { ok: true, key, token: secret });
       }
@@ -107,6 +108,22 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
         const key = state.keys.find(item => item.id === body.id);
         assert.ok(key, '撤销已有 key'); key.status = 'revoked'; key.revoked_at = 1793240100;
         return reply(200, { ok: true });
+      }
+      if (['/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate'].includes(url.pathname)) {
+        if (failManage) return reply(503, { error: 'fixture：密钥管理失败' });
+        const key = state.keys.find(item => item.id === body.id);
+        assert.ok(key && key.status !== 'revoked', '只管理未撤销 key');
+        if (url.pathname.endsWith('/update')) {
+          Object.assign(key, body);
+          if (Object.hasOwn(body, 'role')) key.policy_version = 2;
+          if (Object.hasOwn(body, 'expires_days')) key.expires_at = body.expires_days === 0 ? null : 1802222000;
+          return reply(200, { ok: true, key });
+        }
+        if (url.pathname.endsWith('/enable')) {
+          key.enabled = body.enabled; key.disabled = !body.enabled; key.status = body.enabled ? 'active' : 'disabled';
+          return reply(200, { ok: true, key });
+        }
+        return reply(200, { ok: true, key, token: rotatedSecret });
       }
       return reply(404, { error: 'unknown fixture route' });
     });
@@ -141,7 +158,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('input[data-ref="name"]').fill(unsafeName);
     await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
     check('低角色保留功能选择但说明工具不可调用', (await manager.locator('[data-ref="roleStatus"]').innerText()).includes('当前角色不可调用') && await manager.locator('[data-ref="scopes"] input[value="fan"]').isChecked());
-    await manager.locator('[data-ref="ips"]').fill('192.168.31.100\nfd00::2');
+    await manager.locator('textarea[data-ref="ips"]').fill('192.168.31.100\nfd00::2');
     await manager.locator('[data-ref="create"]').click();
     await page.locator('.fullmask [data-yes]').click();
     const secretDialog = page.locator('#r1ApiSecret');
@@ -171,10 +188,55 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('密钥未写入浏览器存储', !(await page.evaluate(() => JSON.stringify(window.__apiStorageWrites))).includes(secret));
     check('安全元数据列表不包含密钥', !(await manager.innerText()).includes(secret));
 
+    await manager.locator('.r1-api-item [data-ref="edit"]').click();
+    check('编辑加载原有角色和权限并默认保持有效期', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly'
+      && await manager.locator('[data-ref="expiry"]').inputValue() === 'keep'
+      && await manager.locator('[data-ref="scopes"] input[value="fan"]').isChecked());
+    await manager.locator('textarea[data-ref="ips"]').fill('192.168.31.0/24\nfd00::/64\n192.168.32.0/255.255.255.0');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const metadataEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('IP编辑接受CIDR和点分掩码且不重设有效期或扩大权限', JSON.stringify(metadataEdit.allowed_ips) === JSON.stringify(['192.168.31.0/24', 'fd00::/64', '192.168.32.0/255.255.255.0'])
+      && !Object.hasOwn(metadataEdit, 'expires_days') && !Object.hasOwn(metadataEdit, 'role') && !Object.hasOwn(metadataEdit, 'scopes') && !Object.hasOwn(metadataEdit, 'file_roots'));
+    await manager.locator('.r1-api-item [data-ref="edit"]').click();
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    await manager.locator('[data-ref="scopes"] input[value="screen"]').check();
+    await manager.locator('[data-ref="expiry"]').selectOption('7');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const permissionEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('明确编辑角色权限和有效期才提交对应字段', permissionEdit.role === 'readwrite'
+      && JSON.stringify(permissionEdit.scopes) === '["read","fan","screen"]' && permissionEdit.expires_days === 7 && JSON.stringify(permissionEdit.file_roots) === '[]');
+    await manager.locator('.r1-api-item [data-ref="toggle"]').click();
+    await manager.locator('.r1-api-item [data-ref="status"]').filter({ hasText: '已停用' }).waitFor();
+    check('单key停用不撤销且可以再启用', calls.at(-1).path === '/api/access/keys/enable' && calls.at(-1).body.enabled === false
+      && await manager.locator('.r1-api-item [data-ref="toggle"]').innerText() === '启用');
+    await manager.locator('.r1-api-item [data-ref="toggle"]').click();
+    await manager.locator('.r1-api-item [data-ref="status"]').filter({ hasText: '有效' }).waitFor();
+    failManage = true;
+    await manager.locator('.r1-api-item [data-ref="toggle"]').click();
+    await manager.locator('[data-ref="error"]').filter({ hasText: '密钥管理失败' }).waitFor();
+    check('停用失败显示原因且不误报停用', await manager.locator('.r1-api-item [data-ref="status"]').innerText() === '有效');
+    failManage = false;
+    await manager.locator('.r1-api-item [data-ref="rotate"]').click();
+    check('轮换前明确旧Token立即失效', (await page.locator('.fullmask').last().innerText()).includes('旧 Token 将立即失效'));
+    await page.locator('.fullmask [data-yes]').click();
+    await page.locator('#r1ApiSecret').waitFor();
+    const rotatedField = await page.locator('#r1ApiSecret [data-ref="token"]').elementHandle();
+    check('轮换仅一次显示新Token而不返回旧Token', await rotatedField.inputValue() === rotatedSecret
+      && calls.at(-1).path === '/api/access/keys/rotate');
+    await page.keyboard.press('Escape');
+    check('轮换窗口关闭后清除Token且不写浏览器存储', await rotatedField.inputValue() === ''
+      && !(await manager.innerText()).includes(rotatedSecret)
+      && !(await page.evaluate(() => JSON.stringify(window.__apiStorageWrites))).includes(rotatedSecret));
+    await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
+
     await manager.locator('.r1-api-item [data-ref="revoke"]').click();
     await page.locator('.fullmask [data-yes]').click();
     await manager.locator('.r1-api-item [data-ref="status"]').filter({ hasText: '已撤销' }).waitFor();
     check('撤销后刷新安全元数据', calls.some(call => call.path === '/api/access/keys/revoke') && await manager.locator('.r1-api-item [data-ref="revoke"]').isHidden());
+    check('已撤销Token不能恢复编辑启用或轮换', await manager.locator('.r1-api-item [data-ref="edit"]').isHidden()
+      && await manager.locator('.r1-api-item [data-ref="toggle"]').isHidden() && await manager.locator('.r1-api-item [data-ref="rotate"]').isHidden());
 
     failCreate = true;
     await manager.locator('input[data-ref="name"]').fill('失败测试');
@@ -257,6 +319,17 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="refresh"]').click();
     await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
     check('显式 legacy 也保持原有精确权限标签', (await legacy.locator('[data-ref="role"]').innerText()) === '原有精确权限');
+    await legacy.locator('[data-ref="edit"]').click();
+    check('编辑旧key保留legacy选项且不默认升级角色', await manager.locator('select[data-ref="role"]').inputValue() === 'legacy'
+      && await manager.locator('[data-ref="scopes"] input[value="power"]').isDisabled());
+    await manager.locator('input[data-ref="name"]').fill('旧权限密钥已编辑');
+    await manager.locator('textarea[data-ref="ips"]').fill('192.168.31.0/24');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const legacyEdit = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('旧key仅编辑元数据不发送角色功能或新过期时间', legacyEdit.id === 'fixture-legacy'
+      && !Object.hasOwn(legacyEdit, 'role') && !Object.hasOwn(legacyEdit, 'scopes') && !Object.hasOwn(legacyEdit, 'expires_days'));
+    await manager.locator('[data-ref="scopes"] input[value="fan"]').check();
 
     await manager.locator('input[data-ref="name"]').fill('长期 AI');
     await manager.locator('[data-ref="expiry"]').selectOption('0');

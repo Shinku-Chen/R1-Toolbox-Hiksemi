@@ -117,6 +117,7 @@ class ToolboxController:
         self.settings_error = None
         self.last_activity = self.clock()
         self.asleep = False
+        self.screen_managed = True
         self.saver = False
         self.saved_brightness = None
         self.saver_saved_brightness = None
@@ -217,6 +218,29 @@ class ToolboxController:
                 value = self._read_int(path)
                 if value is not None:
                     self.original_screen[path] = value
+
+    def set_screen_managed(self, enabled):
+        """Release display-only ownership without stopping power/fan/light work."""
+        require(type(enabled) is bool, "小屏接管开关必须为布尔值")
+        with self.lock:
+            self.screen_managed = enabled
+            if enabled:
+                self.last_activity = self.clock()
+                self.night_active = None
+                return
+            failures = []
+            for path in sorted(self.original_screen, key=lambda item: item.name == "blank"):
+                try:
+                    self._write_int(path, self.original_screen[path])
+                    del self.original_screen[path]
+                except OSError as error:
+                    failures.append(str(error))
+            self.asleep = self.saver = False
+            self.saved_brightness = self.saver_saved_brightness = None
+            self.night_active = None
+            if failures:
+                self.settings_error = "屏幕原始状态恢复失败：" + failures[0]
+                raise RuntimeError(self.settings_error)
 
     def _set_brightness(self, value):
         folder, maximum = self._backlight()
@@ -558,7 +582,7 @@ class ToolboxController:
             remaining = max(0, math.ceil(self.pending["deadline"] - self.clock())) if self.pending else None
             return {
                 "capabilities": {
-                    "screen": {"available": screen_available, "reason": "" if screen_available else "未发现背光或 fb0 息屏接口"},
+                    "screen": {"available": screen_available and self.screen_managed, "reason": "Toolbox 小屏接管已关闭" if not self.screen_managed else "" if screen_available else "未发现背光或 fb0 息屏接口"},
                     "fans": {"available": bool(fans) or bool(official.get("control_available")),
                              "reason": "" if fans or official.get("control_available") else
                              "未发现可用的原厂策略接口或 IT87 PWM；详见设备接口诊断"},
@@ -567,7 +591,7 @@ class ToolboxController:
                 },
                 "settings": copy.deepcopy(self.settings), "settings_error": self.settings_error,
                 "screen": {"brightness": self._brightness(), "asleep": self.asleep or (self._read_int(blank) or 0) != 0,
-                           "saver": self.saver, "max_brightness": maximum},
+                           "saver": self.saver, "max_brightness": maximum, "managed": self.screen_managed},
                 "fans": {"channels": fans, "official": official,
                          "temperature_c": self._temperature(), "last_error": self.fan_error},
                 "rgb": {"bus": self.rgb_bus, "mode": self.rgb_mode, "color": self.rgb_color,
@@ -585,6 +609,8 @@ class ToolboxController:
             with self.lock:
                 require(not self.stopped.is_set(), "控制服务正在停止，操作未执行")
                 require(isinstance(payload, dict), "参数必须是 JSON 对象")
+                require(not name.startswith('screen.') or self.screen_managed,
+                        "Toolbox 小屏接管已关闭，请先在网页启用小屏")
                 if name == "settings.update":
                     keys(payload, ("settings",))
                     updated = validated_settings(payload.get("settings"), self.settings)
@@ -593,7 +619,7 @@ class ToolboxController:
                     changes = payload["settings"]
                     self.settings, self.settings_error = updated, None
                     self.last_activity = self.clock()
-                    if not self.asleep and set(changes) & {"brightness", "night_enabled", "night_start", "night_end", "night_brightness"}:
+                    if self.screen_managed and not self.asleep and set(changes) & {"brightness", "night_enabled", "night_start", "night_end", "night_brightness"}:
                         try:
                             self._set_brightness(self._effective_brightness())
                         except (OSError, ValueError) as error:
@@ -659,7 +685,7 @@ class ToolboxController:
                 command = [self.systemctl, "--no-block", self.pending["operation"]]
                 self.pending, self.executing = None, True
             if command is None:
-                if self.settings["night_enabled"]:
+                if self.screen_managed and self.settings["night_enabled"]:
                     active = self._is_night()
                     if active != self.night_active:
                         if not self.asleep:
@@ -667,9 +693,9 @@ class ToolboxController:
                         self.night_active = active
                 idle = self.clock() - self.last_activity
                 timeout = self.settings["sleep_timeout"]
-                if timeout and not self.asleep and idle >= timeout:
+                if self.screen_managed and timeout and not self.asleep and idle >= timeout:
                     self._sleep()
-                elif (not self.asleep and not self.saver and self.settings.get("saver_timeout")
+                elif (self.screen_managed and not self.asleep and not self.saver and self.settings.get("saver_timeout")
                       and idle >= self.settings["saver_timeout"]):
                     self._saver_start()
                 for channel, original in list(self.owned_fans.items()):

@@ -418,6 +418,29 @@ class MountTests(unittest.TestCase):
         self.assertIn('-B', command)
         self.assertIn(str(backend), command)
 
+    def test_resident_bootstrap_is_headless_and_preserves_default_service_settings(self):
+        actions = load_actions()
+        actions.settings_directory = mock.Mock(return_value=self.temporary / 'data-volume')
+        with mock.patch.dict(os.environ, {}, clear=True):
+            environment = actions.resident_environment('r1-toolbox')
+        self.assertEqual(environment['R1_WEB_AUTH_MODE'], 'password')
+        self.assertEqual(environment['R1_SMALL_SCREEN_ENABLED'], '1')
+        self.assertEqual(environment['R1_WEB_PORT'], '18732')
+        self.assertNotIn('DISPLAY', environment)
+        self.assertNotIn('R1_DEV_NO_PAIRING', environment)
+        actions.settings_directory.assert_called_once_with('r1-toolbox', required=True)
+
+    def test_resident_bootstrap_accepts_private_ip_and_cidr_but_rejects_wide_or_public_ranges(self):
+        actions = load_actions()
+        actions.settings_directory = mock.Mock(return_value=self.temporary / 'data-volume')
+        common = {'R1_DEV_NO_PAIRING': '1', 'R1_DEV_MINUTES': '30'}
+        for value in ('192.168.31.193', '192.168.31.0/24', 'fd00::/64', '::1'):
+            with self.subTest(value=value), mock.patch.dict(os.environ, dict(common, R1_DEV_ALLOW_IPS=value), clear=True):
+                self.assertEqual(actions.resident_environment('r1-toolbox')['R1_DEV_ALLOW_IPS'], value)
+        for value in ('0.0.0.0/0', '::/0', '8.8.8.8', '192.0.0.0/8', 'example.com', ''):
+            with self.subTest(value=value), mock.patch.dict(os.environ, dict(common, R1_DEV_ALLOW_IPS=value), clear=True), self.assertRaises(ValueError):
+                actions.resident_environment('r1-toolbox')
+
 
 if __name__ == "__main__":
     unittest.main()

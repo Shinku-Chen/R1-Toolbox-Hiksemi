@@ -8,14 +8,15 @@ R1 Toolbox
 
 Usage: r1-toolbox [run|--help|--version]
 
-  run         Run the NAS boot-once task, then stop this container (default).
+  run         Keep the NAS Web/control runtime running until the container stops.
   --help      Show this help without accessing the NAS host.
   --version   Show the image version without accessing the NAS host.
 
 Deploy with composer.yml for the required host mounts and namespaces.
 composer.yml uses UI_MODE=image: the bundled UI runs from the host's /run tmpfs.
-UI_MODE=diagnostic only reports diagnostics; UI_MODE=directory uses a NAS UI_DIR.
-Without UI_MODE or UI_DIR, the task only reports diagnostics.
+The Web interface controls the small-screen takeover independently of MCP.
+UI_MODE=diagnostic leaves the display alone; UI_MODE=directory uses NAS UI_DIR.
+Without UI_MODE, the bundled screen is available and initially enabled.
 HELP
     ;;
   --version|-V|version)

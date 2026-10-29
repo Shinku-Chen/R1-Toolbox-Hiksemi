@@ -37,6 +37,9 @@ from monitoring import MonitoringService
 import fnm_compat
 import copy
 
+# This browser suite verifies the explicitly requested legacy pairing workflow.
+os.environ['R1_WEB_AUTH_MODE'] = 'pair'
+
 assert fixture.name.startswith('r1-web-browser-') and fixture.is_dir()
 registers = {1: 0x55, 0x90: 1, 0x91: 204}
 commands = []

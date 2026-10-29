@@ -195,7 +195,7 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         state = json.loads(path.read_text(encoding='utf-8'))
         state['version'] = 1
         for row in state['keys']:
-            for field in ('role', 'policy_version', 'file_roots'):
+            for field in ('role', 'policy_version', 'file_roots', 'disabled'):
                 row.pop(field, None)
         digest = state['keys'][0]['digest']
         path.write_text(json.dumps(state), encoding='utf-8')
@@ -211,7 +211,7 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         self.assertFalse(result['isError'])
         self.controller.action.assert_called_once_with('power.cancel', {})
         persisted = json.loads(path.read_text(encoding='utf-8'))
-        self.assertEqual(2, persisted['version'])
+        self.assertEqual(3, persisted['version'])
         self.assertEqual(digest, persisted['keys'][0]['digest'])
         self.assertEqual('legacy', persisted['keys'][0]['role'])
         self.assertEqual(1, persisted['keys'][0]['policy_version'])

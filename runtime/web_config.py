@@ -29,6 +29,8 @@ from vendor_business import collect_business_diagnostics
 from vendor_media_probe import collect_media_probe
 from vendor_media_batch import collect_media_batch
 from integration_api import IntegrationApi
+from service_settings import ServiceSettingsStore
+from network_access import peer_matches
 from mcp_service import validate_http_metadata
 from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
 
@@ -57,7 +59,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/raidcard', '/api/processes', '/api/apps', '/api/modules', '/api/vms', '/api/history',
     '/api/history/diag', '/api/smart', '/api/disk_health', '/api/scan_log', '/api/notify',
     '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
-    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access',
+    '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/services',
 )) | PANEL_QUERY_ROUTES
 
 PANEL_POST_ROUTES = frozenset((
@@ -69,10 +71,14 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
     '/api/dev/media', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
+    '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate',
+    '/api/services/screen', '/api/services/mcp', '/api/services/developer',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
-ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/api/access/keys/revoke'))
+ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
+                              '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate'))
+SERVICE_POST_ROUTES = frozenset(('/api/services/screen', '/api/services/mcp', '/api/services/developer'))
 
 
 def _mcp_accepts(values):
@@ -245,7 +251,8 @@ def _run_dev_command(name):
 class WebConfigServer:
     def __init__(self, controller, insights=None, *, fan_policy=None, light_policy=None, monitoring=None,
                  monitor=None, host='0.0.0.0', port=18732,
-                 asset_dir=None, clock=None, state_dir=None, version='dev', dev_root=None, udev_root=None):
+                 asset_dir=None, clock=None, state_dir=None, version='dev', dev_root=None, udev_root=None,
+                 screen_manager=None):
         if host not in ('127.0.0.1', '0.0.0.0') or type(port) is not int or not (port == 0 or 1024 <= port <= 65535):
             raise ValueError('网页监听只允许 127.0.0.1/0.0.0.0 和 1024–65535 端口')
         self.controller, self.insights = controller, insights
@@ -279,31 +286,103 @@ class WebConfigServer:
         self.panel = FnmonitorPanel(controller, insights, monitoring, fan_policy, light_policy, monitor,
                                     state_dir=self.state_dir, version=version, web=self,
                                     dev_root=dev_root or '/dev', udev_root=udev_root or '/run/udev')
-        # Opt-in development bypass.  It is off unless both an explicit flag
-        # and a client allowlist are supplied, and it expires automatically.
-        # Never enable this on a production LAN without understanding the risk.
-        self.auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'pair')
+        self.auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'password')
         if self.auth_mode not in ('pair', 'password'):
-            self.auth_mode = 'pair'
-        self.dev_no_pairing = os.environ.get('R1_DEV_NO_PAIRING') == '1'
-        self.dev_allow_ips = set()
-        for item in os.environ.get('R1_DEV_ALLOW_IPS', '').split(','):
-            item = item.strip()
-            if not item:
-                continue
-            try:
-                self.dev_allow_ips.add(ipaddress.ip_address(item))
-            except ValueError:
-                continue
-        try:
-            minutes = int(os.environ.get('R1_DEV_MINUTES', '60'))
-        except ValueError:
-            minutes = 60
-        self.dev_until = time.time() + 60 * max(1, min(1440, minutes)) if self.dev_no_pairing and self.dev_allow_ips else 0
-        self.dev_commands = os.environ.get('R1_DEV_ALLOW_COMMANDS') == '1'
+            self.auth_mode = 'password'
+        self.service_settings = ServiceSettingsStore(self.state_dir)
+        self.screen_manager = screen_manager
+        self._screen_error = None
+        self._dev_fingerprint = None
+        self.dev_no_pairing, self.dev_allow_ips = False, set()
+        self.dev_until, self.dev_commands = 0, False
+        self._sync_development(force=True)
         self.fan_diagnostics = FanDiagnostics(fan_policy, version=version)
         self.integration = IntegrationApi(self, state_dir=self.state_dir, version=version)
         self.api_access = self.integration.access
+
+    def _sync_development(self, state=None, *, force=False):
+        """Apply persisted changes while retaining legacy embedding attributes.
+
+        Existing embedders may shorten the in-memory window for diagnostics.
+        A real Web edit or changed persisted configuration replaces that cache;
+        malformed storage always closes access, regardless of cached attributes.
+        """
+        state = state if state is not None else self.service_settings.snapshot()
+        if not state['storage_ok']:
+            self.dev_no_pairing, self.dev_allow_ips = False, set()
+            self.dev_until, self.dev_commands, self._dev_fingerprint = 0, False, None
+            return state
+        dev = state['developer']
+        fingerprint = (dev['enabled'], tuple(dev['allowed_ips']), dev['minutes'],
+                       dev['expires_at'], dev['allow_commands'])
+        if force or fingerprint != self._dev_fingerprint:
+            self.dev_no_pairing = dev['enabled']
+            self.dev_allow_ips = set(dev['allowed_ips'])
+            self.dev_until = dev['expires_at'] or 0
+            self.dev_commands = dev['allow_commands']
+            self._dev_fingerprint = fingerprint
+        return state
+
+    def attach_screen_manager(self, manager):
+        """Attach the independent GUI lifecycle after core services are ready."""
+        self.screen_manager = manager
+        try:
+            manager.set_enabled(self.service_settings.snapshot()['screen_enabled'])
+            self._screen_error = None
+        except Exception:
+            self._screen_error = '小屏接管请求未完成；网页与 MCP 保持可用。'
+
+    def services_snapshot(self):
+        settings = self._sync_development()
+        screen = {'enabled': settings['screen_enabled'], 'active': None, 'busy': None,
+                  'available': False, 'last_error': '小屏接管管理器未就绪。'}
+        if self.screen_manager is not None:
+            try:
+                live = self.screen_manager.snapshot()
+                if not isinstance(live, dict):
+                    raise ValueError('invalid screen lifecycle snapshot')
+                for key in ('active', 'busy', 'available'):
+                    value = live.get(key)
+                    if type(value) is not bool:
+                        raise ValueError('unknown screen lifecycle field')
+                    screen[key] = value
+                # Only the lifecycle adapter supplies this bounded product error.
+                error = live.get('last_error')
+                screen['last_error'] = error if isinstance(error, str) and len(error) <= 256 else None
+            except Exception:
+                screen.update(active=None, busy=None, available=False)
+                screen['last_error'] = '小屏接管状态暂不可确认。'
+        if self._screen_error:
+            screen['last_error'] = self._screen_error
+        dev = settings['developer']
+        return {'ok': True, 'screen': screen,
+                'mcp': {'enabled': self.api_access.snapshot()['enabled']},
+                'developer': {key: dev[key] for key in (
+                    'enabled', 'active', 'allowed_ips', 'minutes', 'expires_at', 'allow_commands', 'reason')}}
+
+    def _services_write(self, route, body):
+        """Browser-owner settings only; no API token or developer bypass here."""
+        if route == '/api/services/mcp':
+            self.api_access.configure(body)
+        elif route == '/api/services/developer':
+            self.service_settings.configure_developer(body)
+            self._sync_development(force=True)
+        elif route == '/api/services/screen':
+            if self.screen_manager is None:
+                return 503, {'ok': False, 'error': '小屏接管管理器未就绪，未改变显示状态。'}
+            self.service_settings.configure_screen(body)
+            try:
+                self.screen_manager.set_enabled(body['enabled'])
+                self._screen_error = None
+            except Exception:
+                self._screen_error = '小屏偏好已保存，但切换未完成，请核对实际状态后重试。'
+                state = self.services_snapshot()
+                return 503, {'ok': False, 'saved': True, 'error': self._screen_error,
+                             'services': {key: value for key, value in state.items() if key != 'ok'}}
+        else:
+            raise ValueError('不支持的服务设置')
+        state = self.services_snapshot()
+        return 200, {'ok': True, 'services': {key: value for key, value in state.items() if key != 'ok'}}
 
     def _expire(self):
         now = self.clock()
@@ -584,17 +663,10 @@ class WebConfigServer:
         return self.auth.session(headers.get('Cookie') or '')
 
     def _dev_authorized(self, peer):
+        self._sync_development()
         if not self.dev_no_pairing or not self.dev_allow_ips or time.time() >= self.dev_until:
             return False
-        if not peer:
-            return False
-        try:
-            address = ipaddress.ip_address(str(peer))
-        except ValueError:
-            return False
-        if address.version == 6 and address.ipv4_mapped:
-            address = address.ipv4_mapped
-        return address in self.dev_allow_ips
+        return peer_matches(str(peer), [str(rule) for rule in self.dev_allow_ips]) if peer else False
 
     def panel_authorized(self, headers, *, network_csrf=True, peer=None):
         """Password session, or the small-screen pairing session, may write.
@@ -607,13 +679,13 @@ class WebConfigServer:
         """
         if self.password_session(headers) is not None:
             return 'password'
-        if self._dev_authorized(peer) and not self.auth.required():
-            return 'dev'
         if self.auth_mode == 'password' and not self.auth.required():
             return 'open'
         _, session = self._session(headers.get('Cookie') or '')
         if session is not None and network_csrf:
             return 'pair'
+        if self._dev_authorized(peer) and not self.auth.required():
+            return 'dev'
         return None
 
     def panel_readable(self, headers, peer=None):
@@ -645,13 +717,13 @@ class WebConfigServer:
     def panel_get(self, route, query, headers, peer=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
-        if route == '/api/access':
+        if route in ('/api/access', '/api/services'):
             if (headers.get('Authorization') is not None
-                    or self.panel_authorized(headers, peer=peer) is None):
+                    or self.panel_authorized(headers, peer=peer) not in ('password', 'pair', 'open')):
                 return 403, {'ok': False, 'error': 'API 管理需要网页登录授权'}, 'application/json; charset=utf-8'
             if query:
                 raise ValueError('API 管理不接受查询参数')
-            return 200, self.integration.snapshot(), 'application/json; charset=utf-8'
+            return 200, (self.integration.snapshot() if route == '/api/access' else self.services_snapshot()), 'application/json; charset=utf-8'
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
         if route == '/api/auth/session':
@@ -742,7 +814,7 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
-        if route in ACCESS_POST_ROUTES and headers.get('Authorization') is not None:
+        if route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES) and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
         if route == '/api/dev/diagnostics':
             return self._diagnostic_post(body, ip)
@@ -774,9 +846,8 @@ class WebConfigServer:
                 return 401, result, None
             return 200, {'ok': True}, self._auth_cookie(result['sid'])
         if route == '/api/auth/setup':
-            # The first password is a device-level setting: require the same
-            # small-screen unlock as other writes instead of letting any LAN
-            # client claim the panel and lock the owner out.
+            # Password mode permits initial setup without screen ownership.
+            # Explicit legacy pairing mode retains its original unlock rule.
             if self.auth.password_set():
                 return 400, {'ok': False, 'error': '已设置口令，请使用登录修改'}, None
             if self.panel_authorized(headers, peer=ip) is None:
@@ -791,7 +862,10 @@ class WebConfigServer:
             if sid:
                 self.auth.revoke(sid)
             return 200, {'ok': True}, self._auth_cookie('', clear=True)
-        authorized = self.panel_authorized(headers, peer=ip) is not None
+        authorization = self.panel_authorized(headers, peer=ip)
+        authorized = authorization is not None
+        if route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES) and authorization == 'dev':
+            return 403, {'ok': False, 'error': '授权管理需要网页登录，开发者白名单不能修改授权'}, None
         if not authorized and not (route == '/api/ui' and not self.auth.required()):
             # With a login password the panel is already gated, so a 401 sends the
             # browser to the login page.  Without one, keep public monitoring and
@@ -804,6 +878,7 @@ class WebConfigServer:
         # light apply must not interleave with another configuration save.
         if not self.operation_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有设置正在保存或应用，请稍后重试'}, None
+        started = time.monotonic()
         try:
             try:
                 status, payload = self._panel_write(route, body, headers)
@@ -811,6 +886,13 @@ class WebConfigServer:
                 return 400, {'ok': False, 'error': str(error)}, None
             except Exception:
                 return 503, {'ok': False, 'error': '服务暂不可用，未确认操作结果'}, None
+            if route in ACCESS_POST_ROUTES and 200 <= status < 300:
+                operation = {'/api/access/settings': 'config', '/api/access/keys': 'key.create',
+                             '/api/access/keys/revoke': 'key.revoke', '/api/access/keys/update': 'key.update',
+                             '/api/access/keys/enable': 'key.enable', '/api/access/keys/rotate': 'key.rotate'}[route]
+                target = payload.get('key', {}).get('id') if isinstance(payload.get('key'), dict) else body.get('id')
+                self.integration.record({'key_id': target} if target else None, operation, ip,
+                                        payload, started=started, touch_key=False)
             return status, payload, None
         finally:
             self.operation_lock.release()
@@ -1018,6 +1100,8 @@ class WebConfigServer:
         panel = self.panel
         if route in ACCESS_POST_ROUTES:
             return 200, self.integration.manage(route, body)
+        if route in SERVICE_POST_ROUTES:
+            return self._services_write(route, body)
         if route == '/api/ui':
             clean = panel.store.save_ui(body)
             return 200, {'ok': True, 'ui': clean}
@@ -1306,7 +1390,7 @@ class WebConfigServer:
                         required_scope='read' if route == '/api/integration/status' else None)
                     if principal is None:
                         status = 503 if reason == 'storage_unavailable' else 403 if reason in (
-                            'disabled', 'peer_not_lan', 'peer_not_allowed', 'scope_denied') else 401
+                            'disabled', 'key_disabled', 'peer_not_lan', 'peer_not_allowed', 'scope_denied') else 401
                         self.send(status, {'ok': False, 'error': {'code': reason, 'message': 'API 访问未授权'}},
                                   extra_headers={'WWW-Authenticate': 'Bearer realm="r1-toolbox"'} if status == 401 else None)
                         return
@@ -1384,7 +1468,7 @@ class WebConfigServer:
                     if route in MACHINE_ROUTES:
                         self.machine(parsed)
                         return
-                    if route == '/api/access' and parsed.fragment:
+                    if route in ('/api/access', '/api/services') and parsed.fragment:
                         self.send(400, {'error': 'API 管理不接受 URL 参数'})
                         return
                     public = route in PUBLIC_ROUTES
@@ -1450,7 +1534,7 @@ class WebConfigServer:
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if (route in ('/api/dev/diagnostics', '/api/dev/media') or route in ACCESS_POST_ROUTES) and (parsed.query or parsed.fragment):
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media') or route in (ACCESS_POST_ROUTES | SERVICE_POST_ROUTES)) and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:

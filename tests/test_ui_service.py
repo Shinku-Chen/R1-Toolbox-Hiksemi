@@ -434,6 +434,111 @@ class ServiceTests(unittest.TestCase):
         controller.stop.assert_called_once()
         insights.stop.assert_called_once()
 
+    def test_headless_resident_core_stays_available_without_apprun_or_display(self):
+        stopped, bound = threading.Event(), threading.Event()
+        servers, failures = [], []
+        monitor = service.StatusMonitor(self.sampler, interval=0.02)
+        original_make_server = service.make_http_server
+        controller = mock.Mock(snapshot=lambda: {})
+        insights = mock.Mock(snapshot=lambda: {})
+        manager = mock.Mock()
+        manager.snapshot.return_value = {'enabled': True, 'active': False, 'busy': False,
+                                         'available': False, 'last_error': '无 DISPLAY'}
+        web = mock.Mock()
+        self.web_factory.return_value = web
+
+        def bind(*args, **options):
+            server = original_make_server(*args, **options)
+            servers.append(server)
+            bound.set()
+            return server
+
+        def observe():
+            try:
+                self.assertTrue(bound.wait(2))
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if not web.attach_screen_manager.called:
+                        time.sleep(0.01)
+                        continue
+                    self.assertEqual(self.request(servers[0].server_port)[0], 200)
+                    self.assertFalse(manager.snapshot()['active'])
+                    return
+                self.fail('headless Web 未开始常驻')
+            except Exception as error:
+                failures.append(error)
+            finally:
+                stopped.set()
+
+        observer = threading.Thread(target=observe, daemon=True)
+        observer.start()
+        with mock.patch.object(service, 'acquire_runtime_lock', return_value=None), \
+                mock.patch.object(service, 'create_screen_manager', return_value=manager), \
+                mock.patch.object(service, 'StatusMonitor', return_value=monitor), \
+                mock.patch.object(service, 'make_http_server', side_effect=bind), \
+                mock.patch.object(service.subprocess, 'Popen') as spawn, \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = service.run_resident_service(self.temporary / 'missing-frontend', port=0,
+                controller=controller, insights=insights, stop_event=stopped)
+        observer.join(timeout=3)
+        self.assertEqual(failures, [])
+        self.assertEqual(result, 0)
+        spawn.assert_not_called()
+        web.start.assert_called_once()
+        web.attach_screen_manager.assert_called_once_with(manager)
+        manager.stop.assert_called_once()
+        controller.stop.assert_called_once()
+        self.assertEqual(servers[0].socket.fileno(), -1)
+
+    def test_resident_web_bind_failure_exits_nonzero_and_releases_every_resource(self):
+        controller, insights, manager, web = mock.Mock(snapshot=lambda: {}), mock.Mock(), mock.Mock(), mock.Mock()
+        web.start.side_effect = OSError('fixture Web occupied')
+        self.web_factory.return_value = web
+        with mock.patch.object(service, 'acquire_runtime_lock', return_value=None), \
+                mock.patch.object(service, 'create_screen_manager', return_value=manager), \
+                mock.patch.object(service, 'StatusMonitor', return_value=service.StatusMonitor(self.sampler, interval=0.02)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = service.run_resident_service(port=0, controller=controller, insights=insights)
+        self.assertEqual(result, 1)
+        web.attach_screen_manager.assert_not_called()
+        web.stop.assert_called_once()
+        manager.stop.assert_called_once()
+        controller.stop.assert_called_once()
+        insights.stop.assert_called_once()
+
+    def test_resident_cli_routes_to_independent_core_without_apprun_precheck(self):
+        with mock.patch.object(service, 'run_resident_service', return_value=0) as resident, \
+                mock.patch.object(service, 'run_service') as legacy:
+            self.assertEqual(service.main(['--resident', '--frontend', str(self.temporary / 'missing')]), 0)
+        resident.assert_called_once_with(self.temporary / 'missing', service.PORT)
+        legacy.assert_not_called()
+
+    def test_resident_without_a_bound_status_server_reports_failure(self):
+        controller, insights, manager, web = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+        self.web_factory.return_value = web
+        with mock.patch.object(service, 'acquire_runtime_lock', return_value=None), \
+                mock.patch.object(service, 'create_screen_manager', return_value=manager), \
+                mock.patch.object(service, 'bind_server', return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = service.run_resident_service(controller=controller, insights=insights)
+        self.assertEqual(result, 1)
+        web.start.assert_not_called()
+        manager.stop.assert_called_once()
+
+    @unittest.skipIf(service.fcntl is None, '实际宿主锁需要 Linux fcntl')
+    def test_resident_lock_rejects_a_second_core_and_can_be_adopted_across_exec(self):
+        directory = self.temporary / 'run-lock'
+        with mock.patch.object(service, 'Path', return_value=directory):
+            descriptor = service.acquire_runtime_lock()
+            try:
+                with self.assertRaises(OSError):
+                    service.acquire_runtime_lock()
+                with mock.patch.dict(os.environ, {'R1_TOOLBOX_RUNTIME_LOCK_FD': str(descriptor)}):
+                    self.assertEqual(service.acquire_runtime_lock(), descriptor)
+                self.assertFalse(os.get_inheritable(descriptor))
+            finally:
+                os.close(descriptor)
+
     def test_web_listener_configuration_is_bounded_and_can_be_disabled(self):
         with mock.patch.dict(os.environ, {"R1_WEB_PORT": "0", "R1_WEB_BIND": "0.0.0.0"}):
             self.assertIsNone(self.real_web_factory(None, None))

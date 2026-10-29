@@ -3,6 +3,7 @@ import copy
 import http.client
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -60,6 +61,10 @@ class WebTests(unittest.TestCase):
     def setUp(self):
         self.controller = Controller()
         self.now = 1000.0
+        # Legacy pairing remains supported; default password mode has separate HTTP coverage.
+        auth_environment = patch.dict(os.environ, {'R1_WEB_AUTH_MODE': 'pair'})
+        auth_environment.start()
+        self.addCleanup(auth_environment.stop)
         self.web = web.WebConfigServer(self.controller, host='127.0.0.1', port=0,
                                        asset_dir=ROOT / 'ui/web', clock=lambda: self.now).start()
         self.addCleanup(self.web.stop)

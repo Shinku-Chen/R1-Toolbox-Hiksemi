@@ -74,6 +74,36 @@ class SaverSettingsTests(unittest.TestCase):
 
 
 class ToolboxTests(unittest.TestCase):
+    def test_releasing_screen_restores_backlight_and_does_not_stop_controls(self):
+        folder = self.sys / 'class/backlight/intel_backlight'
+        self.write(folder / 'max_brightness', '1000')
+        self.write(folder / 'brightness', '700')
+        self.write(self.sys / 'class/graphics/fb0/blank', '0')
+        with mock.patch.object(self.controller, '_save_settings'):
+            result = self.controller.action('screen.brightness', {'value': 20})
+        self.assertTrue(result['ok'], result)
+        self.controller.set_screen_managed(False)
+        self.assertEqual((folder / 'brightness').read_text(), '700')
+        self.assertFalse(self.controller.stopped.is_set())
+        self.assertFalse(self.controller.snapshot()['capabilities']['screen']['available'])
+        self.assertFalse(self.controller.action('screen.brightness', {'value': 10})['ok'])
+
+    def test_unmanaged_screen_saves_settings_without_applying_night_or_idle_control(self):
+        folder = self.sys / 'class/backlight/intel_backlight'
+        self.write(folder / 'max_brightness', '1000')
+        self.write(folder / 'brightness', '700')
+        self.write(self.sys / 'class/graphics/fb0/blank', '0')
+        self.controller.set_screen_managed(False)
+        with mock.patch.object(self.controller, '_save_settings'):
+            result = self.controller.action('settings.update', {'settings': {'brightness': 10,
+                'night_enabled': True, 'night_start': '00:00', 'night_end': '23:59', 'sleep_timeout': 60}})
+        self.assertTrue(result['ok'], result)
+        self.now = 3600
+        self.controller.tick()
+        self.assertEqual((folder / 'brightness').read_text(), '700')
+        self.assertEqual((self.sys / 'class/graphics/fb0/blank').read_text(), '0')
+        self.assertFalse(self.controller.asleep)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

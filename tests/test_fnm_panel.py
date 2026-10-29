@@ -501,6 +501,7 @@ class DeveloperModeTests(unittest.TestCase):
     def test_developer_bypass_is_allowlisted_and_expiring(self):
         directory = Path(tempfile.mkdtemp(prefix='r1-panel-dev-'))
         with mock.patch.dict(os.environ, {
+                'R1_WEB_AUTH_MODE': 'pair',
                 'R1_DEV_NO_PAIRING': '1',
                 'R1_DEV_ALLOW_IPS': '192.168.1.50',
                 'R1_DEV_MINUTES': '5',
@@ -541,7 +542,7 @@ class DeveloperModeTests(unittest.TestCase):
 
     def test_developer_bypass_is_off_without_the_flag(self):
         directory = Path(tempfile.mkdtemp(prefix='r1-panel-dev-'))
-        with mock.patch.dict(os.environ, {'R1_DEV_NO_PAIRING': '0', 'R1_DEV_ALLOW_IPS': '192.168.1.50'}, clear=False):
+        with mock.patch.dict(os.environ, {'R1_WEB_AUTH_MODE': 'pair', 'R1_DEV_NO_PAIRING': '0', 'R1_DEV_ALLOW_IPS': '192.168.1.50'}, clear=False):
             server = web.WebConfigServer(Controller(), Insights(), host='127.0.0.1', port=0,
                                          asset_dir=ROOT / 'ui/web', state_dir=directory)
             try:
@@ -572,6 +573,10 @@ class HttpTests(unittest.TestCase):
         self.insights = Insights()
         self.monitoring = Monitoring()
         self.light = LightPolicy()
+        # This fixture intentionally exercises explicit legacy pairing mode.
+        auth_environment = mock.patch.dict(os.environ, {'R1_WEB_AUTH_MODE': 'pair'})
+        auth_environment.start()
+        self.addCleanup(auth_environment.stop)
         self.web = web.WebConfigServer(self.controller, self.insights, fan_policy=self.fan,
                                        light_policy=self.light, monitoring=self.monitoring,
                                        monitor=Monitor(), host='127.0.0.1', port=0,

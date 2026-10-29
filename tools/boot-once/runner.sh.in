@@ -1,8 +1,13 @@
 #!/bin/sh
-# Docker PID 1. Stop through the Engine API; a normal exit would restart us.
+# Foreground supervisor. Container lifetime is the actual host runtime lifetime.
 set -u
-task_rc=1
-trap 'exit "$task_rc"' TERM INT
+child_pid=
+stopping=0
+request_stop() {
+  stopping=1
+  if [ -n "$child_pid" ]; then kill -TERM "$child_pid" 2>/dev/null || true; fi
+}
+trap request_stop TERM INT
 
 host_docker() {
   chroot /host /bin/sh -c '
@@ -13,15 +18,14 @@ host_docker() {
 }
 
 host_shell() {
-  chroot /host /bin/sh -c '
+  exec chroot /host /bin/sh -c '
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/histor/bin:/histor/sbin
     export PATH
-    exec nsenter --target 1 --mount --uts --pid --cgroup --root=/proc/1/root --wd=/ -- /bin/sh -s
+    exec nsenter --no-fork --target 1 --mount --uts --pid --cgroup --root=/proc/1/root --wd=/ -- /bin/sh -s
   '
 }
 
 # Allow Docker to finish starting and monitoring this container.
-sleep 12
 ready=0
 attempt=0
 while [ "$attempt" -lt 10 ]; do
@@ -30,28 +34,34 @@ while [ "$attempt" -lt 10 ]; do
     break
   fi
   attempt=$((attempt + 1))
+  if [ "$stopping" -eq 1 ]; then exit 0; fi
   sleep 2
 done
 if [ "$ready" -ne 1 ]; then
   echo '[ERROR] 无法调用宿主 Docker 或找不到本容器；未执行任务。'
-  echo '[ERROR] 保持等待以避免反复执行，请查看宿主 docker 命令和容器名称。'
-  exec sleep infinity
+  echo '[ERROR] 常驻服务未启动，容器以失败状态退出。'
+  exit 1
 fi
 
-if host_shell <<'R1_HOST_JOB'
+host_shell <<'R1_HOST_JOB' &
 __HOST_JOB__
 R1_HOST_JOB
-then
-  task_rc=0
-  echo '[OK] 本次任务完成，正在停止容器。'
-else
-  task_rc=$?
-  echo "[ERROR] 本次任务失败（状态 ${task_rc}），停止容器，不自动循环执行。"
+child_pid=$!
+if [ "$stopping" -eq 1 ]; then kill -TERM "$child_pid" 2>/dev/null || true; fi
+task_rc=0
+wait "$child_pid" || task_rc=$?
+# POSIX wait may be interrupted by the signal trap while the child is cleaning
+# up hardware. Reap it before allowing Docker to consider the container stopped.
+if [ "$stopping" -eq 1 ]; then
+  while kill -0 "$child_pid" 2>/dev/null; do
+    wait "$child_pid" || true
+    if kill -0 "$child_pid" 2>/dev/null; then sleep 0.05; fi
+  done
+  exit 0
 fi
-
-# Background + interruptible wait lets PID 1 handle the stop signal immediately.
-host_docker stop --time 5 "$TASK_CONTAINER" &
-stop_pid=$!
-wait "$stop_pid" || true
-echo '[ERROR] 自停请求未能终止容器；保持等待，不重复执行任务。'
-exec sleep infinity
+if [ "$task_rc" -eq 0 ]; then
+  echo '[ERROR] 常驻服务意外退出，交由 Docker 重启。'
+  exit 1
+fi
+echo "[ERROR] 常驻服务退出（状态 ${task_rc}），交由 Docker 重启。"
+exit "$task_rc"

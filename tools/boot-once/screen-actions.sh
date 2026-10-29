@@ -94,6 +94,7 @@ def read_bundle(tar_path, expected_sha):
                              'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                              'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
                              'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
+                             'runtime/service_settings.py', 'runtime/network_access.py', 'runtime/screen_manager.py',
                              'runtime/light_policy.py', 'runtime/monitoring.py',
                              'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
                              'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')
@@ -132,6 +133,7 @@ def read_bundle(tar_path, expected_sha):
                                            'frontend/web/login.html', 'runtime/fnm_auth.py', 'runtime/fnm_compat.py', 'runtime/fan_diagnostics.py', 'runtime/dev_diagnostics.py',
                                            'runtime/vendor_media_auth.py', 'runtime/vendor_media_probe.py', 'runtime/vendor_media_batch.py',
                                            'runtime/api_access.py', 'runtime/api_permissions.py', 'runtime/api_file_roots.py', 'runtime/mcp_service.py', 'runtime/integration_api.py',
+                                           'runtime/service_settings.py', 'runtime/network_access.py', 'runtime/screen_manager.py',
                                            'runtime/light_policy.py', 'runtime/monitoring.py',
                                            'runtime/vendor_business.py', 'runtime/vendor_runtime.py',
                                            'runtime/vendor_app_diagnostics.py', 'runtime/vendor_download_diagnostics.py')),
@@ -229,7 +231,7 @@ def settings_directory(container, required=False):
         require(not os.statvfs(source).f_flag & os.ST_RDONLY, 'Docker 数据卷所在文件系统只读')
         require(source != runtime_root and runtime_root not in source.parents,
                 '设置卷不能位于 Toolbox 的易失运行目录')
-        official = app.resolve(strict=True)
+        official = app.resolve(strict=False)
         require(source != pathlib.Path('/') and source != official and source not in official.parents
                 and official not in source.parents and not any(c in str(source) for c in '\n\r\x00'),
                 'Docker 设置数据卷必须与官方程序目录独立')
@@ -549,7 +551,10 @@ def main():
                     raise SystemExit('开发者免配对模式需要设置 R1_DEV_ALLOW_IPS（仅允许指定客户端 IP）')
                 for item in dev_ips:
                     try:
-                        ipaddress.ip_address(item)
+                        network = ipaddress.ip_network(item, strict=False)
+                        trusted = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8') if network.version == 4 else ('fc00::/7', '::1/128')
+                        require(any(network.subnet_of(ipaddress.ip_network(value)) for value in trusted),
+                                '开发者来源只能是局域网或回环地址范围')
                     except ValueError:
                         raise SystemExit('R1_DEV_ALLOW_IPS 包含无效 IP') from None
                 try:
@@ -625,6 +630,72 @@ def main():
         return 1
 
 
+def resident_environment(container):
+    """Forward fixed bootstrap settings; persisted Web settings remain authoritative."""
+    environment = dict(base_env)
+    environment['R1_TOOLBOX_DATA_DIR'] = str(settings_directory(container, required=True))
+    environment['R1_TOOLBOX_VERSION'] = os.environ.get('TOOLBOX_VERSION', 'dev')
+    web_bind, web_port = os.environ.get('R1_WEB_BIND', '0.0.0.0'), os.environ.get('R1_WEB_PORT', '18732')
+    require(web_bind in ('0.0.0.0', '127.0.0.1'), 'R1_WEB_BIND 只能是 0.0.0.0 或 127.0.0.1')
+    require(web_port.isascii() and web_port.isdigit() and len(web_port) <= 5 and 1024 <= int(web_port) <= 65535,
+            '常驻 Web 的 R1_WEB_PORT 需要为 1024–65535')
+    environment.update(R1_WEB_BIND=web_bind, R1_WEB_PORT=web_port)
+    auth_mode = os.environ.get('R1_WEB_AUTH_MODE', 'password')
+    require(auth_mode in ('pair', 'password'), 'R1_WEB_AUTH_MODE 只能是 pair 或 password')
+    environment['R1_WEB_AUTH_MODE'] = auth_mode
+    small_screen = os.environ.get('R1_SMALL_SCREEN_ENABLED', '1')
+    require(small_screen in ('0', '1'), 'R1_SMALL_SCREEN_ENABLED 只能是 0 或 1')
+    environment['R1_SMALL_SCREEN_ENABLED'] = small_screen
+    developer = os.environ.get('R1_DEV_NO_PAIRING', '0')
+    require(developer in ('0', '1', ''), 'R1_DEV_NO_PAIRING 只能是 0 或 1')
+    if developer == '1':
+        ips = [value.strip() for value in os.environ.get('R1_DEV_ALLOW_IPS', '').split(',') if value.strip()]
+        require(bool(ips), '开发模式需要设置局域网来源 IP 或 CIDR')
+        for value in ips:
+            network = ipaddress.ip_network(value, strict=False)
+            trusted = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8') if network.version == 4 else ('fc00::/7', '::1/128')
+            require(any(network.subnet_of(ipaddress.ip_network(item)) for item in trusted),
+                    '开发模式来源必须完整位于局域网或回环范围')
+        minutes = int(os.environ.get('R1_DEV_MINUTES', '60'))
+        require(1 <= minutes <= 1440, 'R1_DEV_MINUTES 需要在 1–1440 分钟')
+        commands = os.environ.get('R1_DEV_ALLOW_COMMANDS', '0')
+        require(commands in ('0', '1', ''), 'R1_DEV_ALLOW_COMMANDS 只能是 0 或 1')
+        environment.update(R1_DEV_NO_PAIRING='1', R1_DEV_ALLOW_IPS=','.join(ips),
+                           R1_DEV_MINUTES=str(minutes), R1_DEV_ALLOW_COMMANDS=commands or '0')
+    return environment
+
+
+def resident_main():
+    """Provision a verified RAM bundle, then replace this process with the core."""
+    descriptor = None
+    try:
+        mode, source = select_mode(dict(os.environ, UI_MODE=os.environ.get('UI_MODE') or 'image'))
+        container = os.environ.get('TASK_CONTAINER', 'r1-toolbox')
+        cache = prepare_image_bundle(container)
+        environment = resident_environment(container)
+        frontend = None if mode == 'diagnostic' else resolve_source(source if mode == 'directory' else str(cache / 'frontend'))
+        if mode == 'diagnostic':
+            environment['R1_SMALL_SCREEN_ENABLED'] = '0'
+        runtime = cache / 'runtime'
+        sys.path.insert(0, str(runtime))
+        from ui_service import acquire_runtime_lock
+        from screen_manager import migrate_legacy_runtime
+        descriptor = acquire_runtime_lock()
+        migrate_legacy_runtime()
+        os.set_inheritable(descriptor, True)
+        environment['R1_TOOLBOX_RUNTIME_LOCK_FD'] = str(descriptor)
+        command = [shutil.which('python3'), '-B', str(runtime / 'ui_service.py'), '--resident']
+        if frontend is not None:
+            command += ['--frontend', str(frontend)]
+        print('[OK] 已准备常驻 Web／控制服务；小屏按独立开关管理。', flush=True)
+        os.execve(command[0], command, environment)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError, tarfile.TarError) as error:
+        print('[ERROR] 常驻服务准备失败：', error, flush=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        return 1
+
+
 if __name__ == '__main__':
-    sys.exit(main())
+    sys.exit(resident_main())
 PY

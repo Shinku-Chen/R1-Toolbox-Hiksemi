@@ -46,7 +46,7 @@ class ApiAccessTests(unittest.TestCase):
         state = json.loads(self.store.path.read_text(encoding='utf-8'))
         state['version'] = 1
         for row in state['keys']:
-            for field in ('role', 'policy_version', 'file_roots'):
+            for field in ('role', 'policy_version', 'file_roots', 'disabled'):
                 row.pop(field, None)
         return state
 
@@ -148,7 +148,7 @@ class ApiAccessTests(unittest.TestCase):
                   {'name': 'a', 'scopes': ['read', 'read']}, {'name': 'a', 'scopes': ['unknown']},
                   {'name': 'a', 'scopes': [[]]}, {'name': 'a', 'scopes': [True]},
                   {'name': 'a', 'allowed_ips': ['8.8.8.8']},
-                  {'name': 'a', 'allowed_ips': ['192.168.1.0/24']},
+                  {'name': 'a', 'allowed_ips': ['192.168.1.0/15']},
                   {'name': 'a', 'allowed_ips': ['127.0.0.1', '::ffff:127.0.0.1']},
                   {'name': 'a', 'allowed_ips': [None]}, {'name': 'a', 'allowed_ips': {}},
                   {'name': 'a', 'allowed_ips': ['127.0.0.1'] * 33},
@@ -358,9 +358,10 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.configure({'enabled': True})
         migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 2)
+        self.assertEqual(migrated['version'], 3)
         self.assertEqual(migrated['keys'][0], {
             **old['keys'][0], 'policy_version': 1, 'role': 'legacy', 'file_roots': [],
+            'disabled': False,
         })
         self.assertEqual(self.authorize(key), (principal, 'ok'))
         self.assertEqual(self.authorize(key, scope='docker'), (None, 'scope_denied'))
@@ -376,7 +377,7 @@ class ApiAccessTests(unittest.TestCase):
         principal, _ = self.authorize(valid)
         self.store.record(principal, 'integration/capabilities', '192.168.31.22', 'success')
         state = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(state['version'], 2)
+        self.assertEqual(state['version'], 3)
         self.assertTrue(all(row['role'] == 'legacy' for row in state['keys']))
         self.assertEqual(self.authorize(revoked), (None, 'key_revoked'))
         self.now += 86400
@@ -391,7 +392,7 @@ class ApiAccessTests(unittest.TestCase):
                     state = json.loads(store.path.read_text(encoding='utf-8'))
                     state['version'] = 1
                     for row in state['keys']:
-                        for field in ('role', 'policy_version', 'file_roots'):
+                        for field in ('role', 'policy_version', 'file_roots', 'disabled'):
                             row.pop(field)
                     store.path.write_text(json.dumps(state), encoding='utf-8')
                     os.chmod(store.path, 0o600)
@@ -400,7 +401,7 @@ class ApiAccessTests(unittest.TestCase):
                     else:
                         store.create_key({'name': '新键', 'role': 'readonly', 'scopes': ['read']})
                     result = json.loads(store.path.read_text(encoding='utf-8'))
-                    self.assertEqual(result['version'], 2)
+                    self.assertEqual(result['version'], 3)
                     self.assertEqual(result['keys'][0]['role'], 'legacy')
                     self.assertEqual(result['keys'][0]['scopes'], ['power'])
                     self.assertEqual(result['keys'][0]['digest'], state['keys'][0]['digest'])
@@ -527,6 +528,299 @@ class ApiAccessTests(unittest.TestCase):
             with self.subTest(row=bad):
                 self.write_state({**old, 'keys': [bad]})
                 self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+
+    def test_cidr_rules_are_normalized_and_match_only_the_actual_lan_peer(self):
+        key = self.create(allowed_ips=['192.168.31.193/255.255.255.0',
+                                       'fd00:1234::123/64', '::ffff:10.1.2.3/120'])
+        self.enable()
+        self.assertEqual(key['allowed_ips'], ['192.168.31.0/24', 'fd00:1234::/64', '10.1.2.0/24'])
+        for peer in ('192.168.31.1', '192.168.31.255', '::ffff:192.168.31.193',
+                     'fd00:1234::9', '10.1.2.5'):
+            with self.subTest(peer=peer):
+                self.assertEqual(self.authorize(key, peer=peer)[1], 'ok')
+        for peer in ('192.168.30.1', '192.168.32.1', 'fd00:1235::1', '10.1.3.1'):
+            with self.subTest(peer=peer):
+                self.assertEqual(self.authorize(key, peer=peer), (None, 'peer_not_allowed'))
+        self.assertEqual(self.authorize(key, peer='8.8.8.8'), (None, 'peer_not_lan'))
+        for rules in (['0.0.0.0/0'], ['::/0'], ['192.168.0.0/15'],
+                      ['192.168.31.1', '192.168.31.1/32']):
+            with self.subTest(rules=rules), self.assertRaises(ValueError):
+                self.create(allowed_ips=rules)
+
+    def test_v2_reads_project_enabled_without_rewriting_then_migrate_only_on_write(self):
+        key = self.create(role='readwrite', scopes=['read', 'fan'])
+        self.enable()
+        old = json.loads(self.store.path.read_text(encoding='utf-8'))
+        old['version'] = 2
+        for row in old['keys']:
+            row.pop('disabled')
+        self.write_state(old)
+        before = self.store.path.read_bytes()
+        self.assertFalse(self.store.snapshot()['keys'][0]['disabled'])
+        self.assertTrue(self.store.snapshot()['keys'][0]['enabled'])
+        principal, reason = self.authorize(key)
+        self.assertEqual(reason, 'ok')
+        self.assertNotIn('disabled', principal)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.store.update_key({'id': key['id'], 'name': '重命名'})
+        migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
+        self.assertEqual(migrated['version'], 3)
+        self.assertEqual(migrated['keys'][0], {**old['keys'][0], 'name': '重命名', 'disabled': False})
+        self.assertEqual(self.authorize(key)[0]['role'], 'readwrite')
+
+    def test_update_preserves_secret_creation_and_legacy_permissions_until_role_is_explicit(self):
+        key = self.create(scopes=['fan'], allowed_ips=['192.168.31.22'], expires_days=30)
+        self.enable()
+        before = json.loads(self.store.path.read_text(encoding='utf-8'))['keys'][0]
+        self.now += 123
+        updated = self.store.update_key({'id': key['id'], 'name': '改名',
+                                         'allowed_ips': ['192.168.31.9/24']})
+        self.assertEqual(updated['policy_version'], 1)
+        self.assertEqual(updated['role'], 'legacy')
+        self.assertEqual(updated['scopes'], ['fan'])
+        self.assertEqual(updated['created_at'], key['created_at'])
+        self.assertEqual(updated['expires_at'], key['expires_at'])
+        self.assertNotIn('token', updated)
+        self.assertNotIn('digest', updated)
+        after = json.loads(self.store.path.read_text(encoding='utf-8'))['keys'][0]
+        self.assertEqual(after['digest'], before['digest'])
+        self.assertEqual(self.authorize(key, scope='fan')[1], 'ok')
+        with self.assertRaises(ValueError):
+            self.store.update_key({'id': key['id'], 'scopes': ['fan', 'docker']})
+        promoted = self.store.update_key({'id': key['id'], 'role': 'admin'})
+        self.assertEqual(promoted['role'], 'admin')
+        self.assertEqual(promoted['policy_version'], 2)
+        self.assertEqual(promoted['scopes'], ['fan'])
+        self.assertEqual(self.authorize(key, scope='read'), (None, 'scope_denied'))
+        self.assertEqual(self.authorize(key, scope='docker'), (None, 'scope_denied'))
+
+    def test_update_checks_the_complete_merged_role_scope_and_file_range(self):
+        roots = [{'id': 'root_' + 'a' * 24, 'path': '目录', 'access': 'readwrite'}]
+        key = self.create(role='admin', scopes=['read', 'files'], file_roots=roots)
+        before = self.store.path.read_bytes()
+        for change in ({'role': 'readonly'}, {'scopes': ['read']},
+                       {'file_roots': []}, {'role': 'legacy'}, {'scopes': ['*']}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.store.update_key({'id': key['id'], **change})
+            self.assertEqual(self.store.path.read_bytes(), before)
+        changed = self.store.update_key({'id': key['id'], 'role': 'readonly',
+                                         'file_roots': [{**roots[0], 'access': 'readonly'}]})
+        self.assertEqual(changed['role'], 'readonly')
+        self.assertEqual(changed['file_roots'][0]['access'], 'readonly')
+        changed = self.store.update_key({'id': key['id'], 'scopes': ['read'], 'file_roots': []})
+        self.assertEqual(changed['scopes'], ['read'])
+        self.assertEqual(changed['file_roots'], [])
+
+    def test_update_expiry_is_explicit_relative_to_edit_and_never_restores_revocation(self):
+        key = self.create(expires_days=1)
+        self.enable()
+        self.now += 86400
+        self.assertEqual(self.authorize(key)[1], 'key_expired')
+        extended = self.store.update_key({'id': key['id'], 'expires_days': 7})
+        self.assertEqual(extended['expires_at'], self.now + 7 * 86400)
+        self.assertEqual(extended['created_at'], key['created_at'])
+        self.assertEqual(self.authorize(key)[1], 'ok')
+        self.assertIsNone(self.store.update_key({'id': key['id'], 'expires_days': 0})['expires_at'])
+        revoked = self.store.revoke_key(key['id'])
+        changed = self.store.update_key({'id': key['id'], 'name': '撤销历史', 'expires_days': 30})
+        self.assertEqual(changed['revoked_at'], revoked['revoked_at'])
+        self.assertEqual(changed['status'], 'revoked')
+        self.assertEqual(self.authorize(key)[1], 'key_revoked')
+
+    def test_update_rejects_unknown_secret_and_managed_fields_without_reflection(self):
+        key = self.create()
+        before = self.store.path.read_bytes()
+        invalid = (None, [], {}, {'id': key['id']}, {'id': 'x', 'name': 'a'},
+                   {'id': '0' * 24, 'name': 'a'},
+                   *({'id': key['id'], field: 'private detail'} for field in (
+                       'token', 'digest', 'policy_version', 'disabled', 'enabled',
+                       'created_at', 'last_used_at', 'revoked_at', 'expires_at')),
+                   {'id': key['id'], 'name': ''}, {'id': key['id'], 'role': None},
+                   {'id': key['id'], 'allowed_ips': ['0.0.0.0/0']},
+                   *({'id': key['id'], 'expires_days': value} for value in (None, True, -1, 366, '30')))
+        for body in invalid:
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError) as raised:
+                    self.store.update_key(body)
+                self.assertNotIn('private detail', str(raised.exception))
+                self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_pause_and_resume_preserve_token_expiry_and_independent_reopen(self):
+        key = self.create(role='readonly', expires_days=7)
+        self.enable()
+        paused = self.store.set_key_enabled(key['id'], False)
+        self.assertEqual(paused['status'], 'disabled')
+        self.assertTrue(paused['disabled'])
+        self.assertFalse(paused['enabled'])
+        self.assertEqual(paused['expires_at'], key['expires_at'])
+        self.assertEqual(self.authorize(key), (None, 'key_disabled'))
+        other = access.ApiAccessStore(self.temp.name, clock=lambda: self.now)
+        restored = other.set_key_enabled(key['id'], True)
+        self.assertEqual(restored['status'], 'active')
+        self.assertTrue(restored['enabled'])
+        self.assertEqual(self.authorize(key)[1], 'ok')
+        self.store.revoke_key(key['id'])
+        with self.assertRaises(ValueError):
+            self.store.set_key_enabled(key['id'], True)
+        self.assertEqual(self.authorize(key)[1], 'key_revoked')
+
+    def test_paused_expired_and_revoked_statuses_do_not_override_each_other(self):
+        key = self.create(expires_days=1)
+        self.enable()
+        self.store.set_key_enabled(key['id'], False)
+        self.now += 86400
+        self.assertEqual(self.store.snapshot()['keys'][0]['status'], 'expired')
+        self.assertEqual(self.authorize(key)[1], 'key_expired')
+        self.store.set_key_enabled(key['id'], True)
+        self.assertEqual(self.authorize(key)[1], 'key_expired')
+        self.store.revoke_key(key['id'])
+        self.assertEqual(self.authorize(key)[1], 'key_revoked')
+
+    def test_rotate_replaces_digest_immediately_and_displays_secret_only_once(self):
+        key = self.create(role='readwrite', scopes=['read', 'fan'], allowed_ips=['192.168.31.0/24'])
+        self.enable()
+        principal, _ = self.authorize(key)
+        self.store.record(principal, 'get_nas_status', '192.168.31.22', 'success')
+        before = json.loads(self.store.path.read_text(encoding='utf-8'))['keys'][0]
+        rotated = self.store.rotate_key(key['id'])
+        self.assertNotEqual(rotated['token'], key['token'])
+        self.assertEqual(rotated['id'], key['id'])
+        self.assertEqual(rotated['created_at'], key['created_at'])
+        self.assertEqual(rotated['expires_at'], key['expires_at'])
+        self.assertEqual(rotated['scopes'], key['scopes'])
+        self.assertIsNone(rotated['last_used_at'])
+        self.assertEqual(self.authorize(key), (None, 'invalid_key'))
+        self.assertEqual(self.authorize(rotated)[1], 'ok')
+        persisted = self.store.path.read_text(encoding='utf-8')
+        public = json.dumps(self.store.snapshot(), ensure_ascii=False)
+        for secret in (key['token'], rotated['token'], before['digest']):
+            self.assertNotIn(secret, persisted)
+            self.assertNotIn(secret, public)
+        self.assertNotIn('digest', public)
+
+    def test_rotate_preserves_disabled_and_expiry_and_rejects_revoked_key(self):
+        paused = self.create(expires_days=1)
+        self.enable()
+        self.store.set_key_enabled(paused['id'], False)
+        rotated = self.store.rotate_key(paused['id'])
+        self.assertTrue(rotated['disabled'])
+        self.assertEqual(rotated['expires_at'], paused['expires_at'])
+        self.assertEqual(self.authorize(paused)[1], 'invalid_key')
+        self.assertEqual(self.authorize(rotated)[1], 'key_disabled')
+        self.now += 86400
+        expired = self.store.rotate_key(paused['id'])
+        self.assertEqual(self.authorize(expired)[1], 'key_expired')
+        self.store.revoke_key(paused['id'])
+        before = self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.store.rotate_key(paused['id'])
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_rotation_rejects_reused_entropy_without_changing_either_secret(self):
+        first, second = self.create(name='first'), self.create(name='second')
+        self.enable()
+        before = self.store.path.read_bytes()
+        for repeated in (first, second):
+            with self.subTest(repeated=repeated['name']):
+                with mock.patch.object(access.secrets, 'token_urlsafe', return_value=repeated['token'][3:]):
+                    with self.assertRaises(OSError):
+                        self.store.rotate_key(first['id'])
+                self.assertEqual(self.store.path.read_bytes(), before)
+                self.assertEqual(self.authorize(first)[1], 'ok')
+                self.assertEqual(self.authorize(second)[1], 'ok')
+
+    def test_rotation_checks_time_before_changing_persistent_secret(self):
+        key = self.create()
+        before = self.store.path.read_bytes()
+        with mock.patch.object(self.store, 'clock', return_value=float('nan')):
+            with self.assertRaises(ValueError):
+                self.store.rotate_key(key['id'])
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_new_key_operations_reject_invalid_ids_and_enable_values(self):
+        key = self.create()
+        for key_id in (None, True, [], '', 'x' * 24, '0' * 24):
+            with self.subTest(key_id=key_id):
+                with self.assertRaises(ValueError):
+                    self.store.rotate_key(key_id)
+                with self.assertRaises(ValueError):
+                    self.store.set_key_enabled(key_id, True)
+        for enabled in (None, 'true', 0, 1, [], {}):
+            with self.subTest(enabled=enabled), self.assertRaises(ValueError):
+                self.store.set_key_enabled(key['id'], enabled)
+
+    def test_failed_update_enable_or_rotate_preserves_old_bytes_and_latches_closed(self):
+        for operation in ('update', 'enable', 'rotate'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as folder:
+                store = access.ApiAccessStore(folder, clock=lambda: self.now)
+                key = store.create_key({'name': 'fixture', 'role': 'readonly'})
+                store.configure({'enabled': True})
+                before = store.path.read_bytes()
+                with mock.patch.object(access.os, 'replace', side_effect=OSError('private detail')):
+                    with self.assertRaises(OSError) as raised:
+                        if operation == 'update':
+                            store.update_key({'id': key['id'], 'name': 'changed'})
+                        elif operation == 'enable':
+                            store.set_key_enabled(key['id'], False)
+                        else:
+                            store.rotate_key(key['id'])
+                self.assertNotIn('private detail', str(raised.exception))
+                self.assertEqual(store.path.read_bytes(), before)
+                self.assertEqual(store.authorize('Bearer ' + key['token'], '192.168.31.22'),
+                                 (None, 'storage_unavailable'))
+                self.assertEqual(list(Path(folder).glob('.api-access-*')), [])
+
+    def test_v3_disabled_schema_is_strict_and_old_versions_cannot_smuggle_it(self):
+        key = self.create(role='readonly')
+        self.enable()
+        state = json.loads(self.store.path.read_text(encoding='utf-8'))
+        row = state['keys'][0]
+        bad_rows = [{**row, 'disabled': value} for value in (None, 0, 1, 'false', [], {})]
+        bad_rows.append({field: value for field, value in row.items() if field != 'disabled'})
+        for bad in bad_rows:
+            with self.subTest(row=bad):
+                self.write_state({**state, 'keys': [bad]})
+                self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+        for version in (1, 2):
+            with self.subTest(version=version):
+                self.write_state({**state, 'version': version})
+                self.assertEqual(self.authorize(key), (None, 'storage_unavailable'))
+
+    def test_resume_or_expiry_extension_cannot_exceed_active_key_limit(self):
+        paused = self.create(expires_days=0)
+        self.store.set_key_enabled(paused['id'], False)
+        expired = self.create(expires_days=1)
+        self.now += 86400
+        for number in range(32):
+            self.create(name='active%d' % number)
+        before = self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.store.set_key_enabled(paused['id'], True)
+        with self.assertRaises(ValueError):
+            self.store.update_key({'id': expired['id'], 'expires_days': 30})
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_disabled_records_are_not_pruned_as_expired_or_revoked_history(self):
+        ids = []
+        for number in range(64):
+            key = self.create(name='paused%d' % number)
+            ids.append(key['id'])
+            self.store.set_key_enabled(key['id'], False)
+        before = self.store.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.create(name='would prune')
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual([row['id'] for row in self.store.snapshot()['keys']], ids)
+
+    def test_new_audit_names_remain_bounded_without_token_or_arguments(self):
+        key = self.create()
+        self.enable()
+        principal, _ = self.authorize(key)
+        for operation in ('key.update', 'key.enable', 'key.rotate'):
+            self.store.record(principal, operation, '192.168.31.22', 'success')
+        rows = self.store.snapshot()['audit']
+        self.assertEqual([row['operation'] for row in rows], ['key.rotate', 'key.enable', 'key.update'])
+        self.assertNotIn(key['token'], json.dumps(rows))
 
 
 if __name__ == '__main__':

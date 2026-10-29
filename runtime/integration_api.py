@@ -94,9 +94,23 @@ class IntegrationApi:
             if set(body) != {'id'} or type(body['id']) is not str:
                 raise ValueError('撤销密钥需要有效的 id')
             return {'ok': True, **self.access.revoke_key(body['id'])}
+        if route == '/api/access/keys/update':
+            if body.get('file_roots'):
+                validate_file_grants(body['file_roots'], self.file_root_catalog())
+            return {'ok': True, 'key': self.access.update_key(body)}
+        if route == '/api/access/keys/enable':
+            if set(body) != {'id', 'enabled'} or type(body['enabled']) is not bool:
+                raise ValueError('密钥开关需要 id 与 enabled 布尔值')
+            return {'ok': True, 'key': self.access.set_key_enabled(body['id'], body['enabled'])}
+        if route == '/api/access/keys/rotate':
+            if set(body) != {'id'} or type(body['id']) is not str:
+                raise ValueError('轮换密钥需要有效的 id')
+            created = self.access.rotate_key(body['id'])
+            token = created.pop('token')
+            return {'ok': True, 'key': created, 'token': token}
         raise ValueError('API 管理操作不存在')
 
-    def record(self, principal, operation, peer, result, *, started):
+    def record(self, principal, operation, peer, result, *, started, touch_key=True):
         """Do not persist arguments, results, headers or arbitrary tool names."""
         if operation not in AUDIT_OPERATIONS:
             operation = 'tools/call'
@@ -112,7 +126,8 @@ class IntegrationApi:
                 outcome = 'denied'
         try:
             self.access.record(principal, operation, peer, outcome,
-                               duration_ms=max(0, int((time.monotonic() - started) * 1000)))
+                               duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                               touch_key=touch_key)
         except (OSError, ValueError):
             # The access store locks itself on persistence failure. A completed
             # hardware operation must not be reported as unexecuted and retried.

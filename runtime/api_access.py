@@ -1,13 +1,12 @@
 """Scoped LAN integration keys, with no reusable secret in persistent state.
 
-The browser may receive a newly created key once. Every later response is a
+The browser receives a new or rotated key once. Every later response is a
 projection of metadata only; authorization never trusts proxy forwarding headers.
 This store is shared by the HTTP integration routes and MCP transport.
 """
 
 import hashlib
 import hmac
-import ipaddress
 import json
 import math
 import os
@@ -21,6 +20,7 @@ import time
 
 from api_permissions import (LEGACY_SCOPES, ROLE_CATALOG, SCOPES,
                              SCOPE_CATALOG, valid_file_roots as _file_roots)
+from network_access import normalize_peer, normalize_rule, normalize_rules, peer_matches
 
 AUDIT_OPERATIONS = frozenset((
     'get_nas_status', 'get_media_status', 'set_fan_policy', 'release_fan',
@@ -28,7 +28,8 @@ AUDIT_OPERATIONS = frozenset((
     'request_power', 'cancel_power', 'initialize', 'server/discover', 'ping',
     'tools/list', 'tools/call', 'integration/status', 'integration/action',
     'integration/capabilities',
-    'config', 'key.create', 'key.revoke', 'authenticate',
+    'config', 'key.create', 'key.revoke', 'key.update', 'key.enable', 'key.rotate',
+    'authenticate',
 ))
 AUDIT_OUTCOMES = frozenset(('success', 'error', 'denied', 'busy', 'unavailable'))
 MAX_ACTIVE_KEYS, MAX_KEYS, MAX_AUDIT = 32, 64, 100
@@ -37,32 +38,15 @@ _TOKEN_RE = re.compile(r'r1_[A-Za-z0-9_-]{43}\Z', re.ASCII)
 _KEY_ID_RE = re.compile(r'[0-9a-f]{24}\Z', re.ASCII)
 _DIGEST_RE = re.compile(r'[0-9a-f]{64}\Z', re.ASCII)
 _ROLES = frozenset(item['id'] for item in ROLE_CATALOG)
-_PRIVATE_V4 = tuple(ipaddress.ip_network(value) for value in (
-    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8'))
-_PRIVATE_V6 = ipaddress.ip_network('fc00::/7')
 _KEY_FIELDS = frozenset((
     'id', 'name', 'scopes', 'allowed_ips', 'created_at', 'expires_at',
     'revoked_at', 'last_used_at', 'digest',
 ))
 _POLICY_FIELDS = frozenset(('policy_version', 'role', 'file_roots'))
+_V3_FIELDS = frozenset(('disabled',))
 _AUDIT_FIELDS = frozenset((
     'timestamp', 'key_id', 'operation', 'peer', 'outcome', 'duration_ms',
 ))
-
-
-def normalize_peer(peer):
-    """Return a canonical allowed LAN address, never a hostname or network range."""
-    if not isinstance(peer, str) or peer != peer.strip() or '%' in peer or len(peer) > 64:
-        return None
-    try:
-        address = ipaddress.ip_address(peer)
-    except ValueError:
-        return None
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    if isinstance(address, ipaddress.IPv4Address):
-        return str(address) if any(address in net for net in _PRIVATE_V4) else None
-    return str(address) if address == ipaddress.IPv6Address('::1') or address in _PRIVATE_V6 else None
 
 
 def _timestamp(value, nullable=False):
@@ -87,7 +71,7 @@ def _scopes(value, allowed=SCOPES):
 
 def _ips(value):
     return (isinstance(value, list) and len(value) <= 32
-            and all(normalize_peer(item) == item and item is not None for item in value)
+            and all(normalize_rule(item) == item and item is not None for item in value)
             and len(set(value)) == len(value))
 
 
@@ -130,11 +114,13 @@ class ApiAccessStore:
 
     @staticmethod
     def _empty():
-        return {'version': 2, 'enabled': False, 'keys': [], 'audit': []}
+        return {'version': 3, 'enabled': False, 'keys': [], 'audit': []}
 
     @staticmethod
-    def _valid_key(row, version=2):
+    def _valid_key(row, version=3):
         fields = _KEY_FIELDS if version == 1 else _KEY_FIELDS | _POLICY_FIELDS
+        if version == 3:
+            fields |= _V3_FIELDS
         valid = (isinstance(row, dict) and set(row) == fields
                 and isinstance(row['id'], str) and _KEY_ID_RE.fullmatch(row['id'])
                 and _label(row['name']) and _scopes(row['scopes']) and _ips(row['allowed_ips'])
@@ -143,6 +129,8 @@ class ApiAccessStore:
                 and _timestamp(row['created_at'])
                 and isinstance(row['digest'], str) and _DIGEST_RE.fullmatch(row['digest']))
         if not valid:
+            return False
+        if version == 3 and type(row['disabled']) is not bool:
             return False
         if version == 1:
             return _scopes(row['scopes'], LEGACY_SCOPES)
@@ -188,7 +176,7 @@ class ApiAccessStore:
                     return self._empty(), False
                 data = json.loads(text, parse_constant=_reject_constants, object_pairs_hook=_unique_object)
             if (not isinstance(data, dict) or set(data) != {'version', 'enabled', 'keys', 'audit'}
-                    or type(data['version']) is not int or data['version'] not in (1, 2)
+                    or type(data['version']) is not int or data['version'] not in (1, 2, 3)
                     or type(data['enabled']) is not bool
                     or not isinstance(data['keys'], list) or len(data['keys']) > MAX_KEYS
                     or not all(self._valid_key(row, data['version']) for row in data['keys'])
@@ -204,9 +192,9 @@ class ApiAccessStore:
     def _write(self, state):
         temporary = None
         try:
-            # Pure reads retain v1 bytes. A real write upgrades the complete
+            # Pure reads retain v1/v2 bytes. A real write upgrades the complete
             # state in the same fsync/replace transaction as the requested change.
-            state = dict(state, version=2, keys=[self._policy_row(row) for row in state['keys']])
+            state = dict(state, version=3, keys=[self._policy_row(row) for row in state['keys']])
             serialized = json.dumps(state, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
             if len(serialized.encode('utf-8')) > _MAX_FILE_BYTES:
                 raise OSError('访问配置超出存储上限')
@@ -250,6 +238,8 @@ class ApiAccessStore:
             return 'revoked'
         if row['expires_at'] is not None and row['expires_at'] <= now:
             return 'expired'
+        if row.get('disabled', False):
+            return 'disabled'
         return 'active'
 
     @classmethod
@@ -260,13 +250,15 @@ class ApiAccessStore:
         result['allowed_ips'] = list(row['allowed_ips'])
         result['file_roots'] = [dict(root) for root in row['file_roots']]
         result['status'] = cls._key_status(row, now)
+        result['enabled'] = not row['disabled']
         return result
 
     @staticmethod
     def _policy_row(row):
-        """Project a validated v1 row without changing its effective grants."""
-        return ({**row, 'policy_version': 1, 'role': 'legacy', 'file_roots': []}
-                if 'policy_version' not in row else row)
+        """Project validated old records without changing effective grants."""
+        policy = ({**row, 'policy_version': 1, 'role': 'legacy', 'file_roots': []}
+                  if 'policy_version' not in row else row)
+        return dict(policy, disabled=policy.get('disabled', False))
 
     def snapshot(self):
         with self.lock:
@@ -309,11 +301,7 @@ class ApiAccessStore:
             raise ValueError('文件范围或访问权限无效')
         if type(days) is not int or not 0 <= days <= 365:
             raise ValueError('有效天数须为 0 至 365 的整数')
-        if not isinstance(supplied_ips, list) or len(supplied_ips) > 32:
-            raise ValueError('客户端须为精确的局域网 IP')
-        ips = [normalize_peer(item) for item in supplied_ips]
-        if any(item is None for item in ips) or len(set(ips)) != len(ips):
-            raise ValueError('客户端须为不重复的精确局域网 IP')
+        ips = normalize_rules(supplied_ips)
         with self.lock:
             data = self._mutable()
             now = self._now()
@@ -324,7 +312,10 @@ class ApiAccessStore:
                 raise ValueError('有效期超出支持范围')
             # Preserve active grants; discard only oldest inactive history at the cap.
             while len(data['keys']) >= MAX_KEYS:
-                inactive = [row for row in data['keys'] if self._key_status(row, now) != 'active']
+                # Disabled keys remain recoverable. Only irreversibly revoked
+                # or expired history may be discarded when the record cap fills.
+                inactive = [row for row in data['keys']
+                            if self._key_status(row, now) in ('expired', 'revoked')]
                 if not inactive:
                     raise ValueError('密钥记录已达上限')
                 oldest = min(inactive, key=lambda row: row['created_at'])
@@ -337,6 +328,7 @@ class ApiAccessStore:
                 'id': key_id, 'name': body['name'], 'scopes': list(scopes),
                 'policy_version': 2 if modern else 1, 'role': role,
                 'file_roots': [dict(root) for root in roots],
+                'disabled': False,
                 'allowed_ips': ips, 'created_at': now,
                 'expires_at': expires_at,
                 'revoked_at': None, 'last_used_at': None,
@@ -345,6 +337,99 @@ class ApiAccessStore:
             data['keys'].append(row)
             self._write(data)
             result = self._public_key(row, now)
+            result['token'] = token
+            return result
+
+    @staticmethod
+    def _key_id(key_id):
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise ValueError('密钥标识无效')
+
+    @classmethod
+    def _selected_key(cls, data, key_id):
+        cls._key_id(key_id)
+        row = next((row for row in data['keys'] if row['id'] == key_id), None)
+        if row is None:
+            raise ValueError('密钥不存在')
+        return row
+
+    @classmethod
+    def _check_active_limit(cls, data, candidate, now):
+        if (cls._key_status(candidate, now) == 'active'
+                and sum(cls._key_status(row, now) == 'active'
+                        for row in data['keys'] if row['id'] != candidate['id']) >= MAX_ACTIVE_KEYS):
+            raise ValueError('最多保留 32 个有效密钥')
+
+    def update_key(self, body):
+        """Edit the complete merged grant; omitted role preserves legacy policy.
+
+        Expiry changes are relative to this edit, and never reset creation time,
+        revocation or the secret. Dropping files requires explicitly clearing its
+        ranges; lowering a role must also lower any writable range in that edit.
+        """
+        if (not isinstance(body, dict) or not 2 <= len(body)
+                or set(body) - {'id', 'name', 'role', 'scopes', 'file_roots',
+                                'allowed_ips', 'expires_days'} or 'id' not in body):
+            raise ValueError('密钥更新字段无效')
+        self._key_id(body['id'])
+        with self.lock:
+            data = self._mutable()
+            row = self._selected_key(data, body['id'])
+            candidate = self._policy_row(row)
+            for field in ('name', 'role', 'scopes', 'file_roots'):
+                if field in body:
+                    candidate[field] = body[field]
+            if 'role' in body:
+                candidate['policy_version'] = 2
+            if 'allowed_ips' in body:
+                candidate['allowed_ips'] = normalize_rules(body['allowed_ips'])
+            now = self._now()
+            if 'expires_days' in body:
+                days = body['expires_days']
+                if type(days) is not int or not 0 <= days <= 365:
+                    raise ValueError('有效天数须为 0 至 365 的整数')
+                candidate['expires_at'] = now + days * 86400 if days else None
+            if not self._valid_key(candidate):
+                raise ValueError('密钥角色、权限或文件范围无效')
+            self._check_active_limit(data, candidate, now)
+            data['keys'][data['keys'].index(row)] = candidate
+            self._write(data)
+            return self._public_key(candidate, now)
+
+    def set_key_enabled(self, key_id, enabled):
+        """Suspend or resume a key, retaining expiry and irreversible revocation."""
+        self._key_id(key_id)
+        if type(enabled) is not bool:
+            raise ValueError('密钥启用状态须为布尔值')
+        with self.lock:
+            data = self._mutable()
+            row = self._selected_key(data, key_id)
+            if enabled and row['revoked_at'] is not None:
+                raise ValueError('已撤销的密钥不能恢复')
+            candidate = dict(self._policy_row(row), disabled=not enabled)
+            now = self._now()
+            self._check_active_limit(data, candidate, now)
+            data['keys'][data['keys'].index(row)] = candidate
+            self._write(data)
+            return self._public_key(candidate, now)
+
+    def rotate_key(self, key_id):
+        """Replace one secret atomically; the old digest is removed immediately."""
+        self._key_id(key_id)
+        with self.lock:
+            data = self._mutable()
+            row = self._selected_key(data, key_id)
+            if row['revoked_at'] is not None:
+                raise ValueError('已撤销的密钥不能轮换')
+            now = self._now()
+            token = 'r1_' + secrets.token_urlsafe(32)
+            digest = hashlib.sha256(token.encode('ascii')).hexdigest()
+            if any(hmac.compare_digest(digest, other['digest']) for other in data['keys']):
+                raise OSError('未能生成新的访问密钥')
+            candidate = dict(self._policy_row(row), digest=digest, last_used_at=None)
+            data['keys'][data['keys'].index(row)] = candidate
+            self._write(data)
+            result = self._public_key(candidate, now)
             result['token'] = token
             return result
 
@@ -388,7 +473,7 @@ class ApiAccessStore:
             status = self._key_status(matched, self._now())
             if status != 'active':
                 return None, 'key_' + status
-            if matched['allowed_ips'] and canonical not in matched['allowed_ips']:
+            if matched['allowed_ips'] and not peer_matches(canonical, matched['allowed_ips']):
                 return None, 'peer_not_allowed'
             if required_scope is not None and required_scope not in matched['scopes']:
                 return None, 'scope_denied'
@@ -398,11 +483,11 @@ class ApiAccessStore:
                     'policy_version': policy['policy_version'],
                     'file_roots': [dict(root) for root in policy['file_roots']]}, 'ok'
 
-    def record(self, principal, operation, peer, outcome, duration_ms=0):
+    def record(self, principal, operation, peer, outcome, duration_ms=0, *, touch_key=True):
         """Persist only a known operation, outcome and address, never its arguments."""
         if (not isinstance(operation, str) or operation not in AUDIT_OPERATIONS
                 or not isinstance(outcome, str) or outcome not in AUDIT_OUTCOMES
-                or not _duration(duration_ms)):
+                or not _duration(duration_ms) or type(touch_key) is not bool):
             raise ValueError('审计项目无效')
         with self.lock:
             data = self._mutable()
@@ -410,7 +495,7 @@ class ApiAccessStore:
             key_id = principal.get('key_id') if isinstance(principal, dict) else None
             row = next((row for row in data['keys'] if row['id'] == key_id), None)
             key_id = row['id'] if row is not None else None
-            if row is not None:
+            if row is not None and touch_key:
                 row['last_used_at'] = now
             data['audit'].append({
                 'timestamp': now, 'key_id': key_id, 'operation': operation,

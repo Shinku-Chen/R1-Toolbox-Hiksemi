@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Serve local NAS metrics and authenticated touch controls with the screen app.
+"""Serve resident NAS Web and controls with an independently managed screen.
 
-The one-shot container starts this script through the host service manager.  It
-does not install software or overwrite official screen files. Explicit user
+The container supervises this script in the host namespaces until it stops.
+It does not install software or overwrite official screen files. Explicit user
 actions can adjust supported hardware, manage workloads and request host power.
 """
 
@@ -19,6 +19,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -718,18 +719,162 @@ def run_service(app, port=PORT, controller=None, insights=None):
             signal.signal(sig, handler)
 
 
+def acquire_runtime_lock():
+    """Hold one host-runtime lease across exec and all hardware cleanup."""
+    if fcntl is None:
+        raise OSError('常驻服务需要 Linux 文件锁')
+    directory = Path('/run/r1-toolbox')
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise OSError('宿主运行目录身份或写权限不安全')
+    path = directory / 'resident.lock'
+    inherited = os.environ.pop('R1_TOOLBOX_RUNTIME_LOCK_FD', None)
+    if inherited is not None:
+        if not re.fullmatch(r'[0-9]{1,5}', inherited):
+            raise OSError('常驻服务文件锁描述符无效')
+        descriptor = int(inherited)
+        actual, expected = os.fstat(descriptor), path.lstat()
+        if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError('常驻服务文件锁身份不匹配')
+    else:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise OSError('常驻服务文件锁权限不安全')
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.set_inheritable(descriptor, False)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def create_screen_manager(controller, frontend, control_token):
+    from screen_manager import ScreenManager
+    return ScreenManager(controller, frontend, control_token)
+
+
+def run_resident_service(frontend=None, port=PORT, controller=None, insights=None, *, stop_event=None):
+    """Run Web and hardware independently of the optional, switchable GUI."""
+    runtime_dir = str(Path(__file__).resolve().parent)
+    if runtime_dir not in sys.path:
+        sys.path.insert(0, runtime_dir)
+    stopped, monitor = stop_event or threading.Event(), StatusMonitor()
+    server = server_thread = web = fan = light = analytics = manager = None
+    descriptor, handlers = None, {}
+    try:
+        descriptor = acquire_runtime_lock()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            handlers[sig] = signal.signal(sig, lambda signum, frame: stopped.set())
+        if controller is None:
+            from toolbox import ToolboxController
+            from histor import HistorAdapter
+            controller = ToolboxController(state_dir=os.environ.get('R1_TOOLBOX_DATA_DIR', '/run/r1-toolbox/settings'),
+                                           histor=HistorAdapter(allow_writes=True))
+        if insights is None:
+            from insights import InsightsCollector
+            insights = InsightsCollector()
+        controller.set_screen_managed(False)
+        fan = create_fan_policy(controller, insights)
+        for name, factory in (('灯光联动', lambda: create_light_policy(controller, fan)),
+                              ('历史统计', lambda: create_monitoring(controller, insights, monitor, fan))):
+            try:
+                if name == '灯光联动':
+                    light = factory()
+                else:
+                    analytics = factory()
+            except Exception as error:
+                print('[WARN] ' + name + '不可用：' + type(error).__name__, file=sys.stderr, flush=True)
+        web = create_web_config(controller, insights, fan_policy=fan, light_policy=light,
+                                monitoring=analytics, monitor=monitor)
+        if web is None:
+            raise ValueError('常驻模式需要启用 Web 服务，请设置有效的 R1_WEB_PORT')
+        control_token = secrets.token_hex(32)
+        manager = create_screen_manager(controller, frontend, control_token)
+        server = bind_server(monitor, port, stopped, controller=controller, insights=insights,
+                             control_token=control_token, web_config=web, fan_policy=fan,
+                             light_policy=light, monitoring=analytics)
+        if server is None:
+            raise RuntimeError('本机状态接口未完成绑定，常驻服务未就绪')
+        server_thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.1),
+                                         name='r1-status-api', daemon=True)
+        monitor.start()
+        controller.start()
+        insights.start()
+        fan.start()
+        for name, companion in (('灯光联动', light), ('历史统计', analytics)):
+            if companion is not None:
+                try:
+                    companion.start()
+                except Exception as error:
+                    print('[WARN] ' + name + '未启动：' + type(error).__name__, file=sys.stderr, flush=True)
+        # Web binding is required.  A failed listener must make Docker report a
+        # failed runtime, not an apparently healthy keepalive container.
+        web.start()
+        server_thread.start()
+        web.attach_screen_manager(manager)
+        print('[OK] Web 常驻服务已启动；小屏与 MCP 按各自持久开关独立运行。', flush=True)
+        while not stopped.wait(0.25):
+            if not server_thread.is_alive():
+                raise RuntimeError('本地状态接口已退出，常驻服务停止')
+            web_thread = getattr(web, 'thread', None)
+            if isinstance(web_thread, threading.Thread) and not web_thread.is_alive():
+                raise RuntimeError('Web 服务已退出，常驻服务停止')
+        return 0
+    except (OSError, ValueError, RuntimeError) as error:
+        print('[ERROR] 常驻服务启动或运行失败：' + str(error), file=sys.stderr, flush=True)
+        return 1
+    finally:
+        def stop_http():
+            if server_thread is not None and server_thread.is_alive():
+                server.shutdown()
+                server_thread.join(timeout=1)
+        cleanup = [('停止接收本机控制', stop_http)]
+        if web is not None:
+            cleanup.append(('停止 Web', web.stop))
+        if manager is not None:
+            cleanup.append(('恢复官方小屏', manager.stop))
+        if light is not None:
+            cleanup.append(('恢复灯光', light.stop))
+        if analytics is not None:
+            cleanup.append(('保存历史统计', analytics.stop))
+        if fan is not None:
+            cleanup.append(('恢复原厂风扇', fan.stop))
+        if controller is not None:
+            cleanup.append(('恢复硬件', controller.stop))
+        if insights is not None:
+            cleanup.append(('停止详细采集', insights.stop))
+        if monitor.thread.is_alive():
+            cleanup.append(('停止指标采集', monitor.stop))
+        if server is not None:
+            cleanup.append(('释放本机接口', server.server_close))
+        for description, action in cleanup:
+            try:
+                action()
+            except Exception as error:
+                print('[WARN] ' + description + '未完成：' + type(error).__name__, file=sys.stderr, flush=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, default=Path("/screen/squashfs-root"), help="宿主解包版 AppImage 目录")
     parser.add_argument("--port", type=int, default=PORT, help="本机只读状态端口（默认 18731）")
     parser.add_argument("--check", action="store_true", help="只读取一次指标，不启动小屏或 HTTP 服务")
+    parser.add_argument('--resident', action='store_true', help='常驻运行 Web，独立管理可选小屏')
+    parser.add_argument('--frontend', type=Path, help='已校验的小屏前端目录，仅在启用小屏时使用')
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port 必须在 1–65535 范围内")
     if args.check:
         print(json.dumps(StatusSampler().sample(), ensure_ascii=False, allow_nan=False))
         return 0
-    return run_service(args.app, args.port)
+    return run_resident_service(args.frontend, args.port) if args.resident else run_service(args.app, args.port)
 
 
 if __name__ == "__main__":

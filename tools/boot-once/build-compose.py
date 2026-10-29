@@ -19,12 +19,14 @@ project = {
             "image": "${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}",
             "container_name": "r1-toolbox",
             "restart": "always",
+            "stop_grace_period": "3m",
             "privileged": True,
             "pid": "host",
             "ipc": "host",
             "network_mode": "host",
             "environment": {
                 "UI_MODE": "image",
+                "R1_WEB_AUTH_MODE": "password",
             },
             "volumes": [
                 "/:/host",
@@ -39,13 +41,13 @@ project = {
     "volumes": {"r1-toolbox-data": {}},
 }
 compose = (
-    "# R1 Toolbox 内置 UI：展开到 /run 内存目录并只读挂载，完成后容器自行停止。\n"
-    "# UI_MODE: image 使用镜像内置界面；diagnostic 仅诊断；directory 使用 UI_DIR。\n"
+    "# R1 Toolbox 常驻服务：Web 一直运行，小屏与 MCP 分别管理开关。\n"
+    "# UI_MODE: image 使用镜像内置界面；diagnostic 不接管小屏；directory 使用 UI_DIR。\n"
     "# UI_DIR 仅 directory 模式填写 NAS 前端目录；原版小屏文件保持原样。\n"
     "# 设置保存在独立 Docker 数据卷；UI 和服务仍从 /run 内存目录运行。\n"
-    "# 网页配置使用 NAS_IP:18732，在小屏生成一次性配对码；R1_WEB_PORT=0 禁用。\n"
+    "# 网页使用 NAS_IP:18732；首次不设密码，小屏默认开，MCP 默认关。\n"
     "# UI_MODE=image 必需；container_name、UI_DIR、R1_WEB_BIND/PORT 可按需覆盖。\n"
-    "# 任务配置指纹自动计算；修改环境或更换镜像都会触发同次开机重新执行。\n"
+    "# 小屏／开发开关保存在原数据卷；停止容器会停止服务并恢复官方窗口。\n"
     "# 可通过 R1_TOOLBOX_IMAGE 指定版本；发布包固定为对应构建的 sha 镜像标签。\n"
     + yaml.safe_dump(project, allow_unicode=True, sort_keys=False, width=100)
 )

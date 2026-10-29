@@ -1452,11 +1452,21 @@ dd .diag-link{margin:0;height:24px}
 .r1-api-meta dd{margin:0;min-width:0;overflow-wrap:anywhere}
 .r1-api-audit{display:grid;gap:5px;border-bottom:1px solid var(--line);padding:10px 0;font-size:12px;overflow-wrap:anywhere}
 .r1-api-audit strong{font-size:13px;font-weight:550}
+.r1-api-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+.r1-api-actions [hidden]{display:none}
+.r1-services{display:grid;gap:20px;min-width:0}
+.r1-service-item{border-bottom:1px solid var(--line);padding-bottom:18px;min-width:0}
+.r1-service-item h3{margin-bottom:12px}
+.r1-service-item .check{display:flex;align-items:center;gap:10px;min-height:44px}
+.r1-service-item .check input{width:20px;height:20px;flex:none;accent-color:var(--ink-1)}
+.r1-service-item .sub{line-height:1.6}
+.r1-services .r1-api-create{margin-top:10px}
 @media (max-width: 560px){.r1-api-intro{flex-direction:column;align-items:stretch}
 .r1-api-dialog.fm-card{padding:20px 16px;max-height:calc(100dvh - 20px)}
 .r1-api-scopes>div{grid-template-columns:minmax(0,1fr)}
 .r1-api-meta{grid-template-columns:minmax(0,1fr);gap:3px}
 .r1-api-meta dd + dt{margin-top:7px}
+.r1-api-actions>.btn{flex:1 1 auto}
 }
 </style>
 </head>
@@ -5762,8 +5772,11 @@ const key = JSON.stringify([a.enabled, a.password_set, a.session_days, a.passwor
 if (key === sig) return;
 sig = key;
 const rows = mount(`<div></div>`);
+const passwordMode = ((R1.st && R1.st.web && R1.st.web.auth_mode) || a.auth_mode || 'password') === 'password';
 rows.append(r1Field('登录口令', r1Check(a.enabled ? '访问面板需要登录口令' : '当前无需口令（监控公开）', !!a.enabled,
-v => post({ action: v ? 'enable' : 'disable' })), '开启后访问面板需先输入口令；关闭后监控恢复公开，写操作仍需小屏配对码。'));
+v => post({ action: v ? 'enable' : 'disable' })), passwordMode
+? '首次使用默认不设口令，可直接管理设备；设置并开启口令后，访问网页需要登录。'
+: '开启后访问面板需先输入口令；当前兼容配对模式下，关闭口令后的写操作需要小屏配对码。'));
 rows.append(r1Field('会话有效期', r1Number(a.session_days || 7, 1, 30, '天', v => post({ action: 'session_days', days: v })), '登录后保持天数；修改口令会注销其他会话'));
 const pw = mount(`<div class="r1-inline">
 <input class="textfield" type="password" placeholder="当前口令" aria-label="当前口令" data-ref="old" autocomplete="current-password">
@@ -5788,7 +5801,7 @@ return;
 post({ action: 'change', old_password: oldValue, new_password: newValue });
 };
 if (pw._r.clear) pw._r.clear.onclick = async () => {
-const mode = (R1.st && R1.st.web && R1.st.web.auth_mode) || (a.auth_mode) || 'pair';
+const mode = (R1.st && R1.st.web && R1.st.web.auth_mode) || (a.auth_mode) || 'password';
 const message = mode === 'password'
 ? '取消后面板恢复公开监控，设备写操作将不再需要登录。'
 : '取消后面板恢复公开监控，设备写操作仍需要小屏配对码。';
@@ -5802,14 +5815,120 @@ out.onclick = async () => { try { await API.post('/api/auth/logout', {}); } catc
 rows.append(r1Field('当前会话', out, ''));
 }
 x.rows.replaceChildren(rows);
-const passwordMode = (R1.st && R1.st.web && R1.st.web.auth_mode) === 'password' || a.auth_mode === 'password';
 setHTML(x.status, a.password_required ? '当前已启用登录口令；面板读取与写入都需要登录。' : passwordMode ? '当前未启用登录口令；只读监控公开，设备写操作默认开放。' : '当前未启用登录口令；只读监控公开，设备写操作需要小屏五位配对码。');
 x.pairing = a.pairing;
 };
 card._sync();
 }
+function r1ApiRules(value) {
+const rules = String(value || '').split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
+if (rules.length > 32 || new Set(rules).size !== rules.length || rules.some(rule =>
+!(rule.includes(':') ? /^[0-9a-fA-F:.]+(?:\/\d{1,3})?$/.test(rule)
+: /^\d+(?:\.\d+){3}(?:\/(?:\d{1,2}|\d+(?:\.\d+){3}))?$/.test(rule)))) {
+throw new Error('来源须为不重复的 IPv4／IPv6 地址、CIDR 或 IPv4 点分掩码，最多 32 项；不接受域名或通配符。');
+}
+return rules;
+}
+function r1ServiceSettings(card) {
+card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">常驻服务与开发模式</div><p class="hint">容器持续提供网页监控与管理。小屏默认开启，可关闭并恢复官方界面；MCP 默认关闭。首次使用无需网页口令，可在登录口令中设置。</p></div><button class="btn" type="button" data-ref="open">管理服务</button></div>`;
+card._r = collect(card); card._r.open.onclick = r1OpenServiceManager;
+}
+function r1OpenServiceManager() {
+if ($('#r1ServiceManager')) return;
+const el = mount(`<div class="fullmask r1-api-mask" id="r1ServiceManager" role="dialog" aria-modal="true" aria-labelledby="r1ServiceTitle"><div class="card fm-card r1-api-dialog">
+<div class="r1-api-head"><h2 id="r1ServiceTitle">服务与开发</h2><button class="btn" type="button" data-ref="close">关闭</button></div>
+<p>网页服务随容器常驻。小屏与 MCP 可分别开关，关闭 MCP 不会删除访问密钥。</p>
+<p class="sub" data-ref="loading" role="status">正在读取服务状态…</p><p class="st-crit" data-ref="error" role="alert" hidden></p><button class="btn" type="button" data-ref="retry" hidden>重新读取服务状态</button>
+<div class="r1-services" data-ref="content" hidden>
+<section class="r1-service-item"><h3>小屏界面</h3><label class="check"><input type="checkbox" data-ref="screenEnabled">启用 Toolbox 小屏</label><p class="sub" data-ref="screenState" role="status"></p><p class="sub">关闭后恢复官方显示，网页和其他 Toolbox 服务继续运行。</p></section>
+<section class="r1-service-item"><h3>局域网 AI 服务</h3><label class="check"><input type="checkbox" data-ref="mcpEnabled">启用 MCP 与 REST API</label><p class="sub" data-ref="mcpState" role="status"></p><button class="btn" type="button" data-ref="api">管理访问密钥</button></section>
+<section class="r1-service-item"><h3>开发模式</h3><p class="sub">仅对白名单来源开放固定诊断接口，不提供任意命令或原厂动作代理。到期后自动停止授权。</p>
+<form class="r1-api-create" data-ref="developerForm"><label class="check"><input type="checkbox" data-ref="developerEnabled">启用开发模式</label>
+<p class="sub" data-ref="developerState" role="status"></p>
+<label class="r1-api-input">允许来源（开启时必填）<textarea class="textfield mono" data-ref="developerIps" rows="3" aria-label="开发白名单" placeholder="192.168.31.0/24&#10;fd00::/64"></textarea><span class="sub">支持局域网 IPv4／IPv6、CIDR 与 IPv4 点分掩码。真实来源必须命中，不使用转发头；不允许公网全放行。</span></label>
+<label class="r1-api-input">授权时长（分钟）<input class="textfield" type="number" min="1" max="1440" step="1" value="60" data-ref="developerMinutes" aria-label="开发授权分钟"></label>
+<label class="check"><input type="checkbox" data-ref="developerCommands">允许受限命令诊断</label><p class="sub">仅增加服务端固定项目的诊断权限，不等于开放 Shell，也不授予 MCP 密钥。</p>
+<button class="btn primary" type="submit" data-ref="saveDeveloper">保存开发设置</button>
+</form>
+</section><div class="r1-api-actions"><button class="btn" type="button" data-ref="refresh">刷新实际状态</button></div>
+</div></div></div>`);
+const x = collect(el);
+let state = null, busy = false, closed = false, developerDirty = false, pollTimer = null, polls = 0, revision = 0;
+const stopPoll = () => { if (pollTimer !== null) clearTimeout(pollTimer); pollTimer = null; };
+const close = () => { closed = true; stopPoll(); document.removeEventListener('keydown', onKey); el.remove(); };
+const onKey = event => { if (event.key === 'Escape' && [...document.querySelectorAll('.fullmask')].at(-1) === el) close(); };
+const fail = error => { if (!closed) { setText(x.error, '服务设置操作失败：' + String(error && error.message || '请求未完成').slice(0, 160)); x.error.hidden = false; x.retry.hidden = !!state; } };
+const pending = value => {
+busy = value; el.setAttribute('aria-busy', String(value));
+x.screenEnabled.disabled = value || !state || state.screen.available !== true || state.screen.busy === true;
+x.mcpEnabled.disabled = value || !state; x.saveDeveloper.disabled = value || !state; x.refresh.disabled = value; x.retry.disabled = value;
+};
+const draw = () => {
+if (closed) return;
+const screen = state.screen, developer = state.developer;
+x.content.hidden = false; x.loading.hidden = true; x.retry.hidden = true;
+x.screenEnabled.checked = screen.enabled === true; x.mcpEnabled.checked = state.mcp.enabled === true;
+setText(x.screenState, screen.last_error ? '切换未完成：' + String(screen.last_error)
+: screen.available !== true ? '小屏切换不可用。'
+: screen.busy === true ? `正在切换；当前实际显示${screen.active === true ? ' Toolbox' : screen.active === false ? '官方界面' : '尚未确认'}。${polls >= 30 ? '自动核对已结束，请点击刷新实际状态。' : ''}`
+: screen.active === true ? '实际状态：Toolbox 小屏已接管。'
+: screen.active === false ? '实际状态：官方界面；Toolbox 小屏未接管。' : '实际显示状态尚未确认，请刷新核对。');
+setText(x.mcpState, state.mcp.enabled === true ? '已开启，仍需要独立 Token 与对应权限。' : '已关闭，已有密钥保留。');
+setText(x.developerState, developer.active === true
+? '开发窗口有效，截止时间：' + r1ApiTime(developer.expires_at) + '。每次请求仍须命中来源白名单。'
+: (developer.enabled === true ? '已保存开启意图，开发窗口尚未生效。' : '当前已关闭。') + (developer.reason ? ' ' + String(developer.reason) : ''));
+if (!developerDirty) {
+x.developerEnabled.checked = developer.enabled === true;
+x.developerIps.value = Array.isArray(developer.allowed_ips) ? developer.allowed_ips.join('\n') : '';
+x.developerMinutes.value = Number.isInteger(developer.minutes) ? String(developer.minutes) : '60';
+x.developerCommands.checked = developer.allow_commands === true;
+}
+pending(busy); stopPoll();
+if (screen.busy === true && polls < 30) {
+pollTimer = setTimeout(() => { pollTimer = null; if (!closed && !busy) { polls += 1; refresh().catch(fail); } }, 1000);
+}
+};
+const refresh = async () => {
+const requestedRevision = revision;
+const result = await API.get('/api/services');
+if (!result || result.ok !== true || !result.screen || !result.mcp || !result.developer) throw new Error(result && result.error || '未读取到服务状态');
+if (!closed && requestedRevision === revision) { state = result; draw(); }
+};
+const mutate = async (path, body) => {
+if (busy) return;
+revision += 1; pending(true); x.error.hidden = true; stopPoll();
+try {
+const result = await R1.post(path, body);
+if (!result || result.ok !== true || !result.services) throw new Error(result && result.error || '服务设置未保存');
+if (closed) return;
+if (path === '/api/services/developer') developerDirty = false;
+polls = 0; state = { ok: true, ...result.services }; draw();
+} catch (error) {
+fail(error);
+try { if (!closed) await refresh(); } catch (_) { if (!closed && state) draw(); }
+}
+finally { if (!closed) pending(false); }
+};
+x.screenEnabled.onchange = () => { const enabled = x.screenEnabled.checked; x.screenEnabled.checked = state.screen.enabled === true; mutate('/api/services/screen', { enabled }); };
+x.mcpEnabled.onchange = () => { const enabled = x.mcpEnabled.checked; x.mcpEnabled.checked = state.mcp.enabled === true; mutate('/api/services/mcp', { enabled }); };
+for (const input of [x.developerEnabled, x.developerIps, x.developerMinutes, x.developerCommands]) input.oninput = () => { developerDirty = true; };
+x.developerForm.onsubmit = event => {
+event.preventDefault(); if (busy) return;
+try {
+const allowed_ips = r1ApiRules(x.developerIps.value), minutes = Number(x.developerMinutes.value), enabled = x.developerEnabled.checked;
+if (enabled && !allowed_ips.length) throw new Error('开启开发模式必须填写至少一个来源 IP 或 CIDR 白名单。');
+if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new Error('开发授权时长须为 1 至 1440 分钟的整数。');
+mutate('/api/services/developer', { enabled, allowed_ips, minutes, allow_commands: x.developerCommands.checked });
+} catch (error) { fail(error); }
+};
+x.refresh.onclick = async () => { if (busy) return; polls = 0; pending(true); x.error.hidden = true; try { await refresh(); } catch (error) { fail(error); } finally { if (!closed) pending(false); } };
+x.retry.onclick = () => x.refresh.onclick();
+x.api.onclick = () => { close(); r1OpenApiManager(); };
+x.close.onclick = close; document.addEventListener('keydown', onKey); document.body.append(el); pending(true);
+refresh().catch(fail).finally(() => { if (!closed) pending(false); });
+}
 function r1ApiSettings(card) {
-card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">管理 MCP 与 REST 的独立访问密钥、角色、功能和文件范围。默认关闭；密钥仅在创建时显示一次。</p></div><button class="btn" type="button" data-ref="open">打开 API 管理</button></div>`;
+card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">局域网 AI 与自动化</div><p class="hint">管理 MCP 与 REST 的独立 Token、角色、功能和文件范围、IP／网段限制。默认关闭；Token 仅在创建或轮换时显示一次。</p></div><button class="btn" type="button" data-ref="open">打开 API 管理</button></div>`;
 card._r = collect(card);
 card._r.open.onclick = r1OpenApiManager;
 }
@@ -5835,7 +5954,7 @@ function r1ShowApiSecret(value) {
 let secret = String(value || '');
 if (!secret) throw new Error('服务端未返回新密钥，请撤销后重新创建。');
 const el = mount(`<div class="fullmask r1-api-secret" id="r1ApiSecret" role="dialog" aria-modal="true" aria-labelledby="r1ApiSecretTitle"><div class="card fm-card r1-api-dialog">
-<h2 id="r1ApiSecretTitle">保存新密钥</h2><p>密钥仅显示这一次。关闭后无法再次查看；请保存到 AI 客户端的安全配置中。</p>
+<h2 id="r1ApiSecretTitle">保存新密钥</h2><p>Token 仅显示这一次。关闭后无法再次查看；请保存到 AI 客户端的安全配置中。轮换后旧 Token 已立即失效。</p>
 <label class="r1-api-input">访问密钥<textarea class="textfield mono" data-ref="token" rows="3" readonly spellcheck="false" autocomplete="off" aria-label="新访问密钥"></textarea></label>
 <button class="btn" type="button" data-ref="copyToken">复制密钥</button>
 <label class="r1-api-input">MCP 客户端配置<textarea class="textfield mono" data-ref="config" rows="10" readonly spellcheck="false" autocomplete="off" aria-label="MCP 客户端配置"></textarea></label>
@@ -5867,15 +5986,15 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <div data-ref="content" hidden>
 <div class="r1-api-service"><label class="check"><input type="checkbox" data-ref="enabled">启用局域网 API 服务</label><span class="sub" data-ref="serviceStatus"></span></div>
 <div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label><label>功能能力目录<input class="textfield mono" data-ref="restCapabilities" readonly aria-label="功能能力目录地址"></label></div>
-<h3>创建访问密钥</h3><form data-ref="form" class="r1-api-create">
+<h3 data-ref="formTitle">创建访问密钥</h3><form data-ref="form" class="r1-api-create">
 <label class="r1-api-input">密钥名称<input class="textfield" data-ref="name" aria-label="密钥名称" placeholder="例如：客厅 AI" maxlength="64" required autocomplete="off"></label>
 <label class="r1-api-input">操作角色<select class="textfield" data-ref="role" aria-label="操作角色"></select><span class="sub" data-ref="roleDescription"></span></label>
 <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
 <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
 <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">待接入，当前仅保存范围授权；尚不能通过 AI 浏览、上传或下载文件。只会显示宿主已确认的存储根，不会自动授予全盘。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
-<label class="r1-api-input">允许的来源 IP（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="每行一个精确 IPv4 或 IPv6 地址"></textarea><span class="sub">留空允许持密钥的局域网客户端；不接受网段、域名或通配符。</span></label>
-<label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
-<button class="btn primary" type="submit" data-ref="create">创建密钥</button>
+<label class="r1-api-input">允许的来源 IP／网段（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="192.168.31.0/24&#10;fd00::/64"></textarea><span class="sub">支持 IPv4／IPv6、CIDR 与 IPv4 点分掩码。留空允许持密钥的局域网客户端；不接受域名、通配符或公网全放行。</span></label>
+<label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="keep" data-ref="keepExpiry" hidden>保持当前有效期</option><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
+<div class="r1-api-actions"><button class="btn primary" type="submit" data-ref="create">创建密钥</button><button class="btn" type="button" data-ref="cancelEdit" hidden>取消编辑</button></div>
 </form>
 <div class="r1-api-head"><h3>访问密钥</h3><button class="btn" type="button" data-ref="refresh">刷新列表</button></div><div class="r1-api-list" data-ref="keys"></div>
 <h3>最近调用记录</h3><p class="sub">仅显示时间、密钥标识、来源、功能和结果，不记录令牌或请求内容。</p><div class="r1-api-list" data-ref="audit"></div>
@@ -5883,7 +6002,7 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power', 'media', 'files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing', 'backup', 'system'];
 const roleLevel = { readonly: 0, readwrite: 1, admin: 2 }, roleLabels = { readonly: '只读', readwrite: '读写', admin: '管理员' };
 const defaultMinRole = { read: 'readonly', fan: 'readwrite', light: 'readwrite', screen: 'readwrite', power: 'admin', media: 'readwrite' };
-let state = null, busy = false, closed = false;
+let state = null, busy = false, closed = false, editing = null, permissionDirty = false;
 const close = () => {
 if ($('#r1ApiSecret')) return;
 closed = true; document.removeEventListener('keydown', onKey); el.remove();
@@ -5897,7 +6016,8 @@ setText(x.error, 'API 管理操作失败：' + message); x.error.hidden = false;
 const pending = value => {
 busy = value; el.setAttribute('aria-busy', String(value));
 x.enabled.disabled = value || !state || state.storage_ok !== true;
-x.create.disabled = value || !state || state.storage_ok !== true || (filesSelected() && !fileRoots().length);
+x.create.disabled = value || !state || state.storage_ok !== true || (filesSelected() && !fileRoots().length && (!editing || permissionDirty));
+x.cancelEdit.disabled = value;
 x.refresh.disabled = value;
 x.keys.querySelectorAll('button').forEach(button => { button.disabled = value || !state || state.storage_ok !== true; });
 };
@@ -5914,12 +6034,13 @@ return (labels.get(id) || id) + (scope && scope.implemented === false ? '（待�
 const validSubpath = value => typeof value === 'string' && value.length <= 1024 && !/[\\\u0000-\u001f\u007f]/.test(value) && !/^[A-Za-z]:/.test(value)
 && (!value || value.split('/').every(part => part && part !== '.' && part !== '..'));
 const updatePermissions = () => {
-const role = x.role.value, level = roleLevel[role] ?? -1;
+const role = x.role.value, legacy = role === 'legacy' && editing, level = legacy ? Infinity : roleLevel[role] ?? -1;
 const selected = new Set([...x.scopes.querySelectorAll('input:checked')].map(input => input.value));
 const limited = [];
 for (const scope of Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []) {
 const input = [...x.scopes.querySelectorAll('input')].find(item => item.value === scope.id);
 if (!input) continue;
+input.disabled = !!legacy;
 const minRole = scopeMinimum(scope), tooLow = level < roleLevel[minRole];
 const note = input.closest('label').querySelector('[data-scope-note]');
 note.textContent = scope.implemented === false ? '待接入，仅预授权；当前没有可调用工具。'
@@ -5927,8 +6048,8 @@ note.textContent = scope.implemented === false ? '待接入，仅预授权；当
 if (selected.has(scope.id) && scope.implemented !== false && tooLow) limited.push(String(scope.label || scope.id));
 }
 const description = roles().find(item => item.id === role);
-setText(x.roleDescription, description ? String(description.description || '') : '未获得有效角色配置，请刷新后重试。');
-setText(x.roleStatus, limited.length ? `已选择${limited.join('、')}，当前角色不可调用这些工具。提高角色等级后仍只授予已勾选的功能。`
+setText(x.roleDescription, legacy ? '保留旧密钥原有精确权限，不会自动升级成管理员。明确选择新角色后才更新权限策略。' : description ? String(description.description || '') : '未获得有效角色配置，请刷新后重试。');
+setText(x.roleStatus, legacy ? '当前仅编辑名称、来源和有效期；原有功能权限保持。选择新角色后可重新配置。' : limited.length ? `已选择${limited.join('、')}，当前角色不可调用这些工具。提高角色等级后仍只授予已勾选的功能。`
 : '提高角色等级不会自动勾选功能；待接入的功能只保存预授权。');
 x.fileRoots.hidden = !filesSelected();
 for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
@@ -5961,20 +6082,25 @@ const checkbox = item.querySelector('[data-root-check]'), path = item.querySelec
 checkbox.value = root.id; path.setAttribute('aria-label', root.label + '的子目录'); access.setAttribute('aria-label', root.label + '的访问方式');
 const draft = drafts.get(root.id);
 if (draft) { checkbox.checked = draft.checked; path.value = draft.path; access.value = draft.access; }
-checkbox.onchange = updatePermissions;
+checkbox.onchange = () => { if (editing) permissionDirty = true; updatePermissions(); };
+path.oninput = () => { if (editing) permissionDirty = true; };
+access.onchange = () => { if (editing) permissionDirty = true; };
 x.fileRootOptions.append(item);
 }
 };
 const draw = () => {
 const labels = names();
 x.content.hidden = false; x.enabled.checked = state.enabled === true;
-setText(x.status, state.storage_ok === true ? '密钥只在创建时显示。关闭服务后，所有 MCP 与 REST 密钥立即停止访问。' : '访问配置存储不可用，暂不能启用服务或管理密钥。');
+setText(x.status, state.storage_ok === true ? 'Token 仅在创建或轮换时显示。关闭服务后，所有 MCP 与 REST 密钥立即停止访问；已有密钥保留。' : '访问配置存储不可用，暂不能启用服务或管理密钥。');
 setText(x.serviceStatus, state.enabled === true ? '已开启' : '已关闭');
 x.mcp.value = location.origin + '/mcp'; x.restStatus.value = location.origin + '/api/integration/status'; x.restAction.value = location.origin + '/api/integration/action'; x.restCapabilities.value = location.origin + '/api/integration/capabilities';
 const chosenRole = x.role.value || 'readonly';
 x.role.replaceChildren();
+if (editing && (!editing.role || editing.role === 'legacy')) {
+const option = document.createElement('option'); option.value = 'legacy'; option.textContent = '保留原有精确权限'; x.role.append(option);
+}
 for (const role of roles()) { const option = document.createElement('option'); option.value = role.id; option.textContent = String(role.label || roleLabels[role.id]); x.role.append(option); }
-x.role.value = roles().some(role => role.id === chosenRole) ? chosenRole : 'readonly';
+x.role.value = chosenRole === 'legacy' && editing ? 'legacy' : roles().some(role => role.id === chosenRole) ? chosenRole : 'readonly';
 const chosenScopes = x.scopes.children.length ? new Set([...x.scopes.querySelectorAll('input:checked')].map(input => input.value)) : new Set(['read']);
 x.scopes.replaceChildren();
 for (const scope of Array.isArray(state.scope_catalog) ? state.scope_catalog : []) {
@@ -5983,16 +6109,16 @@ const label = mount(`<label class="r1-api-scope"><input type="checkbox"><span><b
 const input = label.querySelector('input'); input.value = scope.id; input.checked = chosenScopes.has(scope.id);
 label.querySelector('b').textContent = String(scope.label || scope.id);
 label.querySelector('[data-scope-description]').textContent = String(scope.description || '');
-input.onchange = updatePermissions;
+input.onchange = () => { if (editing) permissionDirty = true; updatePermissions(); };
 x.scopes.append(label);
 }
 const keys = Array.isArray(state.keys) ? state.keys : [];
 x.keys.replaceChildren();
 if (!keys.length) x.keys.append(mount('<p class="sub">尚未创建访问密钥。</p>'));
 for (const key of keys) {
-const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></article>`);
+const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><div class="r1-api-actions"><button class="btn" type="button" data-ref="edit">编辑权限</button><button class="btn" type="button" data-ref="toggle"></button><button class="btn" type="button" data-ref="rotate">轮换 Token</button><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></div></article>`);
 const k = collect(item);
-setText(k.name, String(key.name || '未命名密钥')); setText(k.status, ({ active: '有效', expired: '已到期', revoked: '已撤销' })[key.status] || '状态未知');
+setText(k.name, String(key.name || '未命名密钥')); setText(k.status, ({ active: '有效', disabled: '已停用', expired: '已到期', revoked: '已撤销' })[key.status] || '状态未知');
 setText(k.role, !key.role || key.role === 'legacy' ? '原有精确权限' : (roles().find(role => role.id === key.role) || {}).label || roleLabels[key.role] || '角色未知');
 setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => scopeName(id, labels)).join('、') || '未授予权限');
 const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
@@ -6004,7 +6130,15 @@ k.files.append(row);
 }
 setText(k.ips, Array.isArray(key.allowed_ips) && key.allowed_ips.length ? key.allowed_ips.join('、') : '持密钥的局域网客户端');
 setText(k.created, r1ApiTime(key.created_at)); setText(k.expires, key.expires_at === null ? '长期' : r1ApiTime(key.expires_at)); setText(k.used, r1ApiTime(key.last_used_at));
-if (key.status === 'revoked') k.revoke.hidden = true;
+const disabled = key.disabled === true || key.enabled === false || key.status === 'disabled';
+setText(k.toggle, disabled ? '启用' : '停用');
+for (const button of [k.edit, k.toggle, k.rotate, k.revoke]) button.hidden = key.status === 'revoked';
+k.edit.onclick = () => { if (!busy) beginEdit(key); };
+k.toggle.onclick = () => { if (!busy) mutate('/api/access/keys/enable', { id: key.id, enabled: disabled }); };
+k.rotate.onclick = async () => {
+if (busy || !(await R1.ask('轮换访问 Token？', `「${esc(key.name || '未命名密钥')}」的旧 Token 将立即失效，新 Token 只显示一次；客户端需要更新配置。权限、停用状态和到期时间保持不变。`, true))) return;
+await mutate('/api/access/keys/rotate', { id: key.id });
+};
 k.revoke.onclick = async () => {
 if (busy || !(await R1.ask('撤销访问密钥？', `撤销「${esc(key.name || '未命名密钥')}」后，使用此密钥的客户端立即失去访问权限。`, true))) return;
 await mutate('/api/access/keys/revoke', { id: key.id });
@@ -6024,6 +6158,31 @@ x.audit.append(item);
 }
 drawFileRoots(); updatePermissions();
 };
+const endEdit = () => {
+editing = null; permissionDirty = false;
+setText(x.formTitle, '创建访问密钥'); setText(x.create, '创建密钥');
+x.cancelEdit.hidden = true; x.keepExpiry.hidden = true; x.expiry.value = '90';
+x.name.value = ''; x.ips.value = ''; x.role.value = 'readonly';
+x.scopes.querySelectorAll('input').forEach(input => { input.checked = input.value === 'read'; });
+x.fileRootOptions.querySelectorAll('[data-root-check]').forEach(input => { input.checked = false; });
+if (state) draw();
+};
+const beginEdit = key => {
+editing = key; permissionDirty = false; draw();
+setText(x.formTitle, '编辑访问密钥'); setText(x.create, '保存修改');
+x.cancelEdit.hidden = false; x.keepExpiry.hidden = false; x.expiry.value = 'keep';
+x.name.value = String(key.name || ''); x.ips.value = Array.isArray(key.allowed_ips) ? key.allowed_ips.join('\n') : '';
+x.role.value = !key.role || key.role === 'legacy' ? 'legacy' : key.role;
+const chosen = new Set(Array.isArray(key.scopes) ? key.scopes : []);
+x.scopes.querySelectorAll('input').forEach(input => { input.checked = chosen.has(input.value); });
+for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
+const grant = (Array.isArray(key.file_roots) ? key.file_roots : []).find(root => root.id === item.dataset.rootId);
+item.querySelector('[data-root-check]').checked = !!grant;
+item.querySelector('[data-root-path]').value = grant ? String(grant.path || '') : '';
+item.querySelector('[data-root-access]').value = grant && grant.access === 'readwrite' ? 'readwrite' : 'readonly';
+}
+updatePermissions(); x.formTitle.scrollIntoView({ block: 'start', behavior: 'smooth' }); x.name.focus();
+};
 const refresh = async () => {
 const result = await API.get('/api/access');
 if (!result || result.ok !== true) throw new Error((result && result.error) || '未读取到访问配置');
@@ -6036,10 +6195,14 @@ pending(true); x.error.hidden = true;
 try {
 const result = await R1.post(url, body);
 if (!result || result.ok !== true) throw new Error((result && result.error) || '操作未完成');
-if (url === '/api/access/keys') {
-if (!closed) { r1ShowApiSecret(result.token); x.name.value = ''; x.ips.value = ''; }
+if (url === '/api/access/keys' || url === '/api/access/keys/rotate') {
+if (!closed) {
+r1ShowApiSecret(result.token);
+if (url === '/api/access/keys') { x.name.value = ''; x.ips.value = ''; }
+}
 result.token = '';
 }
+if (url === '/api/access/keys/update' || (url === '/api/access/keys/revoke' && editing && editing.id === body.id)) endEdit();
 await refresh(); return result;
 } catch (error) { fail(error); return null; }
 finally { if (!closed) pending(false); }
@@ -6053,12 +6216,13 @@ await mutate('/api/access/settings', { enabled });
 x.form.onsubmit = async event => {
 event.preventDefault(); if (busy) return;
 const name = x.name.value.trim(), role = x.role.value, scopes = [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
-const allowed_ips = x.ips.value.split(/[\s,，;；]+/).map(value => value.trim()).filter(Boolean);
-if (!name || !scopes.length) { fail(new Error('请填写名称，并选择至少一项功能权限。')); return; }
-if (!Object.hasOwn(roleLevel, role)) { fail(new Error('请选择有效的操作角色。')); return; }
-if (new Set(allowed_ips).size !== allowed_ips.length || allowed_ips.some(ip => /[/\*]/.test(ip))) { fail(new Error('来源 IP 不可重复，也不接受网段或通配符。')); return; }
+let allowed_ips;
+try { allowed_ips = r1ApiRules(x.ips.value); } catch (error) { fail(error); return; }
+const changePolicy = !editing || permissionDirty;
+if (!name || (changePolicy && !scopes.length)) { fail(new Error('请填写名称，并选择至少一项功能权限。')); return; }
+if (changePolicy && !Object.hasOwn(roleLevel, role)) { fail(new Error('请选择有效的操作角色。')); return; }
 const file_roots = [];
-if (scopes.includes('files')) {
+if (changePolicy && scopes.includes('files')) {
 if (!fileRoots().length) { fail(new Error('没有已确认的存储根，不能创建文件权限。')); return; }
 for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
 if (!item.querySelector('[data-root-check]').checked) continue;
@@ -6071,15 +6235,26 @@ if (!file_roots.length) { fail(new Error('请至少勾选一个已确认的文�
 }
 const labels = names(), grant = scopes.map(id => labels.get(id) || id).join('、');
 const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root.label) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。文件功能待接入，当前仅保存范围授权。` : '';
+const body = { name, allowed_ips };
+if (changePolicy) Object.assign(body, { role, scopes, file_roots });
+if (!editing || x.expiry.value !== 'keep') body.expires_days = Number(x.expiry.value);
+if (editing) {
+body.id = editing.id;
+const note = changePolicy ? `角色：${roleLabels[role]}；功能：${esc(grant)}。${rangeNote}` : '原有角色、功能与文件范围保持不变。';
+if (!(await R1.ask('保存访问密钥修改？', `保存「${esc(name)}」的设置。${note}${x.expiry.value === 'keep' ? '到期时间保持不变。' : '有效期从本次保存重新计算。'}Token 不会变化。`))) return;
+await mutate('/api/access/keys/update', body);
+} else {
 if (!(await R1.ask('创建访问密钥？', `角色：${roleLabels[role]}。将向「${esc(name)}」授予：${esc(grant)}。${scopes.includes('power') ? '电源权限可安排关机或重启，需要管理员角色。' : ''}${rangeNote}`))) return;
-await mutate('/api/access/keys', { name, role, scopes, file_roots, allowed_ips, expires_days: Number(x.expiry.value) });
+await mutate('/api/access/keys', body);
+}
 };
 x.refresh.onclick = async () => {
 if (busy) return;
 pending(true); x.error.hidden = true;
 try { await refresh(); } catch (error) { fail(error); } finally { if (!closed) pending(false); }
 };
-x.role.onchange = updatePermissions;
+x.role.onchange = () => { if (editing) permissionDirty = true; updatePermissions(); };
+x.cancelEdit.onclick = endEdit;
 x.close.onclick = close; document.addEventListener('keydown', onKey);
 document.body.append(el); pending(true);
 refresh().catch(fail).finally(() => { if (!closed) pending(false); });
@@ -6094,7 +6269,7 @@ const key = JSON.stringify([web.addresses, web.port, pairing, st.version]);
 if (key === sig) return;
 sig = key;
 const rows = mount(`<div></div>`);
-const passwordMode = web.auth_mode === 'password';
+const passwordMode = web.auth_mode !== 'pair';
 rows.append(r1Field('网页地址', mount(`<span class="mono">${esc((web.addresses && web.addresses[0]) || ('http://NAS_IP:' + (web.port || 18732)))}</span>`),
 passwordMode ? '登录口令模式：写操作只使用可选登录口令，不再生成配对码。' : '配对码在小屏「设置 → 网页配置」生成，180 秒有效、只能使用一次。'));
 if (!passwordMode) {
@@ -6137,7 +6312,8 @@ SET_SCHEMA.push(
 { id: 'r1-monitor', title: '历史与告警', icon: 'pulse', desc: '历史采样、保留天数、流量统计范围与本地告警阈值。', custom: r1MonitorSettings },
 ...(R1_THRESHOLDS ? [R1_THRESHOLDS] : []),
 { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
-{ id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '面板登录口令（可选，默认关闭）。启用后网页写操作需要先登录；也可通过 R1_WEB_AUTH_MODE=password 完全停用配对码。', custom: r1AuthSettings },
+{ id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '首次默认无需口令，可在此设置；开启后网页监控与管理需要登录。', custom: r1AuthSettings },
+{ id: 'r1-services', title: '服务与开发', icon: 'server', desc: '容器与网页持续运行，小屏默认开启可切回官方，MCP 默认关闭；开发诊断必须设置来源白名单和有效时长。', custom: r1ServiceSettings },
 { id: 'r1-api', title: 'API 管理', icon: 'key', desc: '为局域网 AI 与自动化管理 MCP／REST 密钥、操作角色、功能与文件范围、来源限制和调用记录。', custom: r1ApiSettings },
 { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
 { id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [

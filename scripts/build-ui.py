@@ -27,6 +27,7 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
                                'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py',
                                'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
                                'api_access.py', 'api_permissions.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py',
+                               'network_access.py', 'service_settings.py', 'screen_manager.py',
                                'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py',
                                'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
                                'light_policy.py', 'monitoring.py')}}

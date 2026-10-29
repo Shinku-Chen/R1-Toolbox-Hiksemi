@@ -4,11 +4,11 @@
 
 ## 项目概述
 
-R1 Toolbox 是海康 HikSemi R1 NAS 的本地工具箱：通过 Docker Compose 部署一次镜像，把宿主小屏界面、网页监控/设置和硬件控制装进官方固件，不改写原厂 AppImage、启动脚本和厂商服务。
+R1 Toolbox 是海康 HikSemi R1 NAS 的常驻 Docker 工具箱：容器前台监督宿主命名空间中的网页监控／设置与硬件控制，小屏默认开启，可独立关闭并恢复官方界面，MCP 默认关闭。首次无网页登录口令，可在设置中添加。不改写原厂 AppImage、启动脚本和厂商服务。
 
 - 小屏：`ui/index.html` + `ui/assets/`，采用已评审原型的六标签、点阵读数与详情页，面向 376×960 触摸屏；温度页提供受限风扇五档，设置页提供四种原生灯效和二级电源管理，复杂曲线引导到网页。
 - 网页：`http://NAS_IP:18732`，直接使用 fnMonitor 2.19.0 的面板框架（MIT，源码固定在 `ui/panel-src/`），由 `runtime/fnm_compat.py` 用本机快照填充数据；R1 专有模块与设置在 `ui/panel-src/50-r1.js`。
-- 宿主服务：`runtime/ui_service.py` 起步，提供本机只读 API（18731）、网页入口（18732）和原厂窗口。
+- 宿主核心：`runtime/ui_service.py --resident` 提供本机 API（18731）、必需的网页入口（18732）；可选小屏由 `runtime/screen_manager.py` 独立管理，不得让图形环境或窗口故障阻止 Web 启动。
 
 ## 目录结构
 
@@ -22,7 +22,7 @@ ui/panel-src/      网页面板源码（fnMonitor，MIT）与 R1 扩展 50-r1.js
 ui/web/            网页面板构建产物 index.html / login.html（不要手改）
 scripts/build-panel.py  构建网页面板
 scripts/build-ui.py     打包镜像内 UI bundle
-tools/boot-once/   宿主一次性部署、挂载、服务生命周期
+tools/boot-once/   容器前台监督、RAM 展开、挂载与常驻服务生命周期（保留原目录名）
 tools/demo/        本地假 NAS：真实网页面板 + 真实小屏 UI 的联动演示
 native/            fan_guard.c 窄范围风扇适配层
 tests/             单元、HTTP、Linux 生命周期与无头浏览器检查
@@ -38,6 +38,8 @@ python scripts/build-ui.py             # 打包 UI bundle（镜像构建也会�
 python -m unittest discover -s tests -v
 node tests/check_interactions.cjs      # 小屏真实 API、触摸/导航/详情与写操作，需要 Chrome/Chromium
 node tests/check_web_config.cjs        # 网页面板 + 真实 HTTP fixture
+node tests/check_api_management.cjs    # Token 创建、编辑、停用、轮换与权限范围
+node tests/check_service_settings.cjs  # 服务开关、实际显示状态与开发白名单
 node tests/check_small_screen_prototype.cjs  # 独立小屏原型（离线 HTML）
 python tests/check_fan_guard_linux.py
 python tests/check_fan_startup_linux.py
@@ -55,14 +57,15 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 不绕过风扇接管预检：必须核验原厂温控二进制、唯一进程、字符设备与已加载驱动身份；不伪造 RPM，不盲扫 I²C，不停转风扇，不用目标百分比冒充实测转速。
 - SMART 只用 `smartctl -n standby` 且走后缓存；打开网页/详情不得临时启动自检或唤醒休眠盘。
 - 功耗只显示 RAPL 实测的 CPU 封装；不估算整机功耗，不把封装功耗当整机功耗。
-- 网页监控默认公开只读；写操作必须五位一次性配对码或登录口令会话，并保留同源/CSRF 校验、确认流程与 5 秒可取消电源操作。小屏控制令牌不得发给网页。
+- 默认 `password` 模式首次无口令，网页监控与管理直接可用；设置并开启口令后需登录会话。显式 `pair` 模式兼容原五位一次性配对流程。两种模式均保留同源／JSON／CSRF、操作确认和 5 秒可取消电源操作；小屏控制令牌不得发给网页。
 - 部署/升级必须复用原 Docker 项目与 `r1-toolbox-data` 数据卷；不删除卷、不使用 `down -v`。删除部署后正常重启可恢复官方显示。
 - 未知读数保持 `null` / `--`，不用 0 或猜测填补；不可用的能力隐藏或标注原因，不生成占位卡片。
 - 风扇接管排障优先使用受限的 `/api/dev/fan` 诊断接口，一次采集完整预检、进程现场和监督端真实判定时间线；不要反复追加少量错误字段、打包并要求用户部署试探。被截断的错误文本不足以判定根因，先对照结构化现场再修复。
-- 开发者白名单直接检测统一使用 `/api/dev/diagnostics`：只在显式开发模式、精确实际客户端 IP 和有效窗口内免登录读取固定项目，保持同源／JSON／CSRF；只读授权不得扩展到控制、风扇重试或任意命令，采集复用各来源的并发锁，逐项报告失败。接口边界见 `docs/dev-diagnostics.md`。
+- “服务与开发”通过所有者授权的 `/api/services/*` 管理独立小屏／MCP 开关和开发窗口，不能由 Bearer Token 或开发者白名单管理自己。小屏返回保存意图与实际 `active/busy/last_error`，不得按勾选成功宣称完成切换。Web 是常驻核心，端口不可用必须报告启动失败，不用空循环伪装健康容器。停止容器执行官方窗口、风扇等恢复，失败保留真实原因。
+- 开发者白名单直接检测统一使用 `/api/dev/diagnostics`：只在显式开发模式、实际连接来源命中非空局域网 IP／CIDR 白名单和有效窗口内免登录读取固定项目，保持同源／JSON／CSRF。Web 保存绝对到期时间，重启不续期；过期、配置损坏或无白名单都关闭授权。只读授权不得扩展到控制、风扇重试或任意命令，采集复用各来源的并发锁，逐项报告失败。接口边界见 `docs/dev-diagnostics.md`。
 - 原厂媒体会话验证使用显式 `POST /api/dev/media`，不自动加入被动检测。只读复用固定管理员已有会话，令牌与签名留在宿主，校验证书后只读首个状态帧；不重新登录、校时、重置令牌或转发任意原厂动作。原厂查询可能写完成状态，必须按 `docs/media-probe.md` 如实说明。
 - 媒体 `probe_all` 固定验证七类状态，每项取一次首帧，失败相互隔离。共享相册只使用当前管理员创建的既有相册，不由网页传入标识；没有相册时标记不适用，不造样本。原厂共享列表存在修复故障分支、计数有吞错零值，不能宣传为全程无副作用或据零值推断空闲。
-- 局域网 MCP `/mcp` 与 `/api/integration/*` 只使用独立 API 密钥，不把网页会话、小屏令牌或开发者窗口转成机器授权。服务默认关闭，新键按只读／读写／管理员角色、显式功能域及文件范围共同授权，列表与调用共用 `api_permissions`；管理员不绕过域与资源，旧键只保留原十工具和原六 scope，不随新目录扩权。API 管理沿用网页授权与同源／CSRF；新工具复用原有校验和锁，禁止任意命令、SQL 或原厂 action 代理。文件功能使用可信根 ID 加相对路径，真实打开时还须重新核验身份、ACL、符号链接和句柄，不能将授权规划缓存当安全证明。未实现领域标记待接入，不制造假工具。密钥仅创建响应显示一次、持久化只存摘要，审计不记录参数／结果／凭据，见 `docs/mcp-api.md` 与 `docs/ai-capability-roadmap.md`。
+- 局域网 MCP `/mcp` 与 `/api/integration/*` 只使用独立 API Token，不把网页会话、小屏令牌或开发者窗口转成机器授权。服务默认关闭，新键按只读／读写／管理员角色、显式功能域及文件范围共同授权，列表与调用共用 `api_permissions`；管理员不绕过域与资源，旧键只保留原十工具和原六 scope。Token 支持编辑、暂停／启用、不可逆撤销和原子轮换；省略权限或有效期字段保持原值，不把旧键自动升级。来源接受完整落在局域网／回环范围的 IP、CIDR 或点分掩码，始终匹配真实 peer，不能用转发头或公网全放行网段。API 管理沿用网页授权与同源／CSRF；新工具复用原有校验和锁，禁止任意命令、SQL 或原厂 action 代理。文件功能使用可信根 ID 加相对路径，真实打开时还须重新核验身份、ACL、符号链接和句柄，不能将授权规划缓存当安全证明。未实现领域标记待接入，不制造假工具。Token 仅创建／轮换响应显示一次、持久化只存摘要；轮换立即使旧摘要失效，审计不记录参数／结果／凭据。见 `docs/mcp-api.md` 与 `docs/ai-capability-roadmap.md`。
 
 ## 代码约定
 

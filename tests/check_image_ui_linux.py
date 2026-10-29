@@ -125,6 +125,80 @@ def check_web_config():
         raise AssertionError('未配对网页可以读取设备设置')
 
 
+def integration_request(path, payload=None, *, token=None):
+    headers = {'Content-Type': 'application/json', 'Origin': f'http://127.0.0.1:{WEB_PORT}',
+               'X-FNM-Request': '1'}
+    if token is not None:
+        headers['Authorization'] = 'Bearer ' + token
+        headers.pop('Origin')
+    request = urllib.request.Request(f'http://127.0.0.1:{WEB_PORT}' + path,
+        data=json.dumps(payload).encode() if payload is not None else None, headers=headers)
+    with HTTP.open(request, timeout=5) as response:
+        return response.status, json.load(response)
+
+
+def check_resident_container(image, volume, unique, data_directory):
+    """Run the real image entrypoint on disposable CI, without a screen device."""
+    container = 'r1-toolbox-resident-ci-' + unique
+    key_id = token = None
+    try:
+        command('docker', 'run', '--detach', '--pull=never', '--name', container,
+                '--privileged', '--pid', 'host', '--ipc', 'host', '--network', 'host',
+                '--env', 'TASK_CONTAINER=' + container, '--env', 'UI_MODE=image',
+                '--env', 'R1_WEB_BIND=127.0.0.1', '--env', 'R1_WEB_PORT=' + str(WEB_PORT),
+                '--env', 'R1_WEB_AUTH_MODE=password', '--env', 'R1_SMALL_SCREEN_ENABLED=1',
+                '--mount', 'type=bind,source=/,target=/host',
+                '--mount', 'type=bind,source=/dev,target=/host/dev',
+                '--mount', 'type=bind,source=/proc,target=/host/proc',
+                '--mount', 'type=bind,source=/sys,target=/host/sys',
+                '--mount', 'type=bind,source=/run,target=/host/run',
+                '--mount', 'type=volume,source=' + volume + ',target=/data', image)
+        wait_for_status()
+        assert command('docker', 'inspect', '--format', '{{.State.Running}}', container).stdout.strip() == 'true', '常驻容器启动后自行停止'
+        _, session = integration_request('/api/session')
+        assert isinstance(session, dict), '首次免密码网页不可读取设置'
+        deadline = time.monotonic() + 8
+        while True:
+            _, state = integration_request('/api/services')
+            if not state.get('screen', {}).get('busy'):
+                break
+            assert time.monotonic() < deadline, '缺少原厂图形环境时小屏未收敛'
+            time.sleep(.1)
+        assert state['screen']['active'] is False and state['screen']['available'] is False, 'CI 无小屏却伪造接管成功'
+        assert state['mcp']['enabled'] is False, '新机器授权不应默认开启'
+        assert command('docker', 'inspect', '--format', '{{.State.Running}}', container).stdout.strip() == 'true', 'GUI 不可用导致 Web 容器退出'
+        integration_request('/api/services/screen', {'enabled': False})
+        integration_request('/api/services/mcp', {'enabled': True})
+        _, created = integration_request('/api/access/keys', {'name': 'CI 常驻只读验收', 'role': 'readonly',
+            'scopes': ['read'], 'file_roots': [], 'allowed_ips': ['127.0.0.1'], 'expires_days': 1})
+        token, key_id = created.get('token'), created.get('key', {}).get('id')
+        assert isinstance(token, str) and key_id, 'CI 临时只读密钥未创建'
+        code, status = integration_request('/api/integration/status?section=system', token=token)
+        assert code == 200 and status.get('ok') is True, '关闭小屏后实际机器读取不可用'
+        check_fixture_settings()
+        check_fixture_fan_policy(data_directory)
+        command('docker', 'stop', '--timeout', '165', container, timeout=180)
+        wait_for_port_release()
+        assert command('docker', 'inspect', '--format', '{{.State.Running}}', container).stdout.strip() == 'false', '停止容器后仍显示运行'
+        command('docker', 'start', container)
+        wait_for_status()
+        _, restored = integration_request('/api/services')
+        assert restored['screen']['enabled'] is False, '重启被 ENV 覆盖了已保存的小屏关闭状态'
+        assert restored['mcp']['enabled'] is True, '重启没有恢复独立 MCP 开关'
+        code, status = integration_request('/api/integration/status?section=system', token=token)
+        assert code == 200 and status.get('ok') is True, '重启后临时只读密钥失效或机器服务未恢复'
+        integration_request('/api/access/keys/revoke', {'id': key_id})
+        key_id = token = None
+        integration_request('/api/services/mcp', {'enabled': False})
+        command('docker', 'stop', '--timeout', '165', container, timeout=180)
+        wait_for_port_release()
+    finally:
+        logs = cleanup_command('docker', 'logs', '--tail', '40', container)
+        if logs is not None and logs.stdout:
+            print(logs.stdout)
+        cleanup_command('docker', 'rm', '--force', container)
+
+
 def save_fixture_settings(token_file):
     deadline, token = time.monotonic() + 5, ''
     while time.monotonic() < deadline:
@@ -308,7 +382,7 @@ def main():
         assert original.read_bytes() == b'official', '挂载预检修改了宿主原始页面'
 
         service_attempted = True
-        command(*runtime['service_options'](unit, frontend), '--setenv=R1_WEB_BIND=127.0.0.1',
+        command(*runtime['service_options'](unit, frontend), '--setenv=R1_WEB_AUTH_MODE=pair', '--setenv=R1_WEB_BIND=127.0.0.1',
                 '--setenv=R1_WEB_PORT=' + str(WEB_PORT), '--setenv=R1_TOOLBOX_DATA_DIR=' + str(data_directory), sys.executable, '-B',
                 str(cache / 'runtime/ui_service.py'), '--app', str(app))
         # Type=simple publishes MainPID before the child finishes setting up its
@@ -322,7 +396,8 @@ def main():
         save_fixture_fan_policy(token, data_directory)
         save_fixture_auxiliary_settings(token, data_directory)
 
-        # The UI and API belong to the host service, not this source container.
+        # Legacy upgrade compatibility: this is only an artifact-source
+        # container, not the resident production entrypoint tested below.
         command('docker', 'stop', '--timeout', '2', container)
         command('docker', 'rm', container)
         container_attempted = False
@@ -347,7 +422,7 @@ def main():
         # container. This verifies the actual storage boundary, not a mock save.
         unit += '-reload'
         service_attempted = True
-        command(*runtime['service_options'](unit, frontend), '--setenv=R1_WEB_BIND=127.0.0.1',
+        command(*runtime['service_options'](unit, frontend), '--setenv=R1_WEB_AUTH_MODE=pair', '--setenv=R1_WEB_BIND=127.0.0.1',
                 '--setenv=R1_WEB_PORT=' + str(WEB_PORT), '--setenv=R1_TOOLBOX_DATA_DIR=' + str(data_directory),
                 sys.executable, '-B', str(cache / 'runtime/ui_service.py'), '--app', str(app))
         wait_for_status()
@@ -359,10 +434,12 @@ def main():
         command('systemctl', 'stop', unit)
         service_attempted = False
         wait_for_port_release()
+        check_resident_container(args.image, volume, unique, data_directory)
         assert original.read_bytes() == b'official', '停止服务后宿主原始页面发生变化'
         assert (original.stat().st_dev, original.stat().st_ino) == original_identity, '宿主原始页面标识发生变化'
         print('PASS: built image Docker copy, verified tmpfs UI cache and x86-64 native guard, real read-only service mount, '
-              'live API and authenticated web config surviving container stop/removal, '
+              'legacy API compatibility, real resident container lifetime and headless Web, independent MCP/GUI settings, '
+              'actual scoped machine reads before/after restart, port release on container stop, '
               'persistent Docker volume settings and independent save-only fan rules after service recreation '
               'without hardware capability or takeover, released ports and unchanged host files')
     finally:
