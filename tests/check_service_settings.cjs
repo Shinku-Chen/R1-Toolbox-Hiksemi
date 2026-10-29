@@ -74,6 +74,13 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       if (url.pathname === '/api/services/screen') {
         if (failScreen) return reply(503, { error: 'fixture：屏幕切换请求失败' });
         state.screen.enabled = body.enabled;
+        if (state.screen.available !== true) {
+          state.screen.active = false; state.screen.busy = false;
+          state.screen.last_error = body.enabled ? 'fixture：图形环境仍缺失，接管未完成' : 'fixture：图形环境不可用，小屏意图已关闭';
+          return body.enabled ? reply(503, { ok: false, saved: true,
+            error: 'fixture：小屏偏好已保存，图形环境预检失败', services: state })
+            : reply(200, { ok: true, services: state });
+        }
         if (screenError) {
           state.screen.busy = false; state.screen.last_error = 'fixture：官方窗口恢复未确认';
           return reply(503, { ok: false, saved: true, error: 'fixture：小屏偏好已保存，切换未完成', services: state });
@@ -132,7 +139,30 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     state.screen = { enabled: true, active: false, busy: false, available: false, last_error: 'fixture：screen_manager 未初始化' };
     await manager.locator('[data-ref="refresh"]').click();
     await manager.locator('[data-ref="screenState"]').filter({ hasText: 'screen_manager' }).waitFor();
-    check('缺少screen_manager不能伪造切换能力', await manager.locator('[data-ref="screenEnabled"]').isDisabled());
+    check('缺少图形环境仍可关闭意图且保留不可用原因', !(await manager.locator('[data-ref="screenEnabled"]').isDisabled())
+      && await manager.locator('[data-ref="screenEnabled"]').isChecked()
+      && (await manager.locator('[data-ref="screenState"]').innerText()).includes('screen_manager'));
+    const screenWritesBeforeUnavailable = calls.filter(call => call.path === '/api/services/screen').length;
+    await manager.locator('[data-ref="screenEnabled"]').click();
+    await manager.locator('[data-ref="screenState"]').filter({ hasText: '意图已关闭' }).waitFor();
+    check('不可用时可保存关闭小屏且不会伪造接管', !state.screen.enabled && !state.screen.active
+      && !(await manager.locator('[data-ref="screenEnabled"]').isChecked()));
+    await manager.locator('[data-ref="screenEnabled"]').click();
+    await manager.locator('[data-ref="screenState"]').filter({ hasText: '图形环境仍缺失' }).waitFor();
+    check('不可用时显式重开仍由后端预检且诚实显示失败', state.screen.enabled && !state.screen.active
+      && await manager.locator('[data-ref="screenEnabled"]').isChecked()
+      && !(await manager.locator('[data-ref="screenState"]').innerText()).includes('Toolbox 小屏已接管'));
+    await page.waitForTimeout(2200);
+    check('不可用不触发后台自动接管重试', calls.filter(call => call.path === '/api/services/screen').length === screenWritesBeforeUnavailable + 2);
+    await manager.locator('[data-ref="screenEnabled"]').click();
+    await manager.locator('[data-ref="screenState"]').filter({ hasText: '意图已关闭' }).waitFor();
+    // The manager still displays its earlier unavailable snapshot. Only this
+    // explicit request rechecks the newly restored graphical environment.
+    state.screen.available = true; state.screen.last_error = null;
+    await manager.locator('[data-ref="screenEnabled"]').click();
+    await manager.locator('[data-ref="screenState"]').filter({ hasText: 'Toolbox 小屏已接管' }).waitFor();
+    check('图形环境恢复后无需旧缓存先变可用也能显式重开', state.screen.enabled && state.screen.active
+      && calls.filter(call => call.path === '/api/services/screen').length === screenWritesBeforeUnavailable + 4);
 
     await manager.locator('[data-ref="mcpEnabled"]').click();
     await manager.locator('[data-ref="mcpState"]').filter({ hasText: '已开启' }).waitFor();

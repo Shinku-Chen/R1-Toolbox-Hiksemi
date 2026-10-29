@@ -937,7 +937,9 @@ function r1OpenServiceManager() {
   const fail = error => { if (!closed) { setText(x.error, '服务设置操作失败：' + String(error && error.message || '请求未完成').slice(0, 160)); x.error.hidden = false; x.retry.hidden = !!state; } };
   const pending = value => {
     busy = value; el.setAttribute('aria-busy', String(value));
-    x.screenEnabled.disabled = value || !state || state.screen.available !== true || state.screen.busy === true;
+    // An unavailable GUI must still allow opting out or an explicit retry;
+    // the host rechecks availability and all display preflight conditions.
+    x.screenEnabled.disabled = value || !state || state.screen.busy === true;
     x.mcpEnabled.disabled = value || !state; x.saveDeveloper.disabled = value || !state; x.refresh.disabled = value; x.retry.disabled = value;
   };
   const draw = () => {
