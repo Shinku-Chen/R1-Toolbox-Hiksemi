@@ -1,6 +1,6 @@
 # 开发者白名单检测
 
-`POST /api/dev/diagnostics` 是开发用的固定只读检测入口。开启开发模式、真实连接来源命中局域网 IP／CIDR 白名单且处于有效窗口时，可以直接查看检测目录，或一次采集设备、存储、业务和风扇现场；无需登录口令会话或 `R1_DEV_ALLOW_COMMANDS`。
+`POST /api/dev/diagnostics` 是开发用的固定只读检测入口。开启开发模式、真实连接来源命中局域网 IP／CIDR 白名单且处于有效窗口时，可以查看目录、采集原四项现场，或显式选择硬盘身份、文件访问就绪及固定 Docker 项目证据；无需机器 Token、登录口令会话或 `R1_DEV_ALLOW_COMMANDS`。
 
 这个授权只适用于本接口。原有 `/api/dev/storage`、`/api/dev/business`、`/api/dev/fan` 和 `/api/dev/exec` 保持各自的授权规则。风扇接管重试、配置修改、应用控制和电源操作不属于本接口的检测项目。
 
@@ -50,9 +50,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"snapshot"}
 {"action":"snapshot","checks":["device","storage"]}
 {"action":"snapshot","checks":["storage_identity"]}
+{"action":"snapshot","checks":["file_access_readiness","docker_project_readiness"]}
 ```
 
-不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号。目录额外列出 `storage_identity`，只有在 `checks` 中明确选择才采集。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
+不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号或新增就绪检查。目录共列七项，额外三项只有在 `checks` 中明确选择才采集。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
 
@@ -63,6 +64,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `storage_identity` | 仅显式选择：复用同一固定查询、身份缓存和 IPC 锁，核验当前设备生命周期及唯一映射后返回完整序列号；默认快照与原 `storage` 仍只含序列号哈希 |
 | `business` | 原厂应用已有缓存或 Toolbox 上次显式查询、身份确认的 aria2／qB 有界任务队列、上次显式媒体脱敏结果及真实服务现场；与原业务诊断共用采集锁，具体限制见[业务状态](business-diagnostics.md) |
 | `fan` | `FanDiagnostics.snapshot` 的被动预检与现场；不发送温控信号、不启动时间线、不应用策略、不重试接管 |
+| `file_access_readiness` | 只读可信根规划与固定安全证明清单；与存储诊断共用锁，不读用户文件或凭据、不执行 SMART。文件 ACL、安全打开未闭合时明确返回文件访问不可用，根规划不算内容读取通过 |
+| `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
+
+Docker 候选核验会访问配置所在文件系统的元数据，可能唤醒休眠磁盘，不能把它说成纯缓存或无磁盘访问；因此只允许显式选择，不加入默认采集或后台轮询。其 peer、引擎、配置身份和读取限额见[固定项目读取](docker-projects.md)。检测期间开发窗口到期或被关闭时，整次结果丢弃并返回 `403`，不续期，也不输出已采到的现场。
 
 读取到的应用缓存不等于完整实时安装列表；下载来源不可用或需要授权时数据保持未知；媒体读取上次显式采集结果和逐项时间，不自动发起原厂媒体查询。白名单授权并不改变这些数据来源的限制。
 
