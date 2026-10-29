@@ -25,6 +25,7 @@ if _RUNTIME_DIR not in sys.path:
 from fnm_auth import AuthStore, COOKIE as AUTH_COOKIE
 from fnm_compat import FnmonitorPanel
 from fan_diagnostics import FanDiagnostics
+from vendor_business import collect_business_diagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
                       'saver_brightness', 'saver_content', 'saver_items', 'brightness',
@@ -61,7 +62,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/idrac/refresh', '/api/disk_scan/now', '/api/scan_log/clear', '/api/update/install',
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
-    '/api/dev/exec', '/api/dev/fan', '/api/dev/storage',
+    '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business',
 ))
 
 
@@ -228,6 +229,7 @@ class WebConfigServer:
         self.lock = threading.RLock()
         self.operation_lock = threading.RLock()
         self.storage_diagnostic_lock = threading.Lock()
+        self.business_diagnostic_lock = threading.Lock()
         self.server = self.thread = None
         self.reason = None
         self.pair_hash, self.pair_until = None, 0
@@ -701,6 +703,8 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip=''):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
+        if route == '/api/dev/business':
+            return self._business_debug_post(body, headers, ip)
         if route == '/api/dev/storage':
             return self._storage_debug_post(body, headers, ip)
         if route == '/api/dev/fan':
@@ -765,6 +769,23 @@ class WebConfigServer:
             return status, payload, None
         finally:
             self.operation_lock.release()
+
+    def _business_debug_post(self, body, headers, ip):
+        """Fixed passive business snapshot; never a general factory API bridge."""
+        if not self._dev_authorized(ip) or not self.dev_commands:
+            return 403, {'ok': False, 'error': '业务诊断接口未启用或客户端未授权'}, None
+        if self.auth.required() and self.password_session(headers) is None:
+            return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
+        if not isinstance(body, dict) or body != {'action': 'snapshot'}:
+            return 400, {'ok': False, 'error': '仅支持固定只读 snapshot 查询'}, None
+        if not self.business_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有业务诊断正在进行'}, None
+        try:
+            return 200, {'ok': True, 'snapshot': collect_business_diagnostics()}, None
+        except Exception:
+            return 503, {'ok': False, 'error': '业务诊断暂不可确认'}, None
+        finally:
+            self.business_diagnostic_lock.release()
 
     def _storage_debug_post(self, body, headers, ip):
         """Fixed name diagnostics; the collector reuses existing SMART cache only.

@@ -36,7 +36,8 @@ class BundleTests(unittest.TestCase):
         (self.root / 'runtime/histor.py').write_text('class HistorAdapter: pass\n')
         (self.root / 'runtime/web_config.py').write_text('class WebConfigServer: pass\n')
         for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
-                     'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'disk_names.py', 'vendor_device.py'):
+                     'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'disk_names.py', 'vendor_device.py',
+                     'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py'):
             (self.root / 'runtime' / name).write_text('# fixture only\n')
         (self.root / 'ui/web').mkdir()
         for name in ('index.html', 'login.html'):
@@ -77,6 +78,8 @@ class BundleTests(unittest.TestCase):
         self.assertIn('runtime/fan_diagnostics.py', files)
         self.assertIn('runtime/disk_names.py', files)
         self.assertIn('runtime/vendor_device.py', files)
+        for name in ('vendor_business', 'vendor_runtime', 'vendor_app_diagnostics', 'vendor_download_diagnostics'):
+            self.assertIn('runtime/' + name + '.py', files)
         self.assertEqual((self.root / 'build/ui-bundle.sha256').read_text(), self.digest + '\n')
 
     def test_archive_digest_and_payload_hash_corruption_are_rejected(self):
