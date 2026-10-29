@@ -148,6 +148,8 @@ console.log(await response.json());
 
 ## 显式读取完整硬盘序列号
 
+所有者网页的 `/api/overview` 与 `/api/smart?dev=...` 现可显示经过核验的完整 SN。只读取后台已取得的身份缓存并重新检查设备生命周期，不调用原厂空间管理或重新运行 SMART；缺失、冲突、换盘和缓存失效仍为 `null`。已有口令时需要网页登录；首次未设口令的 `open` 模式沿用网页授权。Bearer、开发白名单本身、MCP、公开 v1 以及小屏快照不会因此获得完整 SN。数据覆盖和未接入项见[三端数据覆盖](data-coverage.md)。
+
 默认 `storage` 检查和原 `POST /api/dev/storage` 继续只返回序列号摘要。用户明确需要完整序列号时，在已授权的开发窗口使用统一入口 `POST /api/dev/diagnostics`，显式请求：
 
 ```json

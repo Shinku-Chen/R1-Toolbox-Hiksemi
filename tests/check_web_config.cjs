@@ -167,6 +167,7 @@ class Monitor:
                 'network':{'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000},
                 'disks':[{'mount':'/drives/data','used_bytes':1e12,'total_bytes':4e12,'usage_percent':25}]}
 class Insights:
+    storage_identity_available = True
     def __init__(self):
         self.data={'system':{'model':'HIKSEMI R1','cpu_model':'Intel N100','cpu_logical_cores':4,'uptime_seconds':201600,
                      'cpu_usage_percent':24.5,'load_average':[.2,.3,.5],'memory':{'used_bytes':3e9,'total_bytes':8e9,'usage_percent':37.5},
@@ -183,6 +184,13 @@ class Insights:
                   'gpu':{'available':False,'reason':'fixture: no GPU','devices':[]},
                   'history':[{'cpu_usage_percent':v,'memory_usage_percent':37.5} for v in [18,22,28,21,24.5]]}
     def snapshot(self):return copy.deepcopy(self.data)
+    def storage_identity_cached(self):
+        # Fixed cache-only fixture: no SMART execution or vendor connection.
+        if not self.storage_identity_available:
+            raise RuntimeError('fixture: storage identity cache unavailable')
+        return {'available': True, 'items': [{'id': 'sda', 'serial': 'FIXTURE-WEB-SN',
+                'serial_status': 'ok', 'serial_sources': ['smart_identity_cache', 'hiksemi_storage_socket'],
+                'matched': True}]}
     def smart_cached(self,name):
         if name!='sda':return None
         return {'smart_data':{'ata_smart_attributes':{'table':[{'id':5,'name':'Reallocated_Sector_Ct','value':100,'worst':100,'thresh':10,'when_failed':'-','raw':{'value':0,'string':'0'}}]},'power_on_time':{'hours':123},'power_cycle_count':4,'rotation_rate':7200}}
@@ -247,6 +255,10 @@ try:
         elif operation == 'saver_disconnect_disk':
             missing_sources.add('disk')
             primary.fan_policy.tick()
+        elif operation == 'storage_identity_unavailable':
+            insights.storage_identity_available = False
+        elif operation == 'storage_identity_available':
+            insights.storage_identity_available = True
         elif operation == 'saver_fail_save':
             primary.controller.fail_settings = True
         elif operation == 'saver_allow_save':
@@ -616,6 +628,33 @@ finally:
     const fanState = await api('/api/r1');
     check('温控状态接口可读', !!fanState.body && !!fanState.body.fan && !!fanState.body.fan.capability);
     check('CPU 手动与系统原厂中档同时生效', fanState.body.fan.channels.cpu.active === true && fanState.body.fan.channels.system.active === false && fanState.body.fan.official.mode === 'medium', JSON.stringify({ channels: fanState.body.fan.channels, official: fanState.body.fan.official, last_error: fanState.body.fan.last_error }));
+    /* 所有者详情从已核验身份缓存显示 SN；缓存失效不能沿用旧值。 */
+    const waitDiskSerial = async expected => {
+      await page.waitForFunction(expected => {
+        const row = [...document.querySelectorAll('#sheetBody [data-ref="info"] .kv > div')].find(node => node.querySelector('dt')?.textContent === '序列号');
+        const value = row?.querySelector('dd')?.textContent.trim() || '';
+        return expected === null ? /^(?:--|—|未知|未读取到)$/.test(value) : value === expected;
+      }, expected, { timeout: 8000 });
+      return (await page.locator('#sheetBody [data-ref="info"] .kv > div').filter({ has: page.locator('dt', { hasText: '序列号' }) }).locator('dd').textContent()).trim();
+    };
+    const refreshStorage = async () => {
+      const refreshed = page.waitForResponse(response => response.url() === origin + '/api/overview' && response.request().method() === 'GET');
+      await page.locator('#btnRefresh').click();
+      check('存储刷新读取成功', (await refreshed).status() === 200);
+    };
+    await page.locator('#pageSeg button[data-page="storage"]').click();
+    await refreshStorage();
+    await namedDisk.click();
+    check('所有者硬盘详情实际显示已核验缓存 SN', await waitDiskSerial('FIXTURE-WEB-SN') === 'FIXTURE-WEB-SN');
+    await page.locator('#sheetClose').click();
+    await fixtureCall('storage_identity_unavailable');
+    await refreshStorage();
+    await namedDisk.click();
+    const missingSerial = await waitDiskSerial(null);
+    check('身份缓存不可用时 SN 显示未知且不保留旧值', /^(?:--|—|未知|未读取到)$/.test(missingSerial) && !(await page.locator('#sheetBody').textContent()).includes('FIXTURE-WEB-SN'));
+    await page.locator('#sheetClose').click();
+    await fixtureCall('storage_identity_available');
+    await page.locator('#pageSeg button[data-page="settings"]').click();
     await reloadFanSettings(page);
     check('编辑器显示手动已接管与实际中档', /手动接管中/.test(await cpuEditor.textContent()) && /原厂 · 中档/.test(await systemEditor.textContent()));
     const saveFanDirect = async label => {

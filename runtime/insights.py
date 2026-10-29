@@ -235,6 +235,9 @@ class InsightsCollector:
         # of all temperature/health/raw-data expiry. It never survives a changed
         # sysfs lifetime or disagreement with a current identity source.
         self._disk_serial_cache = {}
+        # Owner Web identity is a separate projection, never a public snapshot.
+        # Each record is tied to the same sampled lifetime and fixed vendor list.
+        self._disk_verified_serials = {}
         self._state = {
             "schema_version": 1, "timestamp": None, "system": {}, "interfaces": [],
             "disks": _capability(), "containers": _capability(), "vms": _capability(),
@@ -265,7 +268,13 @@ class InsightsCollector:
 
     def snapshot(self):
         with self._lock:
-            return copy.deepcopy(self._state)
+            state = copy.deepcopy(self._state)
+        # Local inventory may read sysfs serials, but its shared snapshot serves
+        # public v1, the small screen and machine integrations as well as Web.
+        for device in state.get("device", {}).get("storage", {}).get("devices", []):
+            if isinstance(device, dict) and "serial" in device:
+                device["serial"] = None
+        return state
 
     def _fast_loop(self):
         while not self._stop.is_set():
@@ -667,7 +676,7 @@ class InsightsCollector:
         return self._disk_serial_info(name, folder, smart)["serial"]
 
     def _disks(self):
-        rows, active, serials, contexts = [], set(), {}, {}
+        rows, active, serials, contexts, details = [], set(), {}, {}, {}
         with self._lock:
             identity_cache = copy.deepcopy(self._disk_serial_cache)
         for folder in sorted((self.sys_root / "block").glob("*"))[:128]:
@@ -704,6 +713,7 @@ class InsightsCollector:
             prior_serial = prior.get("serial") if prior.get("cache_key") == cache_key else None
             detail = self._disk_serial_info(name, folder, smart, prior_serial) if consistent else {"serial": None, "status": "identity_changed", "sources": []}
             serials[name] = detail["serial"]
+            details[name] = detail
             if detail["status"] == "ok" and any(source in detail["sources"] for source in ("smart_cache", "smart_identity_cache")):
                 identity_cache[name] = {"cache_key": cache_key, "serial": detail["serial"]}
             else:
@@ -711,7 +721,9 @@ class InsightsCollector:
             contexts[name] = {"generation": generation, "identity": identity,
                               "cache_key": cache_key, "row": copy.deepcopy(entry), "consistent": consistent}
         self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
-        names = read_disk_names(serials, client=self.storage_client)
+        storage = self.storage_client.snapshot()
+        names = read_disk_names(serials, storage)
+        verified_serials = {}
         # The two vendor getters may overlap a hot unplug. Check the same sysfs
         # lifetime again before publishing an otherwise valid serial/name join.
         for row in rows:
@@ -722,11 +734,73 @@ class InsightsCollector:
             context["consistent"] = current
             if not current:
                 identity_cache.pop(name, None)
+            detail = details[name] if current else {"serial": None, "status": "identity_changed", "sources": []}
+            serial, status = self._storage_serial_match(name, detail, serials, storage, names["available"])
+            verified_serials[name] = {"cache_key": context["cache_key"], "serial": serial,
+                                      "serial_status": status,
+                                      "serial_sources": detail["sources"] + (["hiksemi_storage_socket"] if serial else [])}
         with self._lock:
             self._disk_name_context = contexts
             self._disk_serial_cache = {name: value for name, value in identity_cache.items() if name in active}
+            self._disk_verified_serials = verified_serials
         return {"available": bool(rows), "reason": None if rows else "未发现可查询的底层块设备", "items": rows,
                 "names": {"available": names["available"], "reason": names["reason"]}}
+
+    def storage_identity_cached(self):
+        """Owner Web projection of background identity; no SMART or vendor IPC.
+
+        Recheck bounded sysfs/udev metadata against the sampled generation and
+        current identity caches. A replaced, ambiguous or conflicting disk stays
+        unknown until a later background sample verifies the fixed vendor list.
+        """
+        with self._lock:
+            contexts = copy.deepcopy(self._disk_name_context)
+            identities = copy.deepcopy(self._disk_serial_cache)
+            verified = copy.deepcopy(self._disk_verified_serials)
+            smart_cache = copy.deepcopy(self._smart_cache)
+        details = {}
+        for name, context in contexts.items():
+            folder = self.sys_root / "block" / name
+            current = (context["consistent"] and context["generation"] == self._disk_generation(folder)
+                       and context["identity"] == self._disk_identity(name, folder))
+            cached = smart_cache.get(name)
+            smart = cached[1] if current and cached and len(cached) == 3 and cached[2] == context["cache_key"] else None
+            prior = identities.get(name, {})
+            prior_serial = prior.get("serial") if prior.get("cache_key") == context["cache_key"] else None
+            details[name] = (self._disk_serial_info(name, folder, smart, prior_serial) if current else
+                             {"serial": None, "status": "identity_changed", "sources": []})
+        items = []
+        for name, context in contexts.items():
+            detail, evidence = details[name], verified.get(name, {})
+            folder = self.sys_root / "block" / name
+            current = (context["consistent"] and context["generation"] == self._disk_generation(folder)
+                       and context["identity"] == self._disk_identity(name, folder))
+            serial, status = None, detail["status"]
+            if not current:
+                status = "identity_changed"
+            elif status == "ok":
+                if sum(row["serial"] == detail["serial"] for row in details.values()) != 1:
+                    status = "conflict"
+                elif evidence.get("cache_key") != context["cache_key"]:
+                    status = "missing"
+                elif evidence.get("serial_status") != "ok":
+                    status = evidence.get("serial_status") or "missing"
+                elif evidence.get("serial") != detail["serial"]:
+                    status = "conflict"
+                else:
+                    serial = detail["serial"]
+            if status in ("conflict", "invalid", "identity_changed"):
+                with self._lock:
+                    for cache in (self._disk_serial_cache, self._disk_verified_serials):
+                        if cache.get(name, {}).get("cache_key") == context["cache_key"]:
+                            cache.pop(name, None)
+            items.append({"id": name, "serial": serial, "serial_status": status,
+                          "serial_sources": evidence.get("serial_sources", []) if serial else [],
+                          "matched": serial is not None})
+        available = any(row["serial"] is not None for row in items)
+        return {"available": available, "items": items,
+                "source": "insights_cache+hiksemi_storage_socket",
+                "reason": None if available else "未取得缓存与原厂列表唯一一致的当前硬盘序列号"}
 
     def storage_name_diagnostics(self):
         """Sample fixed vendor lists with existing identity caches, never SMART.
@@ -805,8 +879,9 @@ class InsightsCollector:
                 result = {"user_name": None, "space_names": [], "name_source": None}
             if detail["status"] in ("conflict", "invalid", "identity_changed"):
                 with self._lock:
-                    if self._disk_serial_cache.get(name, {}).get("cache_key") == context["cache_key"]:
-                        self._disk_serial_cache.pop(name, None)
+                    for cache in (self._disk_serial_cache, self._disk_verified_serials):
+                        if cache.get(name, {}).get("cache_key") == context["cache_key"]:
+                            cache.pop(name, None)
             if include_serial:
                 serial, status = self._storage_serial_match(name, detail, serials, snapshot, names['available'])
                 if status != 'ok':

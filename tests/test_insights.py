@@ -508,6 +508,97 @@ class InsightsTests(unittest.TestCase):
         self.assertIsNone(row['user_name'])
         self.assertEqual(row['space_names'], [])
 
+    def test_owner_web_identity_uses_private_background_cache_without_any_query(self):
+        self.block()
+        client = self.storage_names_fixture()
+        self.identity_smart_fixture()
+        overview = self.collector._disks()
+        self.collector._state['disks'] = overview
+        self.collector._state['device'] = {'storage': {'devices': [{'name': 'sda', 'serial': 'SERIAL-A'}]}}
+        before = list(self.calls)
+        with mock.patch.object(self.collector, '_run', side_effect=AssertionError('no command allowed')):
+            with mock.patch.object(client, 'snapshot', side_effect=AssertionError('no vendor IPC allowed')):
+                value = self.collector.storage_identity_cached()
+        self.assertTrue(value['available'])
+        self.assertEqual(value['items'][0]['serial'], 'SERIAL-A')
+        self.assertEqual(value['items'][0]['serial_status'], 'ok')
+        self.assertTrue(value['items'][0]['matched'])
+        self.assertIn('hiksemi_storage_socket', value['items'][0]['serial_sources'])
+        self.assertNotIn('SERIAL-A', json.dumps(overview))
+        self.assertNotIn('SERIAL-A', json.dumps(self.collector.snapshot()))
+        self.assertIsNone(self.collector.snapshot()['device']['storage']['devices'][0]['serial'])
+        self.assertEqual(self.collector._state['device']['storage']['devices'][0]['serial'], 'SERIAL-A')
+        self.assertEqual(self.calls, before)
+        value['items'][0]['serial'] = 'mutated-copy'
+        self.assertEqual(self.collector.storage_identity_cached()['items'][0]['serial'], 'SERIAL-A')
+
+    def test_owner_web_identity_keeps_standby_serial_without_refreshing_smart(self):
+        self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        self.now += 31
+        self.identity_smart_fixture(None, standby=True)
+        self.collector._disks()
+        before = list(self.calls)
+        row = self.collector.storage_identity_cached()['items'][0]
+        self.assertEqual(row['serial'], 'SERIAL-A')
+        self.assertTrue(row['matched'])
+        self.assertEqual(self.calls, before)
+
+    def test_owner_web_identity_never_fills_vendor_only_or_conflicting_cache(self):
+        self.block()
+        client = self.storage_names_fixture()
+        self.collector._disks()
+        self.assertIsNone(self.collector.storage_identity_cached()['items'][0]['serial'])
+        self.now += 31
+        self.identity_smart_fixture()
+        client.snapshot.return_value['disks'].append({'disk_name': 'sdb', 'disk_port': 2, 'disk_serial': 'SERIAL-A'})
+        self.collector._disks()
+        row = self.collector.storage_identity_cached()['items'][0]
+        self.assertIsNone(row['serial'])
+        self.assertEqual(row['serial_status'], 'conflict')
+        self.assertFalse(row['matched'])
+        client.snapshot.return_value = {'available': False, 'reason': 'fixture unavailable'}
+        self.collector._disks()
+        row = self.collector.storage_identity_cached()['items'][0]
+        self.assertIsNone(row['serial'])
+        self.assertEqual(row['serial_status'], 'vendor_unavailable')
+
+    def test_owner_web_identity_rechecks_sources_and_invalidates_conflict(self):
+        folder = self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        self.write(folder / 'device/serial', 'OTHER')
+        row = self.collector.storage_identity_cached()['items'][0]
+        self.assertIsNone(row['serial'])
+        self.assertIn(row['serial_status'], ('conflict', 'identity_changed'))
+        self.assertEqual(self.collector._disk_verified_serials, {})
+        (folder / 'device/serial').unlink()
+        self.assertIsNone(self.collector.storage_identity_cached()['items'][0]['serial'])
+
+    def test_owner_web_identity_replacement_during_read_is_not_disclosed(self):
+        folder = self.block()
+        self.storage_names_fixture()
+        self.identity_smart_fixture()
+        self.collector._disks()
+        original = self.collector._disk_serial_info
+
+        def replace_after_read(*args, **kwargs):
+            result = original(*args, **kwargs)
+            folder.rename(self.temporary / 'removed-owner-serial')
+            self.block()
+            return result
+
+        before = list(self.calls)
+        with mock.patch.object(self.collector, '_disk_serial_info', side_effect=replace_after_read):
+            row = self.collector.storage_identity_cached()['items'][0]
+        self.assertEqual(row['serial_status'], 'identity_changed')
+        self.assertIsNone(row['serial'])
+        self.assertFalse(row['matched'])
+        self.assertEqual(self.calls, before)
+
     def test_standby_without_serial_keeps_only_verified_identity_not_temperature(self):
         self.block()
         self.storage_names_fixture()

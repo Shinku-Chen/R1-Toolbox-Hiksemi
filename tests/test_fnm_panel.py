@@ -58,11 +58,11 @@ class FanPolicy:
         self.calls = []
 
     def snapshot(self):
-        return {'config': {'schema_version': 1, 'channels': {
-                    'cpu': {'mode': 'vendor', 'sources': [], 'quiet_below': 40, 'normal_at': 55,
-                            'full_at': 70, 'quiet_percent': 55, 'normal_percent': 75, 'manual_percent': 70},
-                    'system': {'mode': 'vendor', 'sources': [], 'quiet_below': 35, 'normal_at': 45,
-                               'full_at': 55, 'quiet_percent': 55, 'normal_percent': 75, 'manual_percent': 70}}},
+        return {'config': {'schema_version': 2, 'channels': {
+                    'cpu': {'mode': 'vendor', 'sources': [], 'low_temp': 55,
+                            'high_temp': 70, 'quiet_percent': 55, 'normal_percent': 75, 'manual_percent': 70},
+                    'system': {'mode': 'vendor', 'sources': [], 'low_temp': 45,
+                               'high_temp': 55, 'quiet_percent': 55, 'normal_percent': 75, 'manual_percent': 70}}},
                 'active': False, 'busy': False, 'pending_changes': False, 'recovery_confirmed': True,
                 'capability': {'available': True, 'reason': ''},
                 'channels': {'cpu': {'mode': 'vendor', 'active': False, 'reference_c': None,
@@ -352,6 +352,71 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(rows[0]['name_source'], 'hiksemi_space_db')
         self.assertIsNone(rows[1]['user_name'])
         self.assertEqual(rows[1]['space_names'], ['共享 RAID'])
+
+    def test_disk_serial_is_owner_opt_in_and_never_falls_back_to_inventory(self):
+        getter = mock.Mock(return_value={'available': True, 'items': [
+            {'id': 'sda', 'serial': 'VERIFIED-CACHE-SN', 'serial_status': 'ok',
+             'serial_sources': ['smart_identity_cache', 'hiksemi_storage_socket'], 'matched': True}]})
+        self.panel.insights.storage_identity_cached = getter
+        self.assertIsNone(self.panel.overview()['disks_detail'][0]['serial'])
+        getter.assert_not_called()
+        row = self.panel.overview(include_identity=True)['disks_detail'][0]
+        self.assertEqual(row['serial'], 'VERIFIED-CACHE-SN')
+        self.assertEqual(row['serial_status'], 'ok')
+        getter.return_value['items'][0].update(serial=None, serial_status='conflict', matched=False)
+        row = self.panel.overview(include_identity=True)['disks_detail'][0]
+        self.assertIsNone(row['serial'])
+        self.assertEqual(row['serial_status'], 'conflict')
+        self.assertNotIn('SN1', json.dumps(self.panel.overview(include_identity=True)))
+        getter.side_effect = RuntimeError('fixture cache unavailable')
+        self.assertIsNone(self.panel.overview(include_identity=True)['disks_detail'][0]['serial'])
+
+    def test_disk_serial_preserves_full_bounded_identity_and_rejects_overflow(self):
+        self.panel.insights.storage_identity_cached = mock.Mock(return_value={'items': [
+            {'id': 'sda', 'serial': 'S' * 512, 'serial_status': 'ok', 'matched': True}]})
+        self.assertEqual(self.panel.overview(include_identity=True)['disks_detail'][0]['serial'], 'S' * 512)
+        self.panel.insights.storage_identity_cached.return_value['items'][0]['serial'] = 'S' * 513
+        row = self.panel.overview(include_identity=True)['disks_detail'][0]
+        self.assertIsNone(row['serial'])
+        self.assertEqual(row['serial_status'], 'invalid')
+
+    def test_power_unknowns_are_not_reported_as_measured_zero(self):
+        power = self.panel.power()
+        self.assertEqual(power['package'], 12.5)
+        self.assertIsNone(power['disks_w'])
+        self.assertIsNone(power['disks_active'])
+        stats = self.panel.power_stats()
+        self.assertIsNone(stats['realtime']['disks_w'])
+        self.assertIsNone(stats['realtime']['disks_active'])
+        self.assertIsNone(stats['estimation_params'])
+        self.assertIsNone(stats['energy']['today_kwh'])
+        self.assertIsNone(stats['cost']['today_yuan'])
+
+    def test_smart_raw_identity_requires_verified_owner_projection(self):
+        self.panel.insights.smart_cached = lambda name: {'smart_data': {
+            'serial_number': 'UNVERIFIED-SN', 'wwn': {'id': 12345},
+            'logical_unit_id': 'UNVERIFIED-LUN', 'vendor_identity': 'UNVERIFIED-SN',
+            'smartctl': {'messages': [{'string': 'UNVERIFIED-SN'}]},
+            'nvme_smart_health_information_log': {'temperature': 300, 'serial_number': 'UNVERIFIED-SN'},
+            'power_on_time': {'hours': 123},
+        }}
+        self.panel.insights.storage_identity_cached = mock.Mock(return_value={'items': [
+            {'id': 'sda', 'serial': 'VERIFIED-CACHE-SN', 'serial_status': 'ok', 'matched': True}]})
+        default = self.panel.smart('sda')
+        self.assertIsNone(default['serial'])
+        self.assertNotIn('UNVERIFIED', json.dumps(default))
+        self.panel.insights.storage_identity_cached.assert_not_called()
+        owner = self.panel.smart('sda', include_identity=True)
+        self.assertEqual(owner['serial'], 'VERIFIED-CACHE-SN')
+        self.assertEqual(owner['raw']['serial_number'], 'VERIFIED-CACHE-SN')
+        self.assertEqual(owner['power_on_hours'], 123)
+        self.assertNotIn('UNVERIFIED', json.dumps(owner))
+        self.assertNotIn('wwn', owner['raw'])
+        self.panel.insights.storage_identity_cached.return_value = {'items': [
+            {'id': 'sda', 'serial': None, 'serial_status': 'conflict', 'matched': False}]}
+        conflict = self.panel.smart('sda', include_identity=True)
+        self.assertIsNone(conflict['serial'])
+        self.assertNotIn('serial_number', conflict['raw'])
 
     def test_mount_cache_keeps_nvme_partition_identity_for_file_root_planning(self):
         with tempfile.TemporaryDirectory(prefix='r1-panel-nvme-') as temporary:

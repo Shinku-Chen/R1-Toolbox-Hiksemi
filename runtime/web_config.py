@@ -544,6 +544,14 @@ class WebConfigServer:
         analytics = self._read(self.monitoring)
         analytics = {key: analytics[key] for key in ('available', 'current', 'summary', 'smart', 'history') if key in analytics}
         status, insights = self._read(self.monitor), self._read(self.insights)
+        # Keep this public boundary safe for older/alternate collectors too;
+        # only owner Web projections may add verified complete disk serials.
+        device = insights.get('device')
+        storage = device.get('storage') if isinstance(device, dict) else None
+        devices = storage.get('devices') if isinstance(storage, dict) else None
+        for disk in devices if isinstance(devices, list) else []:
+            if isinstance(disk, dict) and 'serial' in disk:
+                disk['serial'] = None
         return {'schema_version': 1, 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                 'available': status.get('available', bool(insights)), 'status': status,
                 'insights': insights, 'controls': controls, 'fan_policy': fan,
@@ -766,7 +774,11 @@ class WebConfigServer:
             '/api/update/check': ('force',), '/api/daily': ('days',), '/api/scan_log': ('limit',),
         }.get(route, ()))
         if route == '/api/overview':
-            return 200, panel.overview(), 'application/json; charset=utf-8'
+            # Full disk identities belong to the owner Web view, not public
+            # monitoring, developer allowlists or machine Bearer credentials.
+            identity = (headers.get('Authorization') is None
+                        and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open'))
+            return 200, panel.overview(include_identity=identity), 'application/json; charset=utf-8'
         if route == '/api/system':
             return 200, panel.system(), 'application/json; charset=utf-8'
         if route == '/api/sensors':
@@ -806,7 +818,9 @@ class WebConfigServer:
         if route == '/api/history/diag':
             return 200, panel.history_diag(), 'application/json; charset=utf-8'
         if route == '/api/smart':
-            return 200, panel.smart(params.get('dev', '')), 'application/json; charset=utf-8'
+            identity = (headers.get('Authorization') is None
+                        and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open'))
+            return 200, panel.smart(params.get('dev', ''), include_identity=identity), 'application/json; charset=utf-8'
         if route == '/api/disk_health':
             return 200, panel.disk_health(), 'application/json; charset=utf-8'
         if route == '/api/scan_log':

@@ -111,6 +111,17 @@ def _text(value, limit=256):
     return value[:limit] if value else None
 
 
+def _serial(value):
+    """A full identity is indivisible: reject an invalid value, never truncate."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if (not 0 < len(value) <= 512
+            or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in value)):
+        return None
+    return value
+
+
 def _stamp(value):
     """Epoch seconds from an ISO timestamp; None when unreadable."""
     if not isinstance(value, str):
@@ -335,6 +346,30 @@ _NVME_LABELS = {
     'controller_busy_time': '控制器忙碌时间', 'power_cycles': '通电次数', 'power_on_hours': '通电时间',
     'unsafe_shutdowns': '异常断电', 'media_errors': '介质错误', 'num_err_log_entries': '错误日志条数',
 }
+
+# Only measured health/counter fields belong in the shareable SMART projection.
+# Vendor identity strings and messages may contain a full serial or WWN; even an
+# owner request must obtain its serial from the independently verified cache.
+_SMART_OBSERVATION_FIELDS = frozenset((
+    'ata_smart_attributes', 'nvme_smart_health_information_log', 'smart_status',
+    'temperature', 'power_on_time', 'power_cycle_count', 'rotation_rate',
+    'scsi_grown_defect_list', 'scsi_pending_defects', 'scsi_error_counter_log',
+    'manufactured', 'ata_smart_data', 'ata_smart_error_log',
+    'ata_smart_selective_self_test_log', 'ata_smart_self_test_log',
+))
+
+
+def _smart_observations(raw):
+    """Keep SMART observations, stripping identity even inside nested tables."""
+    def clean(value):
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()
+                    if isinstance(key, str) and 'serial' not in key.lower()
+                    and key.lower() not in ('wwn', 'logical_unit_id', 'nvme_eui64', 'nvme_nguid', 'scsi_device_id')}
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return copy.deepcopy(value)
+    return {key: clean(value) for key, value in _dict(raw).items() if key in _SMART_OBSERVATION_FIELDS}
 
 
 def _smart_rows(raw):
@@ -637,7 +672,7 @@ class FnmonitorPanel:
             'swap_percent': _number(memory.get('swap_usage_percent'), 0, 100),
         }
 
-    def _disks(self):
+    def _disks(self, *, include_identity=False):
         insight, device = self._insights(), self._device()
         storage = _dict(device.get('storage'))
         inventory = {row.get('name'): row for row in _list(storage.get('devices'), 128)
@@ -645,6 +680,16 @@ class FnmonitorPanel:
         mounts = self._mounts()
         basic = {entry.get('mount'): entry for entry in _list(self._basic().get('disks'), 128)
                  if isinstance(entry, dict)}
+        identities = {}
+        if include_identity:
+            getter = getattr(self.insights, 'storage_identity_cached', None)
+            if callable(getter):
+                try:
+                    evidence = _dict(getter())
+                    identities = {row['id']: row for row in _list(evidence.get('items'), 128)
+                                  if isinstance(row, dict) and isinstance(row.get('id'), str)}
+                except Exception:
+                    pass
         rows = []
         for item in _list(_dict(insight.get('disks')).get('items'), 128):
             if not isinstance(item, dict) or not isinstance(item.get('id'), str):
@@ -658,6 +703,13 @@ class FnmonitorPanel:
                 continue
             name = item['id']
             physical = _dict(inventory.get(name))
+            identity = _dict(identities.get(name))
+            # No sysfs fallback: missing/conflicting cache evidence remains null.
+            serial = (_serial(identity.get('serial'))
+                      if identity.get('serial_status') == 'ok' and identity.get('matched') is True else None)
+            serial_status = identity.get('serial_status', 'missing')
+            if serial_status == 'ok' and serial is None:
+                serial_status = 'invalid'
             health = _dict(item.get('health'))
             passed = health.get('passed')
             disk_mounts = mounts.get(name, [])
@@ -682,7 +734,10 @@ class FnmonitorPanel:
                 'name_source': _text(item.get('name_source'), 64),
                 'model': _text(item.get('model') or physical.get('model'), 120),
                 'vendor': _text(physical.get('vendor'), 80),
-                'serial': _text(physical.get('serial'), 120),
+                'serial': serial,
+                **({'serial_status': serial_status,
+                    'serial_sources': _list(identity.get('serial_sources'), 16) if serial else []}
+                   if include_identity else {}),
                 'size': size, 'total': total if measured else None,
                 'used': used if measured else None,
                 'percent': used / total * 100 if measured and total > 0 else None,
@@ -796,7 +851,7 @@ class FnmonitorPanel:
         return {'ok': ok, 'total': package if ok else None,
                 'source': 'rapl' if ok else 'unavailable',
                 'package': package, 'core': None, 'uncore': None, 'dram': None, 'base': None,
-                'disks_w': 0, 'disks_active': 0,
+                'disks_w': None, 'disks_active': None,
                 'reason': None if ok else _text(power.get('reason'), 160) or '未取得 RAPL 实测功耗；不估算整机功耗'}
 
     def _temperature(self, disks):
@@ -1004,8 +1059,9 @@ class FnmonitorPanel:
     # ------------------------------------------------------------------
     # fnmonitor endpoints
     # ------------------------------------------------------------------
-    def overview(self):
-        disks = self._disks()
+    def overview(self, *, include_identity=False):
+        """Shared overview; only an authorized owner Web call opts into identity."""
+        disks = self._disks(include_identity=include_identity)
         sensors = self._sensors()
         total_size, used, percent = self._disk_summary()
         fan = self._fan()
@@ -1077,12 +1133,12 @@ class FnmonitorPanel:
         power = self._power()
         return {'realtime': {'power_w': power['total'], 'source': power['source'],
                              'package': power['package'], 'core': None, 'dram': None,
-                             'base': None, 'disks_w': 0, 'disks_active': 0},
+                             'base': None, 'disks_w': None, 'disks_active': None},
                 'energy': {'today_kwh': None, 'month_kwh': None, 'boot_kwh': None, 'basis': 'rapl_only'},
                 'cost': {'today_yuan': None, 'month_yuan': None,
                          'rate_yuan_per_kwh': self.store.config().get('power_rate_yuan')},
                 'disks': [], 'standby_protect': True,
-                'estimation_params': {'tdp_w': 0, 'disk_typical_w': 0, 'nic_fixed_w': 0, 'base_w': 0},
+                'estimation_params': None,
                 'reason': power.get('reason')}
 
     def traffic(self):
@@ -1205,11 +1261,11 @@ class FnmonitorPanel:
         except Exception as error:
             return {'available': False, 'reason': type(error).__name__}
 
-    def smart(self, device):
+    def smart(self, device, *, include_identity=False):
         """Disk detail from the background probe; never runs smartctl here."""
         if not isinstance(device, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,32}', device):
             raise ValueError('设备标识无效')
-        for disk in self._disks():
+        for disk in self._disks(include_identity=include_identity):
             if disk['name'] == device:
                 cached = None
                 getter = getattr(self.insights, 'smart_cached', None)
@@ -1218,7 +1274,11 @@ class FnmonitorPanel:
                         cached = getter(device)
                     except Exception:
                         cached = None
-                detail = _smart_rows(_dict(cached).get('smart_data') if isinstance(cached, dict) else {})
+                raw = _dict(_dict(cached).get('smart_data'))
+                observations = _smart_observations(raw)
+                if include_identity and disk.get('serial'):
+                    observations['serial_number'] = disk['serial']
+                detail = _smart_rows(observations)
                 return {'ok': True, 'dev': device, 'model': disk.get('model'),
                         'serial': disk.get('serial'), 'size': disk.get('size'),
                         'temp': disk.get('temp'), 'health': disk.get('health'),
