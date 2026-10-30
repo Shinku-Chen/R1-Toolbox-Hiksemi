@@ -208,6 +208,12 @@
 .r1-api-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .r1-api-actions [hidden] { display: none; }
 .r1-services { display: grid; gap: 20px; min-width: 0; }
+.r1-media-sort { padding: 18px 20px; min-width: 0; overflow-wrap: anywhere; }
+.r1-media-sort > p { line-height: 1.65; }
+.r1-media-sort .textfield { width: 100%; min-width: 0; max-width: 100%; }
+.r1-media-sort .r1-api-input { margin-top: 16px; }
+.r1-media-sort .btn { min-height: 44px; white-space: normal; }
+.r1-media-sort-path { overflow-wrap: anywhere; word-break: break-word; }
 .r1-service-item { border-bottom: 1px solid var(--line); padding-bottom: 18px; min-width: 0; }
 .r1-service-item h3 { margin-bottom: 12px; }
 .r1-service-item .check { display: flex; align-items: center; gap: 10px; min-height: 44px; }

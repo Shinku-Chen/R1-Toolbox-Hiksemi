@@ -1483,6 +1483,12 @@ dd .diag-link{margin:0;height:24px}
 .r1-api-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
 .r1-api-actions [hidden]{display:none}
 .r1-services{display:grid;gap:20px;min-width:0}
+.r1-media-sort{padding:18px 20px;min-width:0;overflow-wrap:anywhere}
+.r1-media-sort>p{line-height:1.65}
+.r1-media-sort .textfield{width:100%;min-width:0;max-width:100%}
+.r1-media-sort .r1-api-input{margin-top:16px}
+.r1-media-sort .btn{min-height:44px;white-space:normal}
+.r1-media-sort-path{overflow-wrap:anywhere;word-break:break-word}
 .r1-service-item{border-bottom:1px solid var(--line);padding-bottom:18px;min-width:0}
 .r1-service-item h3{margin-bottom:12px}
 .r1-service-item .check{display:flex;align-items:center;gap:10px;min-height:44px}
@@ -5903,6 +5909,117 @@ function r1ServiceSettings(card) {
 card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">常驻服务与开发模式</div><p class="hint">容器持续提供网页监控与管理。小屏默认开启，可关闭并恢复官方界面；MCP 默认关闭。首次使用无需网页口令，可在登录口令中设置。</p></div><button class="btn" type="button" data-ref="open">管理服务</button></div>`;
 card._r = collect(card); card._r.open.onclick = r1OpenServiceManager;
 }
+function r1MediaSortSettings(card) {
+card.innerHTML = `<div class="r1-media-sort">
+<p class="sub">可选插件 · v2 仅在已识别电视剧新增路径时调整追更排序，资料刷新不置前。电视端“最近添加”的实际效果仍需验证。</p>
+<p class="sub">仅网页所有者可操作。点击检测才自动查找影视数据库，可能唤醒磁盘；不需要填写路径，不会开机重装规则。</p>
+<div class="r1-api-actions"><button class="btn primary" type="button" data-ref="probe">检测数据库</button><button class="btn" type="button" data-ref="refresh">读取缓存</button></div>
+<p data-ref="summary" role="status">未检测。</p><p class="sub" data-ref="checked">上次检测：未检测。</p>
+<p class="sub" data-ref="activity" role="status"></p><p class="st-crit" data-ref="error" role="alert" hidden></p>
+<label class="r1-api-input">自动找到的数据库<select class="textfield" data-ref="choice" aria-label="选择影视数据库"></select></label>
+<p class="sub" data-ref="selection"></p>
+<dl class="r1-api-meta"><dt>数据库位置</dt><dd data-ref="path">未选择。</dd><dt>上次检测状态</dt><dd data-ref="state">未知。</dd><dt>媒体记录数</dt><dd data-ref="count">--</dd><dt>规则版本</dt><dd data-ref="rule">--</dd><dt>Toolbox 备份位置</dt><dd data-ref="backup">尚无备份记录。</dd></dl>
+<p class="sub" data-ref="reason"></p>
+<div class="r1-api-actions"><button class="btn primary" type="button" data-ref="apply" disabled>应用追更排序</button><button class="btn" type="button" data-ref="revert" disabled>撤销增强</button></div>
+<p class="sub">应用或升级前先备份，再改变排序规则。撤销只停止增强，已调整的时间保留；不会用旧备份覆盖新增媒体。</p>
+</div>`;
+const x = collect(card), endpoint = '/api/plugins/media-sort';
+const labels = { disabled: '未启用', enabled: '已启用', legacy: '旧规则，需确认升级', conflict: '规则冲突，禁止写入', unavailable: '不可用' };
+let snapshot = null, selected = null, pending = '', error = '', uncertain = false;
+const failure = value => /[\u3400-\u9fff]/u.test(String(value && value.message || '')) ? String(value.message) : '连接中断、请求超时或返回结果异常。';
+const candidates = () => snapshot && Array.isArray(snapshot.candidates) ? snapshot.candidates : [];
+const candidate = () => selected && candidates().find(row => row.id === selected.id && row.version === selected.version);
+const bindingCurrent = (binding, action) => {
+const row = candidate();
+return row && row.id === binding.id && row.version === binding.version && snapshot.status === 'ready'
+&& snapshot.busy === false && !uncertain && row[action === 'apply' ? 'can_apply' : 'can_revert'] === true
+&& (action === 'apply' ? ['disabled', 'legacy'].includes(row.state) : ['enabled', 'legacy'].includes(row.state));
+};
+const accept = result => {
+const value = result && result.plugin;
+if (!result || result.ok !== true || !value || value.schema_version !== 1 || value.id !== 'media_sort'
+|| !['unknown', 'ready', 'unavailable'].includes(value.status) || typeof value.busy !== 'boolean'
+|| !Array.isArray(value.candidates) || value.candidates.some(row => !row || typeof row.id !== 'string'
+|| !row.id || typeof row.version !== 'string' || !row.version)
+|| new Set(value.candidates.map(row => row.id)).size !== value.candidates.length) {
+throw new Error('未收到可核验的插件状态，请手动重新检测。');
+}
+snapshot = value;
+const row = selected && candidates().find(item => item.id === selected.id);
+selected = row ? { id: row.id, version: row.version } : null;
+};
+const draw = () => {
+const row = candidate(), locked = !!pending;
+setText(x.summary, snapshot ? snapshot.status === 'unknown' ? '未检测。' : snapshot.message || (snapshot.status === 'ready' ? '检测结果已保存。' : '当前不可用。') : '未检测。');
+const at = snapshot && snapshot.checked_at;
+setText(x.checked, typeof at === 'number' && Number.isFinite(at) && at > 0 ? '上次检测：' + new Date(at * 1000).toLocaleString('zh-CN') : '上次检测：未检测。');
+setText(x.activity, pending ? pending === 'confirm' ? '等待确认，尚未发送写入。' : '当前操作进行中…' : snapshot && snapshot.busy ? '服务端正在操作；可手动读取缓存核对，不能重复应用。' : '当前无进行中的操作。');
+setText(x.error, error); x.error.hidden = !error;
+x.choice.replaceChildren();
+const empty = document.createElement('option'); empty.value = ''; empty.textContent = candidates().length ? '请选择数据库（不自动选择）' : '尚未检测到可选数据库'; x.choice.append(empty);
+for (const item of candidates()) {
+const option = document.createElement('option'); option.value = item.id;
+option.textContent = `${labels[item.state] || '状态未知'} · ${item.database_path || '位置未知'}`;
+x.choice.append(option);
+}
+x.choice.value = row ? row.id : ''; x.choice.disabled = locked || !candidates().length;
+setText(x.selection, candidates().length > 1 ? '找到多个数据库，请核对位置并明确选择；每次操作绑定所选数据库及检测版本。' : '操作绑定所选数据库及检测版本，位置仅展示。');
+setText(x.path, row && row.database_path || '未选择。');
+setText(x.state, row ? labels[row.state] || '未知。' : '未知。');
+setText(x.count, row && Number.isInteger(row.metadata_count) && row.metadata_count >= 0 ? String(row.metadata_count) : '--');
+setText(x.rule, row && row.rule_version != null ? String(row.rule_version) : '--');
+setText(x.backup, row && row.last_backup_path || '尚无备份记录。');
+setText(x.reason, row && row.reason || '');
+x.apply.textContent = row && row.state === 'legacy' ? '确认升级追更排序' : '应用追更排序';
+x.probe.disabled = locked; x.refresh.disabled = locked;
+x.apply.disabled = locked || !row || !bindingCurrent(row, 'apply');
+x.revert.disabled = locked || !row || !bindingCurrent(row, 'revert');
+};
+const read = async probe => {
+if (pending) return;
+pending = probe ? 'probe' : 'read'; draw();
+try {
+accept(probe ? await API.post(endpoint + '/probe', {}) : await API.req(endpoint, { method: 'GET' }));
+if (probe) uncertain = false;
+if (!uncertain) error = '';
+} catch (e) {
+error = failure(e);
+} finally { pending = ''; draw(); }
+};
+const mutate = async action => {
+if (pending) return;
+const row = candidate();
+if (!row || !bindingCurrent(row, action)) return;
+const binding = { id: row.id, version: row.version };
+pending = 'confirm'; draw();
+try {
+const applying = action === 'apply', upgrade = row.state === 'legacy';
+const title = applying ? upgrade ? '确认升级影视追更排序？' : '应用影视追更排序？' : upgrade ? '撤销已识别的旧版影视排序增强？' : '撤销影视追更排序增强？';
+const note = applying ? '先创建 Toolbox 备份，再改变所选数据库的排序规则。仅已识别电视剧新增路径置前，资料刷新不置前；电视端实际效果仍需验证。'
+: (upgrade ? '只移除已识别的旧版增强规则。' : '') + '只停止增强，已调整的时间保留；不会使用旧备份覆盖新增媒体。';
+if (!(await R1.ask(title, `数据库：<span class="r1-media-sort-path">${esc(row.database_path || '位置未知')}</span>。${note}可能唤醒磁盘。`, !applying))) return;
+if (!bindingCurrent(binding, action)) throw new Error('数据库选择或检测版本已变化，请重新检测。');
+pending = action; error = ''; draw();
+accept(await API.post(endpoint + '/' + action, { candidate_id: binding.id, version: binding.version, confirmed: true }));
+const observed = candidates().find(item => item.id === binding.id);
+if (observed) selected = { id: observed.id, version: observed.version };
+if (!observed || observed.state !== (applying ? 'enabled' : 'disabled')) {
+throw new Error('返回状态未确认操作结果。');
+}
+} catch (e) {
+uncertain = true;
+error = failure(e) + ' 操作结果未确认，未自动重试；请手动重新检测后再操作。';
+} finally { pending = ''; draw(); }
+};
+x.choice.onchange = () => {
+if (pending) return;
+const row = candidates().find(item => item.id === x.choice.value);
+selected = row ? { id: row.id, version: row.version } : null; draw();
+};
+x.probe.onclick = () => read(true); x.refresh.onclick = () => read(false);
+x.apply.onclick = () => mutate('apply'); x.revert.onclick = () => mutate('revert');
+draw(); read(false);
+}
 function r1OpenServiceManager() {
 if ($('#r1ServiceManager')) return;
 const el = mount(`<div class="fullmask r1-api-mask" id="r1ServiceManager" role="dialog" aria-modal="true" aria-labelledby="r1ServiceTitle"><div class="card fm-card r1-api-dialog">
@@ -6996,6 +7113,7 @@ SET_SCHEMA.push(
 { id: 'look', title: '外观', icon: 'palette', desc: R1_LOOK.desc, items: R1_LOOK.items },
 { id: 'r1-auth', title: '登录口令', icon: 'lock', desc: '首次默认无需口令，可在此设置；开启后网页监控与管理需要登录。', custom: r1AuthSettings },
 { id: 'r1-services', title: '服务与开发', icon: 'server', desc: '容器与网页持续运行，小屏默认开启可切回官方，MCP 默认关闭；开发诊断必须设置来源白名单和有效时长。', custom: r1ServiceSettings },
+{ id: 'r1-media-sort', title: '影视追更排序', icon: 'trend', desc: '可选插件。显式检测自动发现数据库；确认后应用或撤销追更排序规则。', custom: r1MediaSortSettings },
 { id: 'r1-api', title: 'API 管理', icon: 'key', desc: '为局域网 AI 与自动化管理 MCP／REST 密钥、操作角色、功能与文件范围、来源限制和调用记录。', custom: r1ApiSettings },
 { id: 'r1-conn', title: '连接与数据卷', icon: 'server', desc: '网页地址、配对与持久化位置。', custom: r1ConnSettings },
 { id: 'weather', title: '天气', icon: 'cloud', desc: '从 Open-Meteo 读取当前天气；自动定位按 NAS 公网 IP 估算城市，也可填写城市或坐标。需要外网访问。', items: [

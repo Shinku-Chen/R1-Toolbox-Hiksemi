@@ -98,6 +98,8 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 中文正文、UI 文案与文档使用全角标点；代码、路径、标识符保持原样。
 - 原厂文件写入索引排障使用显式 `POST /api/dev/files/write-preflight`，精确 `action:preflight/confirm:true/root_id`；复用生产 SATA、监听、索引 DB 和 SQLite 句柄门的固定阶段观察，不能为诊断跳过安全失败或继续依赖步骤。仅有效开发白名单与绝对窗口授权，拒绝 Bearer、路径、SQL 和原厂 action，不进入默认诊断、MCP 或轮询。服务端仅生成 admin 根下未发布的随机目标，不通知、暂存或发布文件；SQLite 元数据副作用和唤盘须如实说明。该预检不证明子目录、恢复区或真实写入验收，见 `docs/file-mutations.md`。
 
+- 影视追更排序是内置所有者 Web 可选插件，固定 `/api/plugins/media-sort` 的缓存 GET 与显式 probe／apply／revert；不授予 MCP、Bearer 或开发白名单，不接收路径／SQL，不在启动、GET 或轮询中扫描原厂库。数据库只由匹配原厂 scraper 生命周期和 `-d` 自动发现，多候选明确选择；写前私有一致性备份，事务内处理严格识别的规则，未知对象拒绝接管。v2 仅按已识别电视剧新增路径调整时间，保留类型切换基线，不冒充单集入库历史；撤销只删自身规则，不恢复整库或清除已调整时间，容器停止不撤销原厂库内已提交规则。详见 `docs/media-sort-plugin.md`。
+
 ## 提交规范
 
 - 仓库只保留 `dev` 和 `main` 两个分支。日常修改与提交使用 `dev`，通过完整检查后将 `main` 快进到已验证提交；不为每项任务新建长期分支。清理旧分支前必须核对独有提交，并通过合并历史保留全部提交，不用强制推送或重置丢弃历史。

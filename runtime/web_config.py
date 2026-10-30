@@ -67,7 +67,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/access/contracts', '/api/services',
     '/api/access/file-readiness', '/api/docker/projects', '/api/docker/projects/catalog',
     '/api/docker/deployments', '/api/docker/deployments/catalog',
-    '/api/files/authority',
+    '/api/files/authority', '/api/plugins/media-sort',
     '/api/business',
 )) | PANEL_QUERY_ROUTES
 
@@ -86,6 +86,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/docker/deployments/register', '/api/docker/deployments/revoke', '/api/docker/deployments/refresh',
     '/api/files/authority/initialize', '/api/files/authority/inspect', '/api/files/authority/preflight',
     '/api/files/authority/revoke', '/api/files/authority/restore',
+    '/api/plugins/media-sort/probe', '/api/plugins/media-sort/apply', '/api/plugins/media-sort/revert',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
@@ -96,10 +97,13 @@ PROJECT_POST_ROUTES = frozenset(('/api/docker/projects/register', '/api/docker/p
                                   '/api/docker/deployments/register', '/api/docker/deployments/revoke', '/api/docker/deployments/refresh'))
 FILE_AUTHORITY_POST_ROUTES = frozenset(('/api/files/authority/initialize', '/api/files/authority/inspect', '/api/files/authority/preflight',
                                       '/api/files/authority/revoke', '/api/files/authority/restore'))
-MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES
+MEDIA_SORT_POST_ROUTES = frozenset(('/api/plugins/media-sort/probe', '/api/plugins/media-sort/apply',
+                                   '/api/plugins/media-sort/revert'))
+MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES | MEDIA_SORT_POST_ROUTES
 OWNER_READ_ROUTES = frozenset(('/api/access', '/api/access/contracts', '/api/access/file-readiness',
                                '/api/services', '/api/docker/projects', '/api/docker/projects/catalog',
-                               '/api/docker/deployments', '/api/docker/deployments/catalog', '/api/files/authority'))
+                               '/api/docker/deployments', '/api/docker/deployments/catalog', '/api/files/authority',
+                               '/api/plugins/media-sort'))
 FILE_CONTENT_PREFIX = '/api/integration/files/transfers/'
 FILE_CONTENT_PATH = re.compile(r'/api/integration/files/transfers/(transfer_[0-9a-f]{32})/content\Z', re.ASCII)
 
@@ -309,7 +313,7 @@ class WebConfigServer:
     def __init__(self, controller, insights=None, *, fan_policy=None, light_policy=None, monitoring=None,
                  monitor=None, host='0.0.0.0', port=18732,
                  asset_dir=None, clock=None, state_dir=None, version='dev', dev_root=None, udev_root=None,
-                 screen_manager=None):
+                 screen_manager=None, media_sort_plugin=None):
         if host not in ('127.0.0.1', '0.0.0.0') or type(port) is not int or not (port == 0 or 1024 <= port <= 65535):
             raise ValueError('网页监听只允许 127.0.0.1/0.0.0.0 和 1024–65535 端口')
         self.controller, self.insights = controller, insights
@@ -361,6 +365,83 @@ class WebConfigServer:
         self.fan_diagnostics = FanDiagnostics(fan_policy, version=version)
         self.integration = IntegrationApi(self, state_dir=self.state_dir, version=version)
         self.api_access = self.integration.access
+        # An optional plugin is constructed lazily; startup and cached GETs never
+        # discover a factory process, open its DB, or reinstall its rules.
+        self.media_sort_plugin = media_sort_plugin
+        self._media_sort_injected = media_sort_plugin is not None
+        self._media_sort_closed = False
+        self._media_sort_generation = object()
+
+    def _media_sort_current(self, headers, peer, *, generation):
+        """Only a still-current browser owner may inspect or change this plugin."""
+        try:
+            return (generation is self._media_sort_generation
+                    and not self._media_sort_closed and not self.integration._closed
+                    and headers.get('Authorization') is None
+                    and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open'))
+        except Exception:
+            return False
+
+    def _media_sort_authorizer(self, headers, peer, *, generation=None):
+        """Bind a request to one Web lifetime; restarting cannot revive it."""
+        generation = self._media_sort_generation if generation is None else generation
+        return lambda: self._media_sort_current(headers, peer, generation=generation)
+
+    def _media_sort_backend(self):
+        """Create the optional backend without probing disks or vendor state."""
+        with self.lock:
+            if self._media_sort_closed:
+                raise RuntimeError('plugin_closed')
+            if self.media_sort_plugin is None:
+                from media_sort_plugin import MediaSortPlugin
+                backend = MediaSortPlugin(self.state_dir)
+                if self._media_sort_closed:
+                    backend.close()
+                    raise RuntimeError('plugin_closed')
+                self.media_sort_plugin = backend
+            return self.media_sort_plugin
+
+    def _media_sort_post(self, route, body, headers, peer, current=None):
+        """Fixed owner actions; no path, SQL, command or developer-token proxy."""
+        current = current or self._media_sort_authorizer(headers, peer)
+        if not current():
+            return 403, {'ok': False, 'error': '影视排序管理需要当前网页登录授权', 'code': 'authorization_expired'}, None
+        action = route.rsplit('/', 1)[-1]
+        fields = set() if action == 'probe' else {'candidate_id', 'version', 'confirmed'}
+        if type(body) is not dict or set(body) != fields:
+            return 400, {'ok': False, 'error': '影视排序参数无效，不接受路径或 SQL', 'code': 'invalid_arguments'}, None
+        if action != 'probe':
+            if body.get('confirmed') is not True:
+                return 400, {'ok': False, 'error': '请先确认所选数据库与操作', 'code': 'confirmation_required'}, None
+            if any(type(body.get(key)) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', body[key], re.ASCII) is None
+                   for key in ('candidate_id', 'version')):
+                return 400, {'ok': False, 'error': '请重新检测并选择数据库', 'code': 'invalid_arguments'}, None
+        try:
+            backend = self._media_sort_backend()
+            value = (backend.probe(current=current) if action == 'probe' else
+                     getattr(backend, action)(body['candidate_id'], body['version'], confirmed=True, current=current))
+        except Exception as error:
+            # Never return SQLite messages, process arguments or exception text.
+            messages = {
+                'invalid_arguments': (400, '参数无效，请重新检测数据库'),
+                'confirmation_required': (400, '请先确认所选数据库与操作'),
+                'authorization_expired': (403, '网页登录授权已失效，请重新登录'),
+                'busy': (409, '已有影视排序操作正在进行'),
+                'stale_candidate': (409, '数据库或规则状态已变化，请重新检测'),
+                'unavailable': (503, '影视数据库当前无法安全核验，请重新检测'),
+                'timeout': (504, '操作结果未确认，请检测当前状态，不要重复提交'),
+                'conflict': (409, '检测到未知规则或数据库冲突，未接管该对象'),
+                'backup_failed': (503, '备份未完成，未确认规则变更，请重新检测'),
+                'operation_failed': (503, '操作结果未确认，请重新检测状态'),
+            }
+            code = getattr(error, 'code', None)
+            if code not in messages:
+                code = 'operation_failed'
+            status, message = messages[code]
+            return status, {'ok': False, 'error': message, 'code': code}, None
+        if not current():
+            return 403, {'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, None
+        return 200, {'ok': True, 'plugin': value, 'may_wake_disks': True}, None
 
     def _sync_development(self, state=None, *, force=False):
         """Apply persisted changes while retaining legacy embedding attributes.
@@ -784,15 +865,25 @@ class WebConfigServer:
             raise ValueError('查询参数无效')
         return {key: values[0] for key, values in parsed.items()}
 
-    def panel_get(self, route, query, headers, peer=None):
+    def panel_get(self, route, query, headers, peer=None, *, media_sort_current=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
         if route in OWNER_READ_ROUTES:
             if (headers.get('Authorization') is not None
                     or self.panel_authorized(headers, peer=peer) not in ('password', 'pair', 'open')):
+                if route == '/api/plugins/media-sort':
+                    return 403, {'ok': False, 'error': '影视排序管理需要当前网页登录授权', 'code': 'authorization_expired'}, 'application/json; charset=utf-8'
                 return 403, {'ok': False, 'error': 'API 管理需要网页登录授权'}, 'application/json; charset=utf-8'
             if query:
                 raise ValueError('API 管理不接受查询参数')
+            if route == '/api/plugins/media-sort':
+                current = media_sort_current or self._media_sort_authorizer(headers, peer)
+                if not current():
+                    return 403, {'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, 'application/json; charset=utf-8'
+                value = self._media_sort_backend().snapshot()
+                if not current():
+                    return 403, {'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, 'application/json; charset=utf-8'
+                return 200, {'ok': True, 'plugin': value, 'may_wake_disks': False}, 'application/json; charset=utf-8'
             if route == '/api/access/contracts':
                 return 200, self.integration.contracts(), 'application/json; charset=utf-8'
             if route == '/api/access/file-readiness':
@@ -915,7 +1006,7 @@ class WebConfigServer:
             return 200, panel.export_csv(params.get('range', '7d')).encode('utf-8-sig'), 'text/csv; charset=utf-8'
         return 404, {'ok': False, 'error': 'not_found'}, 'application/json; charset=utf-8'
 
-    def panel_post(self, route, body, headers, ip=''):
+    def panel_post(self, route, body, headers, ip='', *, media_sort_current=None):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route in MANAGEMENT_POST_ROUTES and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
@@ -984,7 +1075,9 @@ class WebConfigServer:
             if self.auth.required():
                 return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
             return 403, {'ok': False, 'error': 'need_pairing',
-                         'message': '需要在小屏「设置 → 网页配置」生成五位配对码后解锁设置'}, None
+                          'message': '需要在小屏「设置 → 网页配置」生成五位配对码后解锁设置'}, None
+        if route in MEDIA_SORT_POST_ROUTES:
+            return self._media_sort_post(route, body, headers, ip, media_sort_current)
         if route in PROJECT_POST_ROUTES or route in FILE_AUTHORITY_POST_ROUTES:
             # Registry has its own bounded lock; daemon reads must not hold the
             # hardware-policy lock while an owner registers metadata.
@@ -1612,6 +1705,13 @@ class WebConfigServer:
                 'fan_policy': result.get('fan_policy'), 'light_policy': result.get('light_policy')}
 
     def start(self):
+        if getattr(self, '_media_sort_closed', False):
+            # Never reopen an old backend: a stopped request must remain closed
+            # even if this Web server starts a new authorization generation.
+            if not getattr(self, '_media_sort_injected', False):
+                self.media_sort_plugin = None
+            self._media_sort_closed = False
+            self._media_sort_generation = object()
         self.integration.open()
         with self.lock:
             if self.server:
@@ -1633,6 +1733,7 @@ class WebConfigServer:
                     self.rfile = _Reader(self.rfile, self)
 
                 def handle_one_request(self):
+                    self.media_sort_generation = outer._media_sort_generation
                     self.deadline = time.monotonic() + 5
                     try:
                         super().handle_one_request()
@@ -1642,8 +1743,18 @@ class WebConfigServer:
                 def log_message(self, *args):
                     pass
 
-                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None):
+                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None, guard=None):
+                    def still_authorized():
+                        try:
+                            return guard is None or guard() is True
+                        except Exception:
+                            return False
+                    if not still_authorized():
+                        code, value, cookie = 403, {'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, None
                     data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+                    if not still_authorized():
+                        code, cookie = 403, None
+                        data = json.dumps({'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, ensure_ascii=False).encode()
                     try:
                         self.connection.settimeout(self.RESPONSE_TIMEOUT)
                     except OSError:
@@ -1972,12 +2083,15 @@ class WebConfigServer:
                             self.send(401, {'ok': False, 'error': '未登录', 'auth_required': True})
                             return
                         try:
-                            status, value, mime = outer.panel_get(route, parsed.query, self.headers, peer=self.client_address[0])
+                            guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
+                                     if route == '/api/plugins/media-sort' else None)
+                            status, value, mime = outer.panel_get(route, parsed.query, self.headers, peer=self.client_address[0],
+                                                                 **({'media_sort_current': guard} if guard else {}))
                         except ValueError:
                             status, value, mime = 400, {'ok': False, 'error': '查询参数无效'}, 'application/json; charset=utf-8'
                         except Exception:
                             status, value, mime = 503, {'ok': False, 'error': '数据来源暂不可用'}, 'application/json; charset=utf-8'
-                        self.send(status, value, mime=mime)
+                        self.send(status, value, mime=mime, guard=guard)
                         return
                     _, session = self.authenticated()
                     if session is None:
@@ -2024,11 +2138,14 @@ class WebConfigServer:
                                             'message': '请求被拒绝：缺少 X-FNM-Request 头或会话校验失败'})
                             return
                         try:
+                            guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
+                                     if route in MEDIA_SORT_POST_ROUTES else None)
                             status, value, cookie = outer.panel_post(route, body, self.headers,
-                                                                     self.client_address[0])
+                                                                     self.client_address[0],
+                                                                     **({'media_sort_current': guard} if guard else {}))
                         except Exception:
                             status, value, cookie = 503, {'ok': False, 'error': '服务暂不可用'}, None
-                        self.send(status, value, cookie=cookie)
+                        self.send(status, value, cookie=cookie, guard=guard)
                         return
                     if route == '/api/pair':
                         if not isinstance(body, dict) or set(body) != {'code'}:
@@ -2110,10 +2227,18 @@ class WebConfigServer:
 
     def stop(self):
         first_error = None
+        self._media_sort_closed = True
+        self._media_sort_generation = object()
+        if getattr(self, 'media_sort_plugin', None) is not None:
+            try:
+                self.media_sort_plugin.close()
+            except Exception as error:
+                first_error = error
         try:
             self.integration.close()
         except Exception as error:
-            first_error = error
+            if first_error is None:
+                first_error = error
         with self.operation_lock:
             with self.lock:
                 server, thread = self.server, self.thread
