@@ -2,8 +2,8 @@
 
 This module never resolves or opens a pathname. Trusted backend objects supply
 already authorized handles and must revalidate the native subject, ACL and root
-against each exact descriptor. FileReadExecutor wires the verified read-only
-provider; uploads remain unavailable until their native write protocol is proven.
+against each exact descriptor. FileReadExecutor composes the read provider and
+the new-file writer; the latter remains gated by a verified native index bridge.
 """
 
 from dataclasses import dataclass
@@ -67,6 +67,23 @@ class UploadTarget:
     create_staging: object
     authorize_opened: object
     install: object
+
+
+@dataclass(frozen=True, repr=False)
+class PendingInstall:
+    """Private post-publication receipt; only a verified native index can finish.
+
+    The immutable object version is already installed, but verify(principal,
+    descriptor) returns exactly True only after independent native index matching
+    and same-object validation. False means pending; it never repeats install.
+    """
+
+    version: str
+    verify: object
+
+
+class UnpublishedInstallError(FileAccessError):
+    """Trusted backend knows publication never occurred; not a caller proof."""
 
 
 def _name(value):
@@ -271,6 +288,10 @@ class FileTransfers:
             assert_file_grant(principal, tool, row['resource'].root_id, row['resource'].path,
                               write=row['direction'] == 'upload')
         if self._clock() >= row['deadline'] and row['state'] not in _TERMINAL:
+            if row.get('operation') and row['state'] == 'committing':
+                row['operation'].update(state='result_unconfirmed', result_version=None,
+                    error=FileAccessError('result_unconfirmed').result()['error'],
+                    updated_at=_stamp(self._wall()))
             self._terminal(row, 'expired')
         return row
 
@@ -310,6 +331,10 @@ class FileTransfers:
     def cancel_transfer(self, identifier, principal):
         with self._lock:
             row = self._owned(identifier, principal, tool='cancel_file_transfer')
+            if row['state'] == 'committing':
+                # Publication may already have happened. Cancellation must not
+                # imply deleting or rolling back the installed user object.
+                raise FileAccessError('transfer_busy')
             if row['state'] not in _TERMINAL:
                 # Active GET owns its fd; its next authorization gate closes it.
                 row.update(state='cancelled', changed=self._clock())
@@ -489,7 +514,7 @@ class FileTransfers:
                 operation = row['operation']
                 if row['commit_key'] != idempotency_key:
                     raise FileAccessError('idempotency_conflict')
-                return {'ok': operation['state'] == 'completed', 'operation': dict(operation), 'may_wake_disks': True}
+                return {'ok': True, 'operation': dict(operation), 'may_wake_disks': True}
             self._check_upload(row, principal, 'verified')
             if _identity(row['fd']) != row['identity']:
                 raise FileAccessError('file_changed')
@@ -512,17 +537,28 @@ class FileTransfers:
             self._commit_idempotency[identity] = identifier
             self._operations[operation['operation_id']] = row['id']
             try:
-                version = row['resource'].install(principal, row['fd'], overwrite=row['overwrite'],
+                installed = row['resource'].install(principal, row['fd'], overwrite=row['overwrite'],
                     expected_target_version=row['expected_target_version'])
                 self._check_upload(row, principal, 'verified')
                 assert_file_grant(principal, 'commit_file_upload', row['resource'].root_id,
                                   row['resource'].path, write=True)
+                version = installed.version if isinstance(installed, PendingInstall) else installed
                 if not isinstance(version, str) or not _VERSION.fullmatch(version):
                     raise FileAccessError('write_backend_unverified')
-                operation.update(state='completed', result_version=version)
-                self._terminal(row, 'completed')
+                if isinstance(installed, PendingInstall):
+                    if not callable(installed.verify):
+                        raise FileAccessError('write_backend_unverified')
+                    row.update(state='committing', active=False, pending_install=installed,
+                               installed_identity=_identity(row['fd']), changed=self._clock())
+                    operation.update(state='pending')
+                else:
+                    operation.update(state='completed', result_version=version)
+                    self._terminal(row, 'completed')
             except Exception as error:
-                operation.update(state='result_unconfirmed', error=FileAccessError('result_unconfirmed').result()['error'])
+                definite = isinstance(error, UnpublishedInstallError)
+                failure = error if definite else FileAccessError('result_unconfirmed')
+                operation.update(state='failed' if definite else 'result_unconfirmed',
+                                 error=failure.result()['error'])
                 self._terminal(row, 'failed', operation['error'])
                 if isinstance(error, FileAccessError) and error.code in (
                         'invalid_key', 'permission_denied', 'transfer_expired', 'transfer_unavailable'):
@@ -532,7 +568,7 @@ class FileTransfers:
                     raise
             operation['updated_at'] = _stamp(self._wall())
             self._current(principal)
-            return {'ok': operation['state'] == 'completed', 'operation': dict(operation), 'may_wake_disks': True}
+            return {'ok': True, 'operation': dict(operation), 'may_wake_disks': True}
 
     def get_operation(self, operation_id, principal):
         with self._lock:
@@ -540,7 +576,32 @@ class FileTransfers:
             if identifier is None:
                 raise FileAccessError('transfer_unavailable')
             row = self._owned(identifier, principal, tool='get_file_operation')
-            return {'ok': True, 'operation': dict(row['operation'])}
+            if row['state'] == 'committing':
+                try:
+                    self._check_upload(row, principal, 'committing')
+                    if _identity(row['fd']) != row['installed_identity']:
+                        raise FileAccessError('file_changed')
+                    receipt = row['pending_install']
+                    verified = receipt.verify(principal, row['fd'])
+                    self._check_upload(row, principal, 'committing')
+                    if _identity(row['fd']) != row['installed_identity']:
+                        raise FileAccessError('file_changed')
+                    if verified is True:
+                        row['operation'].update(state='completed', result_version=receipt.version,
+                            updated_at=_stamp(self._wall()))
+                        self._terminal(row, 'completed')
+                    elif verified is not False:
+                        raise FileAccessError('write_backend_unverified')
+                except Exception as error:
+                    row['operation'].update(state='result_unconfirmed', result_version=None,
+                        error=FileAccessError('result_unconfirmed').result()['error'],
+                        updated_at=_stamp(self._wall()))
+                    self._terminal(row, 'failed', row['operation']['error'])
+                    if isinstance(error, FileAccessError) and error.code in (
+                            'invalid_key', 'permission_denied', 'transfer_expired', 'transfer_unavailable'):
+                        raise
+            self._current(principal)
+            return {'ok': True, 'operation': dict(row['operation']), 'may_wake_disks': True}
 
     def close(self):
         """On shutdown, close only owned staging fds; never delete final objects."""
@@ -551,4 +612,8 @@ class FileTransfers:
                     row['reader_fd'] = None
                     row.update(active=False, state='cancelled', changed=self._clock())
                 if row['fd'] is not None:
+                    if row.get('operation') and row['state'] == 'committing':
+                        row['operation'].update(state='result_unconfirmed', result_version=None,
+                            error=FileAccessError('result_unconfirmed').result()['error'],
+                            updated_at=_stamp(self._wall()))
                     self._terminal(row, 'cancelled')

@@ -161,6 +161,35 @@ class _Reader:
             chunks.extend(data)
         return bytes(chunks)
 
+    def file_blocks(self, length):
+        """Yield a fixed body without retaining the file or accepting pipelining.
+
+        Content-Length is the message boundary. Reject extra bytes already
+        received after it; later bytes are discarded by closing this connection.
+        A normal HTTP client need not half-close its socket before the reply.
+        """
+        from api_file_operations import FileAccessError
+        remaining = length
+        while remaining:
+            try:
+                self._timeout()
+                block = self.base.read1(min(65536, remaining))
+            except TimeoutError:
+                raise FileAccessError('timeout') from None
+            if not block:
+                raise FileAccessError('invalid_arguments')
+            remaining -= len(block)
+            yield block
+        previous = self.handler.connection.gettimeout()
+        try:
+            self.handler.connection.settimeout(0)
+            if self.base.peek(1):
+                raise FileAccessError('invalid_arguments')
+        except (BlockingIOError, TimeoutError):
+            pass
+        finally:
+            self.handler.connection.settimeout(previous)
+
 
 class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
@@ -1653,6 +1682,9 @@ class WebConfigServer:
                     if match is None:
                         self.send(404, {'ok': False, 'error': '传输接口不存在'})
                         return
+                    if self.command == 'PUT':
+                        self.file_upload(match[1], principal, peer, started)
+                        return
                     if (self.headers.get('Content-Length', '0') != '0'
                             or any(name.lower().startswith('if-') for name in self.headers)):
                         self.send(400, {'ok': False, 'error': '下载不接受请求体或条件请求头'})
@@ -1693,6 +1725,57 @@ class WebConfigServer:
                         self.close_connection = True
                         outer.integration.record(principal, 'integration/file.content', peer, outcome, started=started)
 
+                def file_upload(self, identifier, principal, peer, started):
+                    """Receive bytes only into a backend-owned, uncommitted fd.
+
+                    The transfer restores its original write grant and verified
+                    native object on every block. No path, offset, install action
+                    or credential can be supplied in this transport request.
+                    """
+                    from api_file_operations import FileAccessError
+                    outcome = {'ok': False}
+                    try:
+                        length = self.headers.get('Content-Length', '')
+                        if (not re.fullmatch(r'0|[1-9][0-9]{0,9}', length, re.ASCII)
+                                or self.headers.get('Content-Type', '').lower() != 'application/octet-stream'
+                                or any(name.lower().startswith('if-') or name.lower() in (
+                                    'range', 'content-range', 'content-encoding', 'upload-offset',
+                                    'x-upload-offset', 'tus-resumable') for name in self.headers)):
+                            self.send(400, {'ok': False, 'error': '上传需要固定长度的二进制正文，不接受偏移或条件请求'})
+                            return
+                        length = int(length)
+                        if length > 8 * 1024 ** 3:
+                            self.send(413, {'ok': False, 'error': '上传超过单文件限额'})
+                            return
+                        # A transfer has an independent absolute lifetime; this
+                        # socket deadline never extends or renews that lifetime.
+                        self.deadline = time.monotonic() + min(1800, max(10, length / 65536))
+                        outcome = outer.integration.file_operations.transfers.receive_upload(
+                            identifier, principal, self.rfile.file_blocks(length), content_length=length)
+                        if not outer.integration._is_current(principal):
+                            raise FileAccessError('invalid_key')
+                        self.send(200, outcome)
+                    except FileAccessError as error:
+                        outcome = error.result()
+                        status = {'invalid_key': 401, 'permission_denied': 403, 'acl_unverified': 403,
+                                  'transfer_unavailable': 404, 'transfer_expired': 410,
+                                  'transfer_busy': 409, 'file_changed': 409,
+                                  'checksum_mismatch': 422, 'limit_exceeded': 413,
+                                  'timeout': 408,
+                                  'invalid_arguments': 400}.get(error.code, 503)
+                        self.send(status, outcome)
+                    except TimeoutError:
+                        self.send(408, {'ok': False, 'error': '上传正文超时，请重新准备传输'})
+                    except ValueError:
+                        self.send(400, {'ok': False, 'error': '上传正文长度与声明不符，请重新准备传输'})
+                    except OSError:
+                        self.send(503, {'ok': False, 'error': '上传传输暂不可用，请重新准备传输'})
+                    except Exception:
+                        self.send(503, {'ok': False, 'error': '文件写入后端尚未完成验证'})
+                    finally:
+                        self.close_connection = True
+                        outer.integration.record(principal, 'integration/file.content', peer, outcome, started=started)
+
                 def machine(self, parsed):
                     """Bearer-only machine routes; browser cookies grant nothing here."""
                     duplicates = {'authorization', 'content-type', 'mcp-protocol-version',
@@ -1723,7 +1806,7 @@ class WebConfigServer:
                     # never populated from JSON, Origin or forwarding headers.
                     principal['_peer'] = peer
                     principal['_service_generation'] = outer.integration._service_generation
-                    allowed = 'GET, HEAD' if binary else 'GET' if route in ('/api/integration/status', '/api/integration/capabilities') else 'POST'
+                    allowed = 'GET, HEAD, PUT' if binary else 'GET' if route in ('/api/integration/status', '/api/integration/capabilities') else 'POST'
                     if self.command not in allowed.split(', '):
                         self.send(405, {'error': '请求方法不支持'}, extra_headers={'Allow': allowed})
                         return

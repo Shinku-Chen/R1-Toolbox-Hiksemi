@@ -1,8 +1,8 @@
 # MCP 功能完成矩阵
 
-更新于 2026-10-30。目标是让局域网 AI 尽可能管理 NAS；当前有 **70 个真实工具回调**，并未完成全部海康 APP、客户端和云端功能替代。以下把「已实现」「当前 NAS 是否通过门槛」「仍缺什么」分开记录，不把固件动作表、工具注册、HTTP 200、原厂 ACK 或本地 fixture 当作实机完成证明。
+更新于 2026-10-30。目标是让局域网 AI 尽可能管理 NAS；当前有 **75 个真实工具回调**，并未完成全部海康 APP、客户端和云端功能替代。以下把「已实现」「当前 NAS 是否通过门槛」「仍缺什么」分开记录，不把固件动作表、工具注册、HTTP 200、原厂 ACK 或本地 fixture 当作实机完成证明。
 
-目录唯一来源为 `runtime/mcp_service.py`，原厂第二批定义为 `runtime/native_capability_specs.py`；实际调用与 `api_permissions.py` 使用同一角色、域、精确工具和资源判定。70 项组成：原 36＋文件只读／传输 5＋下载器扩展 6＋未来 Docker 部署 4＋原厂第二批 15＋缓存监控 3＋固定项目资源读数 1。二十项既定文件／Docker 合同中 12 项已实现，8 项文件写待接入，扩展工具不冒充这些未实现合同。
+目录唯一来源为 `runtime/mcp_service.py`，原厂第二批定义为 `runtime/native_capability_specs.py`；实际调用与 `api_permissions.py` 使用同一角色、域、精确工具和资源判定。75 项组成：原 36＋文件只读／传输 5＋上传／任务 3＋下载器扩展 6＋未来 Docker 部署 4＋原厂第二批 17＋缓存监控 3＋固定项目资源读数 1。二十项既定文件／Docker 合同中 15 项已实现，5 项文件变更待接入；覆盖也未开放，扩展工具不冒充这些未实现合同。
 
 ## 权限与网页管理
 
@@ -19,12 +19,12 @@
 | 灯效 | `set_light_policy/set_rgb` | 原厂四种效果之外的任意灯带／地址控制 | 固定硬件与现有效果，保留控制器预检；不盲扫 I²C |
 | 小屏与屏保 | `set_screen/update_screen_settings` | 通过机器 Token 管理小屏服务授权、任意原厂窗口／脚本控制 | 既有设置与实际状态分开，不能由保存勾选推断接管成功；服务开关只能所有者管理 |
 | 电源 | `request_power/cancel_power` | 固件升级、网络唤醒／自动开机等未审定控制 | 管理员、确认、五秒可取消；不拿其他系统 getter 扩展电源权限 |
-| 文件浏览与下载 | `list_file_roots/list_directory/get_file_info/prepare_file_download/get_file_transfer/cancel_file_transfer` | 其他用户私有树、写入与完整文件管理 | 仅匹配固件的固定原厂所有者及 `admin/public` 正子集，完整逻辑 ACL、同挂载拓扑、最终句柄和逐块授权同时通过。**d507 实机七根均未过挂载门，未取得目录／样本字节证明。** 先显式 `file_protocol` 抓完整现场，再按明确范围比对样本。见[真实只读后端](native-file-readonly.md) |
-| 文件上传及管理 | 当前无生产写工具；仅有严格传输／staging 组件和合同 | `prepare_file_upload/commit_file_upload/create_directory/rename_file/copy_file/move_file/trash_file/get_file_operation` | 须闭合目标 ACL、配额、原厂索引、原子安装、覆盖冲突、回收站、幂等及中断。不能把临时 fd、root 权限或读许可当写权限；不退化成永久删除 |
+| 文件浏览与下载 | `list_file_roots/list_directory/get_file_info/prepare_file_download/get_file_transfer/cancel_file_transfer` | 其他用户私有树、完整文件管理与样本内容验收 | 仅匹配固件的固定原厂所有者及 admin/public 正子集，完整逻辑 ACL、同挂载、最终句柄和逐块授权同时通过。364b858 已浏览三个实际根的 admin 目录；目录证明不等于下载字节验收。规范 /drives 外完整别名不再误伤唯一规范根，也不授别名权限；SSD 新规划仍待本批部署后实测。见[真实只读后端](native-file-readonly.md) |
+| 文件上传及管理 | `prepare_file_upload/commit_file_upload/get_file_operation`，固定 Bearer PUT 字节通道 | 新建目录、覆盖、改名、复制、移动、原厂回收站和其他用户写入 | 仅已核验内置 SATA 的 admin 后代新文件，最低读写＋files＋具体工具＋目标及父目录读写范围。匿名暂存、大小/SHA-256、同 inode 无覆盖发布、固定原厂通知和独立真实索引读取分别核验；通知 ACK 不算完成，索引未确认保持 pending／result_unconfirmed，不明结果不重放。只通过代码／fixture，未 NAS 写验收。见[上传通道](file-upload-transport.md) |
 | 已有 Docker 项目 | `list_docker_projects/get_docker_project_status/get_docker_project_summary/get_docker_project_resource_usage/control_docker_project/plan_docker_project_update/execute_docker_project_update/get_docker_project_task` | 任意 Compose 编辑、多服务复杂重建、任意 bind／设备／特权操作 | 所有者登记项目，精确 `inspect/control/update_image`；资源只读逐服务 stats，无实际双帧则 CPU 百分比为 null，不估算工作集或重复汇总。写保持管理员与固定身份，更新保留卷与未知现场。见[项目读取](docker-projects.md)及[项目操作](docker-project-operations.md) |
 | 新建 Docker 服务 | `list_docker_deployments/plan_docker_deployment/execute_docker_deployment/get_docker_deployment_task`；支持 `deploy/update/start/stop/restart/remove` | 任意多服务 Compose、创建卷／网络、bind、环境／命令透传、私有仓库认证、无约束镜像运行 | 所有者先登记独立 `deployment_*` 固定合同，精确 `inspect/deploy/control/remove`。已有 local 具名卷／受限 bridge 或 none、固定仓库／IP／端口、非 root 和资源限额。Toolbox 卷按真实逻辑／挂载身份保护；删除已停止容器保留卷，健康／Running 同时核验后才清旧备份。仅隔离 HTTP／Unix fixture，NAS 写验收需专用资源。见[受控部署](docker-deployments.md) |
 | 下载器 | `list_download_tasks/get_download_task/pause_download_task/resume_download_task/remove_download_task/set_download_task_limits/get_download_limits/set_download_limits/recheck_download_task/rename_download_task/set_download_task_force_start/set_download_task_queue_position`，另有缓存工具 | 新建链接／种子任务、修改下载目录、删除数据、Tracker／分类等完整设置、下载器安装 | 前六项任务工具支持固定 qB／aria2；全局限速写需管理员，后四项仅 qB。唯一监听、连接后授权、任务／配置版本、确认和本键幂等；不传目录或内容。委托原生引擎不等于整个进程被 Users 沙箱隔离。专用任务逐项验收 |
-| 应用市场与安装 | `get_app_status/list_native_applications/list_native_modules/get_application_install_progress` | 安装／卸载／更新、原厂包身份与完整异步任务核验、通用应用启停和安装失败恢复 | `list_native_applications` 不是完整已装／运行清单；模块目录按原厂可用／已安装两表展示，但不推断运行状态，也不授安装权。安装进度会同步插件、写缓存，需管理员确认／幂等，不是纯 getter。`packages` 统一采集字段形状、整数枚举、URL 类别及校验字段格式，包执行验证仍为 false；不额外要求独立签名。见[原厂第二批](native-capability-completion.md) |
+| 应用市场与安装 | `get_app_status/list_native_applications/list_native_modules/get_application_install_progress/plan_native_application_install/install_native_application` | 其他应用安装、更新／卸载、完整异步任务与失败恢复、通用应用启停 | 新装仅已审计 ID34/netdisk_bd2，两目录精确交叉核对未安装和包字段；管理员计划不会执行安装，执行另须当前版本、确认、本键幂等及 plan 授权。不收 URL／脚本／路径；可能联网、写独立目录和启动进程，ACK 仅受理、不明不重放。原厂包诊断不授通用安装权，未在 NAS 执行新装。见[原厂第二批](native-capability-completion.md) |
 | 影视墙 | `get_movie_status/list_movie_libraries/rename_movie_library/get_movie_library_scan_status` | 新建／删除库、来源／成员、发起扫描、匹配／字幕、播放／收藏等 | 真实原厂目录／状态和名称修改，不返回媒体源路径、不推算进度；配置写须核对嵌套结构、归属及文件范围。当前需已有影视库比对，未创建样本 |
 | 相册、识别与分享 | `get_album_status/get_share_status/get_media_status/list_albums/list_shared_albums/create_album/rename_album/delete_album/revoke_share`；系统另有 AI 开关工具 | 照片内容／上传／整理、人物／成员管理、相册邀请、创建分享链接／密码／有效期、完整手机备份 | 原厂目录也可能初始化／修复状态，最低读写。删除只当前所有者普通 custom 相册且 ID 大于七，不混用共享／保留类型；ACK 不代表清理完成。分享创建需服务端 ID 与真实外链，不拼 URL。写验收先指定独立对象 |
 | 备份与同步 | `list_backup_tasks/get_auto_backup_settings/disable_auto_backup/pause_backup_task/cancel_backup_task` | 创建／恢复任务、开启新自动导入、改变源目标、同步计划与冲突恢复 | 固定当前所有者，未知原始状态不猜。管理员只关闭、暂停／取消既有任务；可能停止原厂线程或清理失败记录，未证明异步完成。新目标和恢复须文件 ACL／索引合同 |

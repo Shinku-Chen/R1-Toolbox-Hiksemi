@@ -2,7 +2,7 @@
 
 Toolbox 在常驻 Web 的 `18732` 端口提供 MCP 与固定 REST 接口，供局域网 AI／自动化客户端读取 NAS 状态和执行明确授权的操作。小屏可独立关闭，MCP 默认关闭；开启后仍需独立 Token。配置与 Token 摘要随原 `r1-toolbox-data` 数据卷保存，重建服务后继续有效。
 
-当前七十工具中包括三项缓存只读查询：`get_monitoring_history/get_health_events/get_network_traffic_totals`，均要求 `read` 域和精确工具；详见[监控历史与事件](mcp-monitoring-tools.md)。固定项目另有 `get_docker_project_resource_usage`，要求 `docker`、具体工具和已登记项目 `inspect`，只投影一次原厂 Docker stats，见[固定项目读取](docker-projects.md)。原厂模块目录 `list_native_modules` 需读写及 `apps`，独立返回可用／已安装列表，不能据此安装或卸载。
+当前七十五工具中包括三项缓存只读查询：`get_monitoring_history/get_health_events/get_network_traffic_totals`，均要求 `read` 域和精确工具；详见[监控历史与事件](mcp-monitoring-tools.md)。固定项目另有 `get_docker_project_resource_usage`，要求 `docker`、具体工具和已登记项目 `inspect`，只投影一次原厂 Docker stats，见[固定项目读取](docker-projects.md)。原厂模块目录 `list_native_modules` 需读写及 `apps`，独立返回可用／已安装列表，不能据此安装或卸载。
 
 ## 网页配置
 
@@ -35,11 +35,11 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 ## 权限与工具
 
-新策略同时要求角色、功能域、精确工具及资源范围。只读 `readonly` 可查询；读写 `readwrite` 增加已接入的普通修改；管理员 `admin` 增加已接入的管理操作。管理员仍受具体工具、文件范围、项目和未来部署资源限制。切换角色不会自动勾选其他工具；未实现的文件写入和任意 Compose 代理不会因角色提高而可用。
+新策略同时要求角色、功能域、精确工具及资源范围。只读 `readonly` 可查询；读写 `readwrite` 增加已接入的普通修改；管理员 `admin` 增加已接入的管理操作。管理员仍受具体工具、文件范围、项目和未来部署资源限制。切换角色不会自动勾选其他工具；未接入的文件变更和任意 Compose 代理不会因角色提高而可用。
 
 工具列表和实际调用使用同一个权限判断；缺少域、具体工具或所需资源时拒绝，角色等级不足也不能调用。HTTP 200 或工具出现在客户端缓存中均不代表操作已获授权。policy v1／v2 固定保留原十工具，再受其原角色与域限制；以前勾选过 `files/docker` 的预授权也不会自动激活新能力。所有者须明确选择升级并勾选具体工具，提交 `tool_grants` 后才进入 policy v3。
 
-当前共七十个真实 MCP／REST 工具：原三十六项，加五项文件读取／传输、六项下载器扩展、四项未来部署、十五项原厂业务、三项缓存监控和一项项目资源读数。目录与调用均以真实回调为准；已注册仍须通过当前来源、逐项授权和后端运行门槛。具体工具如下：
+当前共七十五个真实 MCP／REST 工具：原三十六项，加五项文件读取／传输、三项上传／任务、六项下载器扩展、四项未来部署、十七项原厂业务、三项缓存监控和一项项目资源读数。目录与调用均以真实回调为准；已注册仍须通过当前来源、逐项授权和后端运行门槛。具体工具如下：
 
 | 权限 | 新密钥最低角色 | 工具 | 行为 |
 |---|---|---|---|
@@ -51,6 +51,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 | `media` | 读写 | `get_media_status` | `face` 查询相册识别；`all` 批量验证七类状态；原厂可能写完成标记，明确按需调用 |
 | `files` | 只读 | `list_file_roots` | 仅投影本键已授权根和子目录的绑定元数据，不列盘内文件或传输内容 |
 | `files` | 只读 | `list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer` | 精确固件下固定原厂所有者的 `admin/public` 只读子集；每次原厂 ACL、同挂载／同句柄核验，实机门槛未通过时拒绝 |
+| `files` | 读写 | `prepare_file_upload`、`commit_file_upload`、`get_file_operation` | 仅已核验内置 SATA 的 admin 后代新文件；准备／固定 PUT／显式提交分开，无覆盖发布，独立原厂索引确认后才完成，目标及父目录均须读写授权 |
 | `docker` | 只读 | `list_docker_projects`、`get_docker_project_status`、`get_docker_project_summary` | 仅读取本键获授且已登记项目的状态及脱敏摘要，要求项目 `inspect` |
 | `apps` | 只读 | `get_app_status` | 已有原厂应用脱敏列表缓存及最近失败，不发起安装或原厂刷新 |
 | `downloads` | 只读 | `get_download_status` | 既有下载业务快照，不为 MCP 查询或登录下载器 |
@@ -71,6 +72,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 | `docker` | 管理员 | `plan_docker_deployment`、`execute_docker_deployment` | 独立 `deployment_*` 固定资源的部署、同仓库 digest 更新、启停重启和停止后删除；需对应资源操作和有效确认计划 |
 | `apps` | 读写／管理员 | `list_native_applications`、`get_application_install_progress` | 目录需读写；安装进度会同步插件并写完成状态，需管理员、确认与幂等，不等于允许安装 |
 | `apps` | 读写 | `list_native_modules` | 显式读取原厂可用／已安装模块两表，可能更新支持状态并联系厂商；不推断运行状态、不授安装和卸载权 |
+| `apps` | 管理员 | `plan_native_application_install`、`install_native_application` | 仅白名单 ID34/netdisk_bd2 未安装新装；计划不执行安装，执行另须当前版本、确认、本键幂等及计划工具授权；受理不表示完成，不明结果不重放 |
 | `backup` | 读写 | `list_backup_tasks`、`get_auto_backup_settings` | 当前管理员备份目录与原始自动导入设置，未知枚举保持未知 |
 | `backup` | 管理员 | `disable_auto_backup`、`pause_backup_task`、`cancel_backup_task` | 只关闭自动导入、暂停／取消既有任务；不创建或恢复备份，不接受新目的地 |
 | `system` | 管理员 | `list_nas_users`、`get_nas_name`、`set_nas_name`、`get_nas_ai_settings`、`set_nas_ai_enabled` | 最小用户目录、设备名和原厂 AI 开关；不管理账号凭据或读取照片 |
@@ -85,25 +87,29 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 五项业务缓存工具均为空参数只读工具，返回真实观察时间、缓存年龄、来源及最近失败，未知值保持 `null`。它们按独立功能域和精确工具授权，不沿用 `media` 的主动查询权限；缺少缓存时不会自动采集。下载缓存在首次启动或业务快照尚未发布时报告未采集，不为填数据联网。细节见[业务只读工具](mcp-business-tools.md)。
 
-新增十五项原厂业务请求的共同认证也可能初始化资源，均不承诺无副作用或幂等查询；读写／管理员等级以真实工具定义为准。七个写入口另需确认和本键幂等，原厂 `code=0` 只说明接受，不能冒充异步完成。模块目录查询会更新原厂支持状态且可能联系厂商，只能显式调用；应用安装进度会同步插件并写缓存；备份工具只收紧既有任务，不恢复或开启新目标。包字段形状不是可信安装证明，详情见[原厂能力第二批](native-capability-completion.md)。
+新增十七项原厂业务请求的共同认证也可能初始化资源，均不承诺无副作用或幂等查询；读写／管理员等级以真实工具定义为准。八个写入口另需确认和本键幂等，原厂 `code=0` 只说明接受，不能冒充异步完成。模块目录查询会更新原厂支持状态且可能联系厂商，只能显式调用；应用安装进度会同步插件并写缓存；备份工具只收紧既有任务，不恢复或开启新目标。包字段形状不是通用安装授权；新增安装只对白名单 ID34/netdisk_bd2 交叉核对两个实时目录，不更新或卸载，不接收包 URL、脚本或任意路径。计划查询可能更新支持状态，实际安装可能联网下载、写原厂独立目录和启动进程，尚未实机写验收。详情见[原厂能力第二批](native-capability-completion.md)。
 
-### 文件根元数据、受限只读与待接入写入
+### 文件根元数据、受限读取与新文件上传
 
-文件与固定项目合同见[接口方案](file-docker-api-plan.md)。文件根元数据和五项文件读取／传输已有实际回调；上传、新建、改名、复制、移动及回收站仍待接入。文件读取仅覆盖当前固定原厂管理员和 `admin/public` 逻辑正子集，不等于全用户文件访问。
+文件与固定项目合同见[接口方案](file-docker-api-plan.md)。文件根元数据、五项文件读取／传输及三项上传／任务已有实际回调；新建目录、覆盖、改名、复制、移动及回收站仍待接入。文件读取仅覆盖当前固定原厂管理员和 `admin/public` 逻辑正子集，不等于全用户文件访问。
 
-二十项接口的[机器可读定义](api/file-docker-contracts.json)中，十二项已有执行适配，另外八项文件写合同仍待接入。所有者可在 API 管理中按需查看，或读取 `GET /api/access/contracts`。该入口不接受机器 Token 或单独开发窗口；读取定义本身不授予执行权限，也不迁移旧键。单项 `implemented` 不替代当前授权、后端门槛或实机验收。
+二十项接口的[机器可读定义](api/file-docker-contracts.json)中，十五项已有执行适配，另外五项文件变更合同仍待接入；覆盖也未开放。所有者可在 API 管理中按需查看，或读取 `GET /api/access/contracts`。该入口不接受机器 Token 或单独开发窗口；读取定义本身不授予执行权限，也不迁移旧键。单项 `implemented` 不替代当前授权、后端门槛或实机验收。
 
-`files/docker/apps/downloads/movie/albums/sharing/backup/system` 均已部分接入，新增工具与资源默认不选。应用安装、分享创建、完整影视／相册／备份管理和任意 Compose 仍未完成。详细差异见[完成矩阵](mcp-completion-matrix.md)；不能把七十工具当作 NAS APP 全功能覆盖率。
+`files/docker/apps/downloads/movie/albums/sharing/backup/system` 均已部分接入，新增工具与资源默认不选。通用应用安装／更新／卸载、分享创建、完整影视／相册／备份管理和任意 Compose 仍未完成。详细差异见[完成矩阵](mcp-completion-matrix.md)；不能把七十五工具当作 NAS APP 全功能覆盖率。
 
 勾选文件管理时，必须选择当前可信的 `/drives/<disk>/Users` 根，可填写其内相对 POSIX 子目录，并为每个范围选择只读或读写。文件总边界固定为 `/drives/*/Users/`，不授予整个数据盘、兄弟目录或系统目录。只读角色不能授予读写范围；只读挂载不能授予写入。规划来自已有物理盘身份缓存、sysfs／udev 生命周期核验与 `/proc/self/mountinfo`，不检查 Users 是否存在，也不访问用户文件。缺少身份、歧义挂载、Users 内额外挂载、无法核对的 RAID／虚拟源等不会生成可选目录。详见[Users 文件边界](file-users-boundary.md)。
 
 根 ID 绑定物理身份、分区源、文件系统与挂载路径，修改显示名称不改变 ID；换盘或路径变化后旧绑定不匹配。子目录不接受绝对路径、`.`／`..`、反斜杠、重复斜杠或控制字符。网页支持同根多条子目录的无损编辑，精确重复拒绝；授权按允许范围并集计算，子目录只读授权不会收窄上级已授读写范围。
+
+规范 /drives 之外的完整文件系统别名不再误排唯一规范根，别名自身也不会成为第二授权根；多个规范 /drives 根同源、同设备、堆叠或 Users 内额外挂载继续拒绝。此修复未代替 SSD 实机安全打开或下载验收。
 
 Users 边界使用独立 v2 摘要。旧整盘根不会自动改为 Users 根；原 Token 的名称／IP 等仍可编辑，但旧根显示不可用，需所有者显式重新选择。更换根也不自动注册文件内容工具。
 
 `list_file_roots` 继续只返回 `verification:metadata_only`，不暴露宿主挂载路径或授予内容权限。内容读取由精确固件、固定逻辑主体、完整原厂 ACL 正分支、同挂载无链接拓扑和最终文件句柄共同核验；不把 NAS 逻辑 ID 当 Unix UID，不回退宿主 root 读取。每个下载块前后续验授权与对象。内容只使用独立 Bearer 的 `GET|HEAD /api/integration/files/transfers/<transfer_id>/content`，单 Range 有界，不接受 Cookie 或开发白名单代替授权。详见[真实只读后端](native-file-readonly.md)。
 
 `364b858` 的 NAS 验收已确认视频资源、备份磁盘和主磁盘的三个实际 `Users` 根均通过挂载校验，并用当前来源限定的临时只读 Token 成功浏览各自的 `admin` 目录。视频资源和主磁盘的目录属性读取也成功；备份磁盘的一次属性读取返回 `acl_unverified`，随后浏览成功，不能据此宣称已经解释该次拒绝或保证所有操作稳定通过。四个不存在 `Users` 的分区候选继续拒绝。尚未取得用户指定小文件的下载、HEAD 和 Range 比对证据；`GET /api/access/file-readiness` 和开发诊断自身均不发执行授权。
+
+上传最低机器角色为读写，限定已核验内置 SATA 的 admin 后代；public、admin 根和覆盖都拒绝。prepare 只接受根 ID、相对路径、完整大小、SHA-256、本键幂等标识及可选 false 覆盖字段。字节通过独立 Bearer 的固定 PUT 接收，最多 8 GiB、每块 64 KiB，当前授权／peer／代际／同句柄逐块复验；验证成功只暂存，不自动提交。显式 commit 以匿名 inode 在已核验父目录无覆盖发布，原厂创建／关闭通知后由独立索引 reader 确认，pending／result_unconfirmed 不冒充 completed，不明结果不重放。任务查询固定 may_wake_disks:true。本批尚未进行 NAS 文件写入验收，详见[上传通道](file-upload-transport.md)。
 
 ### 固定 Docker 项目读取
 
@@ -143,7 +149,7 @@ Users 边界使用独立 v2 摘要。旧整盘根不会自动改为 Users 根；
 | `POST /api/access/keys/rotate` | `{"id":"..."}`；新 Token 只在本次响应显示，旧摘要立即移除 |
 | `POST /api/access/keys/revoke` | `{"id":"..."}`；永久撤销 |
 
-创建 policy v3 显式发送 `role`、`scopes`、`tool_grants` 及所需资源。文件范围项为 `{"id":"root_<24 位十六进制>","path":"相对/子目录","access":"readonly"}`，空 `path` 表示整个已选根，`access` 也可为 `readwrite`；勾选 `files` 须至少一项，未选则必须为空。已有项目使用 `docker_projects` 的 `project_*` 和 `inspect/control/update_image`；未来资源使用独立 `docker_deployments` 的 `deployment_*` 和 `inspect/deploy/control/remove`。选 `docker` 至少获授其中一类资源，须对应未撤销登记。写操作须管理员及精确工具，单独提高角色不勾选写权限。旧读写策略中的不可执行更新预授权保留存储兼容，仍不能调用管理员工具。
+创建 policy v3 显式发送 `role`、`scopes`、`tool_grants` 及所需资源。文件范围项为 `{"id":"root_<24 位十六进制>","path":"相对/子目录","access":"readonly"}`，空 `path` 表示整个已选根，`access` 也可为 `readwrite`；勾选 `files` 须至少一项，未选则必须为空。已有项目使用 `docker_projects` 的 `project_*` 和 `inspect/control/update_image`；未来资源使用独立 `docker_deployments` 的 `deployment_*` 和 `inspect/deploy/control/remove`。选 `docker` 至少获授其中一类资源，须对应未撤销登记。Docker 写操作须管理员及精确工具，单独提高角色不勾选写权限；文件新上传最低读写，仍须具体工具、读写范围和真实后端证明。旧读写策略中的不可执行更新预授权保留存储兼容，仍不能调用管理员工具。
 
 没有 `role` 的旧创建请求仍为 policy v1，仅允许旧六 scope；有角色但没有 `tool_grants` 的旧请求保持 policy v2，两者均只能使用原十工具。policy v3 中即使保留某个域，未选具体工具也不获授权。
 

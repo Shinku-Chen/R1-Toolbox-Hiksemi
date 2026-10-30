@@ -16,7 +16,7 @@ from api_docker_operations import DockerProjectOperations
 from api_docker_deployment import DockerDeploymentRegistry, DockerDeploymentOperations
 from api_file_readiness import collect_file_access_readiness
 from api_file_roots import collect_file_roots, validate_file_grants
-from api_file_executor import FileReadExecutor, TOOLS as FILE_READ_TOOLS
+from api_file_executor import FileReadExecutor, TOOLS as FILE_EXECUTOR_TOOLS, WRITE_TOOLS as FILE_WRITE_TOOLS
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
 from vendor_business import _result as project_business_category
@@ -131,7 +131,10 @@ class IntegrationApi:
         result = copy.deepcopy(list(SCOPE_CATALOG))
         for item in result:
             if item['id'] == 'files':
-                item.update(implemented=True, description='在逐次原厂权限核验的Users/admin与public范围浏览、读取属性和下载；上传与文件变更待接入。')
+                description = ('在逐次原厂权限核验的Users/admin与public范围浏览、读取属性和下载；'
+                    + ('可在admin后代上传新文件，发布后单独确认原厂索引；覆盖、新建目录、改名、复制、移动和回收站待接入。'
+                       if 'prepare_file_upload' in IMPLEMENTED_TOOLS else '上传与文件变更待接入。'))
+                item.update(implemented=True, description=description)
             elif item['id'] == 'docker':
                 item.update(implemented=True, description='读取并控制已登记项目；管理员还可在所有者预先登记的独立资源上部署、更新或移除容器，始终保留数据卷。')
         return result
@@ -435,7 +438,7 @@ class IntegrationApi:
         if (self._closed or type(principal['_service_generation']) is not int
                 or principal['_service_generation'] != self._service_generation):
             return {'ok': False, 'error': {'code': 'invalid_key', 'message': 'MCP 服务已停止。', 'retryable': False}}
-        if name in FILE_READ_TOOLS:
+        if name in FILE_EXECUTOR_TOOLS or name in FILE_WRITE_TOOLS and name in IMPLEMENTED_TOOLS:
             return self.file_operations.execute(name, arguments, principal)
         if name in api_monitoring.TOOLS:
             denied = {'ok': False, 'error': {'code': 'invalid_key', 'message': '读取期间授权已失效。', 'retryable': False}}

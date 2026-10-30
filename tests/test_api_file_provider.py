@@ -68,6 +68,12 @@ class Connection:
 
 
 class RuleTests(unittest.TestCase):
+    def test_write_subset_requires_exact_owner_descendant_not_user_root_or_public(self):
+        for path in ('admin/new.bin', 'admin/临时共享/new.bin'):
+            self.assertTrue(files.audited_owner_write_rule(path))
+        for path in ('', 'admin', 'public', 'public/new', 'Admin/new', 'admin-private/new',
+                     'admin/../other', 'admin//new', '/admin/new'):
+            self.assertFalse(files.audited_owner_write_rule(path))
     def test_positive_subset_is_exact_native_owner_public_and_no_uid_claim(self):
         for path in ('', 'admin', 'public', 'admin/docs/a', 'public/照片.jpg'):
             self.assertTrue(files.audited_owner_read_rule(path))
@@ -383,6 +389,22 @@ class ProbeTests(unittest.TestCase):
 
 
 class NativeAuthorityTests(unittest.TestCase):
+    def test_write_authority_is_not_a_writeable_field_or_readonly_mount_bypass(self):
+        catalog = copy.deepcopy(CATALOG)
+        client = SimpleNamespace(clock=lambda: 0, request=mock.Mock(return_value=frame(writeable=0)))
+        authority = files.NativeOwnerWriteAuthority(None, client=client,
+            root_collector=lambda unused: copy.deepcopy(catalog), root_guard=lambda *a: nullcontext())
+        with mock.patch.object(files, '_fixed_owner', return_value=True), \
+             mock.patch.object(files, '_firmware_identity', return_value=True):
+            self.assertEqual(authority.authorize(ROOT, 'admin/new', lambda: True)['mount'], MOUNT)
+            catalog['roots'][0]['read_only'] = True
+            with self.assertRaises(FileAccessError) as caught:
+                authority.authorize(ROOT, 'admin/new', lambda: True)
+            self.assertEqual(caught.exception.code, 'permission_denied')
+            count = client.request.call_count
+            with self.assertRaises(FileAccessError):
+                authority.authorize(ROOT, 'public/new', lambda: True)
+            self.assertEqual(client.request.call_count, count)
     def test_transport_failures_use_existing_availability_codes_without_retry_or_acl_claim(self):
         for reason, code in (('authorization_denied', 'invalid_key'), ('timeout', 'timeout'),
                              ('busy', 'resource_busy'), ('identity_unverified', 'native_unavailable'),

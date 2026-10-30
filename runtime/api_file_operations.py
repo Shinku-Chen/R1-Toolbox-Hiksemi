@@ -26,6 +26,7 @@ _REASONS = {
     'unsupported_file_type': '当前对象类型、符号链接或硬链接不支持文件访问。',
     'unsupported_path_class': '原厂文件后端仅接入管理员和 public 子树；其他用户空间尚不支持。',
     'not_found': '已授权目录中未找到此对象。',
+    'target_exists': '目标名称已经存在；未覆盖、自动改名或合并。',
     'directory_changed': '目录或分页绑定发生变化，请重新浏览。',
     'invalid_arguments': '文件参数无效。',
     'permission_denied': '当前密钥未获此文件范围及工具的权限。',

@@ -22,6 +22,7 @@ from api_file_operations import (FileAccessError, assert_file_grant, _mounts,
 from api_file_provider import NativeOwnerReadAuthority
 from api_file_roots import is_users_root_path, valid_relative_file_path
 from api_file_transfers import DownloadSource, FileTransfers, _binding
+from api_file_write_backend import FileWriteExecutor, TOOLS as WRITE_TOOLS
 
 
 TOOLS = frozenset(('list_directory', 'get_file_info', 'prepare_file_download',
@@ -168,6 +169,8 @@ class FileReadExecutor:
         self._lock = threading.RLock()
         self._cursors = {}
         self.transfers = FileTransfers(self._current)
+        self.write_operations = FileWriteExecutor(panel, root=root, authorizer=self._current,
+                                                   transfers=self.transfers)
 
     def _current(self, principal):
         try:
@@ -318,10 +321,12 @@ class FileReadExecutor:
     def execute(self, tool, args, principal, authorizer=None):
         """Strict arguments plus the same real-key authorization on every branch."""
         try:
-            if tool not in TOOLS or type(args) is not dict:
+            if tool not in TOOLS | WRITE_TOOLS or type(args) is not dict:
                 raise FileAccessError('invalid_arguments')
             if authorizer is not None and authorizer(principal) is not True:
                 raise FileAccessError('invalid_key')
+            if tool in WRITE_TOOLS:
+                return self.write_operations.execute(tool, args, principal)
             if tool in ('get_file_transfer', 'cancel_file_transfer'):
                 if set(args) != {'transfer_id'}:
                     raise FileAccessError('invalid_arguments')
@@ -345,6 +350,7 @@ class FileReadExecutor:
 
     def close(self):
         self._closed = True
+        self.write_operations.close()
         self.transfers.close()
         with self._lock:
             self._cursors.clear()

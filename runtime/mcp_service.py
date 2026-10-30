@@ -166,7 +166,11 @@ _TOOLS = (
 )
 _TOOLS += tuple(
     _tool(contract['name'], contract['title'],
-          ('在明确授权的Users/admin与public子树浏览、读取属性或建立同键下载句柄；每次操作核验原厂权限与最终对象，字节走独立Bearer通道。'
+          ('查询本键、当前代际和原始资源的真实文件写任务；发布与原厂索引尚未同时确认时，不宣称completed，也不自动重放。'
+           if contract['name'] == 'get_file_operation' else
+           '在明确授权的Users/admin后代上传新文件；字节仅进入同键匿名暂存，显式提交后分别核验发布与原厂索引，不支持覆盖或任意宿主路径。'
+           if contract['scope'] == 'files' and contract['category'] == 'file_write' else
+           '在明确授权的Users/admin与public子树浏览、读取属性或建立同键下载句柄；每次操作核验原厂权限与最终对象，字节走独立Bearer通道。'
            if contract['scope'] == 'files' and contract['name'] != 'list_file_roots' else
            '查询明确授权的文件根元数据或固定 Docker 项目，不读取用户文件内容。'
            if contract['idempotency']['mode'] == 'read_only' else

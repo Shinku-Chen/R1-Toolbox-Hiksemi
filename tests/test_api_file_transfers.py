@@ -135,7 +135,7 @@ class FileTransferTests(unittest.TestCase):
                 return os.dup(stream.fileno())
         def install(unused, descriptor, **conditions):
             # This fixture verifies byte/protocol dispatch, not native indexing
-            # or quota. No production UploadTarget is installed by the project.
+            # or quota. Production targets use a separate native-index gate.
             self.installs.append((os.pread(descriptor, len(DATA), 0), conditions))
             return 'file_installed_fixture'
         return UploadTarget(ROOT, 'owner/new.bin', 'new.bin', staging,

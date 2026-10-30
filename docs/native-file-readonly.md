@@ -1,6 +1,6 @@
-# 原厂主体与真实文件只读后端
+# 原厂主体、真实文件读取与新文件上传
 
-本批接入五项真实执行器：`list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer`。生产代码为 `runtime/api_file_provider.py` 与 `runtime/api_file_executor.py`，内容传输复用 `api_file_transfers.py`。这不是全用户文件系统管理：固定原厂所有者、精确固件和当前 `Users` 根均核验后，仅支持管理员 `admin` 与 `public` 子树；其他用户子树明确返回 `unsupported_path_class`，上传、改名、复制、移动与回收站仍未接入。
+已接入五项真实读取执行器：`list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer`。生产代码为 `runtime/api_file_provider.py` 与 `runtime/api_file_executor.py`，内容传输复用 `api_file_transfers.py`。固定原厂所有者、精确固件和当前 `Users` 根均核验后，读取仅支持管理员 `admin` 与 `public` 子树；其他用户子树明确返回 `unsupported_path_class`。新增文件上传后端位于 `api_file_write_backend.py`，仅导出 `prepare_file_upload`、`commit_file_upload`、`get_file_operation`，并须逐次通过独立原厂索引桥；改名、复制、移动、目录创建、覆盖与回收站仍不注册执行回调。
 
 ## 判权依据与完整分支
 
@@ -28,7 +28,7 @@
 - 最终对象先用 O_PATH 检查类型。符号链接、硬链接普通文件、FIFO、socket、字符／块设备均拒绝。只有已检查的普通文件／目录才能经本进程 `/proc/self/fd/<owned-fd>` 取得同 inode 只读 fd，避免先打开设备再判断类型。不会普通路径重开或通过符号链接跟随。
 - 返回元数据与每个下载块之前都重新执行当前原厂许可、当前键和根／对象拓扑；重开严格句柄链比较最终对象的 inode、设备、类型、链接数、大小与时间。期间撤权、换盘、改挂载、改名替换、内容变化或服务关闭即丢弃结果／停止发送。已经交给客户端的块无法撤回；不能宣传客户端已落盘。
 
-原厂根读取和真实目录访问可能唤醒硬盘、更新目录访问时间或原厂日志。不是被动监控，不加入业务缓存 GET、默认开发四项或定时轮询。原厂内部路径类别与文件写入、索引、配额、回收站是不同合同；这里只闭合只读，不据此推导写授权。
+原厂根读取和真实目录访问可能唤醒硬盘、更新目录访问时间或原厂日志。不是被动监控，不加入业务缓存 GET、默认开发四项或定时轮询。原厂内部路径类别与文件写入、索引、配额、回收站是不同合同；读取许可本身不赋予写入权限，新增文件须另过下述门槛。
 
 ## 浏览与下载
 
@@ -86,11 +86,43 @@ python -B -m unittest discover -s tests -p test_api_file_transfers.py -v
 python -B -m unittest discover -s tests -p test_api_file_readiness.py -v
 ```
 
-Linux 使用真实临时目录、mount ID、O_PATH、只读 fd、Range 与逐块撤权；本地 fixture 注入明确的逻辑授权，不代替原厂实机许可。Windows 跳过 14 项依赖 Linux 的新增真实对象用例。尚须 Linux CI，以及用户部署后在既有允许范围对目录／小文件做只读比对，不在真实业务文件上做写验收。
+Linux 用例使用真实临时目录、mount ID、O_PATH、只读 fd、Range 与逐块撤权；本地 fixture 注入明确的逻辑授权，不代替原厂实机许可。Windows 跳过依赖 Linux 的真实对象用例，不能把 Windows 测试通过当成 Linux 执行证明。新增文件用例还覆盖真实 `O_TMPFILE` 与 no-clobber 发布，仍须 Linux CI，以及部署后的受限实机验收；原用户文件始终只读保留。
+
+## 新文件上传执行合同
+
+生产最小子集只有三项，中央层仍取角色、`files` 域、精确工具及当前根／目录范围的交集；固定原厂逻辑主体 `admin` 不会把 Token 角色自动提升为管理员。最低角色为 `readwrite`，准备与提交都必须同时拥有目标和父目录的读写范围，不能用单个叶子文件授权在父目录创建对象。旧键不自动增加这些工具。
+
+`NativeOwnerWriteAuthority` 在现有精确固件、固定所有者、原厂根读取和实时根检查之外，再执行已审计的写类别正子集：路径必须是 `admin/` 后代，`admin` 自身、`public`、其他用户、只读挂载均拒绝。`rest_check_path_auth@0x281dc9` 对同名类别 4 的 `eAuth=0` 正分支和 `base_check_path_if_public@0xadc6c3` 的前置拒绝分别保留。`get_info.writeable` 来自 `0x4320cb → 0xaaed98` 的盘／文件系统状态，不是逻辑用户写 ACL；代码和测试不会把它当写授权。
+
+| 工具 | 输入与真实效果 | 成功的含义 |
+|---|---|---|
+| `prepare_file_upload` | 固定根 ID、`admin/...` 相对目标、`size_bytes`（0～8 GiB）、SHA-256、本键幂等标识；`overwrite` 只能为 `false`，拒绝版本覆盖和 `confirmed` 参数 | 原厂索引桥预检、同父目录／挂载证明与空间检查通过后，创建本进程独占的匿名普通文件。尚未发布任何用户可见目标 |
+| `commit_file_upload` | 固定传输 ID 与本键幂等标识；再次核验当前授权、字节数、SHA-256、匿名 inode 与父目录 | 内核 no-clobber 发布同一 inode，原厂通知发送一次后返回 `pending`。文件存在或通知 ACK 均不等于操作完成 |
+| `get_file_operation` | 固定操作 ID，仍须本键／代际／真实 peer、原始上传范围和当前精确工具授权 | 仅查询已通知操作的独立原厂索引结果并复验同一 fd／最终路径；精确匹配才 `completed`。未知、撤权、换对象或超时不冒充成功 |
+
+上传内容通道固定为 `PUT /api/integration/files/transfers/<transfer_id>/content`，使用同一 Toolbox Bearer。其 framing、正文限额与拒绝规则见 [file-upload-transport.md](file-upload-transport.md)。它只写入准备阶段保留的匿名 fd；每块前后重验当前键、原厂许可、同父目录、挂载与容量。只接受声明长度和 SHA-256 完整相符的内容。准备和提交分别绑定幂等标识；重复提交返回原操作，不重新发布或重发索引通知。
+
+匿名 staging 使用真实父目录 fd 上的 `O_TMPFILE`，权限为 `0600`，没有可见临时路径。发布使用标准库 `os.link('/proc/self/fd/<owned-fd>', name, dst_dir_fd=<verified-parent>, follow_symlinks=True)`，即 Linux 文档的 `O_TMPFILE`／`linkat` 方法；只跟随本进程仍持有的内核 fd，不跟随用户输入的链接。发布前后核对同 inode、普通文件和链接数 0→1。同名目标由内核原子拒绝，返回 `target_exists`，不覆盖、合并或自动改名。发布后再核对最终路径仍是同一对象，父目录同步失败或身份变化保留不明结果。没有 `rename`、可见临时文件或 root 普通路径写入回退。
+
+容量检查只使用相同真实 fd 的 `fstatvfs`，要求块大小／碎片大小无歧义，并用 `f_bavail` 保留严格大于“本次剩余字节＋5 GiB＋min（总量／1000，50 MiB）”的空间。它复刻并收严原厂本机空间储备，不宣称替代云或外部服务的配额。完整普通 `rest_upload_file@0x12c64f` 在 `0x12cded` 调用的 `0x1274dc` 只检查 mount／statfs 和上述储备，不接受用户或 quota 参数。其 `0x50098c` 用户结构指针仅在后续相册与同步调用使用，写入前没有读取配额字段；完整原生 mkdir 路径同样没有这个比较。`user_quota` 确为数据库 enum 7 的 int64，`s_user_db_cmp_and_chg@0x5075b5` 的 `0x507910` 分支将其保存到用户结构 `+0x920`，默认值为 -1；字段存在不构成另一个已被证实的本机上传配额门，也不据此宣称所有服务配额无限。
+
+`FileWriteExecutor` 的原厂桥是私有可信依赖，方法固定为：
+
+```python
+preflight(row, relative_path, *, current)
+notify_new(row, relative_path, fd, *, directory=False, current)  # 私有收据
+verify_new(receipt, row, relative_path, fd, *, directory=False, current)  # 精确 bool
+```
+
+`preflight` 在匿名创建及发布前运行，默认拒绝原厂数据库已有的同名行，包括 stale 索引；发布后不再要求“索引行不存在”，避免自动索引线程已插入时误报。`notify_new` 只发一次，`verify_new=False` 只保留 `pending`，不会重放通知。缺模块、未知索引协议或未证实的盘类别均在预检阶段拒绝，不以 fixture 回调、任意 SQL／action 或 `get_info` 代替真实索引核对。生产桥仅可复用经过静态审计的固定消息和私有数据库投影；原文、绝对路径和凭据不得返回 MCP。
+
+`PendingInstall` 在内存保留同一已发布 fd，只允许独立索引核对将操作置为完成。通知丢失、失败或结果不明返回 `result_unconfirmed`；关闭服务或到期只关闭本进程持有的句柄，不删除已经发布的文件。发布后的取消返回 `transfer_busy`，不能把“取消”宣传为已回滚。进程重启会丢失内存操作，不能据此重放写入；调用方应使用原定范围进行只读核对。
+
+当前的 Linux 测试用私有索引 fixture 验证匿名字节接收、同 inode 发布、并发同名拒绝、父目录／最终对象替换、撤权、通知不明和到期行为；这不是原厂索引／实机写入已经通过。已授权的实机方案只在用户给定测试文件的同目录创建 `r1-toolbox-accept-<nonce>.bin` 的独立 8193 字节对象，核对 SHA-256、原厂索引和读取结果。名称没有前导点，原厂不会正常索引隐藏文件；原文件与新增对象均保留，不覆盖、删除或执行原文件。由统一部署后的固定验收完成，不为小错误字段重复打包试探。
 
 ## 文件写协议专项证据（2026-10-30）
 
-本节仍只对应上述精确固件。仅静态读取用户已有 ELF 与反汇编，没有再取 d507 NAS 样本，没有发原厂写请求或执行厂商程序。它解释剩余写接口的真实切入口与下一步门槛，不新增工具、不赋予写权限。
+本节仍只对应上述精确固件，仅静态读取用户已有 ELF 与反汇编，没有发原厂写请求或执行厂商程序。表中的原生 HTTP writer 与 Toolbox 的匿名 fd 上传不是同一个协议；列出入口不赋予执行权限。新文件子集须通过上一节的完整生产门槛，其他类别仍未注册。
 
 ### 八类业务路径
 
@@ -109,15 +141,15 @@ Linux 使用真实临时目录、mount ID、O_PATH、只读 fd、Range 与逐块
 
 旧文件分派器的上传在 `0x1564f4` 先调用 `base_check_path_if_public@0xadc6c3`，再于 `0x1565ec` 执行 `eAuth=0` 的 ACL。完整 helper 表明它提取用户名类别，匹配 `public` 时返回 0；调用方据此明确拒绝，并记录 `PUBLIC HAS BEEN UPGRADED! NO PERMISSION`。改名等分支对源／目标也存在这一前置检查。因此，即使 `public` 只读已经成立，也不能自动给它增加原厂写入；还须逐入口保留这类原厂额外限制。
 
-普通上传的 `s_rest_check_sapce_able_by_path@0x1274dc` 在 `0x12cded` 被调用。其完整分支先从路径确定空间余量，再给本次所需长度增加保留空间；可见总容量千分之一、最大 50 MiB 的保留量，以及另一类路径约 5 GiB 的额外余量门。**这是空间余量检查，不是已经证明的每用户配额合同。** 不能用 `statvfs` 的空闲数替换它，也不能宣称其存在便已经处理所有用户配额。
+普通上传的 `s_rest_check_sapce_able_by_path@0x1274dc` 在 `0x12cded` 被调用。其完整分支先从路径确定空间余量，再给本次所需长度增加保留空间；可见总容量千分之一、最大 50 MiB 的保留量，以及另一类路径约 5 GiB 的额外余量门。**这是空间余量检查，不是已经证明的每用户配额合同。** 不能只看 `statvfs` 的空闲数而忽略这些保留量；本批对同一已核验句柄使用 `fstatvfs` 并同时保留两类余量，不能据此宣称已经处理所有用户配额。
 
 目录创建的原厂文件数据库更新线程、上传的相册同步 `album_sync_data_api_v1@0x43c4c1`、改名的双备份线程以及回收站独立数据库，说明最终写入不是一个裸 `os.rename` 就可兼容原厂。把路径改成 `/proc/<pid>/fd/...` 虽可能固定某个打开对象，却会改变原厂路径分类、空间检查与索引键；本实现不把这种做法当作已验证的安全桥。
 
 ### 下一次一次性采集与验收的明确范围
 
-先使用已经提供的 `file_protocol` 解决 d507 七根当前真实挂载／目录问题：四阶段打开 errno、预期／实际 mount ID 与设备号、namespace 摘要、前后稳定性和原厂根／管理员／public 响应形态。不得为了让结果通过而改成只比设备号、跟随链接或忽略挂载 ID。已有 d507 的上下文样本不需重复采集。
+早期 d507 七根挂载／目录问题已通过完整 `file_protocol` 定位，后续三个真实根已完成上述只读浏览验收。不重复旧上下文取样，不改成只比设备号、跟随链接或忽略挂载 ID。SSD 完整文件系统的外部 `/home`／`/mnt` 别名不会成为第二个授权根；多个可选 `/drives/<name>` 完整根、缺失 canonical 根或 Users 内额外挂载仍拒绝，最终真实句柄门槛不变。
 
-在真实只读根通过前，不增加自动写探测。后续写验收需要所有者明确选定的**独立临时目录**和新增微小样本，只在额外确认的固定开发入口执行；它不能加入统一被动诊断或通过“缺参调用 writer”推测方法。一次固定验收应收齐：
+新增文件的受限验收已按上一节获得授权；以下较广的原生 HTTP／复制／移动／回收站矩阵仍是后续方案，未授权也未执行。只使用所有者选定的独立临时对象，不加入统一被动诊断，也不通过“缺参调用 writer”推测方法。未来一次隔离验收应收齐：
 
 1. 一个固定文件完整上传与分片上传的请求方法、白名单头和参数类型；正文仅固定样本，记录长度和 SHA-256，不保存令牌／Cookie。
 2. 当前临时对象、目标、父目录的真实 mount／inode 身份，原厂 ACK、后续只读属性／字节校验与文件索引可见时间；记录回包与实际完成的差别。

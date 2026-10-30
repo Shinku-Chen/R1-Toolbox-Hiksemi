@@ -271,7 +271,7 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
         no_role.pop('role')
         cases = [no_role,
                  self.key_body(project, tool_grants=['plan_docker_project_update'], role='admin'),
-                 self.key_body(scopes=['files'], role='readwrite', tool_grants=['prepare_file_upload'],
+                 self.key_body(scopes=['files'], role='readwrite', tool_grants=['create_directory'],
                                file_roots=[{'id': ROOT, 'path': '', 'access': 'readwrite'}]),
                  self.key_body('project_' + 'f' * 24),
                  self.key_body(project, role='admin', docker_projects=[{'id': project, 'operations': ['inspect', 'arbitrary_exec']}])]

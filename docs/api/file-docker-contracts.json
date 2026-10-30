@@ -106,6 +106,7 @@
       "directions": {
         "download": {
           "head_starts_or_extends_deadline": false,
+          "implemented": true,
           "methods": [
             "GET",
             "HEAD"
@@ -117,25 +118,35 @@
           "strong_etag_or_cross_version_resume_claimed": false
         },
         "upload": {
+          "absolute_socket_deadline_seconds": 1800,
+          "already_received_excess_body_rejected": true,
           "arbitrary_chunk_offsets_allowed": false,
           "automatic_commit_allowed": false,
+          "chunked_content_encoding_and_conditional_headers_allowed": false,
+          "connection_always_closed": true,
           "content_length_and_sha256_required": true,
+          "content_type": "application/octet-stream",
+          "implemented": true,
+          "max_size_bytes": 8589934592,
           "methods": [
             "PUT"
           ],
           "minimum_role": "readwrite",
           "required_tool": "prepare_file_upload",
-          "resource_access": "write"
+          "resource_access": "write",
+          "sha256_from": "trusted_prepared_transfer",
+          "status": "registered_requires_authorization_and_live_backend",
+          "transport_implemented": true
         }
       },
       "execution_allowed": false,
       "fragment_allowed": false,
-      "implemented": false,
+      "implemented": true,
       "max_stream_block_bytes": 65536,
       "query_allowed": false,
       "route_template": "/api/integration/files/transfers/{transfer_id}/content",
       "same_key_generation_revision_peer_and_current_acl_required": true,
-      "status": "definitions_only",
+      "status": "backend_gated_transport",
       "transfer_id_schema": {
         "$defs": {
           "transfer_id": {
@@ -3211,6 +3222,7 @@
             "component_boundary": true,
             "kind": "file",
             "live_identity_required": true,
+            "native_path_class": "owner_admin_descendants",
             "native_subject_acl_required": true,
             "parent_access": "write",
             "path_field": "path",
@@ -3223,7 +3235,7 @@
             "direction": "upload",
             "kind": "new_transfer",
             "original_grant_revision": true,
-            "overwrite_requires_confirmed_target_version": true,
+            "overwrite_allowed": false,
             "same_key_and_generation": true,
             "same_peer": true
           }
@@ -3241,7 +3253,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "change_path": {
@@ -3256,13 +3268,6 @@
             "maxLength": 128,
             "minLength": 1,
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$(?![\\s\\S])",
-            "type": "string"
-          },
-          "object_version": {
-            "description": "仅作已核验对象的版本绑定；不是强内容 ETag。",
-            "maxLength": 256,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9_.:-]+$(?![\\s\\S])",
             "type": "string"
           },
           "root_id": {
@@ -3280,55 +3285,13 @@
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
-        "allOf": [
-          {
-            "else": {
-              "not": {
-                "anyOf": [
-                  {
-                    "required": [
-                      "expected_target_version"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "confirmed"
-                    ]
-                  }
-                ]
-              }
-            },
-            "if": {
-              "properties": {
-                "overwrite": {
-                  "const": true
-                }
-              },
-              "required": [
-                "overwrite"
-              ]
-            },
-            "then": {
-              "required": [
-                "expected_target_version",
-                "confirmed"
-              ]
-            }
-          }
-        ],
         "properties": {
-          "confirmed": {
-            "const": true
-          },
-          "expected_target_version": {
-            "$ref": "#/$defs/object_version"
-          },
           "idempotency_key": {
             "$ref": "#/$defs/idempotency_key"
           },
           "overwrite": {
-            "default": false,
-            "type": "boolean"
+            "const": false,
+            "default": false
           },
           "path": {
             "$ref": "#/$defs/change_path"
@@ -3340,7 +3303,7 @@
             "$ref": "#/$defs/sha256"
           },
           "size_bytes": {
-            "maximum": 9007199254740991,
+            "maximum": 8589934592,
             "minimum": 0,
             "type": "integer"
           }
@@ -3482,13 +3445,13 @@
                 "const": true
               },
               "overwrite": {
-                "type": "boolean"
+                "const": false
               },
               "sha256": {
                 "$ref": "#/$defs/sha256"
               },
               "size_bytes": {
-                "maximum": 9007199254740991,
+                "maximum": 8589934592,
                 "minimum": 0,
                 "type": "integer"
               },
@@ -3519,20 +3482,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "准备文件上传",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -3577,7 +3529,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "idempotency_key": {
@@ -3830,20 +3782,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "提交已校验上传",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -5631,7 +5572,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "operation_id": {
@@ -5851,6 +5792,9 @@
           {
             "additionalProperties": false,
             "properties": {
+              "may_wake_disks": {
+                "const": true
+              },
               "ok": {
                 "const": true
               },
@@ -5860,7 +5804,8 @@
             },
             "required": [
               "ok",
-              "operation"
+              "operation",
+              "may_wake_disks"
             ],
             "type": "object"
           },
@@ -5870,18 +5815,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "查询本键文件写任务",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_contract",
-          "live_resource_identity",
-          "runtime_authorization",
-          "automated_and_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {

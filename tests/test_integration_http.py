@@ -33,6 +33,10 @@ TOOL_NAMES = {
 
 class IntegrationHTTPTests(unittest.TestCase):
     def setUp(self):
+        # Panel discovery reloads web_config; patch the same current instance
+        # that IntegrationApi imports when executing a media request.
+        global web_config
+        web_config = sys.modules['web_config']
         temporary = tempfile.TemporaryDirectory(prefix='r1-integration-http-')
         self.addCleanup(temporary.cleanup)
         directory = Path(temporary.name)

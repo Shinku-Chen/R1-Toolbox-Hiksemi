@@ -134,7 +134,7 @@ def valid_outputs():
         'copy_file': file_op,
         'move_file': file_op,
         'trash_file': file_op,
-        'get_file_operation': {'ok': True, 'operation': operation()},
+        'get_file_operation': {'ok': True, 'operation': operation(), 'may_wake_disks': True},
         'plan_docker_project_update': {'ok': True, 'plan': {
             'plan_id': PLAN, 'project_id': PROJECT, 'service_id': SERVICE,
             'current_image': None, 'target_image': 'registry.example/demo/app@sha256:' + HASH,
@@ -178,14 +178,14 @@ class ApiContractsTests(unittest.TestCase):
         self.assertEqual(contract_catalog(), self.catalog)
         self.assertEqual(catalog(), self.catalog)
 
-    def test_twenty_definitions_register_seven_real_callbacks(self):
+    def test_twenty_definitions_register_only_concrete_callbacks(self):
         self.assertEqual(set(self.tools), set(valid_inputs()))
         self.assertEqual(len(self.catalog['tools']), 20)
         self.assertEqual(sum(t['category'] == 'read' for t in self.tools.values()), 9)
         self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 8)
         self.assertEqual(sum(t['category'] == 'docker_update' for t in self.tools.values()), 3)
         active = {item['name'] for item in tool_catalog()}
-        self.assertEqual(len(active), 70)
+        self.assertEqual(len(active), len(tool_catalog()), 'live names must remain unique')
         self.assertEqual(active.intersection(self.tools), IMPLEMENTED_TOOLS)
         self.assertFalse(active.intersection(name for name, tool in self.tools.items() if not tool['implemented']))
 
@@ -293,18 +293,18 @@ class ApiContractsTests(unittest.TestCase):
 
     def test_safe_sizes_and_sha256(self):
         fixture = valid_inputs()['prepare_file_upload']
-        for size in (-1, True, 1.25, 2 ** 53, '1234'):
+        for size in (-1, True, 1.25, 8 * 1024 ** 3 + 1, 2 ** 53, '1234'):
             self.invalid('prepare_file_upload', dict(fixture, size_bytes=size))
-        for size in (0, 2 ** 53 - 1):
+        for size in (0, 8 * 1024 ** 3):
             self.valid('prepare_file_upload', dict(fixture, size_bytes=size))
         for digest in ('', 'A' * 64, 'g' * 64, HASH + '\n', 'sha256:' + HASH):
             self.invalid('prepare_file_upload', dict(fixture, sha256=digest))
 
-    def test_overwrite_requires_explicit_true_confirmation_and_target_version(self):
+    def test_new_file_upload_never_advertises_unverified_overwrite(self):
         fixture = valid_inputs()['prepare_file_upload']
         self.valid('prepare_file_upload', dict(fixture, overwrite=False))
         overwrite = dict(fixture, overwrite=True, expected_target_version=VERSION, confirmed=True)
-        self.valid('prepare_file_upload', overwrite)
+        self.invalid('prepare_file_upload', overwrite)
         for field in ('confirmed', 'expected_target_version'):
             value = dict(overwrite)
             del value[field]
@@ -417,14 +417,18 @@ class ApiContractsTests(unittest.TestCase):
                       {'code': 'not_found', 'message': 'x', 'retryable': False, 'body': 'raw'}):
             self.invalid('get_file_info', {'ok': False, 'error': error}, output=True)
 
-    def test_http_contract_cannot_be_mistaken_for_a_registered_endpoint(self):
+    def test_http_contract_separates_live_download_and_backend_gated_upload(self):
         http = self.catalog['http_contracts'][0]
-        self.assertFalse(http['implemented'])
+        self.assertTrue(http['implemented'])
         self.assertFalse(http['execution_allowed'])
         self.assertFalse(http['query_allowed'])
         self.assertTrue(http['bearer_header_required'])
         self.assertEqual(http['directions']['download']['methods'], ['GET', 'HEAD'])
+        self.assertTrue(http['directions']['download']['implemented'])
         self.assertEqual(http['directions']['upload']['methods'], ['PUT'])
+        self.assertTrue(http['directions']['upload']['transport_implemented'])
+        self.assertTrue(http['directions']['upload']['implemented'])
+        self.assertEqual(http['directions']['upload']['sha256_from'], 'trusted_prepared_transfer')
         self.assertFalse(http['directions']['upload']['automatic_commit_allowed'])
         self.assertFalse(http['binary_in_mcp_allowed'])
         self.assertEqual(http['max_stream_block_bytes'], 65536)

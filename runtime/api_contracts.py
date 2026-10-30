@@ -19,6 +19,7 @@ IMPLEMENTED_TOOLS = frozenset((
     'get_docker_project_status', 'get_docker_project_summary',
     'plan_docker_project_update', 'execute_docker_project_update', 'get_docker_project_task',
     'list_directory', 'get_file_info', 'prepare_file_download', 'get_file_transfer', 'cancel_file_transfer',
+    'prepare_file_upload', 'commit_file_upload', 'get_file_operation',
 ))
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',
@@ -359,28 +360,22 @@ _TOOLS = [
 ]
 
 _UPLOAD_ARGUMENTS = _object({
-    **_CHANGE_LOCATION, 'size_bytes': _integer(), 'sha256': _ref('sha256'),
-    **_IDEMPOTENCY, 'overwrite': {'type': 'boolean', 'default': False},
-    'expected_target_version': _ref('object_version'), 'confirmed': {'const': True}},
-    ['root_id', 'path', 'size_bytes', 'sha256', 'idempotency_key'],
-    allOf=[{
-        'if': {'properties': {'overwrite': {'const': True}}, 'required': ['overwrite']},
-        'then': {'required': ['expected_target_version', 'confirmed']},
-        'else': {'not': {'anyOf': [{'required': ['expected_target_version']},
-                                  {'required': ['confirmed']}]}}
-    }])
+    **_CHANGE_LOCATION, 'size_bytes': _integer(8 * 1024 ** 3), 'sha256': _ref('sha256'),
+    **_IDEMPOTENCY, 'overwrite': {'const': False, 'default': False}},
+    ['root_id', 'path', 'size_bytes', 'sha256', 'idempotency_key'])
 
 _TOOLS.extend([
     _tool('prepare_file_upload', '准备文件上传', 'files', 'readwrite', _UPLOAD_ARGUMENTS,
           _success({'transfer_id': _ref('transfer_id'), 'content_path': _ref('content_path'),
                     'direction': {'const': 'upload'}, 'state': {'const': 'prepared'},
-                    'size_bytes': _integer(), 'sha256': _ref('sha256'),
-                    'overwrite': {'type': 'boolean'}, 'expires_at': _ref('timestamp'),
+                    'size_bytes': _integer(8 * 1024 ** 3), 'sha256': _ref('sha256'),
+                    'overwrite': {'const': False}, 'expires_at': _ref('timestamp'),
                     'may_wake_disks': {'const': True}}),
-          [_file_rule(access='write', parent_access='write', root_mutation_allowed=False),
+          [_file_rule(access='write', parent_access='write', root_mutation_allowed=False,
+                      native_path_class='owner_admin_descendants'),
            {'kind': 'new_transfer', 'direction': 'upload', 'same_key_and_generation': True,
             'same_peer': True, 'original_grant_revision': True,
-            'overwrite_requires_confirmed_target_version': True}],
+            'overwrite_allowed': False}],
           category='file_write', idempotency='required_key', gates=_WRITE_GATES),
     _tool('commit_file_upload', '提交已校验上传', 'files', 'readwrite',
           _object({'transfer_id': _ref('transfer_id'), **_IDEMPOTENCY}), _OPERATION_OUTPUT,
@@ -436,7 +431,7 @@ _TOOLS.extend([
           category='file_write', idempotency='required_key', gates=_WRITE_GATES),
     _tool('get_file_operation', '查询本键文件写任务', 'files', 'readwrite',
           _object({'operation_id': _ref('operation_id')}),
-          _success({'operation': _ref('file_operation')}),
+          _success({'operation': _ref('file_operation'), 'may_wake_disks': {'const': True}}),
           [{'kind': 'owned_file_operation', 'id_field': 'operation_id',
             'same_key_and_generation': True,
             'original_tool_from': 'trusted_operation_record',
@@ -497,17 +492,27 @@ _CATALOG = {
     },
     'http_contracts': [{
         'route_template': '/api/integration/files/transfers/{transfer_id}/content',
-        'status': 'definitions_only', 'implemented': False, 'execution_allowed': False,
+        'status': 'backend_gated_transport', 'implemented': True, 'execution_allowed': False,
         'query_allowed': False, 'fragment_allowed': False, 'bearer_header_required': True,
         'transfer_id_schema': _standalone(_ref('transfer_id')),
         'directions': {
             'download': {'methods': ['GET', 'HEAD'], 'required_tool': 'prepare_file_download',
+                         'implemented': True,
                          'minimum_role': 'readonly', 'resource_access': 'read',
                          'single_byte_range_only': True, 'head_starts_or_extends_deadline': False,
                          'strong_etag_or_cross_version_resume_claimed': False},
             'upload': {'methods': ['PUT'], 'required_tool': 'prepare_file_upload',
+                       'implemented': True, 'transport_implemented': True,
+                       'status': 'registered_requires_authorization_and_live_backend',
                        'minimum_role': 'readwrite', 'resource_access': 'write',
                        'content_length_and_sha256_required': True,
+                       'content_type': 'application/octet-stream',
+                       'sha256_from': 'trusted_prepared_transfer',
+                       'max_size_bytes': 8 * 1024 ** 3,
+                       'chunked_content_encoding_and_conditional_headers_allowed': False,
+                       'absolute_socket_deadline_seconds': 1800,
+                       'already_received_excess_body_rejected': True,
+                       'connection_always_closed': True,
                        'arbitrary_chunk_offsets_allowed': False,
                        'automatic_commit_allowed': False}},
         'same_key_generation_revision_peer_and_current_acl_required': True,

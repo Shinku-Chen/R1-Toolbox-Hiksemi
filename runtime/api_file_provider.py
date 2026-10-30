@@ -67,6 +67,19 @@ def audited_owner_read_rule(relative_path):
     return first in ('admin', 'public')
 
 
+def audited_owner_write_rule(relative_path):
+    """Only the fixed logical owner's category-4 descendants may be created.
+
+    The complete 0x281dc9 branch permits eAuth=0 for category 4 only when its
+    extracted user matches. Category 3 is the user root and is read-only in
+    that branch. Native writers independently reject public before this ACL.
+    This is not the get_info.writeable field, a filesystem-state check.
+    """
+    from api_file_roots import valid_relative_file_path
+    return (valid_relative_file_path(relative_path) and relative_path.startswith('admin/')
+            and len(relative_path.split('/')) >= 2)
+
+
 def _authorized(authorizer):
     try:
         allowed = callable(authorizer) and authorizer() is True
@@ -327,6 +340,25 @@ class NativeOwnerReadAuthority:
             code = {'authorization_denied': 'invalid_key', 'timeout': 'timeout',
                     'busy': 'resource_busy'}.get(error.reason, 'native_unavailable')
             raise FileAccessError(code) from None
+
+
+class NativeOwnerWriteAuthority(NativeOwnerReadAuthority):
+    """Re-evaluate the narrower audited write category after current root proof.
+
+    A successful root read proves the current internal-owner or external_disk
+    prerequisite. It does not grant a write: the category-4 own-user rule and
+    current writable mount are separately mandatory, then actual fd proof is
+    still the executor's responsibility. No Unix uid equivalence is inferred.
+    """
+
+    def authorize(self, root_id, path, current):
+        from api_file_operations import FileAccessError
+        if not audited_owner_write_rule(path):
+            raise FileAccessError('unsupported_path_class')
+        row = super().authorize(root_id, path, current)
+        if row.get('read_only') is not False:
+            raise FileAccessError('permission_denied')
+        return row
 
 
 class VendorFileProtocolClient:
