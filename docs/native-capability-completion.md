@@ -2,13 +2,14 @@
 
 本页补充三十六工具之后的原厂业务执行器。工具定义统一放在无依赖的 `runtime/native_capability_specs.py`，实现为 `runtime/vendor_native_capabilities.py` 的 `NativeCapabilities.execute(name, arguments, *, principal, authorizer)`。中央目录、角色和功能域须使用同一份定义；模块不会自行注册未实现工具。
 
-本次仅做离线固件审计和本地 fixture，不向 NAS 安装应用、修改名称、切换识别、删除相册或控制备份。下面的“已实现”指有真实固定执行器及自动测试，不代表已经完成 NAS 写入验收。
+实现验证包括离线固件审计、本地 fixture，以及下文记录的固定 NAS 查询收据复核；未向 NAS 安装应用、修改名称、切换识别、删除相册或控制备份。下面的“已实现”指有真实固定执行器及自动测试，不代表已经完成 NAS 写入验收。新增模块库存工具的本地验证也不等于已完成该接口的 NAS 验收。
 
-## 已实现十四项
+## 已实现十五项
 
 | 工具 | 最低角色／功能域 | 参数与实际效果 |
 | --- | --- | --- |
 | `list_native_applications` | 读写／`apps` | 固定 `get_apply_list`＋`opttype=0`，返回原厂 `apply_id`、名称、版本、原始安装状态；不把目录当完整已装或运行清单，不输出来源 URL、`vid`、路径 |
+| `list_native_modules` | 读写／`apps` | 显式固定 `get_modulize_table`，将 `available_list/installed_list` 分开返回，仅有限模块身份、版本和原始整数状态；原厂可能联系厂商更新支持状态，不输出安装路径或参数，不推断运行，不授予安装或卸载权限 |
 | `get_application_install_progress` | 管理员／`apps` | `application_id`＋确认／幂等键；先核对固定所有者目录，再调用原厂 `get_install_progress`。此动作会同步插件、修改完成状态并写缓存，属于管理操作。只保留原厂 `size/total_size/status` 等数值，不编造百分比 |
 | `list_backup_tasks` | 读写／`backup` | 固定 `get_backup_task_list`，只接受当前管理员归属，投影运行／等待／完成组、原始状态、字节量和内部任务版本，不返回来源、目标、磁盘身份或动作原文。原厂缺失的组保持 `null`，不补零 |
 | `get_auto_backup_settings` | 读写／`backup` | 固定 `get_auto_backup`，投影 `udisk_a_status/sd_status/udisk_a_type/sd_type` 原始整数，缺失为 `null`，不猜枚举意义 |
@@ -23,7 +24,7 @@
 | `get_movie_library_scan_status` | 读写／`movie` | 明确 `library_id`，固定 POST `lib_scan_status`，仅投影 `status/scaned/total/timestamp/num` 原始数字，不启动扫描，不返回路径或推算进度 |
 | `delete_album` | 读写／`albums` | `album_id`＋确认／幂等键；先核对当前所有者目录，只接受 `type=custom` 且 ID 大于七的普通自建相册，不允许保留／共享相册。原厂删除相册表、索引归属和相关共享任务元数据，异步清理 ACK 不表示已经完成 |
 
-所有十四项原厂请求都可能通过共同认证初始化所有者资源，因此没有 `readOnlyHint` 或幂等查询承诺，最低角色也不降为只读。原有五项脱敏业务缓存保持被动只读，不会因为这些新工具而自动联网刷新。
+所有十五项原厂请求都可能通过共同认证初始化所有者资源，因此没有 `readOnlyHint` 或幂等查询承诺，最低角色也不降为只读。原有五项脱敏业务缓存保持被动只读，不会因为这些新工具而自动联网刷新。
 
 “暂停／取消备份”和“关闭自动导入”只收紧既有原厂任务，不提供恢复、开启、创建任务或变更目的地。这些新增目标操作需要先证明真实 Users 根及 ACL；不能沿用本页的停用权限扩大为任意备份文件操作。AI 识别开关属于管理员对原厂后台功能的配置，不授予模型照片内容访问。
 
@@ -84,7 +85,7 @@
 
 本轮同时将 `list_native_applications` 改为严格逐项隔离：先扫描全部原始节点中的合法正整数 ID，任何重复 ID 的全部记录均拒绝，再检查合规名称。即使重复项名称损坏，也不能让另一条记录“先到先得”成为唯一写前身份。结果给出 `accepted_entries/rejected_entries/partial/rejections`，固定计数原因区分非法节点、非法 ID、重复 ID 和非法名称；保留有效唯一节点，非空原表全部拒绝时仍返回不可用，不能补造空目录。安装状态查询预检只接受这份投影中实际保留的唯一 ID；异常节点不会取得调用资格。
 
-`packages` 不再先通过严格应用投影才生成证据。异常 ID、名称或重复条目不会擦除其余记录的安全字段形状；结果标记 `catalog_projection_valid:false/status:diagnostic_only`，既不声明可执行安装，也不把缺失 ID 当作零。顶层不是预期列表、额外包装或 `code` 类型错误时，同样保留固定结构诊断。下一次部署后执行一次 `{"action":"probe","confirm":true}` 和一次 `{"action":"packages","confirm":true}`，可同时核对正常备份投影与应用真实失败位置，无须再反复追加少量字段。
+`packages` 不再先通过严格应用投影才生成证据。异常 ID、名称或重复条目不会擦除其余记录的安全字段形状；结果标记 `catalog_projection_valid:false/status:diagnostic_only`，既不声明可执行安装，也不把缺失 ID 当作零。顶层不是预期列表、额外包装或 `code` 类型错误时，同样保留固定结构诊断。`364b858` 已各执行一次 `{"action":"probe","confirm":true}` 和 `{"action":"packages","confirm":true}`，确认正常备份投影与应用真实失败位置，结果记录在后文。
 
 ## 应用写执行器的具体准入契约
 
@@ -100,5 +101,24 @@
 4. 三类写入均要求确认、本键幂等、发送前和结果后的当前授权／身份复验。仅保留原厂实际 ACK、错误码和已返回的任务标识；受理不表示完成，未知结果不重放，进度只沿现有显式安装状态工具读取原厂值。
 
 目前阻塞点是实际目录身份与模块映射、逐模块清理边界及异步状态契约，不是额外独立签名要求。结构诊断先提供上述当前列表证据；不能据缺失字段推断原厂不存在包校验，也不会为填满工具目录而接受任意地址安装。
+
+## `364b858` 实机复核与模块库存工具
+
+2026-10-30，`sha-364b8586bc0a191d308fb19ed62b40c302d5a053` 的显式固定验收确认：原厂六项检测全部 `status:ok`；应用十五条中接受十三条，原始行十三／十四（ID `2/35`）的空名称被隔离，`rejected_entries:2/partial:true`。备份三组固定 `list_cm` 均为真实空数组并正常投影；这只证明该接口当次返回无对应任务，不代表整个 NAS 没有其他后台任务。
+
+`packages` 保留全部十五条安全形状，因两个空名称标记 `diagnostic_only/catalog_projection_rejected`，并未启用安装。十三条有名记录的 `source/module_type` 都是整数零，但其中包含 Docker（ID `38`）；因此“来源零、类型零、合法名称”不足以证明普通可安装／卸载应用。所有记录的 `vid` 为空字符串，`paramList/support_terminal` 缺失；不能伪造这些值，也不能据其缺失单独断言原厂无法安装。
+
+本轮新增的实际能力为显式模块库存查询 `list_native_modules`，不是新增开发探针。固定 `GET /rest/1.1/update?action=get_modulize_table` 使用现有管理员会话、叶证书 pin 和唯一 emhistor 监听验证；入参为空，不接收模块 ID、action、路径、URL 或 body。工具最低角色读写、功能域 `apps`，还须精确工具授权。它不加入原厂 `probe` 固定六项、`packages`、被动业务轮询或网页 GET。
+
+固件契约来自 `rest_get_modulize_table@0x229a88`：`0x229b8e` 调 `modulize_list_update_support_status_list@0x756ab4`，可能联系厂商更新内部支持状态；当前固定所有者 UID `100000` 分支分别在 `0x229c01/0x229c93` 调 `modulize_get_tbl@0x760efe`，传入 `0/1`，明确生成 `available_list/installed_list`。其他用户走 `moddb_get_tbl@0x77e81c`，不属于该固定管理员认证契约。成功返回含整数 `code=0`，缺失、空或类型异常不补成成功。
+
+模块表序列化 `0x7610f8` 读取 `module_list`，在 `0x761162/0x76118a` 选择上述两个表；`0x761392–0x7613da` 投影原厂 `module_name/id`，`0x761446–0x76161f` 处理 `latest_ver/curr_ver`，`0x761722–0x761870` 处理 `status/paramList/size/type/upgradable/usable/device_need_update`。Toolbox 只返回其中以下固定有限合同：
+
+- `data.groups.available/installed` 为两个独立对象，各有 `items/returned_count/accepted_entries/rejected_entries/partial/rejections`；不跨表合并，也不将一个表的记录补入另一个表。
+- 单条为 `module_id/name/current_version/available_version/native_status_code/native_type/upgradable_code/usable_code/device_update_required_code/running`。版本缺失或包含路径／URL 语法时为 `null`；枚举仅保留合法整数，未知类型为 `null`，不猜测含义，`running` 始终 `null`。
+- 每表先统计全部原始合法正整数 ID，重复 ID 的所有节点都拒绝，再隔离坏名称／坏节点。表缺失、类型不符、超过二百五十六条或非空表全部无效均拒绝，不能补空库存。真实空数组可正常返回。
+- 不输出 `inst_path/paramList`、包地址、签名、原始 JSON 或认证信息。明确 `catalog_confers_write_identity:false/running_state_available:false`，返回 `may_contact_vendor:true`；模块库存是原厂观察结果，不是安装授权或模块白名单。
+
+安装后端下一步应使用这两个真实表与有效应用目录核对 `apply_id↔id`、名称、当前／候选版本和安装成员关系，再对候选普通模块完成回调、依赖与数据清理审计。新库存工具已经提供固定业务查询通道；无需再为相同目录形状添加字段重打包。`modulize_get_status@0x22d1c6` 仍未接入：它是 multipart 状态循环，涉及内部状态处理，不能冒充一次无副作用的运行状态查询。安装／更新／卸载尚未完成实机业务验收。
 
 验证覆盖真实本机 HTTP server 的固定 route／method／query／JSON body、目录归属、未知值、进度不造假、写后撤权、旧键幂等与不确定结果。真实 TLS、进程／socket、签名读取的攻击面沿用固定传输定向测试；本机 HTTP fixture 使用仅构造器可注入的测试连接，不修改生产固定端口。NAS 写入验收仍需用户指定明确对象，先核对只查诊断再验收单项写入。

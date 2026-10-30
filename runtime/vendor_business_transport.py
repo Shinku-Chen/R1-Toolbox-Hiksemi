@@ -33,6 +33,7 @@ OPERATIONS = MappingProxyType({
     'movie_library_rename': ('/rest/1.1/scraper', 'lib_modify', 'POST', True),
     'share_revoke': ('/rest/1.1/file', 'delete_share_link', 'POST', True),
     'apply_list': ('/rest/1.1/applycenter', 'get_apply_list', 'GET', False),
+    'module_inventory': ('/rest/1.1/update', 'get_modulize_table', 'GET', False),
     'application_progress': ('/rest/1.1/applycenter', 'get_install_progress', 'POST', True),
     'backup_tasks_list': ('/rest/1.1/task', 'get_backup_task_list', 'GET', False),
     'auto_backup_get': ('/rest/1.1/config', 'get_auto_backup', 'GET', False),
@@ -106,7 +107,7 @@ def _validate(operation, parameters, body):
     params, payload = dict(parameters), dict(body)
     if operation in ('albums_list', 'shared_albums_list', 'movie_libraries_list',
                      'backup_tasks_list', 'auto_backup_get', 'nas_users_list',
-                     'device_name_get', 'nas_ai_get'):
+                     'device_name_get', 'nas_ai_get', 'module_inventory'):
         valid = not params and not payload
     elif operation == 'albums_create':
         valid = set(params) == {'album_name'} and not payload

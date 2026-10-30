@@ -46,6 +46,11 @@ class NativeFixture:
         frames = {
             'apply_list': {'list': [{'apply_id': 5, 'module_name': '应用', 'version': '1.0',
                                      'status': 4, 'source': SECRET}]},
+            'module_inventory': {'code': 0, 'available_list': [{'id': 5, 'module_name': 'download_engine',
+                                 'curr_ver': '1.0', 'latest_ver': '1.1', 'status': 4,
+                                 'inst_path': '/PRIVATE-MODULE', 'paramList': SECRET}],
+                                 'installed_list': [{'id': 5, 'module_name': 'download_engine',
+                                 'curr_ver': '1.0', 'status': 0}]},
             'application_progress': {'code': 0, 'apply_id': 5, 'size': 3, 'total_size': 10, 'status': 3},
             'backup_tasks_list': {'run_list': [task], 'wait_list': [], 'done_list': []},
             'auto_backup_get': {'code': 0, 'udisk_a_status': 1, 'sd_status': 0,
@@ -116,7 +121,7 @@ class CompletionHTTPBase(unittest.TestCase):
 
 
 class NativeCompletionHTTPTests(CompletionHTTPBase):
-    def test_all_fourteen_native_tools_have_real_catalog_roles_and_strict_schema(self):
+    def test_all_native_tools_have_real_catalog_roles_and_strict_schema(self):
         client = self.native()
         tools = [row['name'] for row in TOOL_SPECS]
         key = self.key('admin', ['apps', 'backup', 'system', 'movie', 'albums'], tools)
@@ -130,6 +135,26 @@ class NativeCompletionHTTPTests(CompletionHTTPBase):
         self.bad(self.call(key, 'set_nas_name', {'name': 'missing confirmation'}), 'invalid_arguments')
         self.bad(self.call(key, 'set_nas_ai_enabled', self.write(enabled=1)), 'invalid_arguments')
         self.assertEqual(client.calls, [])
+
+    def test_native_module_inventory_is_explicit_scoped_and_never_an_install_grant(self):
+        client = self.native()
+        key = self.key('readwrite', ['apps'], ['list_native_modules'])
+        for rest in (False, True):
+            result = self.good(self.call(key, 'list_native_modules', rest=rest))
+            groups = result['data']['groups']
+            self.assertEqual(groups['available']['items'][0]['available_version'], '1.1')
+            self.assertEqual(groups['installed']['items'][0]['module_id'], 5)
+            self.assertIsNone(groups['installed']['items'][0]['running'])
+            self.assertFalse(result['data']['catalog_confers_write_identity'])
+            self.assertTrue(result['native_query_may_update_state'])
+        self.assertEqual(client.calls, [('module_inventory', {}, {}, False)] * 2)
+        self.bad(self.call(key, 'list_native_modules', {'action': 'install'}), 'invalid_arguments')
+        self.bad(self.call(key, 'get_application_install_progress', self.write(application_id=5)))
+        readonly = self.key('readonly', ['apps'], ['get_app_status'])
+        self.bad(self.call(readonly, 'list_native_modules'))
+        self.assertEqual(len(client.calls), 2)
+        client.hook = lambda _operation: self.browser('POST', '/api/access/keys/revoke', {'id': key['id']})
+        self.bad(self.call(key, 'list_native_modules'), 'invalid_key')
 
     def test_native_name_ai_and_album_delete_across_mcp_rest_use_one_guarded_write(self):
         client = self.native()

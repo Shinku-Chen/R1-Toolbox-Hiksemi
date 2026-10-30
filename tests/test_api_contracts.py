@@ -185,7 +185,7 @@ class ApiContractsTests(unittest.TestCase):
         self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 8)
         self.assertEqual(sum(t['category'] == 'docker_update' for t in self.tools.values()), 3)
         active = {item['name'] for item in tool_catalog()}
-        self.assertEqual(len(active), 69)
+        self.assertEqual(len(active), 70)
         self.assertEqual(active.intersection(self.tools), IMPLEMENTED_TOOLS)
         self.assertFalse(active.intersection(name for name, tool in self.tools.items() if not tool['implemented']))
 

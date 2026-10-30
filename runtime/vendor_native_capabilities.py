@@ -23,6 +23,7 @@ from vendor_media_operations import IdempotencyStore, _albums, _label, _number
 _SPECS = {item['name']: item for item in TOOL_SPECS}
 _OPERATIONS = MappingProxyType({
     'list_native_applications': 'apply_list',
+    'list_native_modules': 'module_inventory',
     'get_application_install_progress': 'application_progress',
     'list_backup_tasks': 'backup_tasks_list',
     'get_auto_backup_settings': 'auto_backup_get',
@@ -173,6 +174,72 @@ def _applications(frame):
                 'unsupported_application_entry', 'invalid_application_id',
                 'duplicate_application_id', 'invalid_application_label') if code in rejected],
             'catalog_is_installed_inventory': False, 'package_sources_omitted': True}
+
+
+def _module_text(value, maximum=63):
+    """Native module labels/versions cannot contain a path or URL grammar."""
+    label = _label(value, maximum)
+    if label is None or label != label.strip() or any(char in label for char in ('/', '\\', ':', '?', '#', '%')):
+        return None
+    return label
+
+
+def _module_integer(value):
+    """Preserve the native enum code without treating unknown values as zero."""
+    return value if type(value) is int and -(2 ** 31) <= value < 2 ** 31 else None
+
+
+def _native_modules(frame):
+    """Project the two audited owner module tables, never a write grant.
+
+    Membership is evidence of the specific returned table, not a running-state
+    or package trust verdict. Do not merge rows across those two observations.
+    """
+    groups = {}
+    for field, group in (('available_list', 'available'), ('installed_list', 'installed')):
+        rows = frame.get(field)
+        if type(rows) is not list or len(rows) > 256:
+            raise BusinessTransportError('invalid_json')
+        identities = {}
+        for row in rows:
+            identifier = _number(row.get('id')) if type(row) is dict else None
+            if identifier is not None and 1 <= identifier <= 2 ** 31 - 1:
+                identities[identifier] = identities.get(identifier, 0) + 1
+        accepted, rejected = [], {}
+        for row in rows:
+            identifier = _number(row.get('id')) if type(row) is dict else None
+            name = _module_text(row.get('module_name')) if type(row) is dict else None
+            reason = ('unsupported_module_entry' if type(row) is not dict else
+                      'invalid_module_id' if identifier is None or not 1 <= identifier <= 2 ** 31 - 1 else
+                      'duplicate_module_id' if identities[identifier] != 1 else
+                      'invalid_module_label' if name is None else None)
+            if reason is not None:
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            native_type = row.get('type')
+            native_type = native_type if type(native_type) is str and re.fullmatch(
+                r'[A-Za-z][A-Za-z0-9_-]{0,31}', native_type) else None
+            accepted.append({'module_id': identifier, 'name': name,
+                             'current_version': _module_text(row.get('curr_ver')),
+                             'available_version': _module_text(row.get('latest_ver')),
+                             'native_status_code': _module_integer(row.get('status')),
+                             'native_type': native_type,
+                             'upgradable_code': _module_integer(row.get('upgradable')),
+                             'usable_code': _module_integer(row.get('usable')),
+                             'device_update_required_code': _module_integer(row.get('device_need_update')),
+                             'running': None})
+        if rows and not accepted:
+            raise BusinessTransportError('invalid_json')
+        groups[group] = {'items': accepted, 'returned_count': len(accepted),
+                         'accepted_entries': len(accepted), 'rejected_entries': sum(rejected.values()),
+                         'partial': bool(rejected),
+                         'rejections': [{'code': code, 'count': rejected[code]} for code in (
+                             'unsupported_module_entry', 'invalid_module_id',
+                             'duplicate_module_id', 'invalid_module_label') if code in rejected]}
+    return {'groups': groups, 'complete': False,
+            'installed_membership_source': 'native_installed_list',
+            'catalog_confers_write_identity': False, 'running_state_available': False,
+            'paths_parameters_and_package_sources_omitted': True}
 
 
 _STRUCTURE_FIELDS = frozenset((
@@ -354,6 +421,8 @@ def _users(frame):
 def _project(tool, frame, arguments):
     if tool == 'list_native_applications':
         return _applications(frame)
+    if tool == 'list_native_modules':
+        return _native_modules(frame)
     if tool == 'list_backup_tasks':
         return _backup_tasks(frame)
     if tool == 'get_auto_backup_settings':
@@ -410,6 +479,8 @@ class NativeCapabilities:
                   'sampled_at': datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
                   'native_query_may_update_state': True, 'credential_read_only': True,
                   'mutation_outcome': None}
+        if tool == 'list_native_modules':
+            result['may_contact_vendor'] = True
         pending, responded, mutation = None, False, tool in _WRITES if type(tool) is str else False
         try:
             arguments = {} if arguments is None else arguments

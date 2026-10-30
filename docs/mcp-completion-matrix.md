@@ -1,8 +1,8 @@
 # MCP 功能完成矩阵
 
-更新于 2026-10-30。目标是让局域网 AI 尽可能管理 NAS；当前有 **69 个真实工具回调**，并未完成全部海康 APP、客户端和云端功能替代。以下把「已实现」「当前 NAS 是否通过门槛」「仍缺什么」分开记录，不把固件动作表、工具注册、HTTP 200、原厂 ACK 或本地 fixture 当作实机完成证明。
+更新于 2026-10-30。目标是让局域网 AI 尽可能管理 NAS；当前有 **70 个真实工具回调**，并未完成全部海康 APP、客户端和云端功能替代。以下把「已实现」「当前 NAS 是否通过门槛」「仍缺什么」分开记录，不把固件动作表、工具注册、HTTP 200、原厂 ACK 或本地 fixture 当作实机完成证明。
 
-目录唯一来源为 `runtime/mcp_service.py`，原厂第二批定义为 `runtime/native_capability_specs.py`；实际调用与 `api_permissions.py` 使用同一角色、域、精确工具和资源判定。69 项组成：原 36＋文件只读／传输 5＋下载器扩展 6＋未来 Docker 部署 4＋原厂第二批 14＋缓存监控 3＋固定项目资源读数 1。二十项既定文件／Docker 合同中 12 项已实现，8 项文件写待接入，扩展工具不冒充这些未实现合同。
+目录唯一来源为 `runtime/mcp_service.py`，原厂第二批定义为 `runtime/native_capability_specs.py`；实际调用与 `api_permissions.py` 使用同一角色、域、精确工具和资源判定。70 项组成：原 36＋文件只读／传输 5＋下载器扩展 6＋未来 Docker 部署 4＋原厂第二批 15＋缓存监控 3＋固定项目资源读数 1。二十项既定文件／Docker 合同中 12 项已实现，8 项文件写待接入，扩展工具不冒充这些未实现合同。
 
 ## 权限与网页管理
 
@@ -24,7 +24,7 @@
 | 已有 Docker 项目 | `list_docker_projects/get_docker_project_status/get_docker_project_summary/get_docker_project_resource_usage/control_docker_project/plan_docker_project_update/execute_docker_project_update/get_docker_project_task` | 任意 Compose 编辑、多服务复杂重建、任意 bind／设备／特权操作 | 所有者登记项目，精确 `inspect/control/update_image`；资源只读逐服务 stats，无实际双帧则 CPU 百分比为 null，不估算工作集或重复汇总。写保持管理员与固定身份，更新保留卷与未知现场。见[项目读取](docker-projects.md)及[项目操作](docker-project-operations.md) |
 | 新建 Docker 服务 | `list_docker_deployments/plan_docker_deployment/execute_docker_deployment/get_docker_deployment_task`；支持 `deploy/update/start/stop/restart/remove` | 任意多服务 Compose、创建卷／网络、bind、环境／命令透传、私有仓库认证、无约束镜像运行 | 所有者先登记独立 `deployment_*` 固定合同，精确 `inspect/deploy/control/remove`。已有 local 具名卷／受限 bridge 或 none、固定仓库／IP／端口、非 root 和资源限额。Toolbox 卷按真实逻辑／挂载身份保护；删除已停止容器保留卷，健康／Running 同时核验后才清旧备份。仅隔离 HTTP／Unix fixture，NAS 写验收需专用资源。见[受控部署](docker-deployments.md) |
 | 下载器 | `list_download_tasks/get_download_task/pause_download_task/resume_download_task/remove_download_task/set_download_task_limits/get_download_limits/set_download_limits/recheck_download_task/rename_download_task/set_download_task_force_start/set_download_task_queue_position`，另有缓存工具 | 新建链接／种子任务、修改下载目录、删除数据、Tracker／分类等完整设置、下载器安装 | 前六项任务工具支持固定 qB／aria2；全局限速写需管理员，后四项仅 qB。唯一监听、连接后授权、任务／配置版本、确认和本键幂等；不传目录或内容。委托原生引擎不等于整个进程被 Users 沙箱隔离。专用任务逐项验收 |
-| 应用市场与安装 | `get_app_status/list_native_applications/get_application_install_progress` | 安装／卸载／更新、原厂包身份与完整异步任务核验、通用应用启停和安装失败恢复 | 应用目录不是完整已装／运行清单；安装进度会同步插件、写缓存，需管理员确认／幂等，不是纯 getter。`packages` 统一采集字段形状、整数枚举、URL 类别及校验字段格式，包执行验证仍为 false；不额外要求独立签名。见[原厂第二批](native-capability-completion.md) |
+| 应用市场与安装 | `get_app_status/list_native_applications/list_native_modules/get_application_install_progress` | 安装／卸载／更新、原厂包身份与完整异步任务核验、通用应用启停和安装失败恢复 | `list_native_applications` 不是完整已装／运行清单；模块目录按原厂可用／已安装两表展示，但不推断运行状态，也不授安装权。安装进度会同步插件、写缓存，需管理员确认／幂等，不是纯 getter。`packages` 统一采集字段形状、整数枚举、URL 类别及校验字段格式，包执行验证仍为 false；不额外要求独立签名。见[原厂第二批](native-capability-completion.md) |
 | 影视墙 | `get_movie_status/list_movie_libraries/rename_movie_library/get_movie_library_scan_status` | 新建／删除库、来源／成员、发起扫描、匹配／字幕、播放／收藏等 | 真实原厂目录／状态和名称修改，不返回媒体源路径、不推算进度；配置写须核对嵌套结构、归属及文件范围。当前需已有影视库比对，未创建样本 |
 | 相册、识别与分享 | `get_album_status/get_share_status/get_media_status/list_albums/list_shared_albums/create_album/rename_album/delete_album/revoke_share`；系统另有 AI 开关工具 | 照片内容／上传／整理、人物／成员管理、相册邀请、创建分享链接／密码／有效期、完整手机备份 | 原厂目录也可能初始化／修复状态，最低读写。删除只当前所有者普通 custom 相册且 ID 大于七，不混用共享／保留类型；ACK 不代表清理完成。分享创建需服务端 ID 与真实外链，不拼 URL。写验收先指定独立对象 |
 | 备份与同步 | `list_backup_tasks/get_auto_backup_settings/disable_auto_backup/pause_backup_task/cancel_backup_task` | 创建／恢复任务、开启新自动导入、改变源目标、同步计划与冲突恢复 | 固定当前所有者，未知原始状态不猜。管理员只关闭、暂停／取消既有任务；可能停止原厂线程或清理失败记录，未证明异步完成。新目标和恢复须文件 ACL／索引合同 |
@@ -36,7 +36,7 @@
 1. 开发模式必须有非空实际来源 IP／CIDR 白名单和有效绝对窗口；同源、JSON、CSRF 不豁免。调试只走镜像固定 API，不用 SSH，不反复为少量字段换镜像试探。
 2. `/api/dev/diagnostics` 目录十项，默认仍仅 `device/storage/business/fan`。`file_backend_context` 只看身份／句柄元数据；新增 `file_protocol` 显式采集四阶段 errno、预期／实际 mount／device、namespace 和固定协议形状。诊断不授文件执行权，失败保持真实原因。
 3. `/api/dev/media` 的 `probe_business`＋`confirm:true` 固定三目录；`/api/dev/native` 严格 `{"action":"probe","confirm":true}` 或 `{"action":"packages","confirm":true}`。前者固定六类原厂目录／设置，后者为脱敏包字段、枚举、URL 类别和校验格式；不安装、执行 setter 或造样本，可能更新原厂状态／唤盘，均不加入默认检测。
-4. 新版文件先解决七根挂载门，再由所有者明确给出 `admin/public` 允许目录、小文件和短期只读 Token，核对目录／属性与整文件 SHA-256、HEAD、单 Range、撤权续验；未通过则不声称可读，也不顺带测试写入。
+4. `364b858` 已在实机确认三个实际 `Users` 根的挂载身份，并以当前来源限定的临时只读 Token 浏览视频资源、备份磁盘和主磁盘的 `admin` 目录；Token 已撤销并验证 HTTP 401。视频资源和主磁盘目录属性成功，备份磁盘的一次属性读取拒绝原因尚未确定，随后浏览成功；四个缺少 `Users` 的分区候选继续拒绝。下一步用所有者指定的小文件核对整文件 SHA-256、HEAD、单 Range、撤权续验；目录浏览通过不能替代内容下载和写入验收。
 5. Docker、下载、相册、备份和系统写入各用明确指定的专用对象；先读取比对，再单项确认／执行并核对真实终态。部署复用原 Toolbox 项目与数据卷，不用 `down -v`，不将现有业务当压力／破坏样本。
 
 自动化覆盖固定 HTTP／Unix 传输、真实 Linux 句柄、ACL 正子集、权限矩阵、旧格式兼容、幂等、并发、撤权、对象变化和故障保留。Linux CI、镜像发布、NAS 来源／Token 调用、实际业务终态须分别记录；任何一层通过都不能替代其余证据。
