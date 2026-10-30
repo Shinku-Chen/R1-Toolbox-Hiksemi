@@ -322,8 +322,11 @@ class NativeOwnerReadAuthority:
                 raise FileAccessError('acl_unverified')
             return row
         except BusinessTransportError as error:
-            raise FileAccessError('invalid_key' if error.reason == 'authorization_denied'
-                                  else 'acl_unverified') from None
+            # Transport availability is not an observed native ACL refusal.
+            # Keep fixed contract codes without exposing an upstream message.
+            code = {'authorization_denied': 'invalid_key', 'timeout': 'timeout',
+                    'busy': 'resource_busy'}.get(error.reason, 'native_unavailable')
+            raise FileAccessError(code) from None
 
 
 class VendorFileProtocolClient:
@@ -390,7 +393,9 @@ class VendorFileProtocolClient:
             target = mount + ('/' + component if component else '')
             query = {'action': action, 'path': target}
             if action == 'get_list':
-                query.update(limit=2, offset=0)
+                # v1.0 dispatch @0x158708 requires both keys; page is 1-based.
+                # limit/offset belong to a different parsed operation branch.
+                query.update(page=1, pagesize=2)
             request_path = '/rest/1.0/file?' + urlencode(query, quote_via=quote)
             request_path += '&access_token=' + quote(token, safe='')
             request = ('GET ' + request_path + ' HTTP/1.1\r\n'
@@ -446,6 +451,36 @@ def _shape(value):
             bool: 'boolean', float: 'number'}.get(type(value), 'unsupported')
 
 
+def _native_list_paths(rows, mount, component):
+    """Normalize exact literal child names privately; this proves no file ACL.
+
+    v260907 list serializers emit ``name``; an absolute ``path`` is optional
+    in one flagged branch. Never unquote or Unicode-normalize a native name.
+    Every optional path must name that same immediate child, not another tree.
+    """
+    if (not is_users_root_path(mount) or component not in _COMPONENTS
+            or type(rows) is not list or len(rows) > 256):
+        return None
+    target = mount + ('/' + component if component else '')
+    output, names = [], set()
+    for row in rows:
+        if type(row) is not dict:
+            return None
+        name = row.get('name')
+        if (type(name) is not str or not 1 <= len(name) <= 255 or name in ('.', '..')
+                or '/' in name or '\\' in name or not all(c.isprintable() for c in name)
+                or any(0xD800 <= ord(c) <= 0xDFFF for c in name) or name in names):
+            return None
+        if len(name.encode('utf-8', 'strict')) > 255:
+            return None
+        path = target + '/' + name
+        if 'path' in row and (type(row['path']) is not str or row['path'] != path):
+            return None
+        names.add(name)
+        output.append(path)
+    return output
+
+
 def project_protocol_frame(frame, mount, component, action):
     """Only known field shapes, fixed status and containment evidence leave host."""
     if type(frame) is not dict:
@@ -458,24 +493,30 @@ def project_protocol_frame(frame, mount, component, action):
     path_matches = native_path == target if type(native_path) is str else None
     rows = payload.get('list')
     list_count = len(rows) if type(rows) is list and len(rows) <= 256 else None
-    children_contained = None
-    if list_count is not None:
-        flags = []
-        for row in rows:
-            path = row.get('path') if type(row) is dict else None
-            flags.append(type(path) is str and path.startswith(target + '/')
-                         and all(c not in ('', '.', '..') for c in path[len(target) + 1:].split('/')))
-        children_contained = all(flags)
+    normalized = _native_list_paths(rows, mount, component) if list_count is not None else None
+    children_contained = normalized is not None if list_count is not None else None
+    accepted_code = (('code' not in frame or type(frame['code']) is int and frame['code'] == 0)
+                     and ('code' not in payload or type(payload['code']) is int and payload['code'] == 0))
     info_shape = (action == 'get_info' and path_matches is True
                   and type(payload.get('isdir')) is int and payload['isdir'] == 1
                   and type(payload.get('size')) is int and payload['size'] == 0
                   and all(type(payload.get(k)) is int and 0 <= payload[k] <= 2 ** 53 - 1
                           for k in ('ctime', 'mtime'))
-                  and ('code' not in frame or code == 0))
+                  and accepted_code)
+    list_shape = (action == 'get_list' and children_contained is True
+                  and all(type(payload.get(k)) is int and 0 <= payload[k] <= 2 ** 53 - 1
+                          for k in ('file_attr', 'mtime'))
+                  and ('path' not in payload or path_matches is True)
+                  and ('count' not in payload or type(payload['count']) is int
+                       and payload['count'] == list_count)
+                  and ('totalpage' not in payload or type(payload['totalpage']) is int
+                       and 0 <= payload['totalpage'] <= 2 ** 31 - 1)
+                  and accepted_code)
     return {'action': action, 'subject_path_class': component or 'users_root',
             'http_status': 200, 'native_code': code,
-            'native_success': info_shape if action == 'get_info' else code == 0,
-            'success_contract': 'get_info_structural_v260907' if info_shape else None,
+            'native_success': info_shape if action == 'get_info' else list_shape,
+            'success_contract': ('get_info_structural_v260907' if info_shape else
+                                 'get_list_name_children_v260907' if list_shape else None),
             'field_shapes': {k: _shape(payload[k]) for k in _FIELDS if k in payload},
             'path_matches_requested': path_matches, 'list_items_in_frame': list_count,
             'all_list_paths_contained': children_contained,

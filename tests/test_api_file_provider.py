@@ -33,6 +33,13 @@ def frame(path=MOUNT, **changes):
     return value
 
 
+def listing(*names, **changes):
+    value = {'mtime': 456, 'file_attr': 0, 'list': [
+        {'name': name, 'isdir': 1, 'size': 0, 'ctime': 123, 'mtime': 456} for name in names]}
+    value.update(changes)
+    return value
+
+
 class Connection:
     def __init__(self, value=None, status=200, certificate=b'CERT'):
         raw = json.dumps(frame() if value is None else value).encode('utf-8')
@@ -80,7 +87,7 @@ class RuleTests(unittest.TestCase):
 
     def test_projection_never_returns_native_name_content_path_message_or_token(self):
         value = frame(name=PRIVATE, message=PRIVATE, token=PRIVATE,
-                      list=[{'path': MOUNT + '/admin', 'name': PRIVATE}])
+                      list=[{'path': MOUNT + '/' + PRIVATE, 'name': PRIVATE}])
         result = files.project_protocol_frame(value, MOUNT, '', 'get_list')
         self.assertNotIn(PRIVATE, json.dumps(result))
         self.assertNotIn(MOUNT, json.dumps(result))
@@ -89,6 +96,50 @@ class RuleTests(unittest.TestCase):
         result = files.project_protocol_frame(frame(list=[{'path': MOUNT + '/../secret'}]),
                                              MOUNT, '', 'get_list')
         self.assertFalse(result['all_list_paths_contained'])
+
+    def test_native_list_uses_literal_names_and_needs_no_path_or_code(self):
+        result = files.project_protocol_frame(listing('admin', '照片'), MOUNT, '', 'get_list')
+        self.assertTrue(result['native_success'])
+        self.assertEqual(result['success_contract'], 'get_list_name_children_v260907')
+        self.assertIsNone(result['native_code'])
+        self.assertIsNone(result['path_matches_requested'])
+        self.assertTrue(result['all_list_paths_contained'])
+        self.assertEqual(files._native_list_paths([{'name': '%2e%2e'}], MOUNT, 'admin'),
+                         [MOUNT + '/admin/%2e%2e'])
+        value = listing('报告.txt')
+        value['list'][0]['path'] = MOUNT + '/admin/报告.txt'
+        self.assertTrue(files.project_protocol_frame(value, MOUNT, 'admin', 'get_list')['native_success'])
+        self.assertNotIn('报告', json.dumps(result, ensure_ascii=False))
+        self.assertFalse(result['acl_proven'])
+        self.assertFalse(result['opened_object_proven'])
+
+    def test_native_list_refuses_traversal_separators_duplicates_and_ambiguous_paths(self):
+        bad_rows = [None, {}, {'path': MOUNT + '/admin'}, {'name': ''}, {'name': '.'},
+                    {'name': '..'}, {'name': '../other'}, {'name': 'a/b'}, {'name': 'a\\b'},
+                    {'name': 'a\n'}, {'name': '\ud800'}, {'name': '照' * 86},
+                    {'name': 'admin', 'path': MOUNT + '/other'},
+                    {'name': 'admin', 'path': 'admin'}, {'name': 'admin', 'path': None}]
+        for row in bad_rows:
+            with self.subTest(row=row):
+                value = listing()
+                value['list'] = [row]
+                result = files.project_protocol_frame(value, MOUNT, '', 'get_list')
+                self.assertFalse(result['native_success'])
+                self.assertFalse(result['all_list_paths_contained'])
+        self.assertFalse(files.project_protocol_frame(listing('admin', 'admin'), MOUNT, '',
+                                                      'get_list')['native_success'])
+
+    def test_list_success_requires_metadata_and_rejects_error_or_bad_pagination(self):
+        self.assertTrue(files.project_protocol_frame(listing(), MOUNT, '', 'get_list')['native_success'])
+        for changes in ({'mtime': True}, {'file_attr': -1}, {'count': 2}, {'count': True},
+                        {'totalpage': -1}, {'totalpage': True}, {'code': True}, {'code': -1110},
+                        {'path': MOUNT + '/other'}, {'list': [{'name': 'x'}] * 257}):
+            with self.subTest(changes=changes):
+                result = files.project_protocol_frame(listing('admin', **changes), MOUNT, '', 'get_list')
+                self.assertFalse(result['native_success'])
+        self.assertFalse(files.project_protocol_frame({'code': 0}, MOUNT, '', 'get_list')['native_success'])
+        self.assertFalse(files.project_protocol_frame({'code': 0, 'data': listing('admin', code=-1)},
+                                                      MOUNT, '', 'get_list')['native_success'])
 
     def test_owner_read_is_fixed_columns_no_token_or_other_account(self):
         with tempfile.TemporaryDirectory(prefix='r1-file-owner-') as directory:
@@ -149,6 +200,15 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(self.connection.address, ('127.0.0.1', 20443))
         self.assertTrue(self.connection.closed)
         self.assertGreaterEqual(self.binary.call_count, 3)
+
+    def test_native_list_request_uses_fixed_one_based_page_and_page_size(self):
+        self.connection = Connection(listing('admin'))
+        value = self.client().request(MOUNT, '', 'get_list', deadline=13, authorizer=self.auth)
+        self.assertTrue(files.project_protocol_frame(value, MOUNT, '', 'get_list')['native_success'])
+        request = self.connection.sent[0].decode('ascii')
+        self.assertIn('&page=1&pagesize=2&', request)
+        self.assertNotIn('limit=', request)
+        self.assertNotIn('offset=', request)
 
     def test_route_component_action_and_authorization_rejection_touch_nothing(self):
         for mount, component, action in (('/etc', '', 'get_info'), (MOUNT, '../other', 'get_info'),
@@ -323,6 +383,25 @@ class ProbeTests(unittest.TestCase):
 
 
 class NativeAuthorityTests(unittest.TestCase):
+    def test_transport_failures_use_existing_availability_codes_without_retry_or_acl_claim(self):
+        for reason, code in (('authorization_denied', 'invalid_key'), ('timeout', 'timeout'),
+                             ('busy', 'resource_busy'), ('identity_unverified', 'native_unavailable'),
+                             ('credential_unavailable', 'native_unavailable'),
+                             ('transport_failed', 'native_unavailable')):
+            with self.subTest(reason=reason):
+                request = mock.Mock(side_effect=files.BusinessTransportError(reason))
+                client = SimpleNamespace(clock=lambda: 0, request=request)
+                authority = files.NativeOwnerReadAuthority(None, client=client,
+                                   root_collector=lambda unused: copy.deepcopy(CATALOG),
+                                   root_guard=lambda *a: nullcontext())
+                with mock.patch.object(files, '_fixed_owner', return_value=True), \
+                     mock.patch.object(files, '_firmware_identity', return_value=True), \
+                     self.assertRaises(FileAccessError) as caught:
+                    authority.authorize(ROOT, 'admin/sample', lambda: True)
+                self.assertEqual(caught.exception.code, code)
+                self.assertNotIn(PRIVATE, json.dumps(caught.exception.result()))
+                request.assert_called_once()
+
     def test_positive_native_root_plus_exact_owner_and_binary_maps_only_audited_subtree(self):
         client = SimpleNamespace(clock=lambda: 0, request=mock.Mock(return_value=frame()))
         authority = files.NativeOwnerReadAuthority(None, root='/fixture', client=client,
