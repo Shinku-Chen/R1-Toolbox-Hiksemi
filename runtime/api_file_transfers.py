@@ -241,8 +241,8 @@ class FileTransfers:
     def _new(self, principal, resource, direction, size):
         now = self._clock()
         for identifier, row in list(self._sessions.items()):
-            if now >= row['deadline'] and not row['active']:
-                self._terminal(row, 'expired')
+            if not row['active']:
+                self._expire(row, now=now)
             if row['state'] in _TERMINAL and now - row['changed'] >= 300:
                 self._sessions.pop(identifier)
                 self._idempotency = {key: value for key, value in self._idempotency.items()
@@ -276,6 +276,20 @@ class FileTransfers:
             row['fd'] = None
         row.update(state=state, active=False, changed=self._clock(), error=error)
 
+    def _expire(self, row, *, now=None):
+        """Expire once; closing a published fd cannot leave a live pending op.
+
+        Both request access and new-session cleanup use this gate. Terminal
+        rows retain their original changed time for bounded receipt retention.
+        """
+        now = self._clock() if now is None else now
+        if now >= row['deadline'] and row['state'] not in _TERMINAL:
+            if row.get('operation') and row['state'] == 'committing':
+                row['operation'].update(state='result_unconfirmed', result_version=None,
+                    error=FileAccessError('result_unconfirmed').result()['error'],
+                    updated_at=_stamp(self._wall()))
+            self._terminal(row, 'expired')
+
     def _owned(self, identifier, principal, *, tool=None):
         self._current(principal)
         if not isinstance(identifier, str) or not _ID.fullmatch(identifier):
@@ -287,12 +301,7 @@ class FileTransfers:
         if tool:
             assert_file_grant(principal, tool, row['resource'].root_id, row['resource'].path,
                               write=row['direction'] == 'upload')
-        if self._clock() >= row['deadline'] and row['state'] not in _TERMINAL:
-            if row.get('operation') and row['state'] == 'committing':
-                row['operation'].update(state='result_unconfirmed', result_version=None,
-                    error=FileAccessError('result_unconfirmed').result()['error'],
-                    updated_at=_stamp(self._wall()))
-            self._terminal(row, 'expired')
+        self._expire(row)
         return row
 
     def prepare_download(self, principal, source):

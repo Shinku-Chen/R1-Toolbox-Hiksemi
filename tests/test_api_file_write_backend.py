@@ -228,6 +228,34 @@ class NewFileTests(unittest.TestCase):
         self.assertEqual(len(self.index.notifications), 1)
         self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
 
+    def test_new_prepare_cleans_expired_pending_install_without_a_live_pending_receipt(self):
+        receipt = self.prepare()
+        self.receive(receipt)
+        committed = self.commit(receipt)
+        row = self.manager._sessions[receipt['transfer_id']]
+        descriptor = row['fd']
+        row['deadline'] = self.manager._clock() - 1
+        deadline = row['deadline']
+        # Creating an unrelated staging object used to close the installed fd
+        # but leave operation=pending forever, bypassing get_operation's gate.
+        new = self.prepare('admin/another.bin', idempotency_key='prepare-2')
+        self.assertTrue(new['ok'], new)
+        self.assertIsNone(row['fd'])
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
+        self.assertEqual(row['state'], 'expired')
+        self.assertEqual(self.operation(committed)['operation']['state'], 'result_unconfirmed')
+        self.assertEqual(self.commit(receipt)['operation']['state'], 'result_unconfirmed')
+        changed = row['changed']
+        third = self.prepare('admin/third.bin', idempotency_key='prepare-3')
+        self.assertTrue(third['ok'], third)
+        self.assertEqual(row['changed'], changed)
+        self.assertEqual(row['deadline'], deadline)
+        self.assertEqual(len(self.index.notifications), 1)
+        self.assertEqual(self.index.verifications, 0)
+        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertFalse((self.users / 'admin/another.bin').exists())
+
     def test_revocation_during_index_verification_discards_a_successful_match(self):
         receipt = self.prepare()
         self.receive(receipt)

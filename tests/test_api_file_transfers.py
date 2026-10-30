@@ -85,6 +85,31 @@ class FileTransferRuleTests(unittest.TestCase):
                                    sha256='0' * 64, idempotency_key='test')
         self.assertEqual(caught.exception.code, 'write_backend_unverified')
 
+    def test_new_session_expiry_marks_pending_unknown_without_renewing_terminal_age(self):
+        # Pure lifecycle projection; the separate Linux writer regression
+        # covers a genuinely published inode and closing its retained fd.
+        now = [0.0]
+        manager = FileTransfers(lambda unused: True, clock=lambda: now[0], wall_clock=lambda: now[0])
+        self.addCleanup(manager.close)
+        target = UploadTarget(ROOT, 'owner/new.bin', 'new.bin', None, None, None)
+        key = principal(write=True)
+        old = manager._new(key, target, 'upload', 1)
+        deadline = old['deadline']
+        old.update(state='committing', operation={'state': 'pending', 'result_version': None,
+            'error': None, 'updated_at': 'old'})
+        now[0] = deadline + 1
+        manager._new(key, target, 'upload', 1)
+        self.assertEqual(old['state'], 'expired')
+        self.assertEqual(old['operation']['state'], 'result_unconfirmed')
+        self.assertEqual(old['operation']['error']['code'], 'result_unconfirmed')
+        self.assertEqual(old['changed'], now[0])
+        self.assertEqual(old['deadline'], deadline)
+        changed = old['changed']
+        now[0] += 1
+        manager._new(key, target, 'upload', 1)
+        self.assertEqual(old['changed'], changed)
+        self.assertEqual(old['operation']['state'], 'result_unconfirmed')
+
 
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'pread') and hasattr(os, 'pwrite'),
                      'Linux/POSIX descriptor transport required')
