@@ -23,7 +23,7 @@ import time
 from urllib.parse import quote, urlencode
 
 from api_file_roots import (collect_file_roots, is_users_root_path, is_admin_root_path,
-                            physical_mount_path)
+                            physical_mount_path, is_private_recovery_path)
 from vendor_business_transport import BusinessTransportError, _identity
 from vendor_media_auth import OWNER_ID, read_session
 from vendor_media_probe import (MediaProbeError, MAX_HEADERS, _certificate,
@@ -60,7 +60,8 @@ def audited_owner_read_rule(relative_path):
     This pure path subset does not prove either condition, subject or opened fd.
     """
     from api_file_roots import valid_relative_file_path
-    if not valid_relative_file_path(relative_path):
+    if (not valid_relative_file_path(relative_path)
+            or is_private_recovery_path(relative_path)):
         return False
     if not relative_path:
         return True
@@ -79,7 +80,8 @@ def audited_owner_write_rule(relative_path):
     This is not the get_info.writeable field, a filesystem-state check.
     """
     from api_file_roots import valid_relative_file_path
-    return valid_relative_file_path(relative_path) and bool(relative_path)
+    return (valid_relative_file_path(relative_path) and bool(relative_path)
+            and not is_private_recovery_path(relative_path))
 
 
 def _authorized(authorizer):

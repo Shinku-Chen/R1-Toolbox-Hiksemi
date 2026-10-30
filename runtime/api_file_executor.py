@@ -20,7 +20,8 @@ import time
 from api_file_operations import (FileAccessError, assert_file_grant, _mounts,
                                  _descriptor_mount_id)
 from api_file_provider import NativeOwnerReadAuthority
-from api_file_roots import is_admin_root_path, physical_mount_path, valid_relative_file_path
+from api_file_roots import (is_admin_root_path, is_private_recovery_path,
+                            physical_mount_path, valid_relative_file_path)
 from api_file_transfers import DownloadSource, FileTransfers, _binding, _identity, _version
 from api_file_write_backend import FileWriteExecutor, TOOLS as WRITE_TOOLS
 
@@ -61,6 +62,32 @@ def _opened_mount_id(root, descriptor):
         raise FileAccessError('root_unavailable') from None
 
 
+def _deny_private_alias(root, admin, candidate):
+    """Only metadata: reserve the canonical custody inode against FS aliases."""
+    try:
+        private = os.open('.r1-toolbox-ops', os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=admin)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        raise FileAccessError('root_unavailable') from None
+    try:
+        info = os.fstat(private)
+        if (not stat.S_ISDIR(info.st_mode) or _opened_mount_id(root, private) is None):
+            # An unknown/invalid reserved anchor cannot become a skippable
+            # ordinary child error; never follow a private-name symlink.
+            raise FileAccessError('root_unavailable')
+        other = os.fstat(candidate)
+        if (info.st_dev, info.st_ino) == (other.st_dev, other.st_ino):
+            # A bind alias is the same data inode too, even if its mount ID
+            # differs. The ordinary traversal additionally rejects mount hops.
+            raise FileAccessError('permission_denied')
+    except OSError:
+        raise FileAccessError('root_unavailable') from None
+    finally:
+        os.close(private)
+
+
 def _entry(path, info):
     directory = stat.S_ISDIR(info.st_mode)
     return {'name': path.rsplit('/', 1)[-1] if path else 'admin', 'path': path,
@@ -76,6 +103,8 @@ class _Handle:
     """Owned fd plus no-link admin ancestry, rejecting every extra mount."""
 
     def __init__(self, root, row, path, *, reader=False, directory=False):
+        if is_private_recovery_path(path):
+            raise FileAccessError('permission_denied')
         if os.name != 'posix' or not hasattr(os, 'O_PATH'):
             raise FileAccessError('secure_open_unavailable')
         if not is_admin_root_path(row.get('mount')) or not valid_relative_file_path(path):
@@ -128,6 +157,10 @@ class _Handle:
                             or f'{os.major(info.st_dev)}:{os.minor(info.st_dev)}' != device):
                         descendant = index >= len(boundary) and observed_mount is not None
                         raise FileAccessError('cross_mount_denied' if descendant else 'root_unavailable')
+                if index == len(boundary):
+                    # The first descendant can be a short/case-insensitive FS
+                    # alias even when its spelling passes the lexical guard.
+                    _deny_private_alias(root, self.descriptors[-2], parent)
             self.fd = parent
             self.identity = _object_identity(os.fstat(self.fd))
             if stat.S_ISREG(self.identity[2]) and self.identity[3] != 1:
@@ -182,7 +215,7 @@ class _UsersHandle(_Handle):
 
     The public v3 admin anchor is first verified on the physical mount. Its
     already-held Users parent then serves only native root ACL proof and the
-    fixed custody/cache protocols. Public handles never accept a v2 Users row.
+    fixed native cache protocols. Public handles never accept a v2 Users row.
     """
 
     def __init__(self, root, row):
@@ -237,6 +270,8 @@ class FileReadExecutor:
     def _grant(self, principal, tool, root_id, path):
         if not self._current(principal):
             raise FileAccessError('invalid_key')
+        if is_private_recovery_path(path):
+            raise FileAccessError('permission_denied')
         assert_file_grant(principal, tool, root_id, path)
 
     def _root(self, principal, tool, root_id, path):
@@ -306,6 +341,10 @@ class FileReadExecutor:
                 if after_name is not None and name <= after_name:
                     continue
                 child = path + '/' + name if path else name
+                if is_private_recovery_path(child):
+                    # Custody lives inside admin but never joins its public
+                    # file projection, even for a full-root machine grant.
+                    continue
                 try:
                     self._grant(principal, 'list_directory', root_id, child)
                     with self._handle(self.root, row, child) as target:

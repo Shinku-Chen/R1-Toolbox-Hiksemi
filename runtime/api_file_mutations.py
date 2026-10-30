@@ -20,6 +20,7 @@ import time
 
 from api_file_operations import FileAccessError, assert_file_grant, _descriptor_mount_id
 from api_file_provider import audited_owner_write_rule
+from api_file_roots import is_private_recovery_path
 from api_file_transfers import (UploadTarget, PendingInstall, UnpublishedInstallError, _binding,
                                 _identity, _version, _stamp, _IDEMPOTENCY, _VERSION)
 from api_file_mutation_authority import FileMutationAuthority, _read_at, _write_at
@@ -163,7 +164,8 @@ class FileMutationExecutor:
         self._current(principal)
         if not audited_owner_write_rule(path):
             raise FileAccessError('unsupported_path_class')
-        if path == '.DATA_CACHE' or path.startswith('.DATA_CACHE/'):
+        if (is_private_recovery_path(path) or path == '.DATA_CACHE'
+                or path.startswith('.DATA_CACHE/')):
             raise FileAccessError('unsupported_path_class')
         parent, _, name = path.rpartition('/')
         if not name or len(name.encode('utf-8', 'strict')) > 255:

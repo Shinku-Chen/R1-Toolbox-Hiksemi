@@ -65,6 +65,11 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const projectId = 'project_' + '3'.repeat(24), candidateId = 'candidate_' + '4'.repeat(24);
   const unsafeProject = '<svg onload="window.apiProjectInjected=1">片库';
   const deploymentId = 'deployment_' + '5'.repeat(24), unsafeDeployment = '<svg onload="window.apiDeploymentInjected=1">未来服务';
+  const recoveryLocation = { boundary: 'admin', relative_path: '.r1-toolbox-ops', layout: 'admin_custody_v1', anchor_component: 'admin_root' };
+  const recoveryChecks = ['namespace_root', 'drives_directory', 'physical_mount', 'users_root', 'admin_root'].map((component, index) => ({
+    component, uid: 0, mode: [1, 3].includes(index) ? '0777' : '0755', mount_id: '517', same_mount: index >= 2 ? true : null,
+    group_other_writable: [1, 3].includes(index), access_acl: 'absent', default_acl: 'absent', same_object: true, trusted: ![1, 3].includes(index),
+  }));
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
     role_catalog: [
@@ -175,12 +180,14 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       if (url.pathname.startsWith('/api/files/authority/')) {
         const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
         assert.equal(body.root_id, 'root_' + '1'.repeat(24));
-        if (url.pathname.endsWith('/preflight')) return reply(200, { ok: true, ready: false, blockers: ['parent_writable'],
-          checks: [{ component: 'Users', uid: 0, mode: '0777', access_acl: 'absent' }], source_binding: { native_owner: true, same_mount: true }, existing_directory: 'absent' });
+        if (url.pathname.endsWith('/preflight')) return reply(200, { ok: true, ready: false,
+          blockers: ['drives_directory_untrusted_mode_or_acl', 'users_root_untrusted_mode_or_acl'],
+          checks: recoveryChecks, recovery_location: recoveryLocation, recovery_anchor: recoveryChecks[4],
+          source_binding: { native_owner: 'verified', root_metadata_matches: true, same_mount: true }, existing_directory: 'absent' });
         if (url.pathname.endsWith('/initialize')) {
           assert.equal(body.confirmed, true);
           state.file_mutation_authority.authorities = [...state.file_mutation_authority.authorities.filter(row => row.root_id !== body.root_id),
-            { root_id: body.root_id, enabled: true, status: 'registered', revision: 1 }];
+            { root_id: body.root_id, enabled: true, status: 'registered', revision: 1, recovery_location: recoveryLocation }];
           return reply(200, { ok: true });
         }
         if (url.pathname.endsWith('/inspect')) return reply(200, { ok: true,
@@ -291,9 +298,22 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       && (await legacyAuthority.innerText()).includes('需先使用原镜像处理保管对象')
       && await legacyAuthority.locator('button:disabled').count() === 4);
     await manager.locator('[data-authority-preflight]').first().click();
-    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: 'parent_writable' }).waitFor();
-    check('恢复预检显示阻断和完整元数据', (await manager.locator('[data-ref="fileRecoveries"]').innerText()).includes('0777') && calls.filter(call => call.path.endsWith('/initialize')).length === 0);
-    await manager.locator('[data-authority-init]').first().click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: 'users_root_untrusted_mode_or_acl' }).waitFor();
+    const preflightEvidence = JSON.parse(await manager.locator('[data-ref="fileRecoveries"] pre').innerText());
+    check('恢复预检完整显示五级链及admin恢复位置和锚点', JSON.stringify(preflightEvidence.checks) === JSON.stringify(recoveryChecks)
+      && JSON.stringify(preflightEvidence.recovery_location) === JSON.stringify(recoveryLocation)
+      && JSON.stringify(preflightEvidence.recovery_anchor) === JSON.stringify(recoveryChecks[4])
+      && JSON.stringify(preflightEvidence.source_binding) === JSON.stringify({ native_owner: 'verified', root_metadata_matches: true, same_mount: true }));
+    check('admin锚点通过仍显示drives及Users阻断不冒充就绪', (await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('drives_directory_untrusted_mode_or_acl')
+      && !(await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('初始化条件已通过') && calls.filter(call => call.path.endsWith('/initialize')).length === 0);
+    await page.setViewportSize({ width: 320, height: 960 });
+    check('320px完整恢复预检证据不横滚', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await manager.locator('[data-authority-init]').first().click();
+    check('初始化确认明确admin私有新位置和旧区不复用', (await page.locator('.fullmask').last().innerText()).includes('Users/admin/.r1-toolbox-ops')
+      && (await page.locator('.fullmask').last().innerText()).includes('完整祖先权限')
+      && (await page.locator('.fullmask').last().innerText()).includes('旧 Users 恢复区不会自动搬动或复用'));
+    await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-authority-init]').first().waitFor();
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-authority-init]').disabled);
     check('恢复区写沿用CSRF与明确确认', calls.filter(call => call.path.endsWith('/initialize')).at(-1).headers['x-fnm-request'] === '1' && calls.filter(call => call.path.endsWith('/initialize')).at(-1).body.confirmed === true);
@@ -307,6 +327,58 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-authority-revoke]').first().click(); await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-authority-init]').first().filter({ hasText: '重新启用' }).waitFor();
     check('撤销保留恢复入口且可以显式重新启用', await manager.locator('[data-authority-inspect]').first().isEnabled() && await manager.locator('[data-authority-init]').first().isEnabled());
+    const revokedAuthority = state.file_mutation_authority.authorities.find(row => row.root_id === 'root_' + '1'.repeat(24));
+    await manager.locator('[data-authority-inspect]').first().click();
+    await page.waitForFunction(() => { const button = document.querySelector('#r1ApiManager .r1-api-recovery button'); return button && !button.disabled; });
+    const retainedRecovery = await manager.locator('.r1-api-recovery button').elementHandle();
+    check('已撤销的新布局仍允许恢复保留对象', await manager.locator('.r1-api-recovery button').isEnabled() && revokedAuthority.enabled === false);
+    state.file_mutation_authority.authorities = state.file_mutation_authority.authorities.filter(row => row !== revokedAuthority);
+    const legacyLayoutAuthority = { root_id: revokedAuthority.root_id, enabled: false, status: 'legacy_layout',
+      reason: 'legacy_recovery_layout', revision: 3, recovery_location: { boundary: 'users', relative_path: '.r1-toolbox-ops', layout: 'legacy_users_custody_v1', anchor_component: 'users_root' } };
+    state.file_mutation_authority.authorities.push(legacyLayoutAuthority);
+    const beforeLegacyActions = calls.length;
+    for (let refreshIndex = 0; refreshIndex < 2; refreshIndex += 1) {
+      await manager.locator('[data-ref="refresh"]').click();
+      await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+      const oldLayout = manager.locator('[data-legacy-authority][data-legacy-kind="layout"]');
+      check(`同根旧布局刷新${refreshIndex + 1}次后仍隔离全部操作`, await oldLayout.count() === 1 && await oldLayout.locator('button:disabled').count() === 4
+        && await manager.locator('[data-authority-root="' + revokedAuthority.root_id + '"]').count() === 0
+        && await manager.locator('.r1-api-recovery button').count() === 0
+        && (await oldLayout.innerText()).includes('需先使用原镜像处理保管对象')
+        && (await oldLayout.innerText()).includes('本版不会迁移、删除、接管或恢复旧位置'));
+      await oldLayout.locator('button').evaluateAll(buttons => buttons.forEach(button => button.click()));
+    }
+    await retainedRecovery.evaluate(button => button.onclick());
+    check('旧恢复卡脱离页面且重触旧回调也不能弹确认或发恢复请求', !(await retainedRecovery.evaluate(button => button.isConnected))
+      && await page.locator('.fullmask [data-yes]').count() === 0 && calls.length === beforeLegacyActions);
+    check('旧位置禁用按钮不发送初始化检查或撤销请求', calls.length === beforeLegacyActions);
+    await page.setViewportSize({ width: 320, height: 960 });
+    check('320px两类旧恢复登记说明不横滚', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    state.file_mutation_authority.authorities = state.file_mutation_authority.authorities.filter(row => row.root_id !== revokedAuthority.root_id);
+    state.file_mutation_authority.authorities.push(revokedAuthority);
+    await manager.locator('[data-ref="refresh"]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    await manager.locator('[data-authority-inspect]').first().click();
+    await manager.locator('.r1-api-recovery button').click();
+    await page.locator('.fullmask [data-yes]').waitFor();
+    const beforeChangedConfirmation = calls.length;
+    state.file_mutation_authority.authorities = state.file_mutation_authority.authorities.filter(row => row.root_id !== revokedAuthority.root_id);
+    state.file_mutation_authority.authorities.push(legacyLayoutAuthority);
+    await manager.locator('[data-ref="refresh"]').evaluate(button => button.click());
+    await manager.locator('[data-legacy-kind="layout"]').waitFor();
+    await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '绑定已变化' }).waitFor();
+    check('恢复确认期间布局变化在发送前再次拒绝且没有请求', calls.length === beforeChangedConfirmation && await manager.locator('.r1-api-recovery button').count() === 0);
+    state.file_mutation_authority.authorities = state.file_mutation_authority.authorities.filter(row => row.root_id !== revokedAuthority.root_id);
+    state.file_mutation_authority.authorities.push(revokedAuthority);
+    await manager.locator('[data-ref="refresh"]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    await manager.locator('[data-authority-inspect]').first().click();
+    const beforeRevokedRestore = calls.filter(call => call.path.endsWith('/restore')).length;
+    await manager.locator('.r1-api-recovery button').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '原厂索引尚未确认' }).waitFor();
+    check('当前已撤销新布局仍可发送所有者明确恢复', calls.filter(call => call.path.endsWith('/restore')).length === beforeRevokedRestore + 1 && revokedAuthority.enabled === false);
     await view('create');
     await manager.locator('[data-ref="scopes"] input[value="apps"]').check();
     check('新增只读业务工具按功能启用而不自动勾选', !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isDisabled()) && !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isChecked()));
@@ -459,7 +531,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="scopes"] input[value="files"]').check();
     check('文件功能显示真实admin根与授权边界', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 2
       && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/admin')
-      && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('实际操作仍拒绝进入子挂载'));
+      && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('实际操作仍拒绝进入子挂载')
+      && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('Token 不可访问或单独授权'));
     const writesBeforeFiles = calls.length;
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '请至少勾选一个' }).waitFor();
@@ -487,6 +560,20 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '相对 POSIX 路径' }).waitFor();
     check('越界及非规范子目录均在本地拒绝且不提交', calls.length === writesBeforeFiles);
+    for (const privatePath of ['.r1-toolbox-ops', '.r1-toolbox-ops/source', '.R1-TOOLBOX-OPS/source']) {
+      await writableRoot.locator('[data-root-path]').fill(privatePath);
+      await manager.locator('[data-ref="create"]').click();
+      await manager.locator('[data-ref="error"]').filter({ hasText: '仅由所有者恢复界面管理' }).waitFor();
+      check(`私有恢复范围${privatePath}本地拒绝且无请求`, calls.length === writesBeforeFiles && await page.locator('.fullmask [data-yes]').count() === 0);
+    }
+    for (const allowedPath of ['.r1-toolbox-ops2', 'folder/.r1-toolbox-ops']) {
+      await writableRoot.locator('[data-root-path]').fill(allowedPath);
+      await manager.locator('[data-ref="create"]').click();
+      await page.locator('.fullmask [data-yes]').waitFor();
+      check(`私有名称相邻或嵌套普通路径${allowedPath}保留可授权`, (await page.locator('.fullmask').last().innerText()).includes(allowedPath));
+      await page.locator('.fullmask [data-no]').click();
+    }
+    check('取消普通路径确认不发送创建请求', calls.length === writesBeforeFiles);
     await writableRoot.locator('[data-root-path]').fill('电影/2026');
     await manager.locator('select[data-ref="role"]').selectOption('readwrite');
     await writableRoot.locator('[data-root-access]').selectOption('readwrite');
@@ -597,6 +684,18 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
     check('只有明确重选才保存新根与admin相对路径', JSON.stringify(calls.filter(call => call.path === '/api/access/keys/update').at(-1).body.file_roots)
       === JSON.stringify([{ id: 'root_' + '1'.repeat(24), path: '旧资料', access: 'readwrite' }]));
+    const oldPrivateGrant = { id: 'root_' + '1'.repeat(24), path: '.r1-toolbox-ops/旧记录', access: 'readonly' };
+    state.keys.push({ id: 'fixture-old-private-range', name: '旧内部目录范围', role: 'readonly', policy_version: 3,
+      scopes: ['files'], tool_grants: ['list_file_roots'], file_roots: [oldPrivateGrant], docker_projects: [],
+      docker_deployments: [], application_ids: [], allowed_ips: [], created_at: 1793240000,
+      expires_at: null, revoked_at: null, last_used_at: null, status: 'active' });
+    await manager.locator('[data-ref="refresh"]').click();
+    await manager.locator('.r1-api-item').filter({ hasText: '旧内部目录范围' }).locator('[data-ref="edit"]').click();
+    await manager.locator('input[data-ref="name"]').fill('旧内部目录仅改名称');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    check('旧私有范围仅改元数据省略file_roots不重写旧授权', !Object.hasOwn(calls.filter(call => call.path === '/api/access/keys/update').at(-1).body, 'file_roots')
+      && JSON.stringify(state.keys.find(key => key.id === 'fixture-old-private-range').file_roots) === JSON.stringify([oldPrivateGrant]));
     state.keys.push({ id: 'fixture-legacy', name: '旧权限密钥', scopes: ['read', 'power'], allowed_ips: [], created_at: 1793240000,
       expires_at: null, revoked_at: null, last_used_at: null, status: 'active' });
     await manager.locator('[data-ref="refresh"]').click();

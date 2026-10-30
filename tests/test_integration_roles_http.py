@@ -79,6 +79,7 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
                     self.assertIn(required, description)
                 self.assertNotIn('public', description)
                 self.assertNotIn('公共目录', description)
+                self.assertIn('内部恢复区不授予文件访问', description)
         self.assert_no_actions()
 
     def test_capabilities_require_bearer_not_cookie_or_developer_whitelist(self):
@@ -322,6 +323,31 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
             self.assertEqual([], domain['available_tools'])
             self.assertTrue(domain['reason'])
         self.assertGreaterEqual(catalog.call_count, 1)
+        self.assert_no_actions()
+
+    def test_persisted_private_grants_stay_editable_but_are_not_available_or_listed(self):
+        self.root_catalog()
+        self.server.api_access.configure({'enabled': True})
+        for path in ('.r1-toolbox-ops/source', '.R1-TOOLBOX-OPS/source'):
+            grants = [{'id': ROOT_ID, 'path': path, 'access': 'readonly'}]
+            body = self.create_body('readonly', ['files'], file_roots=grants,
+                                    tool_grants=['get_file_info'])
+            # Model an existing record through the storage layer, whose shape
+            # must remain readable even after this subtree becomes reserved.
+            key = self.server.api_access.create_key(body)
+            status, _, value = self.capabilities(key)
+            self.assertEqual(status, 200)
+            self.assertEqual(value['tools'], [])
+            self.assertEqual(value['file_roots'][0]['path'], path)
+            self.assertFalse(value['file_roots'][0]['available'])
+            self.assertIn('内部恢复区', value['file_roots'][0]['reason'])
+            self.assertEqual(self.rpc(key)[2]['result']['tools'], [])
+            status, _, edited = self.browser('POST', '/api/access/keys/update',
+                                             {'id': key['id'], 'name': '保留旧范围，只改名称'})
+            self.assertEqual(status, 200, edited)
+            self.assertEqual(edited['key']['file_roots'], grants)
+            self.assertEqual(self.browser('POST', '/api/access/keys', body)[0], 400)
+        self.assertTrue(self.server.api_access.snapshot()['storage_ok'])
         self.assert_no_actions()
 
     def test_unmounted_file_root_stays_unknown_without_substitution(self):

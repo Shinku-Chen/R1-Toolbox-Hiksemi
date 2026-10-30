@@ -15,7 +15,7 @@ from api_docker_projects import DockerProjectRegistry
 from api_docker_operations import DockerProjectOperations
 from api_docker_deployment import DockerDeploymentRegistry, DockerDeploymentOperations
 from api_file_readiness import collect_file_access_readiness
-from api_file_roots import collect_file_roots, validate_file_grants
+from api_file_roots import collect_file_roots, validate_file_grants, is_private_recovery_path
 from api_file_executor import FileReadExecutor, TOOLS as FILE_EXECUTOR_TOOLS, WRITE_TOOLS as FILE_WRITE_TOOLS
 from api_file_mutation_authority import FileMutationAuthority
 from api_file_operations import FileAccessError
@@ -162,6 +162,7 @@ class IntegrationApi:
             if item['id'] == 'files':
                 description = ('在逐次原厂权限核验的 /drives/*/Users/admin 范围浏览和下载，相对路径以 admin 为起点；'
                     '根下存在子挂载仍可选，实际跨入拒绝且列表跳过入口。'
+                    '内部恢复区不授予文件访问。'
                     '已核验 admin 后代支持上传、独立覆盖、目录创建、复制、可恢复改名／移动和原厂回收站，'
                     '仍须精确工具、源／目标授权、恢复区及原厂索引等实际门槛。')
                 item.update(implemented=True, description=description)
@@ -250,13 +251,15 @@ class IntegrationApi:
             roots = {row['id']: row for row in self.file_root_catalog()['roots']}
             for grant in selected:
                 root = roots.get(grant['id'])
+                private = is_private_recovery_path(grant['path'])
                 # Preserve the grant's configured mode, and report changed
                 # mount state separately; never silently broaden or downgrade.
-                can_use = root is not None and not (root['read_only'] and grant['access'] == 'readwrite')
+                can_use = not private and root is not None and not (root['read_only'] and grant['access'] == 'readwrite')
                 grants.append({**copy.deepcopy(grant), 'available': can_use,
                                'label': root['label'] if root else None,
                                'read_only': root['read_only'] if root else None,
-                               'reason': '根目录当前无法确认。' if root is None
+                               'reason': '内部恢复区仅由所有者恢复界面管理，不能授予文件访问。' if private
+                               else '根目录当前无法确认。' if root is None
                                else '挂载已变为只读，原写入授权当前不可用。' if not can_use else None})
         result = {'ok': True, 'role': principal.get('role', 'legacy'),
                 'policy_version': principal.get('policy_version', 1),

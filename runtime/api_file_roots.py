@@ -69,6 +69,12 @@ def physical_mount_path(admin_root):
     return admin_root[:-12]
 
 
+def is_private_recovery_path(value):
+    """Reserve custody name variants; real opens also reject same-object aliases."""
+    return (isinstance(value, str)
+            and value.split('/', 1)[0].casefold() == '.r1-toolbox-ops')
+
+
 def valid_relative_file_path(value):
     """Accept literal POSIX paths below a selected admin root, without decoding."""
     if (not isinstance(value, str) or len(value) > 1024 or '\\' in value
@@ -562,6 +568,8 @@ def validate_file_grants(grants, catalog):
                 or not valid_relative_file_path(grant.get('path'))
                 or grant.get('access') not in ('readonly', 'readwrite')):
             raise ValueError('文件范围格式无效')
+        if is_private_recovery_path(grant['path']):
+            raise ValueError('内部恢复区仅由所有者恢复界面管理，不能授予文件访问')
         root = roots.get(grant['id']) if isinstance(grant.get('id'), str) else None
         if root is None:
             raise ValueError('文件范围对应的数据盘目录当前无法确认，请刷新后选择')

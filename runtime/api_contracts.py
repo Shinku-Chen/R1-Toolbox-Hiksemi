@@ -25,7 +25,7 @@ IMPLEMENTED_TOOLS = frozenset((
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',
     'role_denied', 'tool_denied', 'permission_denied', 'root_unavailable',
-    'cross_mount_denied', 'legacy_users_boundary_v2',
+    'cross_mount_denied', 'legacy_users_boundary_v2', 'legacy_recovery_layout',
     'acl_unverified', 'secure_open_unavailable', 'unsupported_file_type',
     'not_found', 'directory_changed', 'file_changed', 'transfer_expired',
     'transfer_busy', 'transfer_unavailable', 'unsupported_range',
@@ -514,6 +514,8 @@ _CATALOG = {
         'file_root_boundary_version': 3,
         'nested_mount_presence_rejects_entire_root': False,
         'opened_path_may_cross_mounts': False,
+        'file_recovery_directory': '/drives/*/Users/admin/.r1-toolbox-ops/',
+        'file_recovery_directory_machine_access_allowed': False,
     },
     'http_contracts': [{
         'route_template': '/api/integration/files/transfers/{transfer_id}/content',

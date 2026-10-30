@@ -8,7 +8,8 @@ turn this diagnostic into a file backend or a runtime authorization decision.
 import copy
 import re
 
-from api_file_roots import collect_file_roots, is_admin_root_path, valid_relative_file_path
+from api_file_roots import (collect_file_roots, is_admin_root_path, valid_relative_file_path,
+                            is_private_recovery_path)
 
 
 _ROOT_ID = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
@@ -78,6 +79,8 @@ def _selection(grants, roots):
         root = known.get(root_id)
         if not valid:
             reason = '文件范围格式无效。'
+        elif is_private_recovery_path(path):
+            reason = '内部恢复区仅由所有者恢复界面管理，不能授予文件访问。'
         elif identity in identities:
             reason = '文件范围重复；未合并或扩大授权。'
         elif root is None:

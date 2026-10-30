@@ -7,6 +7,7 @@ belong to the storage provider, after this policy check.
 
 import re
 
+from api_file_roots import is_private_recovery_path
 from native_capability_specs import TOOL_SPECS as _NATIVE_TOOL_SPECS
 
 
@@ -37,7 +38,7 @@ SCOPE_CATALOG = (
     {'id': 'media', 'label': '媒体查询', 'implemented': True, 'min_role': 'readwrite',
      'description': '显式查询原厂媒体进度，可能写原厂完成状态，需要读写或管理员角色。'},
     {'id': 'files', 'label': '文件管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '仅在已核验的 /drives/*/Users/admin 范围浏览和下载，相对路径以 admin 为起点；根下存在子挂载仍可选，实际跨入拒绝且列表跳过入口。读写工具可在 admin 后代上传、独立覆盖、创建目录、复制、可恢复改名／移动和移入原厂回收站，仍须实际后端门槛。'},
+     'description': '仅在已核验的 /drives/*/Users/admin 范围浏览和下载，相对路径以 admin 为起点；根下存在子挂载仍可选，实际跨入拒绝且列表跳过入口。内部恢复区不授予文件访问。读写工具可在 admin 后代上传、独立覆盖、创建目录、复制、可恢复改名／移动和移入原厂回收站，仍须实际后端门槛。'},
     {'id': 'docker', 'label': 'Docker 管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取并控制已登记项目；管理员可使用所有者预先登记的独立资源部署、更新和移除容器。'},
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
@@ -339,11 +340,19 @@ def permission_allows(principal, scope, minimum_role, *, tool_name=None):
                     and valid_file_roots(principal.get('file_roots'), role, scopes)
                     and _ROLE_LEVELS[role] >= _ROLE_LEVELS[minimum_role])
         elif version == 3 and isinstance(role, str) and role in _ROLE_LEVELS:
-            return (valid_tool_grants(principal.get('tool_grants'), role, scopes,
+            allowed = (valid_tool_grants(principal.get('tool_grants'), role, scopes,
                                       principal.get('file_roots'), principal.get('docker_projects'),
                                       principal.get('docker_deployments', []))
                     and tool_name in principal['tool_grants']
                     and _ROLE_LEVELS[role] >= _ROLE_LEVELS[minimum_role])
+            if not allowed or scope != 'files':
+                return allowed
+            # Keep old persisted shapes valid for metadata-only edits, but do
+            # not list or execute tools backed solely by the private custody.
+            public = [root for root in principal['file_roots']
+                      if not is_private_recovery_path(root['path'])]
+            return bool(public) and (tool_name not in _WRITE_FILE_TOOLS
+                or any(root['access'] == 'readwrite' for root in public))
         else:
             return False
     return (legacy and isinstance(tool_name, str) and tool_name in LEGACY_TOOLS

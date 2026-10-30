@@ -160,11 +160,13 @@ class ApiContractsTests(unittest.TestCase):
         self.assertFalse(boundaries['legacy_users_grants_auto_migrate'])
         self.assertFalse(boundaries['nested_mount_presence_rejects_entire_root'])
         self.assertFalse(boundaries['opened_path_may_cross_mounts'])
+        self.assertEqual(boundaries['file_recovery_directory'], '/drives/*/Users/admin/.r1-toolbox-ops/')
+        self.assertFalse(boundaries['file_recovery_directory_machine_access_allowed'])
         self.assertIs(boundaries['legacy_whole_disk_grants_auto_migrate'], False)
 
     def test_admin_boundary_failures_match_the_public_error_contract(self):
         from api_file_operations import FileAccessError
-        for code in ('cross_mount_denied', 'legacy_users_boundary_v2'):
+        for code in ('cross_mount_denied', 'legacy_users_boundary_v2', 'legacy_recovery_layout'):
             with self.subTest(code=code):
                 self.valid('get_file_info', FileAccessError(code).result(), output=True)
 

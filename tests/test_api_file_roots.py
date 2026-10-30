@@ -10,11 +10,24 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 from api_file_roots import (collect_file_roots, is_users_root_path, is_admin_root_path,
-                            physical_mount_path,
+                            physical_mount_path, is_private_recovery_path,
                             validate_file_grants, valid_relative_file_path)
 
 
 class ApiFileRootsTests(unittest.TestCase):
+    def test_private_recovery_cannot_be_new_file_grant_but_root_and_siblings_remain_valid(self):
+        catalog = self.catalog()
+        root = catalog['roots'][0]['id']
+        for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_fixture/source',
+                     '.R1-TOOLBOX-OPS/source', '.r1-toolbox-opſ/source'):
+            self.assertTrue(is_private_recovery_path(path))
+            for access in ('readonly', 'readwrite'):
+                with self.assertRaisesRegex(ValueError, '内部恢复区'):
+                    validate_file_grants([{'id': root, 'path': path, 'access': access}], catalog)
+        for path in ('', '.r1-toolbox-ops2', 'folder/.r1-toolbox-ops'):
+            self.assertFalse(is_private_recovery_path(path))
+            validate_file_grants([{'id': root, 'path': path, 'access': 'readwrite'}], catalog)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

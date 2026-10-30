@@ -1,4 +1,4 @@
-"""Owner-established, same-Users-mount custody for recoverable file changes.
+"""Owner-established admin-root custody for recoverable file changes.
 
 Machine requests can consume a registered directory, never create or adopt one.
 The first mkdir is permitted only below a complete root-owned, non-writable,
@@ -21,10 +21,13 @@ import time
 from api_file_operations import FileAccessError, _descriptor_mount_id
 from api_file_provider import NativeOwnerWriteAuthority
 from api_file_roots import (collect_file_roots, is_users_root_path, is_admin_root_path,
-                            physical_mount_path)
+                            is_private_recovery_path, physical_mount_path)
 
 
 _DIRECTORY = '.r1-toolbox-ops'
+_REGISTRY = 'file-mutation-admin-authorities.json'
+_LEGACY_REGISTRY = 'file-mutation-authorities.json'
+_LAYOUT = 'admin_custody_v1'
 _ROOT = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
 _OPERATION = re.compile(r'operation_[0-9a-f]{32}\Z', re.ASCII)
 _MAX_STATE = 4 * 1024 ** 2
@@ -183,7 +186,7 @@ class FileMutationAuthority:
     """Private registry; initialize/revoke belong only to owner HTTP routes.
 
     ``catalog`` reads Toolbox state only. ``initialize`` explicitly touches the
-    selected Users root and may wake its disk. Existing unknown directories are
+    selected admin root and may wake its disk. Existing unknown directories are
     never adopted, chmodded, cleaned or recursively traversed.
     """
 
@@ -217,48 +220,81 @@ class FileMutationAuthority:
             raise FileAccessError('write_backend_unverified')
         if self._entries is None:
             with self._state() as parent:
-                data = _read_at(parent, 'file-mutation-authorities.json', {'version': 1, 'entries': {}})
-            if (type(data) is not dict or set(data) != {'version', 'entries'}
-                    or data['version'] != 1 or type(data['entries']) is not dict
-                    or len(data['entries']) > 128):
-                raise FileAccessError('write_backend_unverified')
-            for identifier, entry in data['entries'].items():
-                if (not _ROOT.fullmatch(identifier) or type(entry) is not dict
-                        or set(entry) != {'row', 'identity', 'mount_id', 'enabled', 'revision'}
-                        or type(entry['row']) is not dict or entry['row'].get('id') != identifier
-                        or not (is_users_root_path(entry['row'].get('mount'))
-                                or is_admin_root_path(entry['row'].get('mount')))
-                        or type(entry['identity']) is not list or len(entry['identity']) != 3
-                        or any(type(v) is not int or v < 0 for v in entry['identity'])
-                        or type(entry['mount_id']) is not str
-                        or not entry['mount_id'].isdigit() or type(entry['enabled']) is not bool
-                        or type(entry['revision']) is not int or entry['revision'] < 1):
+                legacy = _read_at(parent, _LEGACY_REGISTRY, {'version': 1, 'entries': {}})
+                current = _read_at(parent, _REGISTRY, {'version': 2, 'entries': {}})
+            entries = {}
+            for data, version in ((legacy, 1), (current, 2)):
+                if (type(data) is not dict or set(data) != {'version', 'entries'}
+                        or type(data['version']) is not int or data['version'] != version
+                        or type(data['entries']) is not dict or len(data['entries']) > 128):
                     raise FileAccessError('write_backend_unverified')
-            self._entries = data['entries']
+                fields = {'row', 'identity', 'mount_id', 'enabled', 'revision'}
+                if version == 2:
+                    fields.add('layout')
+                for identifier, entry in data['entries'].items():
+                    if (type(identifier) is not str or not _ROOT.fullmatch(identifier)
+                            or identifier in entries or type(entry) is not dict or set(entry) != fields
+                            or type(entry['row']) is not dict or entry['row'].get('id') != identifier
+                            or not (is_admin_root_path(entry['row'].get('mount')) or version == 1
+                                    and is_users_root_path(entry['row'].get('mount')))
+                            or version == 2 and entry['layout'] != _LAYOUT
+                            or type(entry['identity']) is not list or len(entry['identity']) != 3
+                            or any(type(v) is not int or v < 0 for v in entry['identity'])
+                            or type(entry['mount_id']) is not str or not entry['mount_id'].isdigit()
+                            or type(entry['enabled']) is not bool or type(entry['revision']) is not int
+                            or entry['revision'] < 1):
+                        raise FileAccessError('write_backend_unverified')
+                    entries[identifier] = entry
+            if len(entries) > 128:
+                raise FileAccessError('write_backend_unverified')
+            self._entries = entries
         return self._entries
 
     def _save(self):
+        # A new registration must never rewrite the old file, even when its
+        # root ID already used the public admin-v3 boundary. Old inode bindings
+        # describe Users custody and are not authority over the new location.
+        entries = {identifier: entry for identifier, entry in self._entries.items()
+                   if entry.get('layout') == _LAYOUT}
         with self._state() as parent:
-            _write_at(parent, 'file-mutation-authorities.json', {'version': 1, 'entries': self._entries})
+            _write_at(parent, _REGISTRY, {'version': 2, 'entries': entries})
+
+    @staticmethod
+    def _location(*, legacy=False):
+        return {'boundary': 'users' if legacy else 'admin', 'relative_path': _DIRECTORY,
+                'layout': 'legacy_users_custody_v1' if legacy else _LAYOUT,
+                'anchor_component': 'users_root' if legacy else 'admin_root'}
 
     @staticmethod
     def _public(identifier, entry):
         if is_users_root_path(entry['row'].get('mount')):
             return {'root_id': identifier, 'enabled': False, 'revision': entry['revision'],
-                    'status': 'legacy_boundary', 'legacy': True, 'reason': 'legacy_users_boundary_v2'}
+                    'status': 'legacy_boundary', 'legacy': True, 'reason': 'legacy_users_boundary_v2',
+                    'recovery_location': FileMutationAuthority._location(legacy=True)}
+        if entry.get('layout') != _LAYOUT:
+            return {'root_id': identifier, 'enabled': False, 'revision': entry['revision'],
+                    'status': 'legacy_layout', 'legacy': True, 'reason': 'legacy_recovery_layout',
+                    'recovery_location': FileMutationAuthority._location(legacy=True)}
         return {'root_id': identifier, 'enabled': entry['enabled'],
-                'revision': entry['revision'], 'status': 'registered' if entry['enabled'] else 'revoked'}
+                'revision': entry['revision'], 'status': 'registered' if entry['enabled'] else 'revoked',
+                'recovery_location': FileMutationAuthority._location()}
 
     def _reject_legacy(self, root_id, row=None):
-        """Keep old bytes and objects untouched; no v2 path reinterpretation."""
+        """Keep both legacy boundaries/layouts untouched; never adopt their IDs."""
         entries = self._load()
         entry = entries.get(root_id)
         if entry is not None and is_users_root_path(entry['row'].get('mount')):
             raise FileAccessError('legacy_users_boundary_v2')
+        if entry is not None and entry.get('layout') != _LAYOUT:
+            raise FileAccessError('legacy_recovery_layout')
         if row is not None and is_admin_root_path(row.get('mount')):
             users = physical_mount_path(row['mount']) + '/Users'
-            if any(item['row'].get('mount') == users for item in entries.values()):
-                raise FileAccessError('legacy_users_boundary_v2')
+            for item in entries.values():
+                if item.get('layout') != _LAYOUT:
+                    if item['row'].get('mount') == users:
+                        raise FileAccessError('legacy_users_boundary_v2')
+                    if item['row'].get('mount') == row['mount']:
+                        raise FileAccessError('legacy_recovery_layout')
 
     def catalog(self, *, current):
         _authorized(current)
@@ -271,13 +307,14 @@ class FileMutationAuthority:
         """Explicit owner evidence, including every rejected mode/ACL boundary.
 
         This never creates, chmods or adopts custody. Unlike catalog it opens
-        the selected Users ancestry and can wake that disk. Metadata is useful
+        the selected admin ancestry and can wake that disk. Metadata is useful
         when a factory image uses writable parents, which must stay rejected.
         """
         _authorized(current)
         if type(root_id) is not str or not _ROOT.fullmatch(root_id):
             raise FileAccessError('invalid_arguments')
         result = {'ok': True, 'root_id': root_id, 'ready': False, 'checks': [],
+            'recovery_location': self._location(), 'recovery_anchor': None,
             'source_binding': {'native_owner': 'unverified', 'root_metadata_matches': False,
                                'same_mount': False},
             'existing_directory': 'unavailable', 'blockers': [], 'may_wake_disks': True}
@@ -301,9 +338,17 @@ class FileMutationAuthority:
                         if identity in seen:
                             continue
                         seen.add(identity)
-                        check = {'component': 'namespace_root' if index == 0 else
-                                 ('users_root' if held == opened.descriptors[-2] else 'ancestor_' + str(index)),
+                        components = ('namespace_root', 'drives_directory', 'physical_mount',
+                                      'users_root', 'admin_root')
+                        observed_mount = _descriptor_mount_id(self.root, descriptor)
+                        same_mount = (observed_mount == opened.mount_id
+                                      and info.st_dev == os.fstat(opened.fd).st_dev) if index >= 2 else None
+                        if same_mount is False:
+                            result['source_binding']['same_mount'] = False
+                        check = {'component': components[index] if index < len(components)
+                                 else 'ancestor_' + str(index),
                                  'uid': info.st_uid, 'mode': format(stat.S_IMODE(info.st_mode), '04o'),
+                                 'mount_id': observed_mount, 'same_mount': same_mount,
                                  'group_other_writable': bool(stat.S_IMODE(info.st_mode) & 0o022),
                                  'access_acl': 'unavailable', 'default_acl': 'unavailable',
                                  'same_object': _stable(info) == _stable(os.fstat(held)), 'trusted': False}
@@ -318,8 +363,10 @@ class FileMutationAuthority:
                                 check[field] = 'present'
                         check['trusted'] = (check['uid'] == 0 and not check['group_other_writable']
                             and check['same_object'] and check['access_acl'] == 'absent'
-                            and check['default_acl'] == 'absent')
+                            and check['default_acl'] == 'absent' and same_mount is not False)
                         result['checks'].append(check)
+                        if check['component'] == 'admin_root':
+                            result['recovery_anchor'] = dict(check)
                         if not check['trusted']:
                             result['blockers'].append(check['component'] + '_untrusted_mode_or_acl')
                     finally:
@@ -357,8 +404,8 @@ class FileMutationAuthority:
 
     def _handle(self, row):
         if self._handle_factory is None:
-            from api_file_executor import _UsersHandle
-            return _UsersHandle(self.root, row)
+            from api_file_executor import _Handle
+            return _Handle(self.root, row, '', directory=True)
         return self._handle_factory(self.root, row, '', directory=True)
 
     def _trusted_chain(self, opened):
@@ -402,6 +449,8 @@ class FileMutationAuthority:
                 _authorized(current)
                 entry = entries.get(root_id)
                 if entry is None:
+                    if len(entries) >= 128:
+                        raise FileAccessError('limit_exceeded')
                     try:
                         os.mkdir(_DIRECTORY, 0o700, dir_fd=opened.fd)
                     except FileExistsError:
@@ -416,7 +465,7 @@ class FileMutationAuthority:
                     identity = _stable(info)
                     if entry is not None and (entry['identity'] != identity or not _same_root(entry['row'], row)):
                         raise FileAccessError('file_changed')
-                    entries[root_id] = {'row': dict(row), 'identity': identity,
+                    entries[root_id] = {'row': dict(row), 'identity': identity, 'layout': _LAYOUT,
                         'mount_id': opened.mount_id, 'enabled': True,
                         'revision': (entry['revision'] + 1) if entry is not None else 1}
                     _authorized(current)
@@ -512,7 +561,7 @@ class FileMutationAuthority:
         """Owner-only review text from validated manifest fields, never raw data."""
         from api_file_provider import audited_owner_write_rule
         path = manifest.get('restore_path')
-        if (not audited_owner_write_rule(path) or path == '.DATA_CACHE'
+        if (not audited_owner_write_rule(path) or is_private_recovery_path(path) or path == '.DATA_CACHE'
                 or path.startswith('.DATA_CACHE/')):
             path = None
         tool = manifest.get('tool')
@@ -528,6 +577,7 @@ class FileMutationAuthority:
             and manifest.get('state') in ('publish_intent', 'published_unconfirmed', 'pending',
                                          'result_unconfirmed')
             and audited_owner_write_rule(source) and audited_owner_write_rule(target)
+            and not is_private_recovery_path(source) and not is_private_recovery_path(target)
             and source != target and manifest.get('restore_path') == source
             and manifest.get('published_path') == target
             and type(identity) is list and len(identity) == 3
@@ -730,6 +780,8 @@ class FileMutationAuthority:
                     _authorized(current)
                     return {'ok': True, 'recovery': dict(receipt), 'may_wake_disks': True}
                 if type(manifest.get('native_recycle')) is dict:
+                    if is_private_recovery_path(manifest['native_recycle'].get('source_path')):
+                        raise FileAccessError('write_backend_unverified')
                     from api_file_native_recycle import NativeFileRecycle
                     receipt = NativeFileRecycle(root=self.root).restore_manifest(
                         row, manifest, stage, current=current)
@@ -742,7 +794,8 @@ class FileMutationAuthority:
                         manifest = self._capture_published(row, manifest, stage, current=current)
                 from api_file_provider import audited_owner_write_rule
                 path, name = manifest.get('restore_path'), manifest.get('custody_name')
-                if (not audited_owner_write_rule(path) or name not in ('source', 'previous', 'directory')
+                if (not audited_owner_write_rule(path) or is_private_recovery_path(path)
+                        or name not in ('source', 'previous', 'directory')
                         or manifest.get('custody_identity') is not None
                         and type(manifest.get('custody_identity')) is not list):
                     raise FileAccessError('write_backend_unverified')

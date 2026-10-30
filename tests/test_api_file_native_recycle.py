@@ -183,8 +183,11 @@ class NativeRecycleLinuxTests(unittest.TestCase):
         with sqlite3.connect(self.db) as connection:
             connection.execute(CREATE)
             connection.execute(INDEX)
-        self.stage_path = self.users / '.r1-toolbox-ops/operation_fixture'
+        self.stage_path = self.admin / '.r1-toolbox-ops/operation_fixture'
         self.stage_path.mkdir(parents=True)
+        self.assertEqual(self.stage_path.relative_to(self.admin).parts,
+                         ('.r1-toolbox-ops', 'operation_fixture'))
+        self.assertFalse((self.users / '.r1-toolbox-ops').exists())
         self.stage_fd = os.open(self.stage_path, os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, self.stage_fd)
         self.stage = mock.Mock(fd=self.stage_fd, operation_id='operation_fixture')

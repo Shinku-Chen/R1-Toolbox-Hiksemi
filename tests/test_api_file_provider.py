@@ -68,6 +68,15 @@ class Connection:
 
 
 class RuleTests(unittest.TestCase):
+    def test_private_admin_recovery_is_not_a_read_or_write_subject(self):
+        for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_fixture/source',
+                     '.R1-TOOLBOX-OPS/source', '.r1-toolbox-opſ/source'):
+            self.assertFalse(files.audited_owner_read_rule(path))
+            self.assertFalse(files.audited_owner_write_rule(path))
+        for path in ('.r1-toolbox-ops2', 'folder/.r1-toolbox-ops/source'):
+            self.assertTrue(files.audited_owner_read_rule(path))
+            self.assertTrue(files.audited_owner_write_rule(path))
+
     def test_write_subset_starts_inside_admin_and_denies_only_root_and_invalid_paths(self):
         for path in ('new.bin', '临时共享/new.bin', 'public/new', 'admin/new', 'Admin/new'):
             self.assertTrue(files.audited_owner_write_rule(path))

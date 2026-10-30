@@ -15,7 +15,7 @@ import stat
 import time
 
 from api_file_roots import (collect_file_roots, is_admin_root_path,
-                            physical_mount_path, valid_relative_file_path)
+                            physical_mount_path, valid_relative_file_path, is_private_recovery_path)
 from api_permissions import permission_allows
 
 
@@ -28,6 +28,7 @@ _REASONS = {
     'unsupported_file_type': '当前对象类型、符号链接或硬链接不支持文件访问。',
     'unsupported_path_class': '原厂文件后端仅接入当前管理员子树；其他用户空间尚不支持。',
     'legacy_users_boundary_v2': '旧 Users 根的恢复登记尚未迁移，请先使用原镜像处理保管对象。',
+    'legacy_recovery_layout': '旧恢复登记仍指向 Users 下的位置，请先使用原镜像处理保管对象；不会自动迁入 admin。',
     'cross_mount_denied': '此路径进入额外挂载，当前文件授权不允许跨越该挂载。',
     'unsupported_precondition': '此操作需要同一已授权 Users/admin 挂载；跨根或跨文件系统移动尚不支持。',
     'not_found': '已授权目录中未找到此对象。',
@@ -72,6 +73,8 @@ def assert_file_grant(principal, tool, root_id, path, *, write=False):
     if (not valid_relative_file_path(path) or not isinstance(root_id, str)
             or not re.fullmatch(r'root_[0-9a-f]{24}', root_id, re.ASCII)):
         raise FileAccessError('invalid_arguments')
+    if is_private_recovery_path(path):
+        raise FileAccessError('permission_denied')
     if not permission_allows(principal, 'files', minimum, tool_name=tool):
         raise FileAccessError('permission_denied')
     for grant in principal.get('file_roots', []):

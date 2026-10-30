@@ -221,6 +221,20 @@ class ApiPermissionTests(unittest.TestCase):
         key['file_roots'].append({'id': ROOT_ID, 'path': 'target', 'access': 'readwrite'})
         self.assertTrue(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
 
+    def test_private_custody_grants_are_preserved_but_cannot_enable_file_tools(self):
+        for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_fixture/source',
+                     '.R1-TOOLBOX-OPS/source'):
+            key = explicit_principal('readwrite', ['copy_file'])
+            key['file_roots'] = [{'id': ROOT_ID, 'path': path, 'access': 'readwrite'}]
+            self.assertTrue(permissions.valid_file_roots(key['file_roots'], key['role'], key['scopes']))
+            self.assertTrue(permissions.valid_tool_grants(key['tool_grants'], key['role'], key['scopes'],
+                                                         key['file_roots'], key['docker_projects']))
+            self.assertFalse(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
+            key['file_roots'].append({'id': ROOT_ID, 'path': 'source', 'access': 'readonly'})
+            self.assertFalse(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
+            key['file_roots'].append({'id': ROOT_ID, 'path': 'target', 'access': 'readwrite'})
+            self.assertTrue(permissions.permission_allows(key, 'files', 'readwrite', tool_name='copy_file'))
+
     def test_v3_docker_exact_operations_dependencies_and_role_ceiling(self):
         for name in ('list_docker_projects', 'get_docker_project_status', 'get_docker_project_summary',
                      'get_docker_project_task'):

@@ -57,6 +57,21 @@ class FixtureAuthority:
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_private_recovery_paths_are_denied_before_authority_or_host_open(self):
+        authority = FixtureAuthority()
+        executor = FileReadExecutor(None, authorizer=lambda unused: True, authority=authority)
+        self.addCleanup(executor.close)
+        for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_private/source',
+                     '.R1-TOOLBOX-OPS/source'):
+            for tool in ('get_file_info', 'prepare_file_download', 'list_directory'):
+                result = executor.execute(tool, {'root_id': ROOT, 'path': path}, principal())
+                self.assertEqual(result['error']['code'], 'permission_denied')
+            with mock.patch('api_file_executor.os.open', side_effect=AssertionError('no host open')), \
+                 self.assertRaises(FileAccessError) as caught:
+                _Handle('/', ROW, path)
+            self.assertEqual(caught.exception.code, 'permission_denied')
+        self.assertFalse(authority.calls)
+
     def test_unimplemented_mutations_unknown_parameters_and_forged_acl_touch_no_backend(self):
         authority = FixtureAuthority()
         executor = FileReadExecutor(None, authorizer=lambda unused: True, authority=authority)
@@ -257,6 +272,66 @@ class OpenedFileTests(unittest.TestCase):
             self.assertTrue(result['ok'], result)
         for path in ('../public', '../../another-user/secret.txt', '/drives/data/Users/public'):
             self.assertFalse(self.call('get_file_info', path)['ok'])
+
+    def test_root_custody_is_hidden_before_native_authority_but_other_literal_names_remain(self):
+        private = self.admin / '.r1-toolbox-ops'
+        private.mkdir(mode=0o700)
+        (private / 'source').write_bytes(b'owner custody must remain private')
+        (self.admin / '.r1-toolbox-ops2').mkdir()
+        (self.admin / 'folder/.r1-toolbox-ops').mkdir(parents=True)
+        with mock.patch.object(self.executor, '_root', wraps=self.executor._root) as roots:
+            result = self.call('list_directory', '')
+        self.assertTrue(result['ok'], result)
+        self.assertNotIn('.r1-toolbox-ops', [item['path'] for item in result['entries']])
+        self.assertIn('.r1-toolbox-ops2', [item['path'] for item in result['entries']])
+        self.assertTrue(all(call.args[3] != '.r1-toolbox-ops' for call in roots.call_args_list))
+        self.assertTrue(all(path != '.r1-toolbox-ops' for root_id, path in self.authority.calls))
+        self.assertTrue(self.call('list_directory', 'folder/.r1-toolbox-ops')['ok'])
+
+    def test_same_inode_private_name_alias_is_denied_without_reading_its_children(self):
+        private = self.admin / '.r1-toolbox-ops'
+        private.mkdir(mode=0o700)
+        (private / 'source').write_bytes(b'preserved private bytes')
+        (self.admin / 'ops-alias').mkdir()
+        admin_identity = self.admin.stat().st_dev, self.admin.stat().st_ino
+        real_open, children = os.open, []
+        def alias_open(path, flags, *args, **options):
+            parent = options.get('dir_fd')
+            if os.fspath(path) == 'source':
+                children.append(path)
+            if os.fspath(path) == 'ops-alias' and parent is not None:
+                info = os.fstat(parent)
+                if (info.st_dev, info.st_ino) == admin_identity:
+                    # Constructor-only FS-name fixture: two names return the
+                    # same real directory inode, without following symlinks.
+                    path = '.r1-toolbox-ops'
+            return real_open(path, flags, *args, **options)
+        with mock.patch('api_file_executor.os.open', side_effect=alias_open):
+            for tool in ('get_file_info', 'prepare_file_download', 'list_directory'):
+                denied = self.call(tool, 'ops-alias/source')
+                self.assertEqual(denied['error']['code'], 'permission_denied', denied)
+            with self.assertRaises(FileAccessError) as caught:
+                _Handle(self.root, ROW, 'ops-alias/source', reader=True)
+            self.assertEqual(caught.exception.code, 'permission_denied')
+            listing = self.call('list_directory', '')
+            self.assertTrue(listing['ok'], listing)
+            self.assertNotIn('ops-alias', [entry['path'] for entry in listing['entries']])
+            self.assertTrue(self.call('get_file_info', 'payload.bin')['ok'])
+        self.assertFalse(children, 'private child must not even be opened')
+        self.assertEqual((private / 'source').read_bytes(), b'preserved private bytes')
+
+    def test_private_anchor_metadata_failure_is_not_swallowed_as_missing_child(self):
+        real_open = os.open
+        for failure in (PermissionError('private metadata refused'), ValueError('private metadata invalid')):
+            def denied(path, flags, *args, **options):
+                if os.fspath(path) == '.r1-toolbox-ops':
+                    raise failure
+                return real_open(path, flags, *args, **options)
+            with self.subTest(failure=type(failure).__name__), \
+                 mock.patch('api_file_executor.os.open', side_effect=denied):
+                result = self.call('list_directory', '')
+            self.assertEqual(result['error']['code'], 'root_unavailable')
+            self.assertNotIn('entries', result)
 
     def test_live_authority_or_token_revocation_never_returns_metadata(self):
         self.authority.after = lambda: setattr(self, 'valid', False)

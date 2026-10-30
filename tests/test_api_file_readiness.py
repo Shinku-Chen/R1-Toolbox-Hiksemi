@@ -28,6 +28,14 @@ def grant(path='', access='readonly', root=ROOT):
 
 
 class FileReadinessTests(unittest.TestCase):
+    def test_private_custody_selection_is_unavailable_without_opening_or_rewriting_it(self):
+        original = [grant('.r1-toolbox-ops/source')]
+        result = self.collect(original)
+        selection = result['planning']['selection']
+        self.assertFalse(selection['verified'])
+        self.assertIn('内部恢复区', selection['grants'][0]['reason'])
+        self.assertEqual(original, [grant('.r1-toolbox-ops/source')])
+
     def collect(self, grants=None, catalog=None):
         provider = mock.Mock(return_value=root_catalog() if catalog is None else catalog)
         result = readiness.collect_file_access_readiness(object(), grants=grants, root_collector=provider)

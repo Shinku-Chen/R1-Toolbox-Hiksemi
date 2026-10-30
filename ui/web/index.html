@@ -6108,7 +6108,7 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 </form><h3>已登记的部署资源</h3><div class="r1-api-list" data-ref="registeredDeployments"></div>
 </details>
 <details data-ref="fileAuthorityManager"><summary>文件变更与恢复</summary>
-<p class="sub">覆盖、改名、移动和新建目录使用所选磁盘的专用恢复区。首次初始化需要所有者确认并检查目录权限；此操作可能唤醒磁盘。打开页面只读 Toolbox 登记，不扫描文件。撤销后停止新操作，已保留对象仍可检查和恢复。</p>
+<p class="sub">覆盖、改名、移动和新建目录使用所选磁盘的 Users/admin/.r1-toolbox-ops 专用恢复区，仅由所有者恢复界面管理。首次初始化需要所有者确认并通过完整祖先权限与挂载检查；此操作可能唤醒磁盘。打开页面只读 Toolbox 登记，不扫描文件。撤销后停止新操作，已保留对象仍可检查和恢复。</p>
 <div data-ref="fileAuthorityRoots" class="r1-api-list"></div><p class="sub" data-ref="fileAuthorityStatus" role="status"></p><div data-ref="fileRecoveries" class="r1-api-list"></div>
 </details>
 <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
@@ -6128,7 +6128,7 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
 <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
 <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
-<fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/admin；子目录相对 admin 根填写，无需添加 admin/ 前缀。根下有其他挂载不影响选择，实际操作仍拒绝进入子挂载。旧 Users 根授权须重新选择，不自动换根或改写路径。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+<fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/admin；子目录相对 admin 根填写，无需添加 admin/ 前缀。根下有其他挂载不影响选择，实际操作仍拒绝进入子挂载。内部 .r1-toolbox-ops 及其后代仅由所有者恢复界面管理，Token 不可访问或单独授权。旧 Users 根授权须重新选择，不自动换根或改写路径。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="applicationInstalls" hidden><legend>允许新装的原厂应用</legend><p class="sub">安装需要管理员、应用功能和安装工具，以及这里明确选择的应用。只支持未安装的审计模块，不会自动卸载或更新已有应用；新应用默认不授权。原厂安装可能启动后台服务并访问其自身数据目录。</p><div data-ref="applicationInstallOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许访问的已登记 Docker 项目</legend><p class="sub">现有项目按读取、启停重启、镜像更新分别授权；写操作需要管理员及对应工具。未来新服务使用下面独立的部署资源。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="dockerDeployments" hidden><legend>允许访问的未来部署资源</legend><p class="sub">先在「Token 操作 → 部署资源管理」登记固定资源。默认只选读取，部署／更新、启停重启和删除须管理员明确勾选，且仍须对应工具授权。</p><p class="sub" data-ref="dockerDeploymentsStatus"></p><div data-ref="dockerDeploymentOptions"></div></fieldset>
@@ -6212,6 +6212,7 @@ const scope = (Array.isArray(state.scope_catalog) ? state.scope_catalog : []).fi
 return (labels.get(id) || id) + (scope && scope.implemented === false ? '（待接入）' : '');
 };
 const validSubpath = value => typeof value === 'string' && [...value].length <= 1024 && new TextEncoder().encode(value).length <= 4096 && !/[\\\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value) && !/^[A-Za-z]:/.test(value)
+&& !/^\.r1-toolbox-ops(?:\/|$)/iu.test(value)
 && (!value || value.split('/').every(part => part && part !== '.' && part !== '..'));
 const updatePermissions = () => {
 const role = x.role.value, legacy = role === 'legacy' && editing, level = legacy ? Infinity : roleLevel[role] ?? -1;
@@ -6401,10 +6402,27 @@ if (!x.applicationInstallOptions.children.length) x.applicationInstallOptions.ap
 };
 const drawFileAuthorities = () => {
 x.fileAuthorityRoots.replaceChildren();
+x.fileRecoveries.replaceChildren();
 const registry = state.file_mutation_authority || {}, entries = Array.isArray(registry.authorities) ? registry.authorities : [];
+const legacy = entry => entry && (['legacy_boundary', 'legacy_layout'].includes(entry.status)
+|| ['legacy_users_boundary_v2', 'legacy_recovery_layout'].includes(entry.reason));
 setText(x.fileAuthorityStatus, registry.ok === false ? '文件恢复登记暂不可用。初始化必须在 NAS 上通过权限检查。' : '尚未读取磁盘恢复清单。');
 for (const root of fileRoots()) {
+if (entries.some(entry => legacy(entry) && entry.root_id === root.id)) continue;
 const registration = entries.find(entry => entry.root_id === root.id);
+const recoveryBindingCurrent = () => {
+const currentRegistry = state && state.file_mutation_authority;
+const currentEntries = currentRegistry && Array.isArray(currentRegistry.authorities) ? currentRegistry.authorities : [];
+const currentRoots = fileRoots().filter(candidate => candidate.id === root.id);
+const currentRegistrations = currentEntries.filter(entry => entry && entry.root_id === root.id);
+if (closed || !currentRegistry || currentRegistry.ok !== true || !registration
+|| !Number.isSafeInteger(registration.revision) || currentRoots.length !== 1
+|| currentRoots[0].mount !== root.mount || currentRegistrations.length !== 1) return false;
+const currentRegistration = currentRegistrations[0], location = currentRegistration.recovery_location;
+return !legacy(currentRegistration) && currentRegistration.revision === registration.revision
+&& !!location && location.boundary === 'admin' && location.relative_path === '.r1-toolbox-ops'
+&& location.layout === 'admin_custody_v1' && location.anchor_component === 'admin_root';
+};
 const row = mount('<article class="r1-api-audit r1-api-authority"><strong></strong><p class="sub" data-authority-state></p><div class="r1-api-actions"><button class="btn" type="button" data-authority-preflight>检查初始化条件</button><button class="btn" type="button" data-authority-init>初始化恢复区</button><button class="btn" type="button" data-authority-inspect>检查保留对象</button><button class="btn" type="button" data-authority-revoke>停止新变更</button></div></article>');
 setText(row.querySelector('strong'), root.label); setText(row.querySelector('[data-authority-state]'), registration ? registration.enabled ? '已登记；每次操作仍核验实际身份与权限。' : '已撤销；保留对象未删除。' : '未初始化。');
 row.dataset.authorityRoot = root.id; row.dataset.readOnly = String(root.read_only); row.dataset.registered = String(!!registration); row.dataset.enabled = String(!!(registration && registration.enabled));
@@ -6414,7 +6432,7 @@ if (registration && !registration.enabled) setText(init, '重新启用恢复区'
 const perform = async action => {
 if (busy) return;
 const reading = ['inspect', 'preflight'].includes(action);
-if (!reading && !(await R1.ask(action === 'initialize' ? '初始化文件恢复区？' : '停止新的文件变更？', action === 'initialize' ? `将在「${esc(root.label)}」的 Users 目录创建专用恢复区，可能唤醒磁盘。只有完整权限和挂载检查通过才启用；已有同名目录不会被接管。` : '停止新的文件变更授权。保留的对象和恢复记录不会删除。'))) return;
+if (!reading && !(await R1.ask(action === 'initialize' ? '初始化文件恢复区？' : '停止新的文件变更？', action === 'initialize' ? `将在「${esc(root.label)}」的 Users/admin/.r1-toolbox-ops 创建专用恢复区，可能唤醒磁盘。只有完整祖先权限和挂载检查通过才启用；已有同名目录不会被接管，旧 Users 恢复区不会自动搬动或复用。` : '停止新的文件变更授权。保留的对象和恢复记录不会删除。'))) return;
 pending(true);
 try {
 const result = await R1.post('/api/files/authority/' + action, { root_id: root.id, ...(reading ? {} : { confirmed: true }) });
@@ -6424,7 +6442,8 @@ setText(x.fileAuthorityStatus, result.ready === true ? '初始化条件已通过
 : `初始化条件未通过：${(result.blockers || []).join('、') || '身份或权限无法核验'}。`);
 x.fileRecoveries.replaceChildren();
 const evidence = document.createElement('pre'); evidence.className = 'sub mono'; evidence.style.whiteSpace = 'pre-wrap'; evidence.style.overflowWrap = 'anywhere';
-evidence.textContent = JSON.stringify({ checks: result.checks, source_binding: result.source_binding, existing_directory: result.existing_directory }, null, 2);
+evidence.textContent = JSON.stringify({ recovery_location: result.recovery_location, recovery_anchor: result.recovery_anchor,
+checks: result.checks, source_binding: result.source_binding, existing_directory: result.existing_directory }, null, 2);
 x.fileRecoveries.append(evidence);
 } else if (action === 'inspect') {
 x.fileRecoveries.replaceChildren();
@@ -6434,11 +6453,18 @@ const item = mount('<article class="r1-api-audit r1-api-recovery"><strong class=
 const restorePath = validSubpath(recovery.path) && recovery.path ? recovery.path : null;
 setText(item.querySelector('strong'), restorePath || recovery.recovery_id);
 setText(item.querySelector('.sub'), `${recovery.recovery_id}；${recovery.state || 'result_unconfirmed'}；保留对象：${(recovery.objects || []).join('、') || '无'}${restorePath ? '' : '；原路径无法核验，暂不能恢复。'}`);
-const canRestore = !!(recovery.objects || []).length && !!restorePath && recovery.state !== 'restored';
+const canRestore = !!(recovery.objects || []).length && !!restorePath && recovery.state !== 'restored' && recoveryBindingCurrent();
 const button = item.querySelector('button'); button.disabled = !canRestore;
 button.dataset.available = String(canRestore);
 button.onclick = async () => {
-if (busy || !restorePath || !(await R1.ask('恢复保留对象？', `恢复「${esc(root.label)}／${esc(restorePath)}」。仅使用该记录绑定的原路径；目标存在时保留双方并拒绝覆盖。可能唤醒磁盘。`))) return;
+if (busy || !restorePath) return;
+const bindingChanged = () => {
+x.fileRecoveries.replaceChildren();
+setText(x.fileAuthorityStatus, '恢复登记或根绑定已变化，请重新检查保留对象。');
+};
+if (!recoveryBindingCurrent()) { bindingChanged(); return; }
+if (!(await R1.ask('恢复保留对象？', `恢复「${esc(root.label)}／${esc(restorePath)}」。仅使用该记录绑定的原路径；目标存在时保留双方并拒绝覆盖。可能唤醒磁盘。`))) return;
+if (busy || !recoveryBindingCurrent()) { bindingChanged(); return; }
 pending(true);
 try {
 const restored = await R1.post('/api/files/authority/restore', { root_id: root.id, recovery_id: recovery.recovery_id, confirmed: true });
@@ -6458,8 +6484,12 @@ setText(x.fileAuthorityStatus, result.recoveries && result.recoveries.length ? '
 row.querySelector('[data-authority-preflight]').onclick = () => perform('preflight');
 init.onclick = () => perform('initialize'); inspect.onclick = () => perform('inspect'); revoke.onclick = () => perform('revoke'); x.fileAuthorityRoots.append(row);
 }
-for (const registration of entries.filter(entry => entry && (entry.status === 'legacy_boundary' || entry.reason === 'legacy_users_boundary_v2'))) {
-const row = mount('<article class="r1-api-audit r1-api-authority" data-legacy-authority><strong>旧 Users 边界恢复登记</strong><p class="sub">旧 Users 边界登记，需先使用原镜像处理保管对象。不会自动转换为 admin 根，也不会删除或接管旧恢复区。</p><p class="sub mono" data-legacy-root></p><div class="r1-api-actions"><button class="btn" type="button" disabled>初始化恢复区</button><button class="btn" type="button" disabled>检查保留对象</button><button class="btn" type="button" disabled>恢复保留对象</button><button class="btn" type="button" disabled>停止新变更</button></div></article>');
+for (const registration of entries.filter(legacy)) {
+const oldBoundary = registration.status === 'legacy_boundary' || registration.reason === 'legacy_users_boundary_v2';
+const row = mount('<article class="r1-api-audit r1-api-authority" data-legacy-authority><strong></strong><p class="sub" data-legacy-description></p><p class="sub mono" data-legacy-root></p><div class="r1-api-actions"><button class="btn" type="button" disabled>初始化恢复区</button><button class="btn" type="button" disabled>检查保留对象</button><button class="btn" type="button" disabled>恢复保留对象</button><button class="btn" type="button" disabled>停止新变更</button></div></article>');
+row.dataset.legacyKind = oldBoundary ? 'boundary' : 'layout';
+setText(row.querySelector('strong'), oldBoundary ? '旧 Users 边界恢复登记' : '旧恢复区位置登记');
+setText(row.querySelector('[data-legacy-description]'), `${oldBoundary ? '旧 Users 边界登记' : '旧 admin 根仍使用 Users/.r1-toolbox-ops 恢复区'}，需先使用原镜像处理保管对象。本版不会迁移、删除、接管或恢复旧位置，也不会自动转换为 Users/admin/.r1-toolbox-ops。`);
 setText(row.querySelector('[data-legacy-root]'), String(registration.root_id || '未知根') + '；修订：' + String(registration.revision ?? '--'));
 x.fileAuthorityRoots.append(row);
 }
@@ -6822,7 +6852,7 @@ if (!item.querySelector('[data-root-check]').checked) continue;
 if (item.dataset.available === 'false') { fail(new Error('原文件范围当前失效，请明确取消失效范围或保持原文件配置。')); return; }
 for (const range of item.querySelectorAll('[data-root-range]')) {
 const path = range.querySelector('[data-root-path]').value, access = range.querySelector('[data-root-access]').value;
-if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符和 4096 个 UTF-8 字节。')); return; }
+if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符和 4096 个 UTF-8 字节；内部 .r1-toolbox-ops 及其后代仅由所有者恢复界面管理。')); return; }
 if (!['readonly', 'readwrite'].includes(access) || (access === 'readwrite' && (role === 'readonly' || item.dataset.readOnly === 'true'))) { fail(new Error('只读角色或只读挂载不能授予文件读写权限。')); return; }
 const identity = item.dataset.rootId + '\n' + path;
 if (identities.has(identity)) { fail(new Error('同一存储根的相同子目录不能重复授权。')); return; }

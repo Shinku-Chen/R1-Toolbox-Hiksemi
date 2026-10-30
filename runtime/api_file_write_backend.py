@@ -12,7 +12,7 @@ import time
 
 from api_file_operations import FileAccessError, assert_file_grant, _descriptor_mount_id
 from api_file_provider import NativeOwnerReadAuthority, NativeOwnerWriteAuthority
-from api_file_roots import valid_relative_file_path
+from api_file_roots import is_private_recovery_path, valid_relative_file_path
 from api_file_transfers import (UploadTarget, PendingInstall, UnpublishedInstallError,
                                 _identity, _version, _SHA, _IDEMPOTENCY, _VERSION)
 
@@ -115,7 +115,8 @@ class FileWriteExecutor:
         if (not valid_relative_file_path(path) or not name
                 or len(name.encode('utf-8', 'strict')) > 255):
             raise FileAccessError('invalid_arguments')
-        if path == '.DATA_CACHE' or path.startswith('.DATA_CACHE/'):
+        if (is_private_recovery_path(path) or path == '.DATA_CACHE'
+                or path.startswith('.DATA_CACHE/')):
             # Fixed factory bookkeeping is not a user-file write surface.
             # Only NativeFileRecycle has a narrow, audited internal exception.
             raise FileAccessError('unsupported_path_class')
