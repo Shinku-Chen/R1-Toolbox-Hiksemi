@@ -1,12 +1,12 @@
 # 文件后端上下文与字节传输
 
-本项目已有真实目录句柄诊断与有界文件传输状态机。现已增加固定管理员／`public` 子树的五项真实只读执行器，逐操作核验精确固件、原厂逻辑读许可和同一实际对象；详见 [native-file-readonly.md](native-file-readonly.md)。上传与文件变更仍没有已核验生产后端。下面的元数据诊断本身不授予文件访问。
+本项目已有真实目录句柄诊断与有界文件传输状态机。现已增加固定管理员／`public` 子树的五项真实只读执行器，逐操作核验精确固件、原厂逻辑读许可和同一实际对象；详见 [native-file-readonly.md](native-file-readonly.md)。上传与文件变更已有受限执行器，仍须逐操作通过实际门槛，NAS 写入验收尚未完成；见[文件变更与恢复](file-mutations.md)。下面的元数据诊断本身不授予文件访问。
 
 ## 已确认的原厂约束
 
 固定固件 `V6.3.3_Build_260907` 的 `emhistor` 样本 SHA-256 为 `402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26`。
 
-`rest_check_path_auth@0x281dc9` 使用路径、NAS 用户名、逻辑 user ID 和访问类别；调用 `rest_get_path_info@0x281689` 与管理员类别判断 `0x281280`，再按路径类别处理 `public`、用户名和外部盘权限。它不能等同为 POSIX uid／gid 的访问检查。文件下载调用者先按路径执行该检查，随后才进入另一个按路径打开的 handler；新的只读后端不复用这个分离的原厂下载 handler，而是对完整原厂正子集判权后，自行核验同一真实句柄；其他用户和写入仍不据此开放。
+`rest_check_path_auth@0x281dc9` 使用路径、NAS 用户名、逻辑 user ID 和访问类别；调用 `rest_get_path_info@0x281689` 与管理员类别判断 `0x281280`，再按路径类别处理 `public`、用户名和外部盘权限。它不能等同为 POSIX uid／gid 的访问检查。文件下载调用者先按路径执行该检查，随后才进入另一个按路径打开的 handler；新的只读后端不复用这个分离的原厂下载 handler，而是对完整原厂正子集判权后，自行核验同一真实句柄；其他用户仍不开放；写入另按受限后端重新核验，不能从读取许可直接推导。
 
 因此，下列做法均不能启用文件功能：把管理员逻辑 ID `100000` 当成 Unix uid、使用宿主 root 直接读写、把根规划或目录 O_PATH 句柄当 ACL、用布尔 `acl_verified` 请求字段自证权限、根据固定动作名称猜测 HTTP／Range／上传协议。
 
@@ -19,7 +19,7 @@ from api_file_operations import collect_file_backend_context
 context = collect_file_backend_context(panel)
 ```
 
-内部签名为 `collect_file_backend_context(panel, *, root='/', root_collector=None, owner_reader=None, runtime_reader=None)`。后四项只用于固定宿主／测试依赖，不能成为 HTTP 参数、任意路径、SQL、账号或原厂动作代理。已通过固定 `file_backend_context` 主线接入实际来源白名单、非空开发窗口、同源／JSON／CSRF，结束重新核验授权；不加入默认检测或轮询。
+内部签名为 `collect_file_backend_context(panel, *, root='/', root_collector=None, owner_reader=None, runtime_reader=None, topology_collector=None, namespace_reader=None)`。这些可选项只用于固定宿主／测试依赖，不能成为 HTTP 参数、任意路径、SQL、账号或原厂动作代理。已通过固定 `file_backend_context` 主线接入实际来源白名单、非空开发窗口、同源／JSON／CSRF，结束重新核验授权；不加入默认检测或轮询。
 
 一次检查包括：
 
@@ -36,7 +36,7 @@ context = collect_file_backend_context(panel)
 
 该检测一次返回 host root、drives、实际挂载、Users 四阶段打开 errno、预期／实际 mount ID 与设备号，以及 self／PID1／emhistor namespace 和前后拓扑稳定性；还返回固定原厂响应白名单的形状／类型，不导出目录名、路径或内容。可能唤盘或初始化原厂资源，结束开发窗口失效即丢弃。诊断自身保持 `file_access_available:false`，执行工具另按逐次 ACL 与同句柄门判断。
 
-此前 `d5075ed` 实机七根均未通过挂载门，未证明文件浏览或样本字节可读。本版结构化现场用于先闭合该实际门槛；不能用本地 fd fixture、根规划或已有管理员会话代替实机许可与对象证据。其他用户和八项文件写合同仍未开放，详见[真实只读后端](native-file-readonly.md)及[完成矩阵](mcp-completion-matrix.md)。
+此前 `d5075ed` 实机七根均未通过挂载门，未证明文件浏览或样本字节可读。本版结构化现场用于先闭合该实际门槛；不能用本地 fd fixture、根规划或已有管理员会话代替实机许可与对象证据。其他用户仍不开放；已接入的文件写合同仍须独立通过恢复区、实际对象和原厂索引等门槛。详见[真实只读后端](native-file-readonly.md)、[文件变更](file-mutations.md)及[完成矩阵](mcp-completion-matrix.md)。
 
 ## 可信后端与传输组件的连接
 
@@ -75,7 +75,7 @@ response.close()
 
 ACL 回调、落盘同步与原厂安装返回后仍重新核验当前授权和传输期限。期间撤权、轮换、改权限或到期时丢弃请求结果；已执行安装的内部任务保留 `result_unconfirmed`，不向失效请求回传文件版本，也不尝试删除可能已经安装的对象。
 
-上传流程仍仅是可测试的组件能力，**不是现有 NAS 上传后端的实现证明**。在主体／ACL／安全打开／索引／配额／原子安装未闭合前，`UploadTarget` 没有生产构造器，不得注册上传或变更工具。目录创建、改名、复制、移动及原厂回收站也保持未接入。
+生产 `FileWriteExecutor` 已构造受限 `UploadTarget`，只允许已核验内置 SATA 的管理员后代，分别校验目标及父目录范围、匿名句柄、容量保留、无覆盖发布和原厂索引。覆盖使用独立工具及目标版本，变更和真实原厂回收使用所有者恢复区，协议见[文件变更与恢复](file-mutations.md)。执行器和测试存在不等于当前 NAS 已通过这些门槛；实机预检未通过时继续拒绝写入。
 
 ## 验证边界
 
@@ -84,4 +84,26 @@ python -B -m unittest discover -s tests -p test_api_file_operations.py -v
 python -B -m unittest discover -s tests -p test_api_file_transfers.py -v
 ```
 
-测试使用临时 SQLite、主机元数据和普通文件字节；ACL 与安装回调均为明确的内部 fixture，不是实机权限证明。Linux 用例覆盖真实 O_PATH／符号链接拒绝、真实 fd 字节、Range、对象变化、逐块撤权、匿名 staging、散列及安装前置条件。Windows 缺少 O_PATH、fcntl、pread／pwrite，对应测试跳过；纯参数、路径范围、peer 与固定证据脱敏测试继续运行。最终仍须 Linux CI，并在只读真实后端确认后才安排 NAS 文件读取验收。
+测试使用临时 SQLite、主机元数据和普通文件字节；ACL 与安装回调均为明确的内部 fixture，不是实机权限证明。Linux 用例覆盖真实 O_PATH／符号链接拒绝、真实 fd 字节、Range、对象变化、逐块撤权、匿名 staging、散列及安装前置条件。Windows 缺少 O_PATH、fcntl、pread／pwrite，对应测试跳过；纯参数、路径范围、peer 与固定证据脱敏测试继续运行。自动化实际执行以 Linux CI 为准；NAS 目录、读取、哈希、变更、原厂索引与恢复各自记录实机证据，不能互相替代。
+
+## 筛选前的根资格现场
+
+显式 `file_backend_context` 还返回 `context.root_topology`，用于解释某个监控挂载为什么没有进入可授权的 Users 根。它读取有界的内核挂载元数据和已有磁盘身份缓存，不打开候选数据目录、不列出用户文件、不执行原厂动作、SMART、blkid 或外部命令。Users 目录的实际句柄仍由原有上下文检查单独核验，整项检测因此仍可能唤盘。
+
+现场包含直接 `/drives/<名称>` 候选的可关联指纹、内核挂载／设备身份、完整文件系统根或子目录分类、规范别名关系、Users 内额外挂载证据、缓存身份匹配及全部拒绝原因。原始序列号、UUID、挂载选项、文件系统内部路径和动态用户路径不出宿主；已知挂载可在客户端计算同类指纹进行关联。源元数据过长、不完整、格式损坏或采集中变化时明确报告未知或不完整，不将短读当作 EOF。
+
+缓存中存在、当前内核挂载表中缺失的规范路径也会列入候选，标记 `origin:cache_only` 和 `mountinfo_not_present`；不会据此补造挂载或授权。`inputs.verification` 保留第二次采样的状态及前后是否一致；被拒绝候选的挂载选项、源与文件系统根变化也会使本次拓扑不完整。私有缓存复验只覆盖身份、挂载关联和规划标签等实际输入，不将温度或采集时间的变化当作根资格变化。
+
+`mount_fingerprint` 为精确解码后的物理挂载路径 UTF-8 字节的 SHA-256，不附加 `/Users`，不做路径归一化。可在客户端关联已知路径：
+
+```python
+import hashlib
+mount = '/drives/<已知挂载名称>'
+fingerprint = hashlib.sha256(mount.encode('utf-8')).hexdigest()
+```
+
+`candidate_id` 使用 `candidate_` 加该摘要前二十四位，始终不是可授权的 root ID。`catalog_included` 只复述原规划结果；`qualification_passed` 描述采到的局部条件，`eligible` 在输入或投影不完整时为 `null`。这些字段不能证明 Users 目录存在、原厂 ACL 允许访问或恢复区已就绪。
+
+`root_topology.complete` 描述本次拓扑证据是否完整，不表示候选符合安全要求；被拒绝候选也保留完整原因。顶层 `context.complete` 还要求前后规划、挂载、启动身份及固定 self／PID1 挂载命名空间一致。诊断不创建 root ID 授权，不迁移旧 Token，不改变规划筛选和实际文件打开的安全门。
+
+实机遇到 `not_found` 时，先区分哪个目录段无法打开，再核对真实数据挂载是否被根规划排除。不能创建一个缺失的 Users 目录试通，也不能把另一个同名磁盘候选当作用户原来的目录。没有合格的当前根和真实恢复区预检，就不启动写入验收。

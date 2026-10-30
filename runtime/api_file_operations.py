@@ -7,6 +7,7 @@ file contents, and must not join passive/default polling.
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -226,13 +227,80 @@ def _users_context(root, row, expected):
             os.close(descriptor)
 
 
+def _mount_namespaces(root):
+    """Fixed proc identity metadata only; namespace evidence grants no access."""
+    result = {'self': None, 'pid1': None}
+    for name, relative in (('self', 'proc/self/ns/mnt'), ('pid1', 'proc/1/ns/mnt')):
+        try:
+            info = os.stat(Path(root).absolute() / relative)
+            result[name] = hashlib.sha256(repr((info.st_dev, info.st_ino)).encode('ascii')).hexdigest()
+        except OSError:
+            pass
+    return result
+
+
+def _topology_unavailable(reason):
+    """No exception text, raw catalog or fallback qualification is exposed."""
+    return {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 2,
+            'available': False, 'complete': False, 'reason_codes': [reason],
+            'catalog_fingerprint': None, 'catalog_root_ids': [], 'candidates': [],
+            'inputs': {}, 'effects': {'metadata_only': True, 'opens_data_paths': False,
+                'stats_data_paths': False, 'enumerates_user_directories': False,
+                'opens_user_files': False, 'calls_native_actions': False,
+                'starts_smart': False, 'reads_credentials': False, 'grants_authorization': False}}
+
+
+def _context_topology(panel, root_collector, topology_collector):
+    """Consume the diagnostic producer without changing root selection/grants."""
+    try:
+        if topology_collector is None:
+            if root_collector is not None:
+                # An injected root catalog must not accidentally inspect the host.
+                return _topology_unavailable('topology_not_collected')
+            from api_file_roots import collect_file_root_topology
+            topology_collector = collect_file_root_topology
+        value = topology_collector(panel)
+        if (type(value) is not dict or value.get('schema_version') != 1
+                or value.get('scope') != 'file_root_topology' or value.get('boundary_version') != 2
+                or type(value.get('complete')) is not bool or type(value.get('available')) is not bool
+                or type(value.get('catalog_root_ids')) is not list
+                or type(value.get('reason_codes')) is not list):
+            return _topology_unavailable('topology_invalid')
+        value = dict(value, reason_codes=list(value['reason_codes']))
+        inputs = value.get('inputs')
+        mounts = inputs.get('mountinfo') if type(inputs) is dict else None
+        disks = inputs.get('cached_disks') if type(inputs) is dict else None
+        if value['complete'] and not (type(mounts) is dict and type(disks) is dict
+                and mounts.get('status') == disks.get('status') == 'ok'
+                and mounts.get('eof') is True and mounts.get('malformed_records') == 0
+                and all(type(mounts.get(key)) is int and mounts[key] >= 0
+                    for key in ('bytes_read', 'parsed_records', 'malformed_records'))
+                and all(type(disks.get(key)) is int and disks[key] >= 0
+                    for key in ('records', 'valid_identity_records', 'invalid_identity_records'))):
+            value['complete'] = False
+            value['reason_codes'].append('topology_metadata_incomplete')
+        return value
+    except Exception:
+        return _topology_unavailable('topology_unavailable')
+
+
+def _catalog_fingerprint(catalog):
+    if type(catalog) is not dict:
+        return None
+    return hashlib.sha256(json.dumps(catalog, sort_keys=True, ensure_ascii=True,
+        separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest()
+
+
 def collect_file_backend_context(panel, *, root='/', root_collector=None,
-                                 owner_reader=None, runtime_reader=None):
+                                 owner_reader=None, runtime_reader=None,
+                                 topology_collector=None, namespace_reader=None):
     """Explicit bounded evidence probe; injection arguments are never HTTP input.
 
     Reading Users directory metadata may wake a disk. This function enumerates
     no directory and opens no user content. It does not sign native requests,
     read tokens, or assert that a uid candidate can authorize a file operation.
+    Topology describes all rejected candidates too, independently of whether
+    selected Users handles pass. It never supplies a root or grant to execution.
     """
     started = time.monotonic()
     collector = collect_file_roots if root_collector is None else root_collector
@@ -242,6 +310,8 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
               'unix_identity_mapping_required': False,
               'owner': {'status': 'unverified', 'reason': 'fixed_owner_unconfirmed'},
               'unix_mapping': _mapping_candidate(root), 'roots': [], 'complete': False,
+              'namespace': {'before': None, 'after': None, 'stable': False,
+                            'same_namespace': None, 'reason': 'namespace_unavailable'},
               'native_contract': {'status': 'unverified', 'reason': 'path_acl_not_bound_to_opened_object',
                                   'reference_sha256': _REFERENCE, 'runtime_verified': False,
                                   'route': '/rest/1.0/file', 'actions': ['get_list', 'get_info', 'download'],
@@ -253,6 +323,25 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
                           'enumerates_user_directories': False, 'opens_user_files': False,
                           'reads_credentials': False, 'calls_native_actions': False,
                           'starts_smart': False, 'grants_authorization': False}}
+    before = after = boot = mounts_before = None
+    rows = None
+    metadata_before = metadata_after = False
+    def read_namespaces():
+        value = (namespace_reader or _mount_namespaces)(root=root)
+        return {key: value.get(key) if type(value) is dict and type(value.get(key)) is str
+            and re.fullmatch(r'[0-9a-f]{64}', value[key], re.ASCII) else None
+            for key in ('self', 'pid1')}
+    try:
+        before = collector(panel)
+        boot = _read_fixed(root, 'proc/sys/kernel/random/boot_id', 128)
+        mounts_before = _mounts(root)
+        result['namespace']['before'] = read_namespaces()
+        metadata_before = True
+    except Exception:
+        pass
+    # Preserve this complete rejection report even when Users/proc context
+    # cannot be opened or the authorization catalog contains no eligible root.
+    result['root_topology'] = _context_topology(panel, root_collector, topology_collector)
     try:
         if (owner_reader or _owner_identity)(root=root) is True:
             result['owner'] = {'status': 'verified', 'reason': 'fixed_owner_logical_identity_only'}
@@ -263,14 +352,10 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
         result['native_contract']['listener'] = ('verified' if isinstance(native, dict)
                                                  and native.get('available') is True
                                                  and native.get('status') == 'verified' else 'unverified')
-        boot = _read_fixed(root, 'proc/sys/kernel/random/boot_id', 128)
-        before = collector(panel)
-        mounts_before = _mounts(root)
         rows = before.get('roots') if isinstance(before, dict) else None
-        if (not isinstance(rows, list) or before.get('boundary_version') != 2
-                or before.get('available') is not True or len(rows) > 128):
-            return result
-        for row in rows[:_MAX_ROOTS]:
+        valid_catalog = (isinstance(rows, list) and before.get('boundary_version') == 2
+                         and before.get('available') is True and len(rows) <= 128)
+        for row in rows[:_MAX_ROOTS] if valid_catalog and metadata_before else ():
             if time.monotonic() - started > 4:
                 break
             if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
@@ -280,15 +365,45 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
             entries = mounts_before.get(row['mount'][:-6], [])
             expected = entries[0] if len(entries) == 1 else None
             result['roots'].append(_users_context(root, row, expected))
-        after = collector(panel)
-        mounts_after = _mounts(root)
-        same = (boot == _read_fixed(root, 'proc/sys/kernel/random/boot_id', 128)
-                and before == after and mounts_before == mounts_after)
-        if not same:
-            for row in result['roots']:
-                row.update(status='unverified', reason='root_lifecycle_changed', handle_fingerprint=None)
-        result['complete'] = same and len(result['roots']) == len(rows)
     except Exception:
         # Partial context is useful, but exceptions may contain account/path data.
-        result['complete'] = False
+        pass
+    try:
+        after = collector(panel)
+        mounts_after = _mounts(root)
+        same = (metadata_before and boot == _read_fixed(root, 'proc/sys/kernel/random/boot_id', 128)
+                and before == after and mounts_before == mounts_after)
+        result['namespace']['after'] = read_namespaces()
+        metadata_after = True
+    except Exception:
+        same = False
+    if not same:
+        for row in result['roots']:
+            row.update(status='unverified', reason='root_lifecycle_changed', handle_fingerprint=None)
+    namespace = result['namespace']
+    valid_namespaces = all(type(value) is dict and all(type(value.get(key)) is str
+        and re.fullmatch(r'[0-9a-f]{64}', value[key], re.ASCII) for key in ('self', 'pid1'))
+        for value in (namespace['before'], namespace['after']))
+    if valid_namespaces:
+        namespace['stable'] = namespace['before'] == namespace['after']
+        namespace['same_namespace'] = all(value['self'] == value['pid1']
+            for value in (namespace['before'], namespace['after']))
+        namespace['reason'] = ('namespace_changed' if not namespace['stable'] else
+            'namespace_mismatch' if not namespace['same_namespace'] else 'namespace_metadata_only')
+    topology = result['root_topology']
+    try:
+        catalog_matches = (_catalog_fingerprint(before) is not None and before == after
+            and topology.get('catalog_fingerprint') == _catalog_fingerprint(before)
+            and type(before.get('roots')) is list
+            and topology['catalog_root_ids'] == [row['id'] for row in before['roots']])
+    except (KeyError, TypeError, ValueError):
+        catalog_matches = False
+    if not catalog_matches and topology['complete']:
+        topology['complete'] = False
+        topology['reason_codes'].append('context_catalog_mismatch')
+    result['complete'] = bool(metadata_after and same and type(rows) is list
+        and before.get('available') is True and before.get('boundary_version') == 2
+        and len(result['roots']) == len(rows) and all(row.get('status') == 'verified'
+            for row in result['roots']) and namespace['stable'] and namespace['same_namespace']
+        and catalog_matches and topology['complete'])
     return result

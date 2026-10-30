@@ -1,6 +1,7 @@
 """Fixed context evidence; fixture metadata never becomes file authorization."""
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,13 +25,15 @@ class FileContextTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='r1-file-context-')
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        for name in ('etc', 'tmp/nand_config', 'proc/sys/kernel/random', 'proc/self'):
+        for name in ('etc', 'tmp/nand_config', 'proc/sys/kernel/random', 'proc/self/ns', 'proc/1/ns'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / 'etc/passwd').write_text('root:x:0:0:fixture:/root:/bin/false\n', encoding='utf-8')
         (self.root / 'etc/group').write_text('root:x:0:\n', encoding='utf-8')
         (self.root / 'proc/sys/kernel/random/boot_id').write_text('fixture-boot\n', encoding='utf-8')
         (self.root / 'proc/self/mountinfo').write_text(
             '100 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n', encoding='utf-8')
+        (self.root / 'proc/self/ns/mnt').write_text('fixture namespace', encoding='utf-8')
+        os.link(self.root / 'proc/self/ns/mnt', self.root / 'proc/1/ns/mnt')
         self.catalog = {'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
                         'roots': [{'id': ROOT, 'mount': '/drives/data/Users',
                                    'label': 'fixture', 'read_only': False}]}
@@ -40,6 +43,26 @@ class FileContextTests(unittest.TestCase):
             root_collector=lambda unused: copy.deepcopy(self.catalog),
             runtime_reader=lambda **unused: {'available': True, 'status': 'verified', 'secret': PRIVATE},
             **options)
+
+    def topology(self, catalog=None):
+        catalog = self.catalog if catalog is None else catalog
+        return {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 2,
+            'available': True, 'complete': True, 'reason_codes': [],
+            'catalog_fingerprint': hashlib.sha256(json.dumps(catalog, sort_keys=True,
+                ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest(),
+            'catalog_root_ids': [row['id'] for row in catalog['roots']],
+            'candidates': [{'candidate_id': 'fixture', 'reason_codes': ['source_unsupported']}],
+            'inputs': {'mountinfo': {'status': 'ok', 'eof': True, 'bytes_read': 70,
+                'parsed_records': 1, 'malformed_records': 0}, 'cached_disks': {
+                'status': 'ok', 'records': 1, 'valid_identity_records': 1, 'invalid_identity_records': 0}},
+            'effects': {'metadata_only': True, 'opens_data_paths': False,
+                'stats_data_paths': False, 'grants_authorization': False}}
+
+    def verified_context(self, **options):
+        with mock.patch.object(files, '_users_context', return_value={
+                'root_id': ROOT, 'status': 'verified', 'reason': 'directory_handle_metadata_only',
+                'handle_fingerprint': 'a' * 64}):
+            return self.collect(owner_reader=lambda **unused: True, **options)
 
     def owner_database(self):
         path = self.root / 'tmp/nand_config/USER_AUTH_DB_101'
@@ -160,6 +183,135 @@ class FileContextTests(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(result['roots'][0]['reason'], 'root_lifecycle_changed')
         self.assertIsNone(result['roots'][0]['handle_fingerprint'])
+
+    def test_injected_catalog_does_not_accidentally_collect_real_host_topology(self):
+        with mock.patch('api_file_roots.collect_file_root_topology', create=True,
+                        side_effect=AssertionError('real host must not be inspected')) as topology:
+            result = self.collect()
+        topology.assert_not_called()
+        self.assertEqual(result['root_topology']['reason_codes'], ['topology_not_collected'])
+        self.assertFalse(result['complete'])
+
+    def test_complete_topology_and_known_namespace_do_not_grant_file_access(self):
+        topology = self.topology()
+        result = self.verified_context(topology_collector=lambda unused: topology)
+        self.assertTrue(result['root_topology']['complete'])
+        self.assertTrue(result['complete'])
+        self.assertTrue(result['namespace']['stable'])
+        self.assertTrue(result['namespace']['same_namespace'])
+        self.assertFalse(result['file_access_available'])
+        self.assertFalse(result['native_contract']['runtime_verified'])
+        self.assertIn('native_root_read_permission', result['blockers'])
+        self.assertEqual(result['root_topology']['candidates'], topology['candidates'])
+
+    def test_rejected_topology_survives_zero_selected_roots_without_opening_data(self):
+        self.catalog.update(available=False, status='unavailable', roots=[])
+        topology = self.topology()
+        with mock.patch.object(files, '_users_context', side_effect=AssertionError('no data path')) as users, \
+                mock.patch.object(files.os, 'scandir', side_effect=AssertionError('no directory listing')), \
+                mock.patch.object(files.os, 'listdir', side_effect=AssertionError('no directory listing')):
+            result = self.collect(topology_collector=lambda unused: topology)
+        users.assert_not_called()
+        self.assertTrue(result['root_topology']['complete'])
+        self.assertEqual(result['root_topology']['candidates'], topology['candidates'])
+        self.assertEqual(result['root_topology']['catalog_root_ids'], [])
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['file_access_available'])
+
+    def test_selected_users_failure_does_not_erase_complete_topology(self):
+        with mock.patch.object(files, '_users_context', return_value={
+                'root_id': ROOT, 'status': 'unverified', 'reason': 'safe_metadata_open_unavailable'}):
+            result = self.collect(topology_collector=lambda unused: self.topology())
+        self.assertTrue(result['root_topology']['complete'])
+        self.assertFalse(result['complete'])
+
+    def test_topology_fingerprint_and_root_id_order_bind_to_exact_context_catalog(self):
+        for field, value in (('catalog_fingerprint', '0' * 64), ('catalog_root_ids', [])):
+            with self.subTest(field=field):
+                topology = self.topology()
+                topology[field] = value
+                result = self.verified_context(topology_collector=lambda unused: topology)
+                self.assertFalse(result['complete'])
+                self.assertFalse(result['root_topology']['complete'])
+                self.assertIn('context_catalog_mismatch', result['root_topology']['reason_codes'])
+                self.assertTrue(topology['complete'])
+
+    def test_unknown_metadata_counts_or_partial_topology_never_report_complete(self):
+        for group, field, value in (('mountinfo', 'parsed_records', None),
+                ('mountinfo', 'bytes_read', True), ('mountinfo', 'eof', False),
+                ('cached_disks', 'records', None), ('cached_disks', 'invalid_identity_records', False)):
+            with self.subTest(group=group, field=field):
+                topology = self.topology()
+                topology['inputs'][group][field] = value
+                result = self.verified_context(topology_collector=lambda unused: topology)
+                self.assertFalse(result['complete'])
+                self.assertFalse(result['root_topology']['complete'])
+                self.assertIn('topology_metadata_incomplete', result['root_topology']['reason_codes'])
+        topology = self.topology()
+        topology.update(complete=False, reason_codes=['mountinfo_incomplete'])
+        result = self.verified_context(topology_collector=lambda unused: topology)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['root_topology']['candidates'], topology['candidates'])
+
+    def test_catalog_change_after_topology_invalidates_its_context_binding(self):
+        after = copy.deepcopy(self.catalog)
+        after['roots'][0]['label'] = 'changed label without changing root ID'
+        topology = self.topology()
+        with mock.patch.object(files, '_users_context', return_value={
+                'root_id': ROOT, 'status': 'verified', 'handle_fingerprint': 'a' * 64}):
+            result = files.collect_file_backend_context(None, root=self.root,
+                root_collector=mock.Mock(side_effect=[copy.deepcopy(self.catalog), after]),
+                topology_collector=lambda unused: topology,
+                owner_reader=lambda **unused: True, runtime_reader=lambda **unused: {})
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['root_topology']['complete'])
+        self.assertIn('context_catalog_mismatch', result['root_topology']['reason_codes'])
+        self.assertEqual(result['roots'][0]['reason'], 'root_lifecycle_changed')
+
+    def test_topology_exception_is_fixed_private_and_does_not_stop_other_context(self):
+        topology = mock.Mock(side_effect=OSError('/private/' + PRIVATE))
+        result = self.verified_context(topology_collector=topology)
+        self.assertEqual(result['root_topology']['reason_codes'], ['topology_unavailable'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['roots'][0]['status'], 'verified')
+        self.assertNotIn(PRIVATE, json.dumps(result))
+
+    def test_missing_real_namespace_metadata_keeps_context_incomplete(self):
+        (self.root / 'proc/1/ns/mnt').unlink()
+        result = self.verified_context(topology_collector=lambda unused: self.topology())
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['namespace']['reason'], 'namespace_unavailable')
+        self.assertIsNone(result['namespace']['before']['pid1'])
+        self.assertTrue(result['root_topology']['complete'])
+
+    def test_different_real_namespace_metadata_keeps_context_incomplete(self):
+        (self.root / 'proc/1/ns/mnt').unlink()
+        (self.root / 'proc/1/ns/mnt').write_text('different namespace', encoding='utf-8')
+        result = self.verified_context(topology_collector=lambda unused: self.topology())
+        self.assertFalse(result['complete'])
+        self.assertTrue(result['namespace']['stable'])
+        self.assertFalse(result['namespace']['same_namespace'])
+        self.assertEqual(result['namespace']['reason'], 'namespace_mismatch')
+
+    def test_real_namespace_change_during_collection_keeps_context_incomplete(self):
+        calls = []
+        def namespace_reader(*, root):
+            evidence = files._mount_namespaces(root)
+            if not calls:
+                alternate = root / 'proc/alternate-mnt'
+                alternate.write_text('new namespace', encoding='utf-8')
+                (root / 'proc/self/ns/mnt').unlink()
+                (root / 'proc/1/ns/mnt').unlink()
+                os.link(alternate, root / 'proc/self/ns/mnt')
+                os.link(alternate, root / 'proc/1/ns/mnt')
+            calls.append(evidence)
+            return evidence
+        result = self.verified_context(topology_collector=lambda unused: self.topology(),
+                                       namespace_reader=namespace_reader)
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['namespace']['stable'])
+        self.assertTrue(result['namespace']['same_namespace'])
+        self.assertEqual(result['namespace']['reason'], 'namespace_changed')
 
     @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'O_PATH'), 'Linux O_PATH required')
     def test_linux_directory_handle_refuses_users_symlink_and_reports_only_metadata(self):

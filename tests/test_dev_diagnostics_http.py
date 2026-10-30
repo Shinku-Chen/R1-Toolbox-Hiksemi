@@ -555,6 +555,71 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertNotIn('never-disclose', json.dumps(value))
         self.assert_no_controls()
 
+    def test_root_topology_is_only_collected_for_explicit_authorized_context(self):
+        import hashlib
+        import api_file_operations
+        import api_file_roots
+        fixture = self.server.state_dir / 'context-proc-fixture'
+        (fixture / 'proc/self').mkdir(parents=True)
+        (fixture / 'proc/sys/kernel/random').mkdir(parents=True)
+        (fixture / 'proc/self/mountinfo').write_text('', encoding='utf-8')
+        (fixture / 'proc/sys/kernel/random/boot_id').write_text('fixture-boot', encoding='utf-8')
+        catalog = {'available': False, 'status': 'unavailable', 'boundary_version': 2, 'roots': []}
+        topology = {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 2,
+            'available': True, 'complete': True, 'reason_codes': [], 'catalog_root_ids': [],
+            'catalog_fingerprint': hashlib.sha256(json.dumps(catalog, sort_keys=True,
+                ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest(),
+            'inputs': {'mountinfo': {'status': 'ok', 'eof': True, 'bytes_read': 0,
+                'parsed_records': 0, 'malformed_records': 0}, 'cached_disks': {'status': 'ok',
+                'records': 1, 'valid_identity_records': 0, 'invalid_identity_records': 1}},
+            'candidates': [{'candidate_id': 'candidate_fixture', 'reason_codes': ['source_unsupported']}],
+            'effects': {'metadata_only': True, 'opens_data_paths': False, 'stats_data_paths': False,
+                'grants_authorization': False}}
+        self._patch(api_file_operations, 'collect_file_roots', return_value=catalog)
+        producer = self._patch(api_file_roots, 'collect_file_root_topology', return_value=topology)
+        actual_context = api_file_operations.collect_file_backend_context
+        provider = self._patch(api_file_operations, 'collect_file_backend_context',
+            side_effect=lambda panel: actual_context(panel, root=fixture,
+                owner_reader=lambda **unused: False, runtime_reader=lambda **unused: {}))
+        users = self._patch(api_file_operations, '_users_context',
+                            side_effect=AssertionError('no eligible Users path may open'))
+        self.request()
+        self.request({'action': 'catalog'})
+        self.request(method='GET')
+        provider.assert_not_called()
+        producer.assert_not_called()
+        body = {'action': 'snapshot', 'checks': ['file_backend_context']}
+        allowed = self.server.dev_allow_ips
+        self.server.dev_allow_ips = {'192.168.31.193'}
+        status, _, value = self.request(body, headers={'Cookie': self.cookie,
+            'X-Forwarded-For': '192.168.31.193', 'X-Real-IP': '192.168.31.193'})
+        self.assertEqual(status, 403)
+        self.assertNotIn('root_topology', json.dumps(value))
+        provider.assert_not_called()
+        producer.assert_not_called()
+        self.server.dev_allow_ips = allowed
+        status, _, value = self.request(body)
+        self.assertEqual(status, 200)
+        context = value['snapshot']['checks']['file_backend_context']['data']['context']
+        self.assertEqual(context['root_topology'], topology)
+        self.assertTrue(context['root_topology']['complete'])
+        self.assertFalse(context['complete'])
+        self.assertFalse(context['file_access_available'])
+        provider.assert_called_once_with(self.server.panel)
+        producer.assert_called_once_with(self.server.panel)
+        users.assert_not_called()
+
+        def expire(unused):
+            self.server.dev_until = time.time() - 1
+            return dict(topology, candidates=[{'private_marker': 'topology-must-not-leave'}])
+        producer.side_effect = expire
+        status, _, value = self.request(body)
+        self.assertEqual(status, 403)
+        self.assertNotIn('topology-must-not-leave', json.dumps(value))
+        self.assertNotIn('root_topology', json.dumps(value))
+        self.assertEqual(producer.call_count, 2)
+        self.assert_no_controls()
+
 
 if __name__ == '__main__':
     unittest.main()
