@@ -48,6 +48,40 @@ _LOCK = threading.Lock()
 _TIMEOUT = 1.0
 _MAX_STEPS = 10000
 
+# Only fixed stage names and start/pass markers leave this private observer.
+# It cannot select a path, query, native action or alter an admission result.
+PREFLIGHT_STAGES = (
+    'reader.arguments', 'reader.authorization', 'reader.lock', 'reader.platform',
+    'reader.parent', 'reader.users', 'reader.cache.physical',
+    'reader.cache.data_cache', 'reader.cache.users', 'reader.cache.owner',
+    'reader.cache.file_db', 'reader.sidecar.main', 'reader.sidecar.wal',
+    'reader.sidecar.shm', 'reader.sidecar.journal', 'reader.header',
+    'reader.wal_header', 'reader.sidecar_layout',
+    'reader.revalidate.authorization', 'reader.revalidate.parent',
+    'reader.revalidate.users', 'reader.revalidate.chain',
+    'reader.revalidate.sidecars', 'reader.revalidate.main',
+    'reader.revalidate.final_current', 'reader.sqlite.fd_snapshot',
+    'reader.sqlite.open', 'reader.sqlite.main_fd', 'reader.sqlite.configure',
+    'reader.sqlite.schema_begin', 'reader.sqlite.sidecars_fd',
+    'reader.schema.tables', 'reader.schema.columns', 'reader.schema.index',
+    'reader.sqlite.query_current', 'reader.sqlite.exact_query',
+    'reader.sqlite.row_shape', 'reader.sqlite.final_fd', 'reader.absence',
+    'reader.final_check',
+)
+_CACHE_STAGES = ('reader.cache.data_cache', 'reader.cache.users',
+                 'reader.cache.owner', 'reader.cache.file_db')
+_SIDECAR_STAGES = {'': 'reader.sidecar.main', '-wal': 'reader.sidecar.wal',
+                   '-shm': 'reader.sidecar.shm', '-journal': 'reader.sidecar.journal'}
+
+
+def _observe(observer, stage, state):
+    """Observer failures never replace the production exception or result."""
+    if observer is not None:
+        try:
+            observer(stage, state)
+        except Exception:
+            pass
+
 
 def _stable(info):
     return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode), info.st_nlink
@@ -137,8 +171,9 @@ class _MutationReceipt:
 class _OpenedIndex:
     """Same-volume no-link ancestry and owned DB/WAL/SHM descriptors."""
 
-    def __init__(self, root, row, path, current, deadline):
+    def __init__(self, root, row, path, current, deadline, *, observer=None):
         self.root, self.row, self.path = root, row, path
+        self._observer = observer
         self.current, self.deadline = current, deadline
         self.descriptors, self.components = [], []
         self.parent = None
@@ -146,28 +181,40 @@ class _OpenedIndex:
         self.files = {}
         self.mount_id = None
         try:
+            _observe(observer, 'reader.platform', 'start')
             if os.name != 'posix' or not hasattr(os, 'O_PATH') or not hasattr(os, 'pread'):
                 raise FileAccessError('write_backend_unverified')
+            _observe(observer, 'reader.platform', 'pass')
             from api_file_executor import _Handle, _UsersHandle
+            _observe(observer, 'reader.parent', 'start')
             self.parent = _Handle(root, row, path.rpartition('/')[0], directory=True)
             self.mount_id = self.parent.mount_id
             self.parent_state = _stable(os.fstat(self.parent.fd))
+            _observe(observer, 'reader.parent', 'pass')
+            _observe(observer, 'reader.users', 'start')
             with _UsersHandle(root, row) as users:
                 self.users_state = _stable(os.fstat(users.fd))
+                _observe(observer, 'reader.users', 'pass')
                 flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
                 # '..' is a fixed operation on the verified Users directory,
                 # never a request component. The current mount must be shared.
+                _observe(observer, 'reader.cache.physical', 'start')
                 parent = os.open('..', flags, dir_fd=users.fd)
                 self.descriptors.append(parent)
                 self._check_mount(parent)
                 self.components.append(('..', _stable(os.fstat(parent))))
-                for component in _CACHE:
+                _observe(observer, 'reader.cache.physical', 'pass')
+                for component, stage in zip(_CACHE, _CACHE_STAGES):
+                    _observe(observer, stage, 'start')
                     parent = os.open(component, flags, dir_fd=parent)
                     self.descriptors.append(parent)
                     self._check_mount(parent)
                     self.components.append((component, _stable(os.fstat(parent))))
+                    _observe(observer, stage, 'pass')
                 self.directory = parent
                 for suffix in ('', '-wal', '-shm', '-journal'):
+                    stage = _SIDECAR_STAGES[suffix]
+                    _observe(observer, stage, 'start')
                     try:
                         opened = os.open(_DB + suffix, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
                                          dir_fd=self.directory)
@@ -175,6 +222,7 @@ class _OpenedIndex:
                         if not suffix:
                             raise FileAccessError('write_backend_unverified') from None
                         self.files[suffix] = None
+                        _observe(observer, stage, 'pass')
                         continue
                     self.descriptors.append(opened)
                     self._check_mount(opened, regular=True)
@@ -188,23 +236,31 @@ class _OpenedIndex:
                     if _stable(os.fstat(opened)) != _stable(os.fstat(readable)):
                         raise FileAccessError('write_backend_unverified')
                     self.files[suffix] = readable
+                    _observe(observer, stage, 'pass')
+            _observe(observer, 'reader.header', 'start')
             info = os.fstat(self.files[''])
             header = os.pread(self.files[''], 100, 0)
             if (info.st_size < 100 or len(header) != 100 or header[:16] != b'SQLite format 3\x00'
                     or header[18] not in (1, 2) or header[19] != header[18]):
                 raise FileAccessError('write_backend_unverified')
             self.wal = header[18] == 2
+            _observe(observer, 'reader.header', 'pass')
             if self.wal:
+                _observe(observer, 'reader.wal_header', 'start')
                 if self.files['-wal'] is None or self.files['-shm'] is None:
                     raise FileAccessError('write_backend_unverified')
                 wal = os.pread(self.files['-wal'], 32, 0)
                 if (len(wal) < 32 or wal[:4] not in (b'\x37\x7f\x06\x82', b'\x37\x7f\x06\x83')
                         or os.fstat(self.files['-shm']).st_size < 32768):
                     raise FileAccessError('write_backend_unverified')
+                _observe(observer, 'reader.wal_header', 'pass')
             elif self.files['-wal'] is not None or self.files['-shm'] is not None:
+                _observe(observer, 'reader.sidecar_layout', 'start')
                 raise FileAccessError('write_backend_unverified')
+            _observe(observer, 'reader.sidecar_layout', 'start')
             self.file_states = {s: _stable(os.fstat(fd)) if fd is not None else None
                                 for s, fd in self.files.items()}
+            _observe(observer, 'reader.sidecar_layout', 'pass')
             self.check()
         except Exception:
             self.close()
@@ -220,24 +276,34 @@ class _OpenedIndex:
             raise FileAccessError('write_backend_unverified')
 
     def check(self):
+        observer = self._observer
+        _observe(observer, 'reader.revalidate.authorization', 'start')
         _gate(self.current, self.deadline)
+        _observe(observer, 'reader.revalidate.authorization', 'pass')
         from api_file_executor import _Handle, _UsersHandle
         flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        _observe(observer, 'reader.revalidate.parent', 'start')
         with _Handle(self.root, self.row, self.path.rpartition('/')[0], directory=True) as parent:
             if (_stable(os.fstat(parent.fd)) != self.parent_state or parent.mount_id != self.mount_id):
                 raise FileAccessError('file_changed')
+        _observe(observer, 'reader.revalidate.parent', 'pass')
+        _observe(observer, 'reader.revalidate.users', 'start')
         with _UsersHandle(self.root, self.row) as users:
             if _stable(os.fstat(users.fd)) != self.users_state or users.mount_id != self.mount_id:
                 raise FileAccessError('root_unavailable')
+            _observe(observer, 'reader.revalidate.users', 'pass')
             descriptors = []
             try:
                 parent = users.fd
+                _observe(observer, 'reader.revalidate.chain', 'start')
                 for component, identity in self.components:
                     parent = os.open(component, flags, dir_fd=parent)
                     descriptors.append(parent)
                     self._check_mount(parent)
                     if _stable(os.fstat(parent)) != identity:
                         raise FileAccessError('write_backend_unverified')
+                _observe(observer, 'reader.revalidate.chain', 'pass')
+                _observe(observer, 'reader.revalidate.sidecars', 'start')
                 for suffix, identity in self.file_states.items():
                     try:
                         info = os.stat(_DB + suffix, dir_fd=parent, follow_symlinks=False)
@@ -247,12 +313,17 @@ class _OpenedIndex:
                         continue
                     if identity is None or _stable(info) != identity:
                         raise FileAccessError('write_backend_unverified')
+                _observe(observer, 'reader.revalidate.sidecars', 'pass')
+                _observe(observer, 'reader.revalidate.main', 'start')
                 if _stable(os.fstat(self.files[''])) != self.file_states['']:
                     raise FileAccessError('write_backend_unverified')
+                _observe(observer, 'reader.revalidate.main', 'pass')
             finally:
                 for descriptor in reversed(descriptors):
                     os.close(descriptor)
+        _observe(observer, 'reader.revalidate.final_current', 'start')
         _gate(self.current, self.deadline)
+        _observe(observer, 'reader.revalidate.final_current', 'pass')
 
     def sqlite_proof(self, before, *, sidecars=False):
         """Check actual newly opened SQLite descriptors before any row query."""
@@ -327,7 +398,8 @@ def _data_authorizer(action, table, column, database, caller):
             else sqlite3.SQLITE_DENY)
 
 
-def _schema(connection):
+def _schema(connection, *, observer=None):
+    _observe(observer, 'reader.schema.tables', 'start')
     rows = connection.execute('SELECT type,name,sql FROM sqlite_master '
                               'WHERE name=? OR tbl_name=? LIMIT 8', (_TABLE, _TABLE)).fetchall()
     tables = [row for row in rows if row[:2] == ('table', _TABLE)]
@@ -335,6 +407,8 @@ def _schema(connection):
             or not re.match(r'CREATE\s+TABLE\s+', tables[0][2], re.IGNORECASE)
             or any(row[0] not in ('table', 'index') for row in rows)):
         raise FileAccessError('write_backend_unverified')
+    _observe(observer, 'reader.schema.tables', 'pass')
+    _observe(observer, 'reader.schema.columns', 'start')
     columns = connection.execute('PRAGMA table_xinfo(tb_file_db_all)').fetchall()
     if (len(columns) != len(_COLUMNS)
             or any(row[0] != i or row[1] != _COLUMNS[i] or row[2].upper() != _TYPES[i]
@@ -342,24 +416,35 @@ def _schema(connection):
                    or row[3] != (1 if i == 1 else 0) or row[6] != 0
                    for i, row in enumerate(columns))):
         raise FileAccessError('write_backend_unverified')
+    _observe(observer, 'reader.schema.columns', 'pass')
+    _observe(observer, 'reader.schema.index', 'start')
     indexes = connection.execute('PRAGMA index_list(tb_file_db_all)').fetchall()
     native = [row for row in indexes if row[1] == _INDEX]
     if (len(native) != 1 or native[0][2:] != (1, 'u', 0)
             or connection.execute('PRAGMA index_info(sqlite_autoindex_tb_file_db_all_1)').fetchall()
             != [(0, 1, 'path')]):
         raise FileAccessError('write_backend_unverified')
+    _observe(observer, 'reader.schema.index', 'pass')
 
 
 def _query(opened, key, *, versioned=False):
     """One fixed exact-index lookup; never use search, attach, functions or raw SQL."""
     connection = None
+    observer = getattr(opened, '_observer', None)
+    _observe(observer, 'reader.sqlite.fd_snapshot', 'start')
     before = _fd_snapshot()
+    _observe(observer, 'reader.sqlite.fd_snapshot', 'pass')
     try:
         uri = ('file:' + quote('/proc/self/fd/' + str(opened.directory) + '/' + _DB, safe='/')
                + '?mode=ro&vfs=unix&readonly_shm=1')
+        _observe(observer, 'reader.sqlite.open', 'start')
         connection = sqlite3.connect(uri, uri=True, isolation_level=None,
                                      timeout=min(.05, max(0, opened.deadline - time.monotonic())))
+        _observe(observer, 'reader.sqlite.open', 'pass')
+        _observe(observer, 'reader.sqlite.main_fd', 'start')
         opened.sqlite_proof(before)
+        _observe(observer, 'reader.sqlite.main_fd', 'pass')
+        _observe(observer, 'reader.sqlite.configure', 'start')
         connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 65536)
         connection.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 4096)
         connection.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
@@ -368,6 +453,7 @@ def _query(opened, key, *, versioned=False):
         connection.execute('PRAGMA trusted_schema=OFF')
         connection.execute('PRAGMA temp_store=MEMORY')
         connection.execute('PRAGMA mmap_size=0')
+        _observe(observer, 'reader.sqlite.configure', 'pass')
         steps = 0
 
         def progress():
@@ -380,23 +466,35 @@ def _query(opened, key, *, versioned=False):
                 return 1
 
         connection.set_progress_handler(progress, 100)
+        _observe(observer, 'reader.sqlite.schema_begin', 'start')
         connection.set_authorizer(_schema_authorizer)
         connection.execute('BEGIN')
         connection.execute('PRAGMA schema_version').fetchall()
+        _observe(observer, 'reader.sqlite.schema_begin', 'pass')
         # Opening the schema primes WAL/SHM without querying user rows. Refuse
         # a sidecar swap before the exact permitted row lookup is prepared.
+        _observe(observer, 'reader.sqlite.sidecars_fd', 'start')
         opened.sqlite_proof(before, sidecars=opened.wal)
-        _schema(connection)
+        _observe(observer, 'reader.sqlite.sidecars_fd', 'pass')
+        _schema(connection, observer=observer)
+        _observe(observer, 'reader.sqlite.query_current', 'start')
         _gate(opened.current, opened.deadline)
+        _observe(observer, 'reader.sqlite.query_current', 'pass')
+        _observe(observer, 'reader.sqlite.exact_query', 'start')
         connection.set_authorizer(_data_authorizer)
         rows = connection.execute(_SELECT_VERSION if versioned else _SELECT, (key,)).fetchall()
+        _observe(observer, 'reader.sqlite.exact_query', 'pass')
+        _observe(observer, 'reader.sqlite.row_shape', 'start')
         if (len(rows) > 1 or any(type(row) is not tuple or len(row) != (7 if versioned else 6)
                 or type(row[0]) is not str or type(row[5]) is not str
                 or any(type(value) is not int for value in row[1:5])
                 or row[3] not in (0, 1) or row[4] < 0
                 or versioned and (type(row[6]) is not int or row[6] <= 0) for row in rows)):
             raise FileAccessError('write_backend_unverified')
+        _observe(observer, 'reader.sqlite.row_shape', 'pass')
+        _observe(observer, 'reader.sqlite.final_fd', 'start')
         opened.sqlite_proof(before, sidecars=opened.wal)
+        _observe(observer, 'reader.sqlite.final_fd', 'pass')
         return rows
     finally:
         if connection is not None:
@@ -406,24 +504,36 @@ def _query(opened, key, *, versioned=False):
 class NativeFileIndexReader:
     """Private helper for NativeFileIndex; it grants no file or machine access."""
 
-    def __init__(self, root='/'):
+    def __init__(self, root='/', *, observer=None):
         self.root = root
+        self._observer = observer
         self._identity = secrets.token_hex(16)
 
     def preflight(self, row, path, *, current, require_absent=True):
+        _observe(self._observer, 'reader.arguments', 'start')
         if type(require_absent) is not bool:
             raise FileAccessError('write_backend_unverified')
         mount, key = _arguments(row, path)
+        _observe(self._observer, 'reader.arguments', 'pass')
         deadline = time.monotonic() + _TIMEOUT
+        _observe(self._observer, 'reader.authorization', 'start')
         _gate(current, deadline)
+        _observe(self._observer, 'reader.authorization', 'pass')
+        _observe(self._observer, 'reader.lock', 'start')
         if not _LOCK.acquire(blocking=False):
             raise FileAccessError('resource_busy')
+        _observe(self._observer, 'reader.lock', 'pass')
         try:
-            with _OpenedIndex(self.root, row, path, current, deadline) as opened:
+            with _OpenedIndex(self.root, row, path, current, deadline,
+                              observer=self._observer) as opened:
                 rows = _query(opened, key, versioned=True)
+                _observe(self._observer, 'reader.absence', 'start')
                 if require_absent and rows:
                     raise FileAccessError('write_backend_unverified')
+                _observe(self._observer, 'reader.absence', 'pass')
+                _observe(self._observer, 'reader.final_check', 'start')
                 opened.check()
+                _observe(self._observer, 'reader.final_check', 'pass')
                 return _Receipt(self._identity, mount, key, row.get('id'), opened.mount_id,
                                 tuple(opened.components), opened.file_states[''], not rows,
                                 rows[0][6] if rows else None)

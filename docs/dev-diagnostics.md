@@ -133,3 +133,9 @@ Docker 候选、文件上下文和协议检查会访问元数据，部分原厂�
 ### 文件根被排除时
 
 `{"action":"snapshot","checks":["file_backend_context"]}` 的 `context.root_topology` 会保留筛选前的直接数据挂载候选及拒绝原因，而非只返回已进入授权列表的根。admin v3 规划允许子挂载存在，实际跨入仍由逐级句柄检查拒绝。使用已知挂载的本地指纹核对候选，检查文件系统根分类、规范别名歧义、Users 内额外挂载以及当前缓存身份关联；不传入路径或原厂动作。完整字段与隐私边界见[文件后端上下文](file-backend-context.md#筛选前的根资格现场)。该字段不增加默认检测、文件权限或 MCP 工具，也不证明数据目录存在。
+
+### 文件写入预检失败时
+
+`file_backend_context` 与 `file_protocol` 不覆盖原厂写入索引的 SATA、Unix 套接字、固定数据库及 SQLite FD 门。使用显式 `POST /api/dev/files/write-preflight`，严格请求 `{"action":"preflight","confirm":true,"root_id":"root_…"}`，一次返回复用生产代码的固定阶段证据。它只选择当前 admin 根，目标名由服务端生成；不接受文件路径、SQL 或原厂动作，不创建或发布用户文件，不发送索引通知。需要真实来源开发白名单、未过期窗口、同源 JSON／CSRF；不能用 Bearer 或网页登录替代开发授权。共享存储锁、锁后和返回前续验保持不变，不进入统一诊断目录或默认四项。
+
+这是可能唤盘的主动索引观察。只读 SQL 仍可能涉及 SQLite 既有 WAL／SHM 元数据，不应宣称无副作用。`ready` 只说明这一瞬间的原厂索引预检，不证明调用者的子目录、恢复区、发布或后续写入完成。字段、停止规则和实机失败记录见[文件变更与恢复](file-mutations.md#原厂写入索引预检)。

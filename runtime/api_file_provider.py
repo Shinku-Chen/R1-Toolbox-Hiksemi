@@ -16,6 +16,7 @@ except ImportError:
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import stat
 import threading
@@ -684,3 +685,102 @@ def collect_file_protocol_probe(panel, *, root='/', authorizer=None,
         return result
     finally:
         _LOCK.release()
+
+
+class _WritePreflightTrace:
+    """Bounded fixed-stage evidence; no paths, exception text or DB rows.
+
+    A failed prerequisite leaves dependent stages unrun. Repeated identity
+    checks update the same slot; this is a diagnostic record, never authority.
+    """
+
+    def __init__(self, stages):
+        self.rows = {stage: {'id': stage, 'state': 'not_run', 'attempts': 0,
+                             'elapsed_ms': None} for stage in stages}
+        self.started = {}
+        self.active = []
+        self.valid = True
+
+    def __call__(self, stage, state):
+        if type(stage) is not str or type(state) is not str or stage not in self.rows or state not in ('start', 'pass'):
+            self.valid = False
+            return
+        row = self.rows[stage]
+        if state == 'start':
+            row.update(state='running', attempts=min(10000, row['attempts'] + 1))
+            self.started[stage] = time.monotonic()
+            if stage in self.active:
+                self.active.remove(stage)
+            self.active.append(stage)
+        else:
+            if stage not in self.started or stage not in self.active:
+                self.valid = False
+                return
+            row.update(state='passed', elapsed_ms=max(0, int(
+                (time.monotonic() - self.started[stage]) * 1000)))
+            self.active.remove(stage)
+
+    def finish(self, code=None):
+        failure = self.active[-1] if self.active else None
+        for stage in self.active:
+            self.rows[stage].update(state='failed' if code and stage == failure else 'unconfirmed',
+                elapsed_ms=max(0, int((time.monotonic() - self.started[stage]) * 1000)))
+        return failure
+
+
+def collect_file_write_preflight(panel, root_id, *, authorizer, root='/'):
+    """Observe production native-index gates for one server-generated target.
+
+    This explicitly confirmed probe opens fixed native DB metadata and may
+    wake a disk or affect SQLite sidecar metadata. It never sends an indexing
+    event, allocates upload staging, publishes a file, or grants execution.
+    The generated target's parent is admin, not a caller-selected directory.
+    """
+    from api_file_native_index import NativeFileIndex, PREFLIGHT_STAGES as INDEX_STAGES
+    from api_file_native_index_reader import PREFLIGHT_STAGES as READER_STAGES
+    from api_file_operations import FileAccessError
+    if type(root_id) is not str or _ROOT_ID.fullmatch(root_id) is None:
+        raise ValueError('invalid_root_id')
+    trace = _WritePreflightTrace(('authority.native_owner',) + INDEX_STAGES + READER_STAGES
+                                 + ('authority.final_authorization',))
+
+    def current():
+        try:
+            return callable(authorizer) and authorizer() is True
+        except Exception:
+            return False
+
+    started = time.monotonic()
+    code = None
+    success = False
+    trace('authority.native_owner', 'start')
+    try:
+        if not current():
+            raise FileAccessError('invalid_key')
+        # A fresh, finite literal child cannot select an existing user object.
+        # Preflight only checks this exact index key; it does not create it.
+        path = 'r1-toolbox-preflight-' + secrets.token_hex(16)
+        row = NativeOwnerWriteAuthority(panel, root=root).authorize(root_id, path, current)
+        trace('authority.native_owner', 'pass')
+        NativeFileIndex(root=root, observer=trace).preflight(row, path, current=current)
+        trace('authority.final_authorization', 'start')
+        if not current():
+            raise FileAccessError('invalid_key')
+        trace('authority.final_authorization', 'pass')
+        success = True
+    except FileAccessError as error:
+        code = error.code
+    except Exception:
+        code = 'write_backend_unverified'
+    failure = trace.finish(code)
+    observed_final = all(trace.rows[stage]['state'] == 'passed'
+                         for stage in ('index.final_current', 'reader.final_check'))
+    ready = success and trace.valid and failure is None and observed_final
+    return {'schema_version': 1, 'scope': 'native_index_preflight', 'root_id': root_id,
+            'ready': ready, 'error_code': code if code else None if ready else 'result_unconfirmed',
+            'failure_stage': failure, 'trace_schema_valid': trace.valid,
+            'elapsed_ms': max(0, int((time.monotonic() - started) * 1000)),
+            'target_kind': 'server_generated_unpublished_admin_child',
+            'may_wake_disks': True, 'sqlite_sidecar_metadata_may_change': True,
+            'file_published': False, 'native_notification_sent': False,
+            'write_acceptance_proven': False, 'stages': list(trace.rows.values())}

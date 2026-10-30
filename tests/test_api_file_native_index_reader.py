@@ -238,6 +238,78 @@ class NativeIndexLinuxTests(unittest.TestCase):
     def preflight(self, **kwargs):
         return self.reader.preflight(ROW, PATH, current=lambda: self.current, **kwargs)
 
+    def test_observer_covers_real_cache_chain_sqlite_fds_and_exact_query_without_data(self):
+        events = []
+        self.reader = reader.NativeFileIndexReader(self.root,
+            observer=lambda stage, state: events.append((stage, state)))
+        before = hashlib.sha256(self.database.read_bytes()).digest()
+        self.assertTrue(self.preflight().absent)
+        required = (*reader._CACHE_STAGES, *reader._SIDECAR_STAGES.values(),
+                    'reader.sqlite.main_fd', 'reader.sqlite.sidecars_fd',
+                    'reader.schema.tables', 'reader.schema.columns', 'reader.schema.index',
+                    'reader.sqlite.exact_query', 'reader.sqlite.final_fd', 'reader.final_check')
+        for stage in required:
+            self.assertIn((stage, 'pass'), events)
+        self.assertTrue(all(stage in reader.PREFLIGHT_STAGES and state in ('start', 'pass')
+                            for stage, state in events))
+        self.assertNotIn(PATH, repr(events))
+        self.assertEqual(before, hashlib.sha256(self.database.read_bytes()).digest())
+
+    def test_missing_fixed_cache_component_stops_at_exact_stage_before_sqlite(self):
+        events = []
+        self.reader = reader.NativeFileIndexReader(self.root,
+            observer=lambda stage, state: events.append((stage, state)))
+        physical = self.root / 'drives/data'
+        for count, stage in enumerate(reader._CACHE_STAGES, 1):
+            with self.subTest(stage=stage):
+                path = physical.joinpath(*reader._CACHE[:count])
+                saved = path.with_name(path.name + '-saved')
+                path.rename(saved)
+                try:
+                    events.clear()
+                    with mock.patch.object(reader.sqlite3, 'connect',
+                                           side_effect=AssertionError('must not open SQLite')) as connect:
+                        self.error('write_backend_unverified', self.preflight)
+                    connect.assert_not_called()
+                    self.assertEqual(events[-1], (stage, 'start'))
+                finally:
+                    saved.rename(path)
+
+    def test_hot_journal_and_wal_header_failures_remain_unpassed_without_sqlite_open(self):
+        events = []
+        self.reader = reader.NativeFileIndexReader(self.root,
+            observer=lambda stage, state: events.append((stage, state)))
+        journal = self.database.with_name(self.database.name + '-journal')
+        journal.write_bytes(b'not safe to recover')
+        try:
+            with mock.patch.object(reader.sqlite3, 'connect') as connect:
+                self.error('write_backend_unverified', self.preflight)
+            connect.assert_not_called()
+            self.assertEqual(events[-1], ('reader.sidecar.journal', 'start'))
+        finally:
+            journal.unlink()
+        before = self.database.read_bytes()
+        damaged = bytearray(before)
+        damaged[18:20] = b'\x02\x02'
+        self.database.write_bytes(damaged)
+        try:
+            events.clear()
+            with mock.patch.object(reader.sqlite3, 'connect') as connect:
+                self.error('write_backend_unverified', self.preflight)
+            connect.assert_not_called()
+            self.assertEqual(events[-1], ('reader.wal_header', 'start'))
+        finally:
+            self.database.write_bytes(before)
+
+    def test_raising_observer_does_not_change_real_descriptor_or_index_proof(self):
+        def broken(*unused):
+            raise RuntimeError('observer is not an authorization gate')
+        self.reader = reader.NativeFileIndexReader(self.root, observer=broken)
+        receipt = self.preflight()
+        descriptor = self.file()
+        self.insert(self.values(descriptor))
+        self.assertTrue(self.verify(receipt, descriptor))
+
     def file(self):
         path = self.admin / PATH
         path.write_bytes(b'new native-index test')

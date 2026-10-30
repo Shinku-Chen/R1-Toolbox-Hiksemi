@@ -96,6 +96,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 新原厂相册／影视库目录也可能初始化或修复内部状态，最低读写，不能标记只读或无副作用；原缓存五工具保持只读。固定七操作复用管理员已有会话、20443 叶证书 pin 和严格 emhistor 监听身份。写入须确认与本键幂等，原厂 ACK 不是异步完成；不明结果不重放。新目录验证仅显式 `/api/dev/media` 的 `probe_business`＋`confirm:true`；`file_backend_context` 仅显式统一开发诊断，目录元数据可能唤盘，不加入默认四项。详见 `docs/mcp-business-operations.md`。
 - 原厂业务工具的唯一定义来源为 native_capability_specs.py。查询也可能初始化资源；写入须确认、本键幂等和当前对象／计划版本，ACK 不代表异步完成。普通应用新装只允许静态审计 ID7/netdisk_bd、ID8/contact_backup、ID34/netdisk_bd2、ID35/66_print，角色 admin、apps、plan/install 精确工具和 application_ids 同时限制，计划绑定授权集合，每步和回执重验。禁止核心模块、更新、卸载和任意包路径／URL／脚本；原厂空名称展示回退只限审计注册 ID2／35，不用于安装／有副作用进度身份。预览必须说明原生数据权限、已有任务、后台进程及可能宿主缓存清理等实际影响。固定开发 probe/packages 不执行安装或 setter，见 docs/native-capability-completion.md。
 - 中文正文、UI 文案与文档使用全角标点；代码、路径、标识符保持原样。
+- 原厂文件写入索引排障使用显式 `POST /api/dev/files/write-preflight`，精确 `action:preflight/confirm:true/root_id`；复用生产 SATA、监听、索引 DB 和 SQLite 句柄门的固定阶段观察，不能为诊断跳过安全失败或继续依赖步骤。仅有效开发白名单与绝对窗口授权，拒绝 Bearer、路径、SQL 和原厂 action，不进入默认诊断、MCP 或轮询。服务端仅生成 admin 根下未发布的随机目标，不通知、暂存或发布文件；SQLite 元数据副作用和唤盘须如实说明。该预检不证明子目录、恢复区或真实写入验收，见 `docs/file-mutations.md`。
 
 ## 提交规范
 

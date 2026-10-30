@@ -32,6 +32,7 @@ from vendor_media_snapshot import record_media_snapshot
 from vendor_app_probe import collect_application_probe
 from vendor_app_diagnostics import record_application_snapshot
 from vendor_storage_probe import collect_storage_probe
+from api_file_provider import collect_file_write_preflight
 from integration_api import IntegrationApi
 from service_settings import ServiceSettingsStore
 from network_access import peer_matches
@@ -78,7 +79,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
-    '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
+    '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/dev/files/write-preflight', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
     '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate',
     '/api/services/screen', '/api/services/mcp', '/api/services/developer', '/api/r1/business/refresh',
     '/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke',
@@ -928,6 +929,8 @@ class WebConfigServer:
             return self._native_debug_post(body, ip)
         if route == '/api/dev/storage/probe':
             return self._storage_probe_post(body, ip)
+        if route == '/api/dev/files/write-preflight':
+            return self._file_write_preflight_post(body, headers, ip)
         if route == '/api/dev/business':
             return self._business_debug_post(body, headers, ip)
         if route == '/api/dev/storage':
@@ -1022,6 +1025,34 @@ class WebConfigServer:
             return status, payload, None
         finally:
             self.operation_lock.release()
+
+    def _file_write_preflight_post(self, body, headers, ip):
+        """Explicit native-index observation, never a file mutation or proxy.
+
+        SQLite may touch existing sidecar metadata. This opt-in route stays
+        outside the passive diagnostic catalog and machine authorization.
+        """
+        if headers.get('Authorization') is not None or not self._dev_authorized(ip):
+            return 403, {'ok': False, 'error': '写入预检未启用、已过期或来源未获开发白名单授权'}, None
+        if (type(body) is not dict or set(body) != {'action', 'confirm', 'root_id'}
+                or body.get('action') != 'preflight' or body.get('confirm') is not True
+                or type(body.get('root_id')) is not str
+                or re.fullmatch(r'root_[0-9a-f]{24}', body['root_id'], re.ASCII) is None):
+            return 400, {'ok': False, 'error': '仅接受明确确认的固定根写入预检，不接受文件路径或原厂操作参数'}, None
+        if not self.storage_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有存储检测正在进行'}, None
+        try:
+            if not self._dev_authorized(ip):
+                return 403, {'ok': False, 'error': '开发窗口已失效，未开始写入预检'}, None
+            value = collect_file_write_preflight(self.panel, body['root_id'],
+                authorizer=lambda: self._dev_authorized(ip))
+            if not self._dev_authorized(ip):
+                return 403, {'ok': False, 'error': '开发窗口已失效，未返回写入预检结果'}, None
+            return 200, {'ok': True, 'preflight': value}, None
+        except Exception:
+            return 503, {'ok': False, 'error': '固定写入预检暂不可确认'}, None
+        finally:
+            self.storage_diagnostic_lock.release()
 
     def _native_debug_post(self, body, ip):
         """Explicit fixed native reads; never a package install or action proxy."""
@@ -1971,7 +2002,7 @@ class WebConfigServer:
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (parsed.query or parsed.fragment):
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/dev/files/write-preflight', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:
