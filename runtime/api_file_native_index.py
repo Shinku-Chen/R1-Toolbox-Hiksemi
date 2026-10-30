@@ -14,7 +14,7 @@ import stat
 import struct
 import time
 
-from api_file_operations import FileAccessError, _read_fixed
+from api_file_operations import FileAccessError, _read_fixed, _read_sysfs_partition_dev
 from api_file_provider import audited_owner_write_rule, _runtime_binary_matches
 from api_file_roots import is_admin_root_path, physical_mount_path
 from vendor_business_transport import _identity as _service_identity
@@ -149,7 +149,7 @@ def _internal_sata(root, row, *, observer=None):
     try:
         partition = match[1] + match[2]
         _observe(observer, 'index.sata.sysfs_device', 'start')
-        number = _read_fixed(root, 'sys/block/' + match[1] + '/' + partition + '/dev', 64).strip()
+        number = _read_sysfs_partition_dev(root, match[1], partition).strip()
         _observe(observer, 'index.sata.sysfs_device', 'pass')
         _observe(observer, 'index.sata.block_node', 'start')
         block = os.stat(base / 'dev' / partition, follow_symlinks=False)

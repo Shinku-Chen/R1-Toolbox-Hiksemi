@@ -1,6 +1,6 @@
 # 文件变更与恢复
 
-更新于 2026-10-30。文件执行器已提供新文件上传、已有文件覆盖、单目录创建、普通文件复制、改名、同盘移动和移入原厂回收站。代码、隔离测试和 NAS 实机验收分别记录；注册工具不代表当前磁盘已通过门槛。原 v2 SSD 根曾受 Users 下十四个 overlay 子挂载阻断；7fcd12b 实机已确认 v3 admin 根保留这些子挂载并通过真实句柄检查，原测试文件的信息、HEAD 与 1 KiB Range 读取通过。此前恢复区因可写祖先及 Users 权限拒绝；a4d5bc6 的 admin 信任锚策略已在 SSD 上完成所有者初始化，登记修订为 1。首次独立目录创建返回失败；后续新名称的上传准备明确返回 `write_backend_unverified`，尚未完成文件写入或应用安装验收。详见本文末的实机记录；此前只读范围见[实机记录](file-users-boundary.md#2026-10-307fcd12b-实机只读核对)。
+更新于 2026-10-31。文件执行器已提供新文件上传、已有文件覆盖、单目录创建、普通文件复制、改名、同盘移动和移入原厂回收站。代码、隔离测试和 NAS 实机验收分别记录；注册工具不代表当前磁盘已通过门槛。原 v2 SSD 根曾受 Users 下十四个 overlay 子挂载阻断；7fcd12b 实机已确认 v3 admin 根保留这些子挂载并通过真实句柄检查，原测试文件的信息、HEAD 与 1 KiB Range 读取通过。此前恢复区因可写祖先及 Users 权限拒绝；a4d5bc6 的 admin 信任锚策略已在 SSD 上完成所有者初始化，登记修订为 1。首次独立目录创建返回失败；后续新名称的上传准备明确返回 `write_backend_unverified`，b3d2039 的固定预检已定位到读取 sysfs 分区设备号。当前只修正已证明的读取器缺陷，尚未完成 NAS 文件写入或应用安装验收。详见本文末的实机记录；此前只读范围见[实机记录](file-users-boundary.md#2026-10-307fcd12b-实机只读核对)。
 
 ## 授权与范围
 
@@ -78,3 +78,11 @@ Linux 不提供按 inode 比较后原子改名的系统调用；`stat` 后直接
 - 所有者 `inspect` 返回 `recoveries:[]`；另一次临时 Token 的真实 `get_file_info` 对原测试目录返回 `not_found`。这两项共同保留现场，未调用恢复或停止登记。
 - 对不同随机文件名只发起一次 `prepare_file_upload`，其 MCP 固定错误为 `write_backend_unverified`；未执行 PUT 或 commit。它说明共用写入预检仍未通过，不能直接归因为 admin ACL、SATA 或数据库中的某一门。
 - 两个实际创建的临时 Token 均撤销成功并用原 Bearer 复核 HTTP 401；测试未请求或修改原来的 `FWA229P.bin`。恢复区继续登记启用。文件上传、覆盖、目录创建、复制、改名、移动、真实原厂回收和恢复仍待实机通过，不以隔离测试或此预检替代。
+
+### 2026-10-30：b3d2039 固定写入预检
+
+实机已核对运行精确 `b3d2039eab539fa702ae32d439a2fc8d81c832af`。恢复登记仍为 `registered/enabled:true/revision:1/trust_boundary:admin`，未重新初始化。只发起一次明确确认的固定 `write-preflight`，HTTP 200；内部 `ready:false/error_code:write_backend_unverified/failure_stage:index.sata.sysfs_device`。原厂固定所有者、路径、挂载表、唯一规范挂载和设备来源格式已通过，后续块设备节点、传输类型、套接字及索引 DB 依赖步骤均未运行。本轮未创建 Token、上传暂存、测试目录或用户文件，未发送原厂索引通知。
+
+代码检查确认此处曾用普通 `_read_fixed(...,64)` 读取 `sys/block/<磁盘>/<分区>/dev`，既拒绝声明 `st_size>64`，又要求非零声明长度等于实际内容长度。Linux 的 sysfs 文本属性按 `PAGE_SIZE` 声明容量，实际由属性的 `show()` 返回内容长度，二者不能等同；见 [Linux sysfs 实现](https://github.com/torvalds/linux/blob/v4.14/fs/sysfs/file.c)。这证明读取器存在独立缺陷，并与实机失败阶段吻合；本次诊断未输出 NAS 的实际 `st_size` 或 errno，不能把推断写成实测，也不能据此宣称其他后续门都已通过。
+
+修复仅新增严格构造的 `sys/block/sdX/sdXN/dev` 专用读取器，以实际 EOF 为准，上限 64 字节，持续处理短读，并保留 no-follow、普通属性类型、打开前后设备／inode／模式／声明大小／mtime／ctime 稳定性。普通 `_read_fixed` 原有长度检查保持不变；读取成功后仍必须与挂载设备号、真实块设备 `rdev` 和内置 ATA 传输路径相符。定向回归包含声明 4096 字节而实际只有短文本、超限、短读、身份变化及 Linux 真实 sysfs 属性；修复后须部署并重新跑固定预检，通过后才继续新随机目录的写入验收，不重放旧操作。

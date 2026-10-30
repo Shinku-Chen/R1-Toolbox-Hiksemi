@@ -77,7 +77,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 
 ## 代码约定
 
-- MCP 缓存历史、健康事件和流量仅读已有内存；健康必须同锁取得告警及评估，缺测、过期或不完整不得报正常，不输出动态 SMART／传感器身份。固定项目 stats 只使用已登记项目及 `inspect`，每次连接后复核授权和容器生命周期；CPU 无合法实际两帧差分则 `null`，网络／块 I/O 不重复聚合。proc 元数据必须有界读至 EOF，不能把一次短读当完整 mountinfo。见 `docs/mcp-monitoring-tools.md` 与 `docs/docker-projects.md`。
+- MCP 缓存历史、健康事件和流量仅读已有内存；健康必须同锁取得告警及评估，缺测、过期或不完整不得报正常，不输出动态 SMART／传感器身份。固定项目 stats 只使用已登记项目及 `inspect`，每次连接后复核授权和容器生命周期；CPU 无合法实际两帧差分则 `null`，网络／块 I/O 不重复聚合。proc 元数据必须有界读至 EOF，不能把一次短读当完整 mountinfo。固定 sysfs 分区 `dev` 文本属性的 `st_size` 是声明容量，不能作为实际长度；只用严格构造的 `sys/block/sdX/sdXN/dev` 专用读取器，实际 EOF 上限 64 字节并核对打开前后身份，普通文件长度门保持不变。见 `docs/mcp-monitoring-tools.md`、`docs/docker-projects.md` 与 `docs/file-mutations.md`。
 
 - 镜像 RAM 缓存严格拒绝清单之外的文件和目录；所有执行或导入缓存运行时的 Python 入口必须带 `-B`，包括启动脚本在 `exec --resident` 前的导入，避免字节码缓存污染导致重启失败。
 - 小屏是触摸优先：最小点击目标 56px、正文 22px、导航 18px、单列布局、底部六标签导航；不引入 hover 依赖、PC 双栏或需要精确指针的交互。风扇/灯光策略、登录口令等复杂设置只放在网页。

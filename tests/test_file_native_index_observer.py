@@ -130,6 +130,9 @@ class FixedObserverTests(unittest.TestCase):
         node = SimpleNamespace(st_mode=stat.S_IFBLK | 0o600,
                                st_rdev=(8, 1) if node_dev is None else node_dev)
         with mock.patch.object(index, '_read_fixed', side_effect=read), \
+                mock.patch.object(index, '_read_sysfs_partition_dev',
+                    side_effect=lambda root, disk, partition: read(
+                        root, 'sys/block/' + disk + '/' + partition + '/dev')), \
                 mock.patch.object(index.os, 'stat', return_value=node), \
                 mock.patch.object(index.os, 'major', side_effect=lambda value: value[0], create=True), \
                 mock.patch.object(index.os, 'minor', side_effect=lambda value: value[1], create=True), \

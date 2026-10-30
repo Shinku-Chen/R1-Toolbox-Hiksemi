@@ -112,6 +112,40 @@ def _read_fixed(root, relative, maximum=_MAX_METADATA):
         os.close(descriptor)
 
 
+def _read_sysfs_partition_dev(root, disk, partition):
+    """Read only one fixed sdX partition's dev attribute through bounded EOF.
+
+    sysfs text attributes advertise PAGE_SIZE, not their returned byte length.
+    Keep ordinary metadata's strict declared-size reader separate: this fixed
+    attribute alone uses an actual 64-byte cap and stable opened-object state.
+    """
+    if (type(disk) is not str or re.fullmatch(r'sd[a-z]+', disk) is None
+            or type(partition) is not str
+            or re.fullmatch(re.escape(disk) + r'[1-9][0-9]*', partition) is None):
+        raise ValueError('invalid_metadata')
+    path = Path(root).absolute() / 'sys/block' / disk / partition / 'dev'
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                         | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('invalid_metadata')
+        raw = bytearray()
+        while len(raw) <= 64:
+            block = os.read(descriptor, 65 - len(raw))
+            if not block:
+                break
+            raw.extend(block)
+        after = os.fstat(descriptor)
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_mode,
+                                  value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if len(raw) > 64 or identity(before) != identity(after):
+            raise ValueError('metadata_changed')
+        return raw.decode('utf-8', 'strict')
+    finally:
+        os.close(descriptor)
+
+
 def _owner_identity(root='/'):
     """Read two fixed noncredential DB fields; never inspect a session/token row."""
     try:
