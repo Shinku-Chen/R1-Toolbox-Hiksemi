@@ -57,3 +57,11 @@ sudo "$(command -v python)" -B -m unittest discover -s tests -p test_admin_root_
 四项分别覆盖同设备 bind 子挂载、overlay 子挂载，以及 Users、admin 本体的 bind 覆盖。子挂载在保留旧 mountinfo 与刷新 mountinfo 两个阶段检查真实 FD mount ID；CI 必须实际执行全部四项且零跳过。夹具反序正常卸载并确认无残留挂载后才删除临时目录，失败保留现场。
 
 回归须覆盖精确 admin 边界、旧 ID 失效、根下存在子挂载而普通兄弟路径可用、实际同设备 bind／overlay 跨入拒绝、链接／挂载变化、短读完整性和脱敏。隔离测试不代表 NAS 字节、索引或恢复验收已经完成。
+
+### 2026-10-30：7fcd12b 实机只读核对
+
+SSD 的 `/drives/BSJQZGLBMYA/Users/admin` 已进入 v3 目录，真实目录句柄验证通过；原有 14 个 overlay 子挂载仍作为拓扑证据保留，不再整体排除该根。原厂固定 Users `get_info`、admin `get_info/get_list` 成功，物理分区、Users 和 admin 的句柄同属 mount ID 539、设备号 `8:49`。
+
+仅对所有者指定的 `临时共享/FWA229P.bin` 创建临时只读授权，文件信息返回 72,690,236 字节，下载准备及 HEAD 返回成功。独立 Range 请求返回 `206`、`bytes 0-1023/72690236`，实际接收 1024 字节；这只证明该段字节读取，不是整文件校验或持续稳定性验收。过程中出现过一次 `native_unavailable` 和一次 Range `503`；固定协议检查中另一个根的一项查询为 `identity_unverified`，SSD 三项查询成功。小范围复核通过，原失败记录保留，不据此断言这些错误具有相同根因或瞬态原因已定位。
+
+本轮三枚临时 Token 均已撤销，并以原 Token 请求复核 `401`；Token 原文、原厂会话和文件字节未写入验收日志。没有变更原文件或初始化恢复区。SSD 恢复预检仍为 `ready:false`：`/drives` 的 UID 1046／0775 和 Users 的 0777 未通过可信祖先规则，故没有开始写入验收。

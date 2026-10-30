@@ -16,6 +16,14 @@ spec.loader.exec_module(diagnostics)
 
 
 class RequestTests(unittest.TestCase):
+    def test_file_backend_catalog_describes_admin_handles_and_metadata_effects(self):
+        description = next(row['description'] for row in diagnostics.catalog()['checks']
+                           if row['id'] == 'file_backend_context')
+        self.assertIn('Users/admin 句柄元数据', description)
+        self.assertIn('显式', description)
+        self.assertIn('不读取目录内容', description)
+        self.assertIn('可能唤盘', description)
+
     def test_catalog_is_fixed_read_only_and_independent(self):
         value = diagnostics.catalog()
         self.assertEqual(diagnostics.CHECKS, ('device', 'storage', 'business', 'fan'))

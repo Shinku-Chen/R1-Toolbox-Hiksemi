@@ -66,6 +66,21 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         return self._patch(self.server.integration, 'file_root_catalog',
             return_value=copy.deepcopy(ROOT_CATALOG if value is None else value))
 
+    def test_file_catalog_descriptions_expose_only_the_admin_v3_boundary(self):
+        self.root_catalog()
+        status, _, management = self.browser()
+        self.assertEqual(status, 200)
+        catalogs = (management['scope_catalog'], self.server.api_access.snapshot()['scope_catalog'])
+        for catalog in catalogs:
+            description = next(row['description'] for row in catalog if row['id'] == 'files')
+            with self.subTest(description=description):
+                for required in ('/drives/*/Users/admin', '相对路径以 admin 为起点',
+                                 '根下存在子挂载仍可选', '实际跨入拒绝', '列表跳过入口'):
+                    self.assertIn(required, description)
+                self.assertNotIn('public', description)
+                self.assertNotIn('公共目录', description)
+        self.assert_no_actions()
+
     def test_capabilities_require_bearer_not_cookie_or_developer_whitelist(self):
         self.server.api_access.configure({'enabled': True})
         for headers in ({}, {'Cookie': self.cookie},

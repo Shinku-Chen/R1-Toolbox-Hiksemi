@@ -160,7 +160,8 @@ class IntegrationApi:
         result = copy.deepcopy(list(SCOPE_CATALOG))
         for item in result:
             if item['id'] == 'files':
-                description = ('在逐次原厂权限核验的 Users/admin 与 public 范围浏览和下载；'
+                description = ('在逐次原厂权限核验的 /drives/*/Users/admin 范围浏览和下载，相对路径以 admin 为起点；'
+                    '根下存在子挂载仍可选，实际跨入拒绝且列表跳过入口。'
                     '已核验 admin 后代支持上传、独立覆盖、目录创建、复制、可恢复改名／移动和原厂回收站，'
                     '仍须精确工具、源／目标授权、恢复区及原厂索引等实际门槛。')
                 item.update(implemented=True, description=description)

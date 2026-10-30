@@ -37,7 +37,7 @@ SCOPE_CATALOG = (
     {'id': 'media', 'label': '媒体查询', 'implemented': True, 'min_role': 'readwrite',
      'description': '显式查询原厂媒体进度，可能写原厂完成状态，需要读写或管理员角色。'},
     {'id': 'files', 'label': '文件管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '浏览并下载已核验的管理员／公共目录；读写工具可在管理员后代上传、独立覆盖、创建目录、复制、可恢复改名／移动和移入原厂回收站，仍须实际后端门槛。'},
+     'description': '仅在已核验的 /drives/*/Users/admin 范围浏览和下载，相对路径以 admin 为起点；根下存在子挂载仍可选，实际跨入拒绝且列表跳过入口。读写工具可在 admin 后代上传、独立覆盖、创建目录、复制、可恢复改名／移动和移入原厂回收站，仍须实际后端门槛。'},
     {'id': 'docker', 'label': 'Docker 管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取并控制已登记项目；管理员可使用所有者预先登记的独立资源部署、更新和移除容器。'},
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
