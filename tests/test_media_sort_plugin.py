@@ -239,25 +239,37 @@ class MediaSortPortableTransactionTests(unittest.TestCase):
         self.assertEqual(plugin.rules.owned_artifacts(con), 'disabled')
         self.assertEqual(self.value.snapshot()['candidates'], [])
 
-    def test_known_legacy_requires_explicit_upgrade_and_can_be_reverted(self):
+    def install_original_rule(self):
         con = sqlite3.connect(self.database)
-        con.execute(plugin.rules.LEGACY_TABLE_SQL)
-        con.execute('INSERT INTO metadata_path_guard SELECT id,lid,type,path FROM metadata')
-        con.execute(plugin.rules.LEGACY_TRIGGER_SQL)
+        con.execute(plugin.rules.CREATE_GUARD_SQL)
+        con.execute(plugin.rules.SEED_SQL)
+        con.execute(plugin.rules.INSERT_TRIGGER_SQL)
         con.commit()
         con.close()
+
+    def test_existing_original_rule_is_enabled_idempotent_and_revertible(self):
+        self.install_original_rule()
         row = self.candidate()
-        self.assertEqual(row['state'], 'legacy')
+        self.assertEqual(row['state'], 'enabled')
+        self.assertEqual(row['rule_version'], 1)
+        self.assertFalse(row['can_apply'])
         self.assertTrue(row['can_revert'])
+        before = sqlite3.connect(self.database)
+        try:
+            guard = before.execute(
+                'SELECT path FROM metadata_path_guard').fetchone()[0]
+        finally:
+            before.close()
         after = self.apply(row)['candidates'][0]
         self.assertEqual(after['state'], 'enabled')
-        self.assertEqual(after['rule_version'], 2)
+        self.assertIsNone(after['last_backup_path'])
+        with closing(sqlite3.connect(self.database)) as con, con:
+            self.assertEqual(con.execute(
+                'SELECT path FROM metadata_path_guard').fetchone()[0], guard)
 
-    def test_exact_legacy_can_be_removed_without_restoring_old_media(self):
+    def test_existing_original_rule_can_be_removed_without_restoring_media(self):
+        self.install_original_rule()
         con = sqlite3.connect(self.database)
-        con.execute(plugin.rules.LEGACY_TABLE_SQL)
-        con.execute('INSERT INTO metadata_path_guard SELECT id,lid,type,path FROM metadata')
-        con.execute(plugin.rules.LEGACY_TRIGGER_SQL)
         con.execute("INSERT INTO metadata(id,lid,type,path,timestamp) VALUES(2,1,2,'[]',2)")
         con.commit()
         con.close()

@@ -30,13 +30,13 @@ _ELF_SIZE = 7913848
 _TIMEOUT = 12.0
 _MESSAGES = {
     'invalid_arguments': '插件参数无效。',
-    'confirmation_required': '应用、升级或撤销需要所有者明确确认。',
+    'confirmation_required': '应用或撤销需要所有者明确确认。',
     'authorization_expired': '所有者授权已失效，结果未交付。',
     'busy': '影视排序插件正在处理另一项操作。',
     'stale_candidate': '数据库候选或版本已经变化，请重新检测。',
     'unavailable': '原厂进程、数据库身份、权限或结构暂不可确认。',
     'timeout': '影视排序操作超过固定时间窗口。',
-    'conflict': '检测到未知规则、旧版本冲突或不明确的影视聚合记录。',
+    'conflict': '检测到未知规则或旧版本冲突。',
     'backup_failed': '私有一致性备份未完成，未应用规则。',
     'operation_failed': '影视排序操作结果未确认，请重新检测实际状态。',
 }
@@ -447,7 +447,7 @@ class MediaSortPlugin:
     def _describe(self, opened, con):
         schema = _schema(con)
         state = rules.owned_artifacts(con)
-        allowed = set(rules.TRIGGER_NAMES) | {rules.LEGACY_TRIGGER}
+        allowed = set(rules.TRIGGER_NAMES)
         if any(row[0] == 'trigger' and row[2] == 'metadata' and row[1] not in allowed
                for row in schema):
             state = 'conflict'
@@ -458,11 +458,11 @@ class MediaSortPlugin:
         return {'id': id_, 'version': version,
                 'database_path': '/' + opened.source.relative, 'state': state,
                 'reason': _MESSAGES['conflict'] if state == 'conflict' else '',
-                'can_apply': state in ('disabled', 'legacy'),
-                'can_revert': state in ('enabled', 'legacy'),
+                'can_apply': state == 'disabled',
+                'can_revert': state == 'enabled',
                 'last_backup_path': self._backups.get(opened.main_identity[:2]),
                 'metadata_count': con.execute('SELECT count(*) FROM metadata').fetchone()[0],
-                'rule_version': 2 if state == 'enabled' else 1 if state == 'legacy' else None}
+                'rule_version': rules.RULE_VERSION if state == 'enabled' else None}
 
     def _publish(self, rows, sources, guard):
         guard()
@@ -472,7 +472,7 @@ class MediaSortPlugin:
             self._sources = sources
             self._cache = {**self._empty(), 'status': 'ready' if ready else 'unavailable',
                            'busy': True, 'checked_at': time.time(), 'candidates': rows,
-                           'message': '请选择数据库并明确应用、升级或撤销。' if ready
+                           'message': '请选择数据库并明确应用或撤销。' if ready
                            else '未找到身份和结构均可确认的原厂影视数据库。'}
         return self.snapshot()
 
@@ -619,7 +619,7 @@ class MediaSortPlugin:
                         if revert:
                             rules.remove(con)
                         else:
-                            rules.install(con, upgrade_legacy=row['state'] == 'legacy')
+                            rules.install(con)
                     guard()
                     opened.current()
                     after = self._describe(opened, con)

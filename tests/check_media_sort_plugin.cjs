@@ -44,8 +44,8 @@ assert.equal(build.status, 0, '临时面板构建失败：' + (build.stderr || b
   const check = (name, condition) => { assert.ok(condition, name); checks.push(name); };
   const item = (id, state = 'disabled') => ({ id, version: 'fixture_version_' + id,
     database_path: '/fixture/media/' + id + '/scraper.db', state, reason: null,
-    can_apply: ['disabled', 'legacy'].includes(state), can_revert: ['enabled', 'legacy'].includes(state),
-    last_backup_path: null, metadata_count: 384, rule_version: state === 'legacy' ? 1 : null });
+    can_apply: state === 'disabled', can_revert: state === 'enabled',
+    last_backup_path: null, metadata_count: 384, rule_version: state === 'enabled' ? 1 : null });
   let failRead = false, failWrite = false, timeoutWrite = false, loseReply = false, unconfirmed = false, holdWrite = null, releaseWrite;
   try {
     const fixture = await ready, origin = fixture.origin;
@@ -80,22 +80,22 @@ assert.equal(build.status, 0, '临时面板构建失败：' + (build.stderr || b
     check('打开页面只GET缓存且不自动检测', calls.length === 1 && calls[0].method === 'GET' && (await command('stats')).calls.length === 0);
     check('没有手工路径SQL输入或默认可写操作', await card.locator('input,textarea').count() === 0 && await apply.isDisabled() && await revert.isDisabled());
 
-    const unsafe = item('db_b', 'legacy');
+    const unsafe = item('db_b', 'disabled');
     unsafe.database_path = '/fixture/' + 'long-folder-'.repeat(36) + '<img src=x onerror="window.mediaInjected=3">/scraper.db';
-    unsafe.reason = '旧规则说明 <svg onload="window.mediaInjected=4">';
+    unsafe.reason = '未启用说明 <svg onload="window.mediaInjected=4">';
     await command('configure', { candidates: [item('db_a'), unsafe] });
-    await probe.click(); await select.locator('option').filter({ hasText: '旧规则' }).waitFor({ state: 'attached' });
+    await probe.click(); await select.locator('option[value="db_b"]').waitFor({ state: 'attached' });
     check('检测提交严格空对象且真实fixture仅显式probe', JSON.stringify(writes('probe')[0].body) === '{}' && (await command('stats')).calls[0].action === 'probe');
     check('多库不默认选择第一项', await select.inputValue() === '' && await apply.isDisabled() && (await card.innerText()).includes('多个数据库'));
     check('检测显示时间与当前操作分离', !(await card.locator('[data-ref="checked"]').innerText()).includes('未检测') && (await card.locator('[data-ref="activity"]').innerText()).includes('当前无进行'));
     await select.selectOption('db_b');
     check('路径和原因按文本转义', (await card.locator('[data-ref="path"]').innerText()).includes('<img') && (await card.locator('[data-ref="reason"]').innerText()).includes('<svg') && await card.locator('img,svg[onload]').count() === 0 && !await page.evaluate(() => window.mediaInjected));
-    check('旧规则显示确认升级而非已启用', (await apply.innerText()).includes('升级') && (await card.locator('[data-ref="state"]').innerText()).includes('旧规则'));
+    check('未启用显示应用而非升级', (await apply.innerText()).includes('应用') && !(await apply.innerText()).includes('升级') && (await card.locator('[data-ref="state"]').innerText()).includes('未启用'));
     await apply.click();
     let dialog = page.getByRole('dialog').filter({ has: page.locator('#r1AskT') });
-    check('升级确认说明先备份和改变规则并转义路径', (await dialog.innerText()).includes('先创建 Toolbox 备份') && (await dialog.innerText()).includes('资料刷新不置前') && await dialog.locator('img').count() === 0);
+    check('应用确认说明先备份和原始规则并转义路径', (await dialog.innerText()).includes('先创建 Toolbox 备份') && (await dialog.innerText()).includes('沿用原始 INSERT 触发器') && await dialog.locator('img').count() === 0);
     await dialog.locator('[data-no]').click();
-    check('取消升级没有apply请求', writes('apply').length === 0 && !(await apply.isDisabled()));
+    check('取消应用没有apply请求', writes('apply').length === 0 && !(await apply.isDisabled()));
 
     holdWrite = new Promise(resolve => { releaseWrite = resolve; });
     await apply.click(); await page.locator('[data-yes]').click();
@@ -103,8 +103,8 @@ assert.equal(build.status, 0, '临时面板构建失败：' + (build.stderr || b
     check('在途操作禁用双击和改库', await apply.isDisabled() && await probe.isDisabled() && await select.isDisabled());
     releaseWrite(); holdWrite = null;
     await card.locator('[data-ref="state"]').filter({ hasText: '已启用' }).waitFor();
-    check('升级仅一次并精确绑定选中ID版本确认', writes('apply').length === 1 && JSON.stringify(writes('apply')[0].body) === JSON.stringify({ candidate_id: 'db_b', version: unsafe.version, confirmed: true }));
-    check('实际enabled回执才显示启用且展示备份规则', (await card.locator('[data-ref="backup"]').innerText()).includes('scraper.sqlite.backup') && await card.locator('[data-ref="rule"]').innerText() === '2' && !(await revert.isDisabled()));
+    check('应用仅一次并精确绑定选中ID版本确认', writes('apply').length === 1 && JSON.stringify(writes('apply')[0].body) === JSON.stringify({ candidate_id: 'db_b', version: unsafe.version, confirmed: true }));
+    check('实际enabled回执才显示启用且展示备份规则', (await card.locator('[data-ref="backup"]').innerText()).includes('scraper.sqlite.backup') && await card.locator('[data-ref="rule"]').innerText() === '1' && !(await revert.isDisabled()));
     const savedBackup = await card.locator('[data-ref="backup"]').innerText();
     check('写入使用JSON同源头而无Bearer', writes('apply')[0].headers['x-fnm-request'] === '1' && !writes('apply')[0].headers.authorization);
     await revert.click();
@@ -155,19 +155,19 @@ assert.equal(build.status, 0, '临时面板构建失败：' + (build.stderr || b
     await select.selectOption('db_unavailable');
     check('不可用候选不可写', await apply.isDisabled() && await revert.isDisabled());
 
-    const legacy = { ...item('db_legacy', 'legacy'), last_backup_path: '/fixture/legacy-backup/scraper.sqlite3' };
-    await command('configure', { candidates: [legacy] }); await probe.click(); await select.selectOption('db_legacy');
-    check('仅已识别且后端明确允许的旧规则可撤销', !(await revert.isDisabled()) && (await card.locator('[data-ref="state"]').innerText()).includes('旧规则'));
-    const beforeLegacyRevert = writes('revert').length, beforeLegacyApply = writes('apply').length;
+    const enabled = { ...item('db_enabled', 'enabled'), last_backup_path: '/fixture/enabled-backup/scraper.sqlite3' };
+    await command('configure', { candidates: [enabled] }); await probe.click(); await select.selectOption('db_enabled');
+    check('已有原规则直接已启用且不能重复安装', !(await revert.isDisabled()) && await apply.isDisabled() && (await card.locator('[data-ref="state"]').innerText()).includes('已启用') && await card.locator('[data-ref="rule"]').innerText() === '1');
+    const beforeEnabledRevert = writes('revert').length, beforeEnabledApply = writes('apply').length;
     await revert.click();
-    check('旧规则撤销确认说明仅移除已识别增强并保留时间', (await page.locator('.fullmask').filter({ has: page.locator('#r1AskT') }).innerText()).includes('只移除已识别的旧版增强规则') && (await page.locator('.fullmask').filter({ has: page.locator('#r1AskT') }).innerText()).includes('已调整的时间保留'));
+    check('撤销确认说明只移除规则并保留时间', (await page.locator('.fullmask').filter({ has: page.locator('#r1AskT') }).innerText()).includes('只移除已识别的追更排序规则') && (await page.locator('.fullmask').filter({ has: page.locator('#r1AskT') }).innerText()).includes('已调整的时间保留'));
     await page.locator('[data-no]').click();
-    check('旧规则取消撤销不发送请求', writes('revert').length === beforeLegacyRevert);
+    check('取消撤销不发送请求', writes('revert').length === beforeEnabledRevert);
     await revert.click(); await page.locator('[data-yes]').click();
     await card.locator('[data-ref="state"]').filter({ hasText: '未启用' }).waitFor();
-    check('确认撤销旧规则精确绑定且不升级并保留备份', writes('revert').length === beforeLegacyRevert + 1
-      && JSON.stringify(writes('revert').at(-1).body) === JSON.stringify({ candidate_id: legacy.id, version: legacy.version, confirmed: true })
-      && writes('apply').length === beforeLegacyApply && await card.locator('[data-ref="backup"]').innerText() === legacy.last_backup_path);
+    check('确认撤销精确绑定并保留备份', writes('revert').length === beforeEnabledRevert + 1
+      && JSON.stringify(writes('revert').at(-1).body) === JSON.stringify({ candidate_id: enabled.id, version: enabled.version, confirmed: true })
+      && writes('apply').length === beforeEnabledApply && await card.locator('[data-ref="backup"]').innerText() === enabled.last_backup_path);
 
     await command('configure', { candidates: [unsafe, item('db_a')] }); await probe.click(); await select.selectOption('db_b');
     await page.setViewportSize({ width: 320, height: 900 });

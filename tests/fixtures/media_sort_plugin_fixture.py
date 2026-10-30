@@ -63,7 +63,7 @@ class Plugin:
             self.sequence += 1
             row.update(state='enabled' if action == 'apply' else 'disabled',
                        can_apply=action != 'apply', can_revert=action == 'apply',
-                       rule_version=2 if action == 'apply' else None,
+                       rule_version=1 if action == 'apply' else None,
                        version='revision_' + str(self.sequence), reason=None)
             if action == 'apply':
                 row['last_backup_path'] = str(fixture / ('backup-' + 'long-' * 30) / 'scraper.sqlite.backup')

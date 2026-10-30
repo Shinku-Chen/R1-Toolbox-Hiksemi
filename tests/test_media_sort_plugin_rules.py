@@ -1,4 +1,9 @@
-"""Exercise fixed sort rules using only fresh, synthetic in-memory databases."""
+"""Contract tests for the user's original INSERT-only media sort rule.
+
+All databases are synthetic and in-memory.  The rule intentionally has no TV
+type filter, no UPDATE trigger, no de-duplication and no cross-type baseline:
+it compares the raw JSON path array length for (id, lid, type).
+"""
 
 import importlib.util
 import json
@@ -16,7 +21,7 @@ SPEC.loader.exec_module(rules)
 
 class MediaSortRulesTests(unittest.TestCase):
     def setUp(self):
-        self.con = sqlite3.connect(":memory:")
+        self.con = sqlite3.connect(":memory:", isolation_level=None)
         self.addCleanup(self.con.close)
         self.con.execute("""CREATE TABLE metadata (
             id INTEGER, lid INTEGER, type INTEGER, path TEXT,
@@ -24,7 +29,7 @@ class MediaSortRulesTests(unittest.TestCase):
             PRIMARY KEY(id,lid,type))""")
 
     def write(self, paths, ty=2, ident=7, lid=10, timestamp=100):
-        value = json.dumps(paths) if isinstance(paths, list) else paths
+        value = json.dumps(paths, separators=(',', ':')) if isinstance(paths, list) else paths
         self.con.execute("INSERT OR REPLACE INTO metadata VALUES(?,?,?,?,?,?)",
                          (ident, lid, ty, value, timestamp, "synthetic"))
 
@@ -33,381 +38,262 @@ class MediaSortRulesTests(unittest.TestCase):
             "SELECT timestamp FROM metadata WHERE id=? AND lid=? AND type=?",
             (ident, lid, ty)).fetchone()[0]
 
-    def baseline(self, ident=7, lid=10):
+    def guard(self, ty=2, ident=7, lid=10):
         row = self.con.execute(
-            "SELECT paths FROM " + rules.GUARD_TABLE + " WHERE id=? AND lid=?",
-            (ident, lid)).fetchone()
-        return set(json.loads(row[0])) if row else None
+            "SELECT path FROM " + rules.GUARD_TABLE + " WHERE id=? AND lid=? AND type=?",
+            (ident, lid, ty)).fetchone()
+        return row[0] if row else None
 
-    def begin(self):
-        if not self.con.in_transaction:
-            self.con.execute("BEGIN")
-
-    def install(self, **kwargs):
-        self.begin()
-        result = rules.install(self.con, **kwargs)
-        self.con.commit()
+    def install(self):
+        self.con.execute("BEGIN")
+        result = rules.install(self.con)
+        self.con.execute("COMMIT")
         return result
 
     def remove(self):
-        self.begin()
+        self.con.execute("BEGIN")
         result = rules.remove(self.con)
-        self.con.commit()
+        self.con.execute("COMMIT")
         return result
 
-    def legacy(self):
-        self.con.execute(rules.LEGACY_TABLE_SQL)
-        self.con.execute("INSERT INTO metadata_path_guard "
-                         "SELECT id,lid,type,path FROM metadata")
-        self.con.execute(rules.LEGACY_TRIGGER_SQL)
-        self.con.commit()
-
-    def test_new_install_repeat_and_remove_preserve_metadata(self):
+    def test_exact_original_sql_and_repeat_apply_do_not_reseed(self):
         self.write(["p0"])
-        self.assertEqual(rules.owned_artifacts(self.con), "disabled")
+        self.assertEqual(rules.RULE_VERSION, 1)
+        self.assertIn("AFTER INSERT ON metadata", rules.INSERT_TRIGGER_SQL)
+        self.assertNotIn("AFTER UPDATE", rules.INSERT_TRIGGER_SQL)
+        self.assertIn("INSERT OR REPLACE INTO metadata_path_guard", rules.SEED_SQL)
         self.assertTrue(self.install())
         self.assertEqual(rules.owned_artifacts(self.con), "enabled")
+        installed = dict(self.con.execute(
+            "SELECT name, sql FROM sqlite_master WHERE name IN (?, ?)",
+            (rules.GUARD_TABLE, rules.TRIGGER_NAMES[0])).fetchall())
+        self.assertEqual(rules._normalized_sql(installed[rules.GUARD_TABLE]),
+                         rules._normalized_sql(rules.CREATE_GUARD_SQL))
+        self.assertEqual(rules._normalized_sql(installed[rules.TRIGGER_NAMES[0]]),
+                         rules._normalized_sql(rules.INSERT_TRIGGER_SQL))
+        self.assertEqual(self.guard(), '["p0"]')
+        self.con.execute("UPDATE metadata_path_guard SET path='[\"sentinel\"]'")
         self.assertFalse(self.install())
+        self.assertEqual(self.guard(), '["sentinel"]')
+        self.assertEqual(self.timestamp(), 100)
+
+    def test_insert_or_replace_longer_path_updates_microsecond_timestamp_and_guard(self):
+        self.write(["p0"])
+        self.install()
         self.write(["p0", "p1"])
         stamp = self.timestamp()
         self.assertGreater(stamp, 100)
+        self.assertGreater(stamp, 1_000_000_000_000_000)
+        self.assertEqual(self.guard(), '["p0","p1"]')
+
+    def test_same_length_reorder_and_shorter_paths_do_not_bump(self):
+        self.write(["p0", "p1"])
+        self.install()
+        for paths in (["p1", "p0"], ["p0", "p1"], ["p0"]):
+            with self.subTest(paths=paths):
+                self.write(paths)
+                self.assertEqual(self.timestamp(), 100)
+        # The original rule copies the latest array into the guard even when
+        # the length did not grow.
+        self.assertEqual(self.guard(), '["p0"]')
+
+    def test_duplicate_entry_that_grows_raw_array_still_bumps(self):
+        self.write(["p0"])
+        self.install()
+        self.write(["p0", "p0"])
+        self.assertGreater(self.timestamp(), 100)
+        self.assertEqual(self.guard(), '["p0","p0"]')
+
+    def test_valid_non_array_json_keeps_original_sqlite_behavior(self):
+        self.write(["p0"])
+        self.install()
+        self.write('{"path":"synthetic"}')
+        self.assertEqual(self.timestamp(), 100)
+        self.assertEqual(self.guard(), '{"path":"synthetic"}')
+        self.write(["p0"])
+        self.assertGreater(self.timestamp(), 100)
+
+    def test_user_supplied_script_is_recognized_without_reinstalling(self):
+        # This fixture is the user's original SQL, independent of module SQL.
+        self.write(["p0"])
+        self.con.executescript('''
+CREATE TABLE IF NOT EXISTS metadata_path_guard (
+  id INTEGER, lid INTEGER, type INTEGER, path TEXT,
+  PRIMARY KEY (id, lid, type)
+);
+INSERT OR REPLACE INTO metadata_path_guard (id, lid, type, path)
+  SELECT id, lid, type, path FROM metadata;
+CREATE TRIGGER IF NOT EXISTS metadata_guard_insert
+AFTER INSERT ON metadata
+FOR EACH ROW
+BEGIN
+  UPDATE metadata
+     SET timestamp = CAST((julianday('now') - 2440587.5) * 86400000000 AS INTEGER)
+   WHERE id = NEW.id AND lid = NEW.lid AND type = NEW.type
+     AND EXISTS (
+       SELECT 1 FROM metadata_path_guard g
+        WHERE g.id = NEW.id AND g.lid = NEW.lid AND g.type = NEW.type
+          AND json_array_length(NEW.path) > json_array_length(g.path)
+     );
+  INSERT OR REPLACE INTO metadata_path_guard (id, lid, type, path)
+    VALUES (NEW.id, NEW.lid, NEW.type, NEW.path);
+END;
+''')
+        self.assertEqual(rules.owned_artifacts(self.con), 'enabled')
+        original = self.con.execute(
+            "SELECT sql FROM sqlite_master WHERE name='metadata_guard_insert'").fetchone()[0]
+        self.assertEqual(rules._normalized_sql(original),
+                         rules._normalized_sql(rules.INSERT_TRIGGER_SQL))
+        self.con.execute("UPDATE metadata_path_guard SET path='[\"sentinel\"]'")
+        self.assertFalse(self.install())
+        self.assertEqual(self.guard(), '["sentinel"]')
+        self.assertEqual(self.con.execute(
+            "SELECT sql FROM sqlite_master WHERE name='metadata_guard_insert'").fetchone()[0],
+                         original)
+
+    def test_update_path_does_not_trigger_and_does_not_change_guard(self):
+        self.write(["p0"])
+        self.install()
+        self.con.execute("UPDATE metadata SET path='[\"p0\",\"p1\"]'")
+        self.assertEqual(self.timestamp(), 100)
+        self.assertEqual(self.guard(), '["p0"]')
+
+    def test_first_insert_without_old_baseline_keeps_factory_timestamp(self):
+        self.install()
+        self.write(["p0"])
+        self.assertEqual(self.timestamp(), 100)
+        self.assertEqual(self.guard(), '["p0"]')
+        self.write(["p0", "p1"])
+        self.assertGreater(self.timestamp(), 100)
+        self.assertEqual(self.guard(), '["p0","p1"]')
+
+    def test_type_is_part_of_the_key_and_not_a_tv_filter(self):
+        for ty in (0, 1, 2, 3, 4, 5):
+            self.write(["p0"], ty=ty, ident=ty)
+        self.install()
+        for ty in (0, 1, 2, 3, 4, 5):
+            with self.subTest(ty=ty):
+                self.write(["p0", "p1"], ty=ty, ident=ty)
+                self.assertGreater(self.timestamp(ty=ty, ident=ty), 100)
+                self.assertEqual(self.guard(ty=ty, ident=ty), '["p0","p1"]')
+        # Same id/lid but another type has an independent baseline.
+        self.write(["p0"], ty=4, ident=77)
+        self.write(["p0"], ty=2, ident=77)
+        self.write(["p0", "p1"], ty=2, ident=77)
+        self.assertGreater(self.timestamp(ty=2, ident=77), 100)
+        self.assertEqual(self.timestamp(ty=4, ident=77), 100)
+        self.assertEqual(self.guard(ty=4, ident=77), '["p0"]')
+
+    def test_remove_preserves_metadata_and_adjusted_timestamp(self):
+        self.write(["p0"])
+        self.install()
+        self.write(["p0", "p1"])
+        stamp = self.timestamp()
         self.assertTrue(self.remove())
         self.assertEqual(rules.owned_artifacts(self.con), "disabled")
         self.assertEqual(self.timestamp(), stamp)
+        self.assertEqual(self.con.execute("SELECT count(*) FROM metadata").fetchone()[0], 1)
         self.assertFalse(self.remove())
 
-    def test_requires_caller_transaction_and_does_not_commit(self):
+    def test_caller_transaction_is_required_and_rollback_restores_state(self):
         with self.assertRaisesRegex(RuntimeError, "caller-owned transaction"):
             rules.install(self.con)
         self.con.execute("BEGIN")
         rules.install(self.con)
-        self.assertTrue(self.con.in_transaction)
-        self.con.rollback()
+        self.con.execute("ROLLBACK")
         self.assertEqual(rules.owned_artifacts(self.con), "disabled")
-        with self.assertRaisesRegex(RuntimeError, "caller-owned transaction"):
-            rules.remove(self.con)
-
-    def test_remove_can_be_rolled_back(self):
         self.install()
         self.con.execute("BEGIN")
         rules.remove(self.con)
-        self.assertTrue(self.con.in_transaction)
-        self.con.rollback()
+        self.con.execute("ROLLBACK")
         self.assertEqual(rules.owned_artifacts(self.con), "enabled")
+        with self.assertRaisesRegex(RuntimeError, "caller-owned transaction"):
+            rules.remove(self.con)
 
-    def test_same_array_reordering_duplicates_and_metadata_do_not_bump(self):
-        self.write(["p0", "p1"])
-        self.install()
-        for paths in (["p0", "p1"], ["p1", "p0"], ["p0", "p0", "p1"]):
-            with self.subTest(paths=paths):
-                self.write(paths)
-                self.assertEqual(self.timestamp(), 100)
-        self.con.execute("UPDATE metadata SET name='changed synthetic'")
-        self.assertEqual(self.timestamp(), 100)
-        self.assertEqual(self.baseline(), {"p0", "p1"})
-
-    def test_distinct_growth_and_equal_length_new_path_bump(self):
-        for new in (["p0", "p1"], ["p1"]):
-            with self.subTest(new=new):
-                self.con.execute("DELETE FROM metadata")
-                if rules.owned_artifacts(self.con) == "enabled":
-                    self.remove()
-                self.write(["p0"])
-                self.install()
-                self.write(new)
-                self.assertGreater(self.timestamp(), 100)
-                self.assertEqual(self.baseline(), {"p0", "p1"})
-
-    def test_new_group_without_baseline_keeps_factory_timestamp(self):
-        self.install()
+    def test_unknown_same_name_partial_and_v2_artifacts_conflict_without_mutation(self):
         self.write(["p0"])
-        self.assertEqual(self.timestamp(), 100)
-        self.assertEqual(self.baseline(), {"p0"})
-        self.write(["p0", "p1"])
-        self.assertGreater(self.timestamp(), 100)
+        cases = (
+            "CREATE TABLE metadata_path_guard(unrelated TEXT)",
+            "CREATE TRIGGER metadata_guard_insert AFTER INSERT ON metadata BEGIN SELECT 1; END",
+            "CREATE TABLE r1_toolbox_media_sort_baseline_v2(id INTEGER)",
+            "CREATE TRIGGER r1_toolbox_media_sort_insert_v2 AFTER INSERT ON metadata BEGIN SELECT 1; END",
+            "CREATE TRIGGER unknown_hook AFTER INSERT ON metadata BEGIN SELECT 1; END",
+        )
+        for statement in cases:
+            with self.subTest(statement=statement):
+                con = sqlite3.connect(":memory:", isolation_level=None)
+                con.execute("""CREATE TABLE metadata (
+                    id INTEGER, lid INTEGER, type INTEGER, path TEXT, timestamp INTEGER,
+                    PRIMARY KEY(id,lid,type))""")
+                con.execute(statement)
+                self.assertEqual(rules.owned_artifacts(con), "conflict")
+                before = list(con.execute("SELECT name,sql FROM sqlite_master ORDER BY name"))
+                con.execute("BEGIN")
+                for operation in (rules.install, rules.remove):
+                    with self.assertRaises(rules.RuleConflictError):
+                        operation(con)
+                con.execute("ROLLBACK")
+                self.assertEqual(before, list(con.execute(
+                    "SELECT name,sql FROM sqlite_master ORDER BY name")))
+                con.close()
 
-    def test_empty_array_is_valid_baseline(self):
-        self.write([])
-        self.install()
-        self.assertEqual(self.baseline(), set())
-        self.write(["p0"])
-        self.assertGreater(self.timestamp(), 100)
-
-    def test_non_tv_types_are_untouched(self):
-        for ty in (0, 1, 3, 5):
-            self.write(["p0"], ty=ty, ident=ty)
-        self.install()
-        for ty in (0, 1, 3, 5):
-            self.write(["p0", "p1"], ty=ty, ident=ty)
-            self.assertEqual(self.timestamp(ty=ty, ident=ty), 100)
-            self.assertIsNone(self.baseline(ident=ty))
-
-    def test_update_bumps_once_without_timestamp_recursion(self):
-        self.write(["p0"])
-        self.install()
-        self.con.execute("PRAGMA recursive_triggers=ON")
-        self.con.execute("UPDATE metadata SET path='[\"p0\",\"p1\"]'")
-        self.assertGreater(self.timestamp(), 100)
-        self.assertEqual(self.baseline(), {"p0", "p1"})
-        # A later factory reparse with unchanged paths must not become a bump.
-        self.write(["p0", "p1"])
-        self.assertEqual(self.timestamp(), 100)
-
-    def test_delete_type2_insert_type4_keeps_baseline_and_bumps(self):
-        self.write(["p0"])
-        self.install()
-        self.con.execute("DELETE FROM metadata WHERE type=2")
-        self.write(["p0", "p1"], ty=4)
-        self.assertGreater(self.timestamp(ty=4), 100)
-        self.assertEqual(self.baseline(), {"p0", "p1"})
-        self.assertEqual(self.con.execute(
-            "SELECT count(*) FROM " + rules.GUARD_TABLE).fetchone()[0], 1)
-
-    def test_direct_type_update_keeps_stable_group(self):
-        self.write(["p0"])
-        self.install()
-        self.con.execute("UPDATE metadata SET type=4,path='[\"p0\",\"p1\"]'")
-        self.assertGreater(self.timestamp(ty=4), 100)
-        self.assertEqual(self.baseline(), {"p0", "p1"})
-
-    def test_complete_union_survives_subset_and_outer_replace_policy(self):
-        self.write(["p0", "p1"])
-        self.install()
-        self.write(["p0"])
-        self.assertEqual(self.timestamp(), 100)
-        self.assertEqual(self.baseline(), {"p0", "p1"})
-        self.write(["p1"])
-        self.assertEqual(self.timestamp(), 100)
-        self.write(["p2"])
-        self.assertGreater(self.timestamp(), 100)
-        self.assertEqual(self.baseline(), {"p0", "p1", "p2"})
-
-    def test_library_groups_do_not_share_baseline(self):
-        self.write(["p0"], lid=10)
-        self.write(["q0"], lid=20)
-        self.install()
-        self.write(["p0", "p1"], lid=10)
-        self.assertGreater(self.timestamp(lid=10), 100)
-        self.assertEqual(self.timestamp(lid=20), 100)
-        self.assertEqual(self.baseline(lid=20), {"q0"})
-
-    def test_invalid_json_and_non_string_arrays_never_block_insert_or_update(self):
-        self.write(["p0"])
-        self.install()
-        invalid = (None, "not JSON", "{", "{}", '"p1"', "1", "null",
-                   "[1]", '["p0",null]', "[[]]", '[{"x":1}]', b'[]')
-        for value in invalid:
-            with self.subTest(value=value):
-                self.write(value)
-                self.assertEqual(self.timestamp(), 100)
-                self.con.execute("UPDATE metadata SET path=?", (value,))
-                self.assertEqual(self.timestamp(), 100)
-                self.assertEqual(self.baseline(), {"p0"})
-        self.write(["p0", "p1"])
-        self.assertGreater(self.timestamp(), 100)
-
-    def test_invalid_existing_source_does_not_break_install_or_first_valid_write(self):
-        self.write("not JSON")
-        self.install()
-        self.assertIsNone(self.baseline())
-        self.write(["p0"])
-        self.assertEqual(self.timestamp(), 100)
-        self.assertEqual(self.baseline(), {"p0"})
-
-    def test_malformed_baseline_does_not_block_vendor_write(self):
-        self.write(["p0"])
-        self.install()
-        for value in ("invalid JSON", "{}", '["p0",1]'):
-            self.con.execute("UPDATE " + rules.GUARD_TABLE + " SET paths=?", (value,))
-            self.write(["p0", "p1"])
-            self.assertEqual(self.timestamp(), 100)
-            self.assertEqual(self.con.execute(
-                "SELECT paths FROM " + rules.GUARD_TABLE).fetchone()[0], value)
-
-    def test_existing_two_tv_types_are_conflict_and_install_is_nonmutating(self):
-        self.write(["p0"], ty=2)
-        self.write(["q0"], ty=4)
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.install(self.con)
-        self.assertFalse(self.con.execute(
-            "SELECT 1 FROM sqlite_master WHERE name=?", (rules.GUARD_TABLE,)).fetchone())
-
-    def test_runtime_two_tv_types_are_not_guessed_but_owned_remove_is_allowed(self):
-        self.write(["p0"], ty=2)
-        self.install()
-        self.write(["q0"], ty=4)
-        self.assertEqual(self.timestamp(ty=4), 100)
-        self.assertEqual(self.baseline(), {"p0"})
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.assertTrue(self.remove())
-        self.assertEqual(self.con.execute("SELECT count(*) FROM metadata").fetchone()[0], 2)
-
-    def test_null_identity_is_conflict_and_runtime_does_not_abort(self):
-        self.install()
-        self.write(["p0"], ident=None)
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.assertEqual(self.con.execute(
-            "SELECT timestamp FROM metadata WHERE id IS NULL").fetchone()[0], 100)
-
-    def test_exact_legacy_detection_explicit_upgrade_and_preserved_union(self):
-        self.write(["p0"])
-        self.legacy()
-        self.assertEqual(rules.owned_artifacts(self.con), "legacy")
-        self.begin()
-        with self.assertRaisesRegex(rules.RuleConflictError, "confirmed upgrade"):
-            rules.install(self.con)
-        self.assertEqual(rules.owned_artifacts(self.con), "legacy")
-        # Deleted legacy type2 records retain paths useful to the stable group.
-        self.con.execute("DELETE FROM metadata WHERE type=2")
-        self.write(["p1"], ty=4)
-        self.assertTrue(self.install(upgrade_legacy=True))
-        self.assertEqual(rules.owned_artifacts(self.con), "enabled")
-        self.assertEqual(self.baseline(), {"p0", "p1"})
-        self.assertEqual(self.timestamp(ty=4), 100)
-        self.write(["p0", "p1"], ty=4)
-        self.assertEqual(self.timestamp(ty=4), 100)
-        self.write(["p2"], ty=4)
-        self.assertGreater(self.timestamp(ty=4), 100)
-        self.assertFalse(self.con.execute(
-            "SELECT 1 FROM sqlite_master WHERE name IN (?,?)",
-            (rules.LEGACY_GUARD_TABLE, rules.LEGACY_TRIGGER)).fetchone())
-
-    def test_legacy_remove_preserves_timestamp(self):
-        self.write(["p0"])
-        self.legacy()
-        self.assertTrue(self.remove())
-        self.assertEqual(self.timestamp(), 100)
-        self.assertEqual(rules.owned_artifacts(self.con), "disabled")
-
-    def test_legacy_upgrade_and_ddl_are_owned_by_caller_transaction(self):
-        self.write(["p0"])
-        self.legacy()
-        before = list(self.con.execute(
-            "SELECT name,sql FROM sqlite_master ORDER BY name"))
-        self.con.execute("BEGIN")
-        rules.install(self.con, upgrade_legacy=True)
-        self.assertTrue(self.con.in_transaction)
-        self.assertEqual(rules.owned_artifacts(self.con), "enabled")
-        self.con.rollback()
-        self.assertEqual(rules.owned_artifacts(self.con), "legacy")
-        self.assertEqual(before, list(self.con.execute(
-            "SELECT name,sql FROM sqlite_master ORDER BY name")))
-        self.assertEqual(self.timestamp(), 100)
-
-    def test_legacy_invalid_json_is_skipped_during_explicit_upgrade(self):
-        self.write("invalid JSON")
-        self.legacy()
-        self.install(upgrade_legacy=True)
-        self.assertEqual(rules.owned_artifacts(self.con), "enabled")
-        self.assertIsNone(self.baseline())
-        self.write(["p0"])
-        self.assertEqual(self.timestamp(), 100)
-
-    def test_unknown_same_name_trigger_and_table_are_never_adopted_or_removed(self):
-        self.write(["p0"])
-        self.con.execute(rules.LEGACY_TABLE_SQL)
-        self.con.execute("CREATE TRIGGER metadata_guard_insert AFTER INSERT ON metadata "
-                         "BEGIN SELECT 1; END")
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        before = list(self.con.execute("SELECT name,sql FROM sqlite_master ORDER BY name"))
-        self.begin()
-        for operation in (rules.install, rules.remove):
-            with self.assertRaises(rules.RuleConflictError):
-                operation(self.con)
-        self.assertEqual(before, list(self.con.execute(
-            "SELECT name,sql FROM sqlite_master ORDER BY name")))
-
-    def test_unknown_compatible_table_alone_is_not_seeded(self):
-        self.write(["p0"])
-        self.con.execute(rules.LEGACY_TABLE_SQL)
-        self.con.execute("INSERT INTO metadata_path_guard VALUES(7,10,2,'foreign')")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.install(self.con)
-        self.assertEqual(self.con.execute(
-            "SELECT path FROM metadata_path_guard").fetchone()[0], "foreign")
-
-    def test_modified_v2_sql_partial_artifacts_and_extra_table_objects_conflict(self):
+    def test_partial_owned_objects_and_extra_table_objects_conflict(self):
         self.install()
         self.con.execute("DROP TRIGGER " + rules.TRIGGER_NAMES[0])
         self.assertEqual(rules.owned_artifacts(self.con), "conflict")
         self.con.execute("CREATE TRIGGER " + rules.TRIGGER_NAMES[0]
                          + " AFTER INSERT ON metadata BEGIN SELECT 1; END")
         self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.remove(self.con)
-
-    def test_extra_index_on_owned_table_prevents_destructive_remove(self):
-        self.install()
-        self.con.execute("CREATE INDEX unrelated_index ON " + rules.GUARD_TABLE + "(lid)")
+        self.con.execute("CREATE INDEX unrelated_index ON metadata_path_guard(type)")
         self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.remove(self.con)
         self.assertTrue(self.con.execute(
             "SELECT 1 FROM sqlite_master WHERE name='unrelated_index'").fetchone())
 
-    def test_extra_trigger_on_owned_table_prevents_destructive_remove(self):
+    def test_other_index_on_exact_guard_is_preserved_and_blocks_removal(self):
         self.install()
-        self.con.execute("CREATE TRIGGER unrelated_trigger AFTER INSERT ON "
-                         + rules.GUARD_TABLE + " BEGIN SELECT 1; END")
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
+        self.con.execute('CREATE INDEX unrelated_index ON metadata_path_guard(type)')
+        before = list(self.con.execute('SELECT name,sql FROM sqlite_master ORDER BY name'))
+        self.assertEqual(rules.owned_artifacts(self.con), 'conflict')
+        self.con.execute('BEGIN')
         with self.assertRaises(rules.RuleConflictError):
             rules.remove(self.con)
-        self.assertTrue(self.con.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='unrelated_trigger'").fetchone())
+        self.con.execute('ROLLBACK')
+        self.assertEqual(before, list(self.con.execute(
+            'SELECT name,sql FROM sqlite_master ORDER BY name')))
 
-    def test_mixed_versions_and_case_variant_names_are_conflict(self):
-        self.install()
-        self.con.execute(rules.LEGACY_TABLE_SQL)
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.remove(self.con)
-        self.con.execute("DROP TABLE metadata_path_guard")
-        self.assertTrue(self.remove())
-        self.con.execute("CREATE TABLE METADATA_PATH_GUARD(unrelated TEXT)")
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.install(self.con)
-
-    def test_enable_and_disable_do_not_issue_transaction_boundaries(self):
-        self.write(["p0"])
-        self.con.commit()
-        statements = []
-        self.con.set_trace_callback(statements.append)
-        self.con.execute("BEGIN")
-        statements.clear()
-        rules.install(self.con)
-        rules.remove(self.con)
-        self.assertFalse(any(statement.strip().upper().startswith(
-            ("BEGIN", "COMMIT", "END", "ROLLBACK")) for statement in statements))
-        self.assertTrue(self.con.in_transaction)
-
-    def test_temp_shadow_and_wrong_table_schema_conflict(self):
+    def test_temp_metadata_conflicts_and_row_factory_works(self):
         self.con.execute("CREATE TEMP TABLE metadata(id INTEGER)")
         self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        self.begin()
-        with self.assertRaises(rules.RuleConflictError):
-            rules.install(self.con)
         self.con.execute("DROP TABLE temp.metadata")
-        self.con.execute("CREATE TABLE " + rules.GUARD_TABLE + "(unrelated TEXT)")
-        self.assertEqual(rules.owned_artifacts(self.con), "conflict")
-        with self.assertRaises(rules.RuleConflictError):
-            rules.remove(self.con)
-
-    def test_row_factory_supported(self):
         self.con.row_factory = sqlite3.Row
         self.write(["p0"])
         self.install()
         self.assertEqual(rules.owned_artifacts(self.con), "enabled")
         self.remove()
         self.assertEqual(rules.owned_artifacts(self.con), "disabled")
+
+    def test_bad_json_is_not_silently_skipped(self):
+        # The original SQL calls json_array_length on NEW.path and the guard.
+        # A malformed array makes SQLite raise; the plugin does not add a
+        # WHEN/validity guard or claim that the vendor write cannot be blocked.
+        self.write(["p0"])
+        self.install()
+        with self.assertRaises(sqlite3.OperationalError):
+            self.write("not JSON")
+        self.assertEqual(self.timestamp(), 100)
+        self.assertEqual(self.guard(), '["p0"]')
+        self.con.execute("UPDATE metadata_path_guard SET path='not JSON'")
+        with self.assertRaises(sqlite3.OperationalError):
+            self.write(["p0", "p1"])
+        self.assertEqual(self.timestamp(), 100)
+        self.assertEqual(self.guard(), "not JSON")
+
+    def test_seed_copies_all_types_and_raw_paths_without_dedup(self):
+        self.write(["p0", "p0"], ty=0, ident=1)
+        self.write(["p1"], ty=4, ident=4)
+        self.install()
+        self.assertEqual(self.guard(ty=0, ident=1), '["p0","p0"]')
+        self.assertEqual(self.guard(ty=4, ident=4), '["p1"]')
 
 
 if __name__ == "__main__":

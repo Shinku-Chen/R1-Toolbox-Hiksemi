@@ -5911,7 +5911,7 @@ card._r = collect(card); card._r.open.onclick = r1OpenServiceManager;
 }
 function r1MediaSortSettings(card) {
 card.innerHTML = `<div class="r1-media-sort">
-<p class="sub">可选插件 · v2 仅在已识别电视剧新增路径时调整追更排序，资料刷新不置前。电视端“最近添加”的实际效果仍需验证。</p>
+<p class="sub">可选插件 · 沿用原始 INSERT 触发器，同一媒体 ID、媒体库 ID 和类型的路径数组数量增加时更新时间。电视端“最近添加”的实际效果仍需验证。</p>
 <p class="sub">仅网页所有者可操作。点击检测才自动查找影视数据库，可能唤醒磁盘；不需要填写路径，不会开机重装规则。</p>
 <div class="r1-api-actions"><button class="btn primary" type="button" data-ref="probe">检测数据库</button><button class="btn" type="button" data-ref="refresh">读取缓存</button></div>
 <p data-ref="summary" role="status">未检测。</p><p class="sub" data-ref="checked">上次检测：未检测。</p>
@@ -5920,11 +5920,11 @@ card.innerHTML = `<div class="r1-media-sort">
 <p class="sub" data-ref="selection"></p>
 <dl class="r1-api-meta"><dt>数据库位置</dt><dd data-ref="path">未选择。</dd><dt>上次检测状态</dt><dd data-ref="state">未知。</dd><dt>媒体记录数</dt><dd data-ref="count">--</dd><dt>规则版本</dt><dd data-ref="rule">--</dd><dt>Toolbox 备份位置</dt><dd data-ref="backup">尚无备份记录。</dd></dl>
 <p class="sub" data-ref="reason"></p>
-<div class="r1-api-actions"><button class="btn primary" type="button" data-ref="apply" disabled>应用追更排序</button><button class="btn" type="button" data-ref="revert" disabled>撤销增强</button></div>
-<p class="sub">应用或升级前先备份，再改变排序规则。撤销只停止增强，已调整的时间保留；不会用旧备份覆盖新增媒体。</p>
+<div class="r1-api-actions"><button class="btn primary" type="button" data-ref="apply" disabled>应用追更排序</button><button class="btn" type="button" data-ref="revert" disabled>撤销追更排序</button></div>
+<p class="sub">应用或撤销前先备份，再改变排序规则。撤销只移除规则，已调整的时间保留；不会用旧备份覆盖新增媒体。</p>
 </div>`;
 const x = collect(card), endpoint = '/api/plugins/media-sort';
-const labels = { disabled: '未启用', enabled: '已启用', legacy: '旧规则，需确认升级', conflict: '规则冲突，禁止写入', unavailable: '不可用' };
+const labels = { disabled: '未启用', enabled: '已启用', conflict: '规则冲突，禁止写入', unavailable: '不可用' };
 let snapshot = null, selected = null, pending = '', error = '', uncertain = false;
 const failure = value => /[\u3400-\u9fff]/u.test(String(value && value.message || '')) ? String(value.message) : '连接中断、请求超时或返回结果异常。';
 const candidates = () => snapshot && Array.isArray(snapshot.candidates) ? snapshot.candidates : [];
@@ -5933,7 +5933,7 @@ const bindingCurrent = (binding, action) => {
 const row = candidate();
 return row && row.id === binding.id && row.version === binding.version && snapshot.status === 'ready'
 && snapshot.busy === false && !uncertain && row[action === 'apply' ? 'can_apply' : 'can_revert'] === true
-&& (action === 'apply' ? ['disabled', 'legacy'].includes(row.state) : ['enabled', 'legacy'].includes(row.state));
+&& (action === 'apply' ? row.state === 'disabled' : row.state === 'enabled');
 };
 const accept = result => {
 const value = result && result.plugin;
@@ -5970,7 +5970,7 @@ setText(x.count, row && Number.isInteger(row.metadata_count) && row.metadata_cou
 setText(x.rule, row && row.rule_version != null ? String(row.rule_version) : '--');
 setText(x.backup, row && row.last_backup_path || '尚无备份记录。');
 setText(x.reason, row && row.reason || '');
-x.apply.textContent = row && row.state === 'legacy' ? '确认升级追更排序' : '应用追更排序';
+x.apply.textContent = '应用追更排序';
 x.probe.disabled = locked; x.refresh.disabled = locked;
 x.apply.disabled = locked || !row || !bindingCurrent(row, 'apply');
 x.revert.disabled = locked || !row || !bindingCurrent(row, 'revert');
@@ -5993,10 +5993,10 @@ if (!row || !bindingCurrent(row, action)) return;
 const binding = { id: row.id, version: row.version };
 pending = 'confirm'; draw();
 try {
-const applying = action === 'apply', upgrade = row.state === 'legacy';
-const title = applying ? upgrade ? '确认升级影视追更排序？' : '应用影视追更排序？' : upgrade ? '撤销已识别的旧版影视排序增强？' : '撤销影视追更排序增强？';
-const note = applying ? '先创建 Toolbox 备份，再改变所选数据库的排序规则。仅已识别电视剧新增路径置前，资料刷新不置前；电视端实际效果仍需验证。'
-: (upgrade ? '只移除已识别的旧版增强规则。' : '') + '只停止增强，已调整的时间保留；不会使用旧备份覆盖新增媒体。';
+const applying = action === 'apply';
+const title = applying ? '应用影视追更排序？' : '撤销影视追更排序？';
+const note = applying ? '先创建 Toolbox 备份，再改变所选数据库的排序规则。沿用原始 INSERT 触发器，同一媒体 ID、媒体库 ID 和类型的路径数组数量增加时更新时间。电视端实际效果仍需验证。'
+: '只移除已识别的追更排序规则，已调整的时间保留；不会使用旧备份覆盖新增媒体。';
 if (!(await R1.ask(title, `数据库：<span class="r1-media-sort-path">${esc(row.database_path || '位置未知')}</span>。${note}可能唤醒磁盘。`, !applying))) return;
 if (!bindingCurrent(binding, action)) throw new Error('数据库选择或检测版本已变化，请重新检测。');
 pending = action; error = ''; draw();
