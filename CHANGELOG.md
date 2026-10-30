@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- ci: 取消三处 Python 环境准备中的可选 pip 缓存，避免缓存服务出站限额阻断检查与镜像发布；保留固定开发依赖安装、全部 Linux 验证和镜像交付步骤。
+
 - fix(files): 区分原厂 Unix 套接字的监听条目与继承同路径的已连接条目，保留唯一监听 inode、实际原厂进程归属及连接前后身份核验；补充混排和 Linux 真实连接回归。记录 0fa458b 的 SATA 预检已通过、现场转而阻断于 `index.listener.unix_table`，不把解析缺陷修复等同于实机写入验收。
 
 - fix(files): 修正内置 SATA 预检读取 sysfs 分区设备号的长度语义，仅对固定 `sys/block/sdX/sdXN/dev` 采用实际有界 EOF 读取；保留普通元数据的声明长度检查及设备、真实句柄、挂载和原厂索引门。记录 b3d2039 实机定位到 `index.sata.sysfs_device`，不把代码缺陷修复当作 NAS 写入验收通过。
