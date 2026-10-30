@@ -14,7 +14,7 @@ import threading
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
-from native_capability_specs import TOOL_SPECS
+from native_capability_specs import APPLICATION_INSTALL_SPECS, TOOL_SPECS
 from vendor_business_transport import BusinessTransportError, VendorBusinessClient, _validate
 from vendor_media_auth import OWNER_ID
 from vendor_media_operations import IdempotencyStore, _albums, _label, _number
@@ -57,7 +57,25 @@ PENDING = MappingProxyType({
     'account_mutation': 'per_object_privilege_and_credential_change_contract_required',
 })
 _INSTALL_TOOLS = frozenset(('plan_native_application_install', 'install_native_application'))
-_INSTALL_ALLOWLIST = MappingProxyType({34: ('netdisk_bd2', 0, 0, 'extension')})
+_INSTALL_ALLOWLIST = APPLICATION_INSTALL_SPECS
+# Empty presentation labels for these two IDs are observed in the matched
+# firmware. These audited registration names are display-only, never package
+# identity or permission to progress/install a previously quarantined object.
+_EMPTY_APPLICATION_DISPLAY_NAMES = MappingProxyType({2: 'ipc', 35: '66_print'})
+
+
+def _installation_resources(principal):
+    """Missing old resources preserve only ID34; explicit empty grants nothing.
+
+    Owner Key storage supplies current grants. This second check keeps adapters
+    and every continuation from treating a broader software allowlist as access.
+    """
+    values = principal.get('application_ids', [34]) if type(principal) is dict else None
+    if (type(values) is not list or len(values) > len(APPLICATION_INSTALL_SPECS)
+            or any(type(value) is not int or value not in APPLICATION_INSTALL_SPECS for value in values)
+            or len(set(values)) != len(values)):
+        raise BusinessTransportError('authorization_denied')
+    return sorted(values)
 
 
 def _json_copy(value):
@@ -140,6 +158,20 @@ def _native_code(operation, frame):
     return code
 
 
+def _application_display_name(row):
+    """Fixed registration-name fallback for exactly observed empty labels.
+
+    Missing, null, control-bearing or unknown labels remain invalid. Caller
+    supplied alternative fields never become a trusted native identity.
+    """
+    if type(row) is not dict:
+        return None
+    name = _label(row.get('module_name'), 63)
+    if name is None and row.get('module_name') == '' and type(row.get('apply_id')) is int:
+        return _EMPTY_APPLICATION_DISPLAY_NAMES.get(row['apply_id'])
+    return name
+
+
 def _applications(frame):
     """Isolate bad records while rejecting every ambiguous native identity.
 
@@ -157,7 +189,7 @@ def _applications(frame):
     items, rejected = [], {}
     for row in rows:
         identifier = _number(row.get('apply_id')) if type(row) is dict else None
-        name = _label(row.get('module_name'), 63) if type(row) is dict else None
+        name = _application_display_name(row)
         reason = ('unsupported_application_entry' if type(row) is not dict else
                   'invalid_application_id' if identifier is None or not 1 <= identifier <= 2 ** 31 - 1 else
                   'duplicate_application_id' if identities[identifier] != 1 else
@@ -167,9 +199,12 @@ def _applications(frame):
             continue
         raw_status = row.get('status')
         status = raw_status if type(raw_status) is int and -(2 ** 31) <= raw_status < 2 ** 31 else None
-        items.append({'application_id': identifier, 'name': name,
-                      'version': _label(row.get('version'), 63),
-                      'installation_status_code': status, 'running': None})
+        item = {'application_id': identifier, 'name': name,
+                'version': _label(row.get('version'), 63),
+                'installation_status_code': status, 'running': None}
+        if row.get('module_name') == '':
+            item['name_source'] = 'audited_module_registration'
+        items.append(item)
     if rows and not items:
         raise BusinessTransportError('invalid_json')
     return {'items': items, 'returned_count': len(items), 'complete': False,
@@ -201,7 +236,9 @@ def _installation_candidate(identifier, frames):
     selection; no URL/manifest/signature is invented or accepted from callers.
     Private native paths participate only in the opaque version, not requests.
     """
-    expected_name, source, kind, native_type = _INSTALL_ALLOWLIST[identifier]
+    spec = _INSTALL_ALLOWLIST[identifier]
+    expected_name, source, kind, native_type = (spec[key] for key in
+        ('module_name', 'source', 'module_type', 'native_type'))
     apps, modules = frames['apply_list'], frames['module_inventory']
     accepted_apps = _applications(apps)['items']
     _native_modules(modules)
@@ -216,12 +253,12 @@ def _installation_candidate(identifier, frames):
                 and row['apply_id'] == identifier]
     available = [row for row in modules['available_list'] if type(row) is dict and type(row.get('id')) is int
                  and row['id'] == identifier]
-    if len(app_rows) != 1 or len(available) != 1:
-        return None, 'application_identity_changed'
-    app, module = app_rows[0], available[0]
     if any(type(row) is dict and (row.get('id') == identifier or row.get('module_name') == expected_name)
            for row in modules['installed_list']):
         return None, 'application_not_uninstalled'
+    if len(app_rows) != 1 or len(available) != 1:
+        return None, 'application_identity_changed'
+    app, module = app_rows[0], available[0]
     if (app.get('module_name') != expected_name or module.get('module_name') != expected_name
             or type(app.get('source')) is not int or app['source'] != source
             or type(app.get('module_type')) is not int or app['module_type'] != kind
@@ -402,7 +439,7 @@ def _catalog_projection_checks(operation, frame):
             else:
                 seen.add(identifier)
             if operation == 'apply_list':
-                if _label(row.get('module_name'), 63) is None:
+                if _application_display_name(row) is None:
                     issues.append({**location, 'field': 'module_name', 'reason': 'invalid_label'})
             else:
                 if type(row.get('user')) is not int or row['user'] != OWNER_ID:
@@ -564,14 +601,20 @@ class NativeCapabilities:
                     or any(type(principal.get(key)) is not int or not 1 <= principal[key] <= 2 ** 53 - 1
                            for key in ('grant_revision', 'credential_generation'))):
                 raise BusinessTransportError('authorization_denied')
-            _authorize(authorizer, operation, {}, {})
+            def authorize_install(native_operation, parameters, body):
+                _authorize(authorizer, native_operation, parameters, body)
+                if identifier in _INSTALL_ALLOWLIST and identifier not in _installation_resources(principal):
+                    raise BusinessTransportError('authorization_denied')
+                return True
+
+            authorize_install(operation, {}, {})
             if mutation:
                 digest = hashlib.sha256(json.dumps({'tool': tool, 'arguments': arguments},
                     sort_keys=True, separators=(',', ':')).encode('utf8')).hexdigest()
                 pending, replay = self._idempotency.begin(principal, arguments['idempotency_key'], digest)
                 if replay is not None:
                     pending = None
-                    _authorize(authorizer, operation, {}, {})
+                    authorize_install(operation, {}, {})
                     return replay
                 result['idempotent_replay'] = False
             if identifier not in _INSTALL_ALLOWLIST:
@@ -582,54 +625,50 @@ class NativeCapabilities:
                 return result
             with _operation_lock():
                 def authorize_catalog(_operation, _params, _body):
-                    _authorize(authorizer, operation, {}, {})
+                    authorize_install(operation, {}, {})
                     return True
                 frames = {}
                 for query in ('apply_list', 'module_inventory'):
                     status, frame = self.client.request(query, {}, {}, authorize_catalog)
-                    _authorize(authorizer, operation, {}, {})
+                    authorize_install(operation, {}, {})
                     if status != 200 or _native_code(query, frame) not in (None, 0):
                         raise BusinessTransportError('invalid_json')
                     frames[query] = frame
                 candidate, reason = _installation_candidate(identifier, frames)
                 if reason is not None:
-                    _authorize(authorizer, operation, {}, {})
+                    authorize_install(operation, {}, {})
                     if mutation:
                         raise BusinessTransportError(reason)
                     result.update(available=True, status='ok', data={'application_id': identifier,
                         'allowed': False, 'reason': reason, 'expected_version': None})
                     return result
-                material = {'candidate': candidate, 'owner': {key: principal.get(key) for key in
+                material = {'candidate': candidate, 'application_ids': _installation_resources(principal),
+                    'owner': {key: principal.get(key) for key in
                     ('key_id', 'grant_revision', 'credential_generation', '_service_generation')}}
                 version = 'app_install_' + hashlib.sha256(json.dumps(material, sort_keys=True,
                     ensure_ascii=True, separators=(',', ':')).encode('ascii')).hexdigest()[:32]
                 public = {'application_id': identifier, 'name': candidate['body']['module_name'],
                           'target_version': candidate['body']['version'], 'expected_version': version,
                           'allowed': True, 'operation': 'new_install_only', 'reason': None,
-                          'resource_effects': {
-                              'network_download': True, 'may_start_background_process': True,
-                              'program_storage': 'vendor_selected_netdisk_bd2_directory',
-                              'application_data': 'current_owner_Downloads_and_native_application_state',
-                              'file_tool_sandbox_applies': False,
-                              'native_application_delegation': True},
+                          'resource_effects': _json_copy(_INSTALL_ALLOWLIST[identifier]['resource_effects']),
                           'package_selection': 'factory_current_module_id',
                           'version_is_observed_not_final_attestation': True,
-                          'effect_summary': '原厂安装器可能联网下载百度网盘v2模块，写入独立程序目录和当前管理员应用状态，并启动后台进程；后续原生网盘任务可使用管理员Downloads。该应用不因Toolbox文件授权而成为文件沙箱。'}
-                _authorize(authorizer, operation, {}, {})
+                          'effect_summary': _INSTALL_ALLOWLIST[identifier]['effect_summary']}
+                authorize_install(operation, {}, {})
                 if not mutation:
                     result.update(available=True, status='ok', data=public)
                     return result
                 if arguments['expected_version'] != version:
                     raise BusinessTransportError('installation_plan_changed')
                 params, body = _validate('application_install', {}, candidate['body'])
-                _authorize(authorizer, operation, params, body)
+                authorize_install(operation, params, body)
                 attempted = True
-                status, frame = self.client.request(operation, params, body, authorizer, confirmed=True)
+                status, frame = self.client.request(operation, params, body, authorize_install, confirmed=True)
                 responded = True
                 code = _native_code(operation, frame)
                 result['native'] = {'http_status': status, 'code': code}
                 if status != 200 or code not in (None, 0):
-                    _authorize(authorizer, operation, params, body)
+                    authorize_install(operation, params, body)
                     result.update(status='native_error', reason='native_request_rejected', mutation_outcome='rejected')
                     return result
                 # Audited appcenter success may omit code, but must echo both
@@ -637,7 +676,7 @@ class NativeCapabilities:
                 if (type(frame.get('apply_id')) is not int or frame['apply_id'] != identifier
                         or frame.get('module_name') != candidate['body']['module_name']):
                     raise BusinessTransportError('invalid_json')
-                _authorize(authorizer, operation, params, body)
+                authorize_install(operation, params, body)
                 result.update(available=True, status='ok', mutation_outcome='acknowledged', data={
                     'application_id': identifier, 'name': candidate['body']['module_name'],
                     'target_version': candidate['body']['version'], 'accepted': True,
@@ -704,7 +743,8 @@ class NativeCapabilities:
                         raise BusinessTransportError('invalid_json')
                     if tool == 'get_application_install_progress':
                         items = _applications(frame)['items']
-                        found = any(row['application_id'] == arguments['application_id'] for row in items)
+                        found = any(row['application_id'] == arguments['application_id']
+                                    and row.get('name_source') != 'audited_module_registration' for row in items)
                     elif tool == 'delete_album':
                         items = _albums(frame)['items']
                         found = any(row['album_id'] == arguments['album_id'] and row['editable'] is True
@@ -908,7 +948,7 @@ def collect_application_package_context(root='/', *, authorizer=None, client=Non
                 urls['source'] = _package_url_shape(row['source'])
             checksums = {key: _package_checksum_shape(row.get(key), key) for key in checksum_keys}
             shapes.append({'row_index': index, 'application_id': identifier,
-                           'name': _label(row.get('module_name'), 63),
+                           'name': _application_display_name(row),
                            'version': _label(row.get('version'), 63), 'field_shapes': fields,
                            'enum_fields': enums, 'url_fields': urls,
                            'checksum_fields': checksums,

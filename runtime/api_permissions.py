@@ -41,7 +41,7 @@ SCOPE_CATALOG = (
     {'id': 'docker', 'label': 'Docker 管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取并控制已登记项目；管理员可使用所有者预先登记的独立资源部署、更新和移除容器。'},
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '读取应用缓存和显式原厂目录；管理员可预览并新装已审计的百度网盘 v2，其他安装、更新和卸载待接入。'},
+     'description': '读取应用缓存和显式原厂目录；管理员可按独立 application_ids 预览并新装审计普通模块，已安装、未审计模块、更新和卸载不开放。'},
     {'id': 'downloads', 'label': '下载管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取缓存或显式任务明细；可逐任务暂停、继续、移除及限速，移除始终保留文件；新增任务待接入。'},
     {'id': 'movie', 'label': '影视管理', 'implemented': True, 'min_role': 'readonly',
@@ -230,6 +230,15 @@ _DEPLOYMENT_WRITE_TOOLS = frozenset(('plan_docker_deployment', 'execute_docker_d
 DEPLOYMENT_TOOLS = _DEPLOYMENT_READ_TOOLS | _DEPLOYMENT_WRITE_TOOLS
 _DEPLOYMENTS_OMITTED = object()
 
+
+def valid_application_ids(value, role, scopes):
+    """Installation resources are explicit audited IDs, never catalog positions."""
+    from native_capability_specs import APPLICATION_INSTALL_SPECS
+    allowed = set(APPLICATION_INSTALL_SPECS)
+    return (isinstance(value, list) and len(value) <= len(allowed)
+            and all(type(item) is int and item in allowed for item in value)
+            and len(set(value)) == len(value)
+            and (not value or role == 'admin' and 'apps' in scopes))
 
 def valid_docker_deployments(value, role, scopes):
     """Check explicit future-deployment grants; names never grant existing projects."""

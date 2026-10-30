@@ -303,7 +303,7 @@ class IntegrationTokenHTTPTests(unittest.TestCase):
         old = json.loads(path.read_text(encoding='utf-8'))
         old['version'] = 2
         for row in old['keys']:
-            for field in ('disabled', 'tool_grants', 'docker_projects', 'docker_deployments', 'grant_revision', 'credential_generation'):
+            for field in ('disabled', 'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'grant_revision', 'credential_generation'):
                 row.pop(field)
         path.write_text(json.dumps(old, separators=(',', ':')), encoding='utf-8')
         os.chmod(path, 0o600)
@@ -314,10 +314,10 @@ class IntegrationTokenHTTPTests(unittest.TestCase):
         self.assertTrue(row['enabled'])
         self.update(key, name='v2 迁移 fixture')
         migrated = json.loads(path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 5)
+        self.assertEqual(migrated['version'], 6)
         actual = migrated['keys'][0]
         expected = {**old['keys'][0], 'name': 'v2 迁移 fixture', 'disabled': False,
-                    'tool_grants': [], 'docker_projects': [], 'docker_deployments': [], 'grant_revision': 1, 'credential_generation': 1}
+                    'tool_grants': [], 'docker_projects': [], 'docker_deployments': [], 'application_ids': [], 'grant_revision': 1, 'credential_generation': 1}
         self.assertEqual(actual, expected)
         self.assertEqual(self.capability(key)[0], 200)
         self.assertEqual(self.key_row(key['id'])['role'], 'readwrite')

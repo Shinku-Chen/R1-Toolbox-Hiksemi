@@ -10,8 +10,8 @@
 | --- | --- | --- |
 | `list_native_applications` | 读写／`apps` | 固定 `get_apply_list`＋`opttype=0`，返回原厂 `apply_id`、名称、版本、原始安装状态；不把目录当完整已装或运行清单，不输出来源 URL、`vid`、路径 |
 | `list_native_modules` | 读写／`apps` | 显式固定 `get_modulize_table`，将 `available_list/installed_list` 分开返回，仅有限模块身份、版本和原始整数状态；原厂可能联系厂商更新支持状态，不输出安装路径或参数，不推断运行，不授予安装或卸载权限 |
-| `plan_native_application_install` | 管理员／`apps` | `application_id`；固定两目录交叉核对，仅预览已审计白名单的未安装普通应用，返回 opaque 当前版本及下载、后台进程、独立安装目录和原生应用数据影响；查询可能更新原厂支持状态，不执行安装 |
-| `install_native_application` | 管理员／`apps` | `application_id/expected_version`＋确认／本键幂等；仅对白名单新装应用重新核对两目录后固定 `install_apply/flag=0`，不接收包地址、路径、脚本或 action。原厂 ACK 仅代表受理，不伪造任务 ID、完成或进度 |
+| `plan_native_application_install` | 管理员／`apps`／精确 `application_ids` | `application_id`；固定两目录交叉核对，仅预览本键选择的已审计未安装应用，返回 opaque 当前版本及该应用的实际原生委托影响；查询可能更新原厂支持状态，不执行安装 |
+| `install_native_application` | 管理员／`apps`／精确 `application_ids` | `application_id/expected_version`＋确认／本键幂等；仅对明确授权的白名单新装应用重新核对两目录后固定 `install_apply/flag=0`，不接收包地址、路径、脚本或 action。原厂 ACK 仅代表受理，不伪造任务 ID、完成或进度 |
 | `get_application_install_progress` | 管理员／`apps` | `application_id`＋确认／幂等键；先核对固定所有者目录，再调用原厂 `get_install_progress`。此动作会同步插件、修改完成状态并写缓存，属于管理操作。只保留原厂 `size/total_size/status` 等数值，不编造百分比 |
 | `list_backup_tasks` | 读写／`backup` | 固定 `get_backup_task_list`，只接受当前管理员归属，投影运行／等待／完成组、原始状态、字节量和内部任务版本，不返回来源、目标、磁盘身份或动作原文。原厂缺失的组保持 `null`，不补零 |
 | `get_auto_backup_settings` | 读写／`backup` | 固定 `get_auto_backup`，投影 `udisk_a_status/sd_status/udisk_a_type/sd_type` 原始整数，缺失为 `null`，不猜枚举意义 |
@@ -106,17 +106,35 @@
 
 ## 已审计普通应用的新增安装
 
-本轮先实现固定白名单 `application_id:34/module_name:netdisk_bd2`（百度网盘 v2）新增安装，未实现更新或卸载。它不是按 `source=0` 推导的普通应用：还须应用目录的精确 ID／名称／`source:0/module_type:0` 与模块可用表的精确 ID／名称／`type:extension` 对应，已安装表没有该 ID 或同名别名，当前原厂版本为字符串 `0`；目标 `latest_ver` 与应用目录 `version`、两处大小必须一致。任何原始重复 ID、同名异 ID、空名称、安装中或已安装状态都拒绝。核心 `ipc/update_desc/frpc/nginx`、Docker、下载引擎及其它未审计模块不在白名单内，管理员也不能跳过。
+当前固定白名单为 `7/netdisk_bd`（百度网盘）、`8/contact_backup`（通讯录备份）、`34/netdisk_bd2`（百度网盘 v2）、`35/66_print`（66 打印），唯一来源为 `native_capability_specs.APPLICATION_INSTALL_SPECS`。仅实现新增安装，未实现更新或卸载。这些不是按 `source=0` 推导的普通应用：还须应用目录的精确 ID／名称／`source:0/module_type:0` 与模块可用表的精确 ID／名称／`type:extension` 对应，已安装表没有该 ID 或同名别名，当前原厂版本为字符串 `0`；目标 `latest_ver` 与应用目录 `version`、两处大小必须一致。任何原始重复 ID、同名异 ID、空安装身份、安装中或已安装状态都拒绝。核心 `ipc/update_desc/frpc/nginx`、Docker、下载引擎及其它未审计模块不在安装白名单内，管理员也不能跳过。
 
 固件 `modulize_mod_netdisk_bd2_register@0x76f755` 在 `0x76f7a3` 注册固定名称 `netdisk_bd2`，在 `0x76f7ce/0x76f7d5` 绑定安装回调 `modulize_mod_netdisk_bd2_install@0x76f1ae`。回调核对当前用户资源，调用 `netd2_get_install_path@0x32bdd6` 获取原厂选定的独立 `netdisk_bd2` 程序目录；`netd2_get_download_path@0x32bedd` 以原厂选定磁盘和当前用户构造 `Users/<user>/Downloads` 应用数据位置，并写入模块运行上下文。安装后的启动回调 `modulize_mod_netdisk_bd2_start@0x76efb0` 调原厂 `netd2_init@0x31e775`；文件检查回调还核验该模块的 `libkernel.so/P2PClient/baiduNas_v2`。没有执行这些厂商 ELF 或回调地址。
 
-原厂包选择委托固定模块 ID，不接收调用者的 URL 或脚本。`appcenter install_apply_request@0x3543` 清零结构，读取固定 JSON 字段；`flag=0` 进入新增安装，`flag=1` 更新不在本工具范围内。`client_id` 缺失仅记录日志，工具使用固定 `r1-toolbox`；`vid` 可为空字符串，缺失的可选 `paramList/support_terminal` 不伪造补齐，也不向调用者开放。传输只允许十个固定 body 字段：`client_id/flag/size/apply_id/module_name/vid/module_type/source/version/guest`，`flag/source/module_type/guest` 必须为整数零，ID 和名称固定为该白名单。原厂通过先前审计的固定模块安装链下载／部署包，既有安装检查会拒绝已经安装的模块；Toolbox 不添加外部独立签名要求，也不宣称进行了原厂不存在于当前证据中的包校验。
+原厂包选择委托固定模块 ID，不接收调用者的 URL 或脚本。`appcenter install_apply_request@0x3543` 清零结构，读取固定 JSON 字段；`flag=0` 进入新增安装，`flag=1` 更新不在本工具范围内。`client_id` 缺失仅记录日志，工具使用固定 `r1-toolbox`；`vid` 可为空字符串，缺失的可选 `paramList/support_terminal` 不伪造补齐，也不向调用者开放。传输只允许十个固定 body 字段：`client_id/flag/size/apply_id/module_name/vid/module_type/source/version/guest`，`flag/source/module_type/guest` 必须为整数零，ID 和名称必须同时匹配上述固定白名单；不能将某个获准 ID 与另一个模块名称拼接。原厂通过先前审计的固定模块安装链下载／部署包，既有安装检查会拒绝已经安装的模块；Toolbox 不添加外部独立签名要求，也不宣称进行了原厂不存在于当前证据中的包校验。
 
-`plan_native_application_install` 参数只有 `application_id`，最低管理员＋`apps`＋精确工具授权。它显式查询当前应用与模块库存，不安装；原厂查询可能联网更新支持状态。允许时返回 `app_install_<32hex>` 的 `expected_version`，绑定精确包字段、当前未安装证明、原厂私有目录摘要以及当前 Key／授权修订／凭据代际／服务代际。目录私有路径只在宿主内参与摘要，响应只有固定资源类别和实际影响说明。拒绝时给出固定原因和 `allowed:false`，不产生可安装版本。
+`plan_native_application_install` 参数只有 `application_id`，最低管理员＋`apps`＋精确工具授权，并要求本键独立 `application_ids` 包含目标 ID。该列表是精确资源集合，没有“所有应用”通配符。旧存储缺省字段只兼容原 `34`，新增 v3 键缺省 `[]`，显式 `[]` 拒绝全部安装；编辑省略保留原值，扩大软件白名单不扩大旧键权限。未获目标授权时在查询原厂目录前拒绝。
+
+计划显式查询当前应用与模块库存，不安装；原厂查询可能联网更新支持状态。允许时返回 `app_install_<32hex>` 的 `expected_version`，绑定精确包字段、当前未安装证明、原厂私有目录摘要以及当前 Key／授权修订／凭据代际／服务代际和排序后的 `application_ids`。目录私有路径只在宿主内参与摘要，响应只有固定资源类别和各应用实际影响说明。目录或安装前提不满足时给出固定原因和 `allowed:false`，不产生可安装版本；权限错误不输出可用计划。
 
 实际影响是：原厂可能联网下载模块包，写入独立程序目录及管理员原生应用状态，启动百度网盘后台进程；原生网盘后续任务可使用管理员 Downloads。此功能属于管理员明确委托原厂应用安装，不能宣传原生进程已被 Toolbox 文件授权沙箱化，也不能拿安装授权执行任意文件操作。计划中的版本是最后观察到的厂商候选版本；固定原厂后端按当前模块 ID 选择包，不提供目标字节或最终已安装版本证明。返回明确 `package_selection:factory_current_module_id/version_is_observed_not_final_attestation:true`，最终状态仍须核对。
 
-`install_native_application` 要求同一应用 ID、当前 `expected_version`、`confirmed:true` 和本 Key 的 `idempotency_key`。发送前在有界共享锁内重新查询两目录并重建相同版本；版本变化、撤权、轮换、服务重开或身份变化拒绝。固定调用 `POST /rest/1.1/applycenter?action=install_apply`，不把原厂用户参数、包地址或安装目录转成 HTTP 输入。
+`install_native_application` 要求同一应用 ID、当前 `expected_version`、`confirmed:true` 和本 Key 的 `idempotency_key`。发送前在有界共享锁内重新查询两目录并重建相同版本；版本变化、目标授权撤回、轮换、服务重开或身份变化拒绝。目录续验、发送前、接收 ACK 后及读取幂等回执时都复核目标应用授权；修改资源集合会使旧计划失效，撤权后不返回旧回执。固定调用 `POST /rest/1.1/applycenter?action=install_apply`，不把原厂用户参数、包地址或安装目录转成 HTTP 输入。
+
+### 扩展应用的逐项静态证据与影响
+
+以下地址均来自匹配固件 `V6.3.3 Build_260907` 的 `emhistor` 静态反汇编及异常展开表函数边界，没有执行厂商 ELF。安装链与目录前提继续适用；注册记录本身不会授予机器安装权限。
+
+| ID／模块 | 安装与启动证据 | 必须呈现的影响与限制 |
+| --- | --- | --- |
+| `7/netdisk_bd` | 注册 `0x76eadb` 将安装回调 `0x76e7ee`、启动回调 `0x76e599` 绑定至固定 `netdisk_bd`；安装分别调用 `netd_get_install_path@0x2fee7c`、`netd_get_download_path@0x2fefe2`；启动调用 `netd_init@0x3102da` | 独立程序目录位于原厂选定磁盘；下载数据由原厂固定到 `Users/admin/Downloads`。安装可将原厂暂存的两份 `p2p.conf` 迁移回固定 `netdisk_bd` 子目录。初始化会创建数据库／表、读写配置、加载已有 `dirtask.json`、启动原生下载进程及后台任务。不是空白应用或文件沙箱保证；不能声称安装后一定没有既有任务。 |
+| `8/contact_backup` | 注册 `0x76f97d` 将安装 `0x76f89b`、启动 `0x76f8d7` 绑定至固定 `contact_backup`；安装只记录原厂用户标识并返回 `0`，启动直接返回 `0` | 原厂安装链可能查询厂商并写模块元数据。该回调不证明已经备份通讯录、创建独立程序目录或启动后台备份；后续原厂业务仍按自身权限使用数据。本工具不调用备份入口或删除回调。 |
+| `35/66_print` | 注册 `0x7737e1` 将安装 `0x773778`、启动 `0x7737b4` 绑定至固定 `66_print`；安装只记录原厂用户标识并返回 `0`，启动直接返回 `0` | 原厂安装链可能查询厂商并写模块元数据。ACK 不证明打印服务已启动、打印机已绑定或已发送打印任务；不制造后台进程、用户文件范围或额外依赖的证明。 |
+
+这三个模块不通过 Toolbox 安装 Docker、下载引擎、`frpc`、`nginx` 或其他核心模块。静态证据没有逐项证明原厂下载包的最终字节和未来版本行为，当前目录精确版本只能作为当次观察，不能当作最终包验签。所有原生应用的后续访问仍由原厂权限决定；Toolbox 的文件根授权不会把原生安装器和应用进程变成 Users 范围沙箱。
+
+`netdisk_bd` 的 `bd_start_netdisk@0x2ff5df` 经 `0x2ff8cc–0x2ff942` 委派原厂固定 `netdisk_start.sh`。该脚本联网探测百度域名，监督 `baiduNas/netd_bd`；`netdisk_downloader.sh` 同样监督 `P2PClient`，已有配置还可能启用其原生 `raichu` 功能。同名进程重复时原脚本会用 `killall` 重启，长周期故障恢复分支可能向 `/proc/sys/vm/drop_caches` 写 `1`，还会维护原厂 `/tmp` 崩溃日志。这些是本应用的真实原生委托影响，已纳入预览的 `may_restart_native_processes/may_adjust_host_cache/may_load_existing_tasks` 与文案；没有修改或执行厂商脚本，也不将这些行为宣传为受文件授权范围限制。
+
+2026-10-30 的既有 NAS 只读库存显示 `7/netdisk_bd`、`8/contact_backup` 在已安装表；`35/66_print` 在可用表但 `curr_ver:V1.0.0`，因此这三项在该设备上全部拒绝新增安装。即使已安装项不再出现在可用表，也明确返回 `application_not_uninstalled`。`34/netdisk_bd2` 是此前观察到的未安装候选；这不等于已经安装或验收。本轮仅完成静态审计、单元与真实 HTTP fixture 验证，没有为验收卸载／重装现有应用或向 NAS 发送安装。实机安装仍需先展示该设备的具体计划，由所有者选择应用并确认。
 
 `appcenter` 在 `0x4651` 保存等待状态，`0x46a6` 排入真实异步队列。成功分支 `0x4700–0x479d` 只输出精确 `module_name/apply_id`，可能省略 `code`；工具只在这两个身份字段精确匹配且没有明确非零错误码时标记 `accepted:true/factory_acknowledgement_only:true/effect_confirmed:false`。没有真实独立任务 ID 时返回 `native_task_id:null`，不拿应用 ID 冒充任务 ID。继续使用已有 `get_application_install_progress` 显式查询原厂状态，该查询本身仍须管理员确认与新幂等标识。
 
@@ -130,6 +148,8 @@
 
 `packages` 保留全部十五条安全形状，因两个空名称标记 `diagnostic_only/catalog_projection_rejected`，并未启用安装。十三条有名记录的 `source/module_type` 都是整数零，但其中包含 Docker（ID `38`）；因此“来源零、类型零、合法名称”不足以证明普通可安装／卸载应用。所有记录的 `vid` 为空字符串，`paramList/support_terminal` 缺失；不能伪造这些值，也不能据其缺失单独断言原厂无法安装。
 
+后续本地投影兼容仅对这两个已观察的空字符串名称使用静态注册名：`2→ipc`、`35→66_print`，显式标注 `name_source:audited_module_registration`。它不会从不可信的 `name` 字段或其它 ID 猜名称；字段缺失、`null`、控制字符、未知 ID 及重复 ID 仍隔离。该回退仅改善目录显示，安装依然要求原始 `module_name` 精确匹配；仅靠回退名的条目也不能取得会推进原厂状态的安装进度前检资格。此前实机的十三／十五收据仍保留历史原样，本地兼容与 fixture 通过不代表新版已部署或完成安装验收。
+
 本轮新增的实际能力为显式模块库存查询 `list_native_modules`，不是新增开发探针。固定 `GET /rest/1.1/update?action=get_modulize_table` 使用现有管理员会话、叶证书 pin 和唯一 emhistor 监听验证；入参为空，不接收模块 ID、action、路径、URL 或 body。工具最低角色读写、功能域 `apps`，还须精确工具授权。它不加入原厂 `probe` 固定六项、`packages`、被动业务轮询或网页 GET。
 
 固件契约来自 `rest_get_modulize_table@0x229a88`：`0x229b8e` 调 `modulize_list_update_support_status_list@0x756ab4`，可能联系厂商更新内部支持状态；当前固定所有者 UID `100000` 分支分别在 `0x229c01/0x229c93` 调 `modulize_get_tbl@0x760efe`，传入 `0/1`，明确生成 `available_list/installed_list`。其他用户走 `moddb_get_tbl@0x77e81c`，不属于该固定管理员认证契约。成功返回含整数 `code=0`，缺失、空或类型异常不补成成功。
@@ -141,6 +161,6 @@
 - 每表先统计全部原始合法正整数 ID，重复 ID 的所有节点都拒绝，再隔离坏名称／坏节点。表缺失、类型不符、超过二百五十六条或非空表全部无效均拒绝，不能补空库存。真实空数组可正常返回。
 - 不输出 `inst_path/paramList`、包地址、签名、原始 JSON 或认证信息。明确 `catalog_confers_write_identity:false/running_state_available:false`，返回 `may_contact_vendor:true`；模块库存是原厂观察结果，不是安装授权或模块白名单。
 
-安装后端下一步应使用这两个真实表与有效应用目录核对 `apply_id↔id`、名称、当前／候选版本和安装成员关系，再对候选普通模块完成回调、依赖与数据清理审计。新库存工具已经提供固定业务查询通道；无需再为相同目录形状添加字段重打包。`modulize_get_status@0x22d1c6` 仍未接入：它是 multipart 状态循环，涉及内部状态处理，不能冒充一次无副作用的运行状态查询。安装／更新／卸载尚未完成实机业务验收。
+安装后端使用这两个真实表与有效应用目录核对 `apply_id↔id`、名称、当前／候选版本和安装成员关系；只有上文逐项完成安装／启动回调及依赖审计的普通模块可新增安装，卸载所需数据清理语义仍未开放。库存工具已经提供固定业务查询通道；无需再为相同目录形状添加字段重打包。`modulize_get_status@0x22d1c6` 仍未接入：它是 multipart 状态循环，涉及内部状态处理，不能冒充一次无副作用的运行状态查询。安装／更新／卸载尚未完成实机业务验收。
 
 验证覆盖真实本机 HTTP server 的固定 route／method／query／JSON body、目录归属、未知值、进度不造假、写后撤权、旧键幂等与不确定结果。真实 TLS、进程／socket、签名读取的攻击面沿用固定传输定向测试；本机 HTTP fixture 使用仅构造器可注入的测试连接，不修改生产固定端口。NAS 写入验收仍需用户指定明确对象，先核对只查诊断再验收单项写入。

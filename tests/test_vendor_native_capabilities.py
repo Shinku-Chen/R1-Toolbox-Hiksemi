@@ -85,6 +85,39 @@ class NativeCapabilityTests(unittest.TestCase):
             backend, _ = self.backend({'list': rows})
             self.assertEqual(self.execute(backend, 'list_native_applications')['reason'], 'invalid_json')
 
+    def test_only_observed_empty_labels_use_audited_registration_display_names(self):
+        backend, _ = self.backend({'list': [app(2, ''), app(35, ''), app(7, 'netdisk_bd')]})
+        value = self.execute(backend, 'list_native_applications')
+        self.assertTrue(value['available'])
+        self.assertFalse(value['data']['partial'])
+        items = value['data']['items']
+        self.assertEqual([(item['application_id'], item['name']) for item in items],
+                         [(2, 'ipc'), (35, '66_print'), (7, 'netdisk_bd')])
+        self.assertEqual(items[0]['name_source'], 'audited_module_registration')
+        self.assertEqual(items[1]['name_source'], 'audited_module_registration')
+        self.assertNotIn('name_source', items[2])
+        self.assertEqual(ops._catalog_projection_checks('apply_list',
+                         {'list': [app(2, ''), app(35, '')]}), [])
+
+    def test_display_fallback_never_accepts_missing_bad_unknown_or_duplicate_identity(self):
+        for rows in ([app(2, None)], [app(35, '\x00')], [app(7, '')],
+                     [app(35, ''), app(35, '66_print')], [{**app(2, ''), 'name': 'ipc'}]):
+            # An unrelated native `name` field never substitutes for a missing
+            # or corrupt module_name. The final case is tested separately.
+            if len(rows) == 1 and 'name' in rows[0]:
+                rows[0].pop('module_name')
+            backend, _ = self.backend({'list': rows})
+            self.assertEqual(self.execute(backend, 'list_native_applications')['reason'], 'invalid_json')
+
+    def test_display_only_fallback_does_not_grant_mutating_progress_preflight(self):
+        for identifier in (2, 35):
+            backend, client = self.backend({'list': [app(identifier, '')]})
+            value = self.execute(backend, 'get_application_install_progress',
+                                 self.write(application_id=identifier))
+            self.assertEqual(value['reason'], 'object_not_in_owner_catalog')
+            self.assertEqual(value['mutation_outcome'], 'not_sent')
+            self.assertEqual(len(client.calls), 1)
+
     def test_application_progress_requires_current_catalog_and_explicit_confirmation(self):
         backend, client = self.backend({'list': [app()]}, {'code': 0, 'apply_id': 5,
                                                       'size': 10, 'total_size': 20, 'status': 3,

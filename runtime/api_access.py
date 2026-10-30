@@ -21,7 +21,8 @@ import time
 
 from api_permissions import (LEGACY_SCOPES, ROLE_CATALOG, SCOPES, SCOPE_BY_TOOL,
                              SCOPE_CATALOG, valid_file_roots as _file_roots,
-                             valid_tool_grants as _tool_grants)
+                             valid_tool_grants as _tool_grants,
+                             valid_application_ids as _application_ids)
 from network_access import normalize_peer, normalize_rule, normalize_rules, peer_matches
 
 AUDIT_OPERATIONS = frozenset((
@@ -49,8 +50,9 @@ _POLICY_FIELDS = frozenset(('policy_version', 'role', 'file_roots'))
 _V3_FIELDS = frozenset(('disabled',))
 _V4_FIELDS = frozenset(('tool_grants', 'docker_projects', 'grant_revision', 'credential_generation'))
 _V5_FIELDS = frozenset(('docker_deployments',))
+_V6_FIELDS = frozenset(('application_ids',))
 _REVISION_FIELDS = ('policy_version', 'role', 'scopes', 'file_roots',
-                    'tool_grants', 'docker_projects', 'docker_deployments', 'allowed_ips', 'expires_at', 'disabled', 'revoked_at')
+                    'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'allowed_ips', 'expires_at', 'disabled', 'revoked_at')
 _MAX_REVISION = 2 ** 53 - 1
 _STORE_LOCKS = {}
 _STORE_LOCKS_GUARD = threading.Lock()
@@ -128,10 +130,10 @@ class ApiAccessStore:
 
     @staticmethod
     def _empty():
-        return {'version': 5, 'enabled': False, 'keys': [], 'audit': []}
+        return {'version': 6, 'enabled': False, 'keys': [], 'audit': []}
 
     @staticmethod
-    def _valid_key(row, version=5):
+    def _valid_key(row, version=6):
         fields = _KEY_FIELDS if version == 1 else _KEY_FIELDS | _POLICY_FIELDS
         if version >= 3:
             fields |= _V3_FIELDS
@@ -139,6 +141,8 @@ class ApiAccessStore:
             fields |= _V4_FIELDS
         if version >= 5:
             fields |= _V5_FIELDS
+        if version >= 6:
+            fields |= _V6_FIELDS
         valid = (isinstance(row, dict) and set(row) == fields
                 and isinstance(row['id'], str) and _KEY_ID_RE.fullmatch(row['id'])
                 and _label(row['name']) and _scopes(row['scopes']) and _ips(row['allowed_ips'])
@@ -158,6 +162,9 @@ class ApiAccessStore:
         if type(row['policy_version']) is not int:
             return False
         if version >= 5 and row['policy_version'] < 3 and row['docker_deployments'] != []:
+            return False
+        if version >= 6 and (not _application_ids(row['application_ids'], row['role'], row['scopes'])
+                             or row['policy_version'] < 3 and row['application_ids'] != []):
             return False
         if row['policy_version'] == 1:
             return (row['role'] == 'legacy' and row['file_roots'] == []
@@ -204,7 +211,7 @@ class ApiAccessStore:
                     return self._empty(), False
                 data = json.loads(text, parse_constant=_reject_constants, object_pairs_hook=_unique_object)
             if (not isinstance(data, dict) or set(data) != {'version', 'enabled', 'keys', 'audit'}
-                    or type(data['version']) is not int or data['version'] not in (1, 2, 3, 4, 5)
+                    or type(data['version']) is not int or data['version'] not in (1, 2, 3, 4, 5, 6)
                     or type(data['enabled']) is not bool
                     or not isinstance(data['keys'], list) or len(data['keys']) > MAX_KEYS
                     or not all(self._valid_key(row, data['version']) for row in data['keys'])
@@ -222,7 +229,7 @@ class ApiAccessStore:
         try:
             # Pure reads retain v1/v2/v3/v4 bytes. A real write upgrades the complete
             # state in the same fsync/replace transaction as the requested change.
-            state = dict(state, version=5, keys=[self._policy_row(row) for row in state['keys']])
+            state = dict(state, version=6, keys=[self._policy_row(row) for row in state['keys']])
             if not all(self._valid_key(row) for row in state['keys']):
                 raise OSError('访问配置不可写')
             serialized = json.dumps(state, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
@@ -282,6 +289,7 @@ class ApiAccessStore:
         result['tool_grants'] = list(row['tool_grants'])
         result['docker_projects'] = copy.deepcopy(row['docker_projects'])
         result['docker_deployments'] = copy.deepcopy(row['docker_deployments'])
+        result['application_ids'] = list(row['application_ids'])
         result['status'] = cls._key_status(row, now)
         result['enabled'] = not row['disabled']
         return result
@@ -295,6 +303,10 @@ class ApiAccessStore:
         for field, default in (('disabled', False), ('tool_grants', []), ('docker_projects', []), ('docker_deployments', []),
                                ('grant_revision', 1), ('credential_generation', 1)):
             policy.setdefault(field, default)
+        # The previous installer accepted ID 34 only. Expanding the audited
+        # catalog never expands an existing key, including on a later write.
+        policy.setdefault('application_ids', [34] if set(policy['tool_grants']).intersection(
+            ('plan_native_application_install', 'install_native_application')) else [])
         return policy
 
     @staticmethod
@@ -331,7 +343,7 @@ class ApiAccessStore:
     def create_key(self, body):
         if (not isinstance(body, dict) or set(body) - {
                 'name', 'scopes', 'allowed_ips', 'expires_days', 'role', 'file_roots',
-                'tool_grants', 'docker_projects', 'docker_deployments'}
+                'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids'}
                 or not _label(body.get('name'))):
             raise ValueError('密钥名称或字段无效')
         scopes = body.get('scopes', ['read'])
@@ -344,9 +356,10 @@ class ApiAccessStore:
         tools = body.get('tool_grants', [])
         projects = body.get('docker_projects', [])
         deployments = body.get('docker_deployments', [])
+        applications = body.get('application_ids', [])
         if (modern and (not isinstance(role, str) or role not in _ROLES)
                 or not modern and (roots != [] or explicit)
-                or not explicit and (projects != [] or deployments != [])):
+                or not explicit and (projects != [] or deployments != [] or applications != [])):
             raise ValueError('密钥角色或文件范围无效')
         if not _scopes(scopes, SCOPES if modern else LEGACY_SCOPES):
             raise ValueError('密钥权限无效')
@@ -354,6 +367,8 @@ class ApiAccessStore:
             raise ValueError('文件范围或访问权限无效')
         if explicit and not _tool_grants(tools, role, scopes, roots, projects, deployments):
             raise ValueError('具体工具或项目范围无效')
+        if not _application_ids(applications, role, scopes):
+            raise ValueError('允许安装的应用范围无效')
         if type(days) is not int or not 0 <= days <= 365:
             raise ValueError('有效天数须为 0 至 365 的整数')
         ips = normalize_rules(supplied_ips)
@@ -385,6 +400,7 @@ class ApiAccessStore:
                 'file_roots': [dict(root) for root in roots],
                 'tool_grants': list(tools), 'docker_projects': copy.deepcopy(projects),
                 'docker_deployments': copy.deepcopy(deployments),
+                'application_ids': list(applications),
                 'grant_revision': 1, 'credential_generation': 1,
                 'disabled': False,
                 'allowed_ips': ips, 'created_at': now,
@@ -427,7 +443,7 @@ class ApiAccessStore:
         """
         if (not isinstance(body, dict) or not 2 <= len(body)
                 or set(body) - {'id', 'name', 'role', 'scopes', 'file_roots',
-                                'tool_grants', 'docker_projects', 'docker_deployments',
+                                'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids',
                                 'allowed_ips', 'expires_days'} or 'id' not in body):
             raise ValueError('密钥更新字段无效')
         self._key_id(body['id'])
@@ -436,7 +452,7 @@ class ApiAccessStore:
             row = self._selected_key(data, body['id'])
             candidate = self._policy_row(row)
             previous = copy.deepcopy(candidate)
-            for field in ('name', 'role', 'scopes', 'file_roots', 'tool_grants', 'docker_projects', 'docker_deployments'):
+            for field in ('name', 'role', 'scopes', 'file_roots', 'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids'):
                 if field in body:
                     candidate[field] = body[field]
             if 'tool_grants' in body:
@@ -560,6 +576,7 @@ class ApiAccessStore:
                     'tool_grants': list(policy['tool_grants']),
                     'docker_projects': copy.deepcopy(policy['docker_projects']),
                     'docker_deployments': copy.deepcopy(policy['docker_deployments']),
+                    'application_ids': list(policy['application_ids']),
                     'grant_revision': policy['grant_revision'],
                     'credential_generation': policy['credential_generation']}, 'ok'
 

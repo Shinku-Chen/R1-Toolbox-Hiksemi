@@ -37,7 +37,7 @@ class DeploymentAccessTests(unittest.TestCase):
     def test_deployment_only_key_can_read_without_inheriting_existing_projects(self):
         key = self.store.create_key(self.body())
         self.assertEqual(key['docker_projects'], [])
-        self.assertEqual(json.loads(self.store.path.read_text(encoding='utf8'))['version'], 5)
+        self.assertEqual(json.loads(self.store.path.read_text(encoding='utf8'))['version'], 6)
         principal = self.principal(key)
         self.assertTrue(permission_allows(principal, 'docker', 'readonly', tool_name=READ[0]))
         self.assertFalse(permission_allows(principal, 'docker', 'readonly', tool_name='list_docker_projects'))
@@ -79,6 +79,7 @@ class DeploymentAccessTests(unittest.TestCase):
         data['version'] = 4
         for row in data['keys']:
             del row['docker_deployments']
+            del row['application_ids']
         before = json.dumps(data, ensure_ascii=False).encode('utf8')
         self.store.path.write_bytes(before)
         self.assertTrue(self.store.snapshot()['storage_ok'])
@@ -88,7 +89,7 @@ class DeploymentAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.update_key({'id': key['id'], 'name': '重命名旧工具'})
         saved = json.loads(self.store.path.read_text(encoding='utf8'))
-        self.assertEqual(saved['version'], 5)
+        self.assertEqual(saved['version'], 6)
         self.assertEqual(saved['keys'][0]['digest'], data['keys'][0]['digest'])
         self.assertEqual(saved['keys'][0]['tool_grants'], ['get_nas_status'])
         self.assertEqual(saved['keys'][0]['docker_deployments'], [])

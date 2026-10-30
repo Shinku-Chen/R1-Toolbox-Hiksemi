@@ -96,7 +96,7 @@ class NativeApplicationInstallTests(unittest.TestCase):
         self.assertNotIn('PRIVATE', json.dumps(result))
 
     def test_all_nonallowlisted_core_or_other_modules_are_refused_without_query(self):
-        for identifier in (2, 3, 23, 35, 38, 42, 43, 45):
+        for identifier in (2, 3, 23, 32, 33, 36, 38, 42, 43, 45):
             result = self.call('plan_native_application_install', {'application_id': identifier})
             self.assertTrue(result['available'])
             self.assertFalse(result['data']['allowed'])

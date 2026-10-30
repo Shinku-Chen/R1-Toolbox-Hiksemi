@@ -47,7 +47,7 @@ class ApiAccessTests(unittest.TestCase):
         state['version'] = 1
         for row in state['keys']:
             for field in ('role', 'policy_version', 'file_roots', 'disabled',
-                          'tool_grants', 'docker_projects', 'docker_deployments', 'grant_revision', 'credential_generation'):
+                          'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'grant_revision', 'credential_generation'):
                 row.pop(field, None)
         return state
 
@@ -89,7 +89,7 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(principal, {
             'key_id': key['id'], 'name': key['name'], 'scopes': ['read'],
             'role': 'legacy', 'policy_version': 1, 'file_roots': [],
-            'tool_grants': [], 'docker_projects': [], 'docker_deployments': [], 'grant_revision': 2, 'credential_generation': 1,
+            'tool_grants': [], 'docker_projects': [], 'docker_deployments': [], 'application_ids': [], 'grant_revision': 2, 'credential_generation': 1,
         })
         other = access.ApiAccessStore(self.temp.name, clock=lambda: self.now)
         other.configure({'enabled': False})
@@ -360,11 +360,11 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.configure({'enabled': True})
         migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 5)
+        self.assertEqual(migrated['version'], 6)
         self.assertEqual(migrated['keys'][0], {
             **old['keys'][0], 'policy_version': 1, 'role': 'legacy', 'file_roots': [],
             'disabled': False,
-            'tool_grants': [], 'docker_projects': [], 'docker_deployments': [], 'grant_revision': 1, 'credential_generation': 1,
+            'tool_grants': [], 'docker_projects': [], 'docker_deployments': [], 'application_ids': [], 'grant_revision': 1, 'credential_generation': 1,
         })
         self.assertEqual(self.authorize(key), (principal, 'ok'))
         self.assertEqual(self.authorize(key, scope='docker'), (None, 'scope_denied'))
@@ -380,7 +380,7 @@ class ApiAccessTests(unittest.TestCase):
         principal, _ = self.authorize(valid)
         self.store.record(principal, 'integration/capabilities', '192.168.31.22', 'success')
         state = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(state['version'], 5)
+        self.assertEqual(state['version'], 6)
         self.assertTrue(all(row['role'] == 'legacy' for row in state['keys']))
         self.assertEqual(self.authorize(revoked), (None, 'key_revoked'))
         self.now += 86400
@@ -396,7 +396,7 @@ class ApiAccessTests(unittest.TestCase):
                     state['version'] = 1
                     for row in state['keys']:
                         for field in ('role', 'policy_version', 'file_roots', 'disabled',
-                                      'tool_grants', 'docker_projects', 'docker_deployments', 'grant_revision', 'credential_generation'):
+                                      'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'grant_revision', 'credential_generation'):
                             row.pop(field)
                     store.path.write_text(json.dumps(state), encoding='utf-8')
                     os.chmod(store.path, 0o600)
@@ -405,7 +405,7 @@ class ApiAccessTests(unittest.TestCase):
                     else:
                         store.create_key({'name': '新键', 'role': 'readonly', 'scopes': ['read']})
                     result = json.loads(store.path.read_text(encoding='utf-8'))
-                    self.assertEqual(result['version'], 5)
+                    self.assertEqual(result['version'], 6)
                     self.assertEqual(result['keys'][0]['role'], 'legacy')
                     self.assertEqual(result['keys'][0]['scopes'], ['power'])
                     self.assertEqual(result['keys'][0]['digest'], state['keys'][0]['digest'])
@@ -558,7 +558,7 @@ class ApiAccessTests(unittest.TestCase):
         old['version'] = 2
         for row in old['keys']:
             row.pop('disabled')
-            for field in ('tool_grants', 'docker_projects', 'docker_deployments', 'grant_revision', 'credential_generation'):
+            for field in ('tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'grant_revision', 'credential_generation'):
                 row.pop(field)
         self.write_state(old)
         before = self.store.path.read_bytes()
@@ -570,10 +570,10 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.update_key({'id': key['id'], 'name': '重命名'})
         migrated = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(migrated['version'], 5)
+        self.assertEqual(migrated['version'], 6)
         self.assertEqual(migrated['keys'][0], {**old['keys'][0], 'name': '重命名', 'disabled': False,
                                              'tool_grants': [], 'docker_projects': [], 'docker_deployments': [],
-                                             'grant_revision': 1, 'credential_generation': 1})
+                                             'application_ids': [], 'grant_revision': 1, 'credential_generation': 1})
         self.assertEqual(self.authorize(key)[0]['role'], 'readwrite')
 
     def test_update_preserves_secret_creation_and_legacy_permissions_until_role_is_explicit(self):
@@ -980,7 +980,7 @@ class ApiAccessTests(unittest.TestCase):
         old = json.loads(self.store.path.read_text(encoding='utf-8'))
         old['version'] = 3
         for row in old['keys']:
-            for field in ('tool_grants', 'docker_projects', 'docker_deployments', 'grant_revision', 'credential_generation'):
+            for field in ('tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'grant_revision', 'credential_generation'):
                 del row[field]
         self.write_state(old)
         before = self.store.path.read_bytes()
@@ -994,7 +994,7 @@ class ApiAccessTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
         self.store.update_key({'id': key['id'], 'name': '改名'})
         data = json.loads(self.store.path.read_text(encoding='utf-8'))
-        self.assertEqual(data['version'], 5)
+        self.assertEqual(data['version'], 6)
         self.assertEqual(data['keys'][0]['digest'], old['keys'][0]['digest'])
         self.assertEqual(data['keys'][0]['policy_version'], 2)
         self.assertEqual(data['keys'][0]['grant_revision'], 1)
@@ -1008,7 +1008,7 @@ class ApiAccessTests(unittest.TestCase):
         invalid = [{**row, field: value} for field in ('grant_revision', 'credential_generation')
                    for value in (None, True, 0, -1, 1.0, 2 ** 53, '1')]
         invalid += [{field: value for field, value in row.items() if field != missing}
-                    for missing in ('tool_grants', 'docker_projects', 'docker_deployments', 'grant_revision', 'credential_generation')]
+                    for missing in ('tool_grants', 'docker_projects', 'docker_deployments', 'application_ids', 'grant_revision', 'credential_generation')]
         invalid += [{**row, 'policy_version': 2}, {**row, 'tool_grants': ['not_known']}]
         for broken in invalid:
             with self.subTest(broken=broken):

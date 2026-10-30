@@ -13,6 +13,7 @@ import time
 from types import MappingProxyType
 from urllib.parse import quote, urlencode
 
+from native_capability_specs import APPLICATION_INSTALL_SPECS
 from vendor_media_auth import OWNER_ID, read_session
 from vendor_media_probe import (MediaProbeError, MAX_HEADERS, _certificate,
                                 _first_frame, _headers, _WireReader, ssl)
@@ -142,13 +143,15 @@ def _validate(operation, parameters, body):
         if valid:
             payload = {'apply_id': _integer(payload['apply_id'], 1, 2 ** 31 - 1)}
     elif operation == 'application_install':
-        # Fixed audited ordinary module only. These fields are copied from a
+        # Fixed audited ordinary modules only. These fields are copied from a
         # freshly cross-checked catalog by the executor, never HTTP arguments.
         valid = not params and set(payload) == {'client_id', 'flag', 'size', 'apply_id',
             'module_name', 'vid', 'module_type', 'source', 'version', 'guest'}
         if valid:
-            valid = (payload['client_id'] == 'r1-toolbox' and payload['module_name'] == 'netdisk_bd2'
-                     and type(payload['apply_id']) is int and payload['apply_id'] == 34
+            spec = (APPLICATION_INSTALL_SPECS.get(payload['apply_id'])
+                    if type(payload['apply_id']) is int else None)
+            valid = (spec is not None and payload['client_id'] == 'r1-toolbox'
+                     and payload['module_name'] == spec['module_name']
                      and all(type(payload[key]) is int and payload[key] == 0
                              for key in ('flag', 'module_type', 'source', 'guest'))
                      and type(payload['vid']) is str

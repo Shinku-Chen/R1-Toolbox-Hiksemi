@@ -9,6 +9,8 @@ import unittest
 
 import test_mcp_completion_http as completion
 import test_native_application_install as native_fixture
+from test_native_application_expansion import catalogs as expanded_catalogs
+from native_capability_specs import APPLICATION_INSTALL_SPECS
 from vendor_business_transport import BusinessTransportError
 from vendor_media_operations import IdempotencyStore
 from vendor_native_capabilities import NativeCapabilities
@@ -19,6 +21,17 @@ INSTALL = 'install_native_application'
 
 
 class NativeApplicationInstallHTTPTests(completion.CompletionHTTPBase):
+    def key(self, role, scopes, tools=None, *, applications=None, **kwargs):
+        """New Keys explicitly choose installation objects, never all apps."""
+        key = super().key(role, scopes, tools, **kwargs)
+        if tools is not None and set(tools) & {PLAN, INSTALL}:
+            selected = [34] if applications is None else applications
+            status, _, value = self.browser('POST', '/api/access/keys/update',
+                {'id': key['id'], 'application_ids': selected})
+            self.assertEqual(status, 200, value)
+            key.update(value['key'])
+        return key
+
     def setUp(self):
         super().setUp()
         self.client = native_fixture.Client()
@@ -147,6 +160,65 @@ class NativeApplicationInstallHTTPTests(completion.CompletionHTTPBase):
         self.bad(self.call(legacy, PLAN, {'application_id': 34}), 'scope_denied')
         self.bad(self.call(legacy, INSTALL, self.install_args('app_install_' + '0' * 32)), 'scope_denied')
         self.assertEqual(self.client.calls, [])
+
+    def test_new_keys_default_to_no_installation_resources_and_explicit_selection_is_exact(self):
+        empty = super().key('admin', ['apps'], [PLAN, INSTALL])
+        self.assertEqual(empty['application_ids'], [])
+        self.bad(self.call(empty, PLAN, {'application_id': 34}), 'authorization_denied')
+        selected = self.key('admin', ['apps'], [PLAN, INSTALL], applications=[7])
+        self.client.frames = expanded_catalogs(8)
+        self.bad(self.call(selected, PLAN, {'application_id': 8}, rest=True), 'authorization_denied')
+        self.assertEqual(self.client.calls, [])
+
+    def test_more_audited_application_ids_work_through_real_mcp_and_rest_gates(self):
+        for identifier in (7, 8, 35):
+            with self.subTest(identifier=identifier):
+                key = self.key('admin', ['apps'], [PLAN, INSTALL], applications=[identifier])
+                self.client.frames = expanded_catalogs(identifier)
+                self.client.reply = {'apply_id': identifier,
+                    'module_name': APPLICATION_INSTALL_SPECS[identifier]['module_name']}
+                self.client.calls.clear()
+                plan = self.good(self.call(key, PLAN, {'application_id': identifier}))['data']
+                self.assertTrue(plan['allowed'])
+                args = self.install_args(plan['expected_version'], application_id=identifier,
+                                         idempotency_key=f'http:expanded:{identifier}')
+                result = self.good(self.call(key, INSTALL, args, rest=True))['data']
+                self.assertTrue(result['accepted'])
+                self.assertFalse(result['effect_confirmed'])
+                self.assertEqual(self.client.calls[-1][2]['apply_id'], identifier)
+                self.assertEqual(self.client.calls[-1][2]['module_name'],
+                                 APPLICATION_INSTALL_SPECS[identifier]['module_name'])
+
+    def test_editing_only_application_resources_invalidates_old_plan_and_receipt(self):
+        key = self.key('admin', ['apps'], [PLAN, INSTALL], applications=[7, 34])
+        self.client.frames = expanded_catalogs(7)
+        self.client.reply = {'apply_id': 7, 'module_name': 'netdisk_bd'}
+        plan = self.good(self.call(key, PLAN, {'application_id': 7}))['data']
+        args = self.install_args(plan['expected_version'], application_id=7)
+        self.good(self.call(key, INSTALL, args))
+        status, _, changed = self.browser('POST', '/api/access/keys/update',
+                                          {'id': key['id'], 'application_ids': [34]})
+        self.assertEqual(status, 200)
+        self.assertEqual(changed['key']['application_ids'], [34])
+        self.bad(self.call(key, INSTALL, args, rest=True), 'authorization_denied')
+        self.assertEqual(sum(row[0] == 'application_install' for row in self.client.calls), 1)
+
+    def test_application_resource_revocation_during_preflight_or_ack_is_current(self):
+        for stage in ('module_inventory', 'application_install'):
+            with self.subTest(stage=stage):
+                key = self.key('admin', ['apps'], [PLAN, INSTALL], applications=[7])
+                self.client.frames = expanded_catalogs(7)
+                self.client.reply = {'apply_id': 7, 'module_name': 'netdisk_bd'}
+                plan = self.good(self.call(key, PLAN, {'application_id': 7}))['data']
+                args = self.install_args(plan['expected_version'], application_id=7,
+                                         idempotency_key=f'http:revoke:{stage}')
+                self.client.calls.clear()
+                self.client.after = lambda operation: self.server.api_access.update_key(
+                    {'id': key['id'], 'application_ids': []}) if operation == stage else None
+                self.bad(self.call(key, INSTALL, args), 'invalid_key')
+                self.client.after = None
+                self.assertEqual(sum(row[0] == 'application_install' for row in self.client.calls),
+                                 1 if stage == 'application_install' else 0)
 
 
 if __name__ == '__main__':
