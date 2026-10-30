@@ -37,11 +37,11 @@ SCOPE_CATALOG = (
     {'id': 'media', 'label': '媒体查询', 'implemented': True, 'min_role': 'readwrite',
      'description': '显式查询原厂媒体进度，可能写原厂完成状态，需要读写或管理员角色。'},
     {'id': 'files', 'label': '文件管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '在已核验的管理员／公共目录内浏览、读取属性和下载；上传与文件变更待接入。'},
+     'description': '浏览已核验的管理员／公共目录并下载；读写授权可在管理员后代上传新文件，覆盖及其他文件变更待接入。'},
     {'id': 'docker', 'label': 'Docker 管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取并控制已登记项目；管理员可使用所有者预先登记的独立资源部署、更新和移除容器。'},
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '读取脱敏应用目录缓存；安装、卸载与应用市场操作待接入。'},
+     'description': '读取应用缓存和显式原厂目录；管理员可预览并新装已审计的百度网盘 v2，其他安装、更新和卸载待接入。'},
     {'id': 'downloads', 'label': '下载管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取缓存或显式任务明细；可逐任务暂停、继续、移除及限速，移除始终保留文件；新增任务待接入。'},
     {'id': 'movie', 'label': '影视管理', 'implemented': True, 'min_role': 'readonly',
@@ -163,6 +163,7 @@ _TOOL_DEPENDENCIES = {
     'commit_file_upload': 'prepare_file_upload',
     'execute_docker_project_update': 'plan_docker_project_update',
     'execute_docker_deployment': 'plan_docker_deployment',
+    'install_native_application': 'plan_native_application_install',
 }
 
 

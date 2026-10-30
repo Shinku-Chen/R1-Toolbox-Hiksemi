@@ -35,6 +35,7 @@ OPERATIONS = MappingProxyType({
     'apply_list': ('/rest/1.1/applycenter', 'get_apply_list', 'GET', False),
     'module_inventory': ('/rest/1.1/update', 'get_modulize_table', 'GET', False),
     'application_progress': ('/rest/1.1/applycenter', 'get_install_progress', 'POST', True),
+    'application_install': ('/rest/1.1/applycenter', 'install_apply', 'POST', True),
     'backup_tasks_list': ('/rest/1.1/task', 'get_backup_task_list', 'GET', False),
     'auto_backup_get': ('/rest/1.1/config', 'get_auto_backup', 'GET', False),
     'nas_users_list': ('/rest/1.1/login', 'look_all_user', 'GET', False),
@@ -57,6 +58,8 @@ _REASONS = frozenset((
     'unsupported_content_type', 'invalid_multipart', 'incomplete_response',
     'invalid_json', 'redirect_refused', 'http_error', 'token_unavailable',
     'unsupported_application_contract',
+    'application_not_allowlisted', 'application_identity_changed', 'application_not_uninstalled',
+    'catalog_version_changed', 'package_contract_unverified', 'installation_plan_changed',
     'idempotency_required', 'idempotency_conflict', 'idempotency_capacity',
 ))
 
@@ -138,6 +141,21 @@ def _validate(operation, parameters, body):
         valid = not params and set(payload) == {'apply_id'}
         if valid:
             payload = {'apply_id': _integer(payload['apply_id'], 1, 2 ** 31 - 1)}
+    elif operation == 'application_install':
+        # Fixed audited ordinary module only. These fields are copied from a
+        # freshly cross-checked catalog by the executor, never HTTP arguments.
+        valid = not params and set(payload) == {'client_id', 'flag', 'size', 'apply_id',
+            'module_name', 'vid', 'module_type', 'source', 'version', 'guest'}
+        if valid:
+            valid = (payload['client_id'] == 'r1-toolbox' and payload['module_name'] == 'netdisk_bd2'
+                     and type(payload['apply_id']) is int and payload['apply_id'] == 34
+                     and all(type(payload[key]) is int and payload[key] == 0
+                             for key in ('flag', 'module_type', 'source', 'guest'))
+                     and type(payload['vid']) is str
+                     and re.fullmatch(r'[A-Za-z0-9._-]{0,63}', payload['vid']) is not None)
+            if valid:
+                payload['size'] = _integer(payload['size'], 0, 2 ** 31 - 1)
+                payload['version'] = safe_text(payload['version'], 63)
     elif operation == 'device_name_set':
         valid = set(params) == {'name'} and not payload
         if valid:

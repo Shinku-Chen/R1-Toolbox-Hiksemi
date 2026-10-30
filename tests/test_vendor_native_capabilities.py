@@ -62,7 +62,7 @@ class NativeCapabilityTests(unittest.TestCase):
         return {'confirmed': True, 'idempotency_key': 'operation:1', **values}
 
     def test_specs_are_pure_and_exactly_implemented(self):
-        self.assertEqual(len(specs.TOOL_SPECS), 15)
+        self.assertEqual(len(specs.TOOL_SPECS), 17)
         self.assertEqual(set(ops._OPERATIONS), {s['name'] for s in specs.TOOL_SPECS})
         for item in specs.TOOL_SPECS:
             self.assertFalse(item['annotations']['readOnlyHint'])

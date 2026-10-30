@@ -24,6 +24,8 @@ _SPECS = {item['name']: item for item in TOOL_SPECS}
 _OPERATIONS = MappingProxyType({
     'list_native_applications': 'apply_list',
     'list_native_modules': 'module_inventory',
+    'plan_native_application_install': 'module_inventory',
+    'install_native_application': 'application_install',
     'get_application_install_progress': 'application_progress',
     'list_backup_tasks': 'backup_tasks_list',
     'get_auto_backup_settings': 'auto_backup_get',
@@ -36,12 +38,13 @@ _OPERATIONS = MappingProxyType({
 })
 _WRITES = frozenset(('get_application_install_progress', 'set_nas_name',
                      'set_nas_ai_enabled', 'delete_album', 'disable_auto_backup',
-                     'pause_backup_task', 'cancel_backup_task'))
-_OPTIONAL_CODE = frozenset(('apply_list', 'backup_tasks_list'))
+                     'pause_backup_task', 'cancel_backup_task', 'install_native_application'))
+_OPTIONAL_CODE = frozenset(('apply_list', 'backup_tasks_list', 'application_install'))
 _LOCK = threading.RLock()
 _STORE = IdempotencyStore()
 PENDING = MappingProxyType({
-    'install_application': 'fixed_native_package_identity_and_install_task_contract_unverified',
+    'install_other_applications': 'only_audited_new_install_allowlist_supported',
+    'update_application': 'new_install_only_updates_unverified',
     'remove_application': 'trusted_installed_package_identity_and_removal_effects_required',
     'control_application': 'per_application_lifecycle_contract_unverified',
     'create_share': 'factory_cloud_share_id_and_external_link_contract_unverified',
@@ -53,6 +56,8 @@ PENDING = MappingProxyType({
     'backup_schedule': 'existing_destination_acl_and_backup_type_contract_required',
     'account_mutation': 'per_object_privilege_and_credential_change_contract_required',
 })
+_INSTALL_TOOLS = frozenset(('plan_native_application_install', 'install_native_application'))
+_INSTALL_ALLOWLIST = MappingProxyType({34: ('netdisk_bd2', 0, 0, 'extension')})
 
 
 def _json_copy(value):
@@ -187,6 +192,68 @@ def _module_text(value, maximum=63):
 def _module_integer(value):
     """Preserve the native enum code without treating unknown values as zero."""
     return value if type(value) is int and -(2 ** 31) <= value < 2 ** 31 else None
+
+
+def _installation_candidate(identifier, frames):
+    """Bind one audited ordinary app to a unique current uninstalled module.
+
+    Both authenticated factory catalogs remain authoritative for package
+    selection; no URL/manifest/signature is invented or accepted from callers.
+    Private native paths participate only in the opaque version, not requests.
+    """
+    expected_name, source, kind, native_type = _INSTALL_ALLOWLIST[identifier]
+    apps, modules = frames['apply_list'], frames['module_inventory']
+    accepted_apps = _applications(apps)['items']
+    _native_modules(modules)
+    if not any(row['application_id'] == identifier and row['name'] == expected_name for row in accepted_apps):
+        return None, 'application_identity_changed'
+    for rows, field in ((apps['list'], 'apply_id'), (modules['available_list'], 'id'),
+                        (modules['installed_list'], 'id')):
+        if any(type(row) is dict and row.get('module_name') == expected_name
+               and (type(row.get(field)) is not int or row[field] != identifier) for row in rows):
+            return None, 'application_identity_changed'
+    app_rows = [row for row in apps['list'] if type(row) is dict and type(row.get('apply_id')) is int
+                and row['apply_id'] == identifier]
+    available = [row for row in modules['available_list'] if type(row) is dict and type(row.get('id')) is int
+                 and row['id'] == identifier]
+    if len(app_rows) != 1 or len(available) != 1:
+        return None, 'application_identity_changed'
+    app, module = app_rows[0], available[0]
+    if any(type(row) is dict and (row.get('id') == identifier or row.get('module_name') == expected_name)
+           for row in modules['installed_list']):
+        return None, 'application_not_uninstalled'
+    if (app.get('module_name') != expected_name or module.get('module_name') != expected_name
+            or type(app.get('source')) is not int or app['source'] != source
+            or type(app.get('module_type')) is not int or app['module_type'] != kind
+            or module.get('type') != native_type):
+        return None, 'application_identity_changed'
+    if (type(app.get('status')) is not int or app['status'] != 0
+            or type(app.get('apply_opt')) is not int or app['apply_opt'] != 0
+            or type(module.get('status')) is not int or module['status'] != 0
+            or module.get('curr_ver') != '0'):
+        return None, 'application_not_uninstalled'
+    version = _module_text(module.get('latest_ver'))
+    if version is None or version != _module_text(app.get('version')):
+        return None, 'catalog_version_changed'
+    size, vid = app.get('size'), app.get('vid')
+    if (type(size) is not int or not 0 <= size <= 2 ** 31 - 1
+            or type(module.get('size')) is not int or module['size'] != size
+            or type(vid) is not str or re.fullmatch(r'[A-Za-z0-9._-]{0,63}', vid) is None
+            or type(app.get('guest')) is not int or app['guest'] != 0):
+        return None, 'package_contract_unverified'
+    for row, field in ((app, 'path'), (module, 'inst_path')):
+        value = row.get(field)
+        if value is not None and (type(value) is not str or len(value.encode('utf8', errors='replace')) > 4096):
+            return None, 'package_contract_unverified'
+    body = {'client_id': 'r1-toolbox', 'flag': 0, 'apply_id': identifier,
+            'module_name': expected_name, 'module_type': kind, 'source': source,
+            'version': version, 'vid': vid, 'size': size, 'guest': 0}
+    _validate('application_install', {}, body)
+    return {'body': body, 'app_identity': {key: app.get(key) for key in (
+        'path', 'install_time', 'status', 'apply_opt')},
+        'module_identity': {key: module.get(key) for key in ('id', 'module_name',
+            'type', 'curr_ver', 'latest_ver', 'size', 'status', 'upgradable',
+            'usable', 'device_need_update', 'inst_path')}, 'installed': False}, None
 
 
 def _native_modules(frame):
@@ -473,6 +540,126 @@ class NativeCapabilities:
         self._idempotency = idempotency_store or _STORE
         self._diagnostic = diagnostic is True
 
+    def _installation(self, tool, arguments, principal, authorizer, result):
+        """Finite plan/revalidate/install; native ACK is never task completion."""
+        mutation = tool == 'install_native_application'
+        pending, responded, attempted = None, False, False
+        operation = _OPERATIONS[tool]
+        result.update(may_contact_vendor=True, mutation_outcome='not_sent' if mutation else None)
+        try:
+            if type(arguments) is not dict or set(arguments) != set(_SPECS[tool]['inputSchema']['required']):
+                raise BusinessTransportError('invalid_parameters')
+            identifier = arguments.get('application_id')
+            if type(identifier) is not int or not 1 <= identifier <= 2 ** 31 - 1:
+                raise BusinessTransportError('invalid_parameters')
+            if mutation and (arguments.get('confirmed') is not True
+                    or type(arguments.get('expected_version')) is not str
+                    or re.fullmatch(r'app_install_[0-9a-f]{32}', arguments['expected_version']) is None):
+                raise BusinessTransportError('invalid_parameters')
+            if mutation and (type(arguments.get('idempotency_key')) is not str or
+                    re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', arguments['idempotency_key']) is None):
+                raise BusinessTransportError('idempotency_required')
+            if (type(principal) is not dict or type(principal.get('key_id')) is not str
+                    or re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', principal['key_id']) is None
+                    or any(type(principal.get(key)) is not int or not 1 <= principal[key] <= 2 ** 53 - 1
+                           for key in ('grant_revision', 'credential_generation'))):
+                raise BusinessTransportError('authorization_denied')
+            _authorize(authorizer, operation, {}, {})
+            if mutation:
+                digest = hashlib.sha256(json.dumps({'tool': tool, 'arguments': arguments},
+                    sort_keys=True, separators=(',', ':')).encode('utf8')).hexdigest()
+                pending, replay = self._idempotency.begin(principal, arguments['idempotency_key'], digest)
+                if replay is not None:
+                    pending = None
+                    _authorize(authorizer, operation, {}, {})
+                    return replay
+                result['idempotent_replay'] = False
+            if identifier not in _INSTALL_ALLOWLIST:
+                if mutation:
+                    raise BusinessTransportError('application_not_allowlisted')
+                result.update(available=True, status='ok', data={'application_id': identifier,
+                    'allowed': False, 'reason': 'application_not_allowlisted', 'expected_version': None})
+                return result
+            with _operation_lock():
+                def authorize_catalog(_operation, _params, _body):
+                    _authorize(authorizer, operation, {}, {})
+                    return True
+                frames = {}
+                for query in ('apply_list', 'module_inventory'):
+                    status, frame = self.client.request(query, {}, {}, authorize_catalog)
+                    _authorize(authorizer, operation, {}, {})
+                    if status != 200 or _native_code(query, frame) not in (None, 0):
+                        raise BusinessTransportError('invalid_json')
+                    frames[query] = frame
+                candidate, reason = _installation_candidate(identifier, frames)
+                if reason is not None:
+                    _authorize(authorizer, operation, {}, {})
+                    if mutation:
+                        raise BusinessTransportError(reason)
+                    result.update(available=True, status='ok', data={'application_id': identifier,
+                        'allowed': False, 'reason': reason, 'expected_version': None})
+                    return result
+                material = {'candidate': candidate, 'owner': {key: principal.get(key) for key in
+                    ('key_id', 'grant_revision', 'credential_generation', '_service_generation')}}
+                version = 'app_install_' + hashlib.sha256(json.dumps(material, sort_keys=True,
+                    ensure_ascii=True, separators=(',', ':')).encode('ascii')).hexdigest()[:32]
+                public = {'application_id': identifier, 'name': candidate['body']['module_name'],
+                          'target_version': candidate['body']['version'], 'expected_version': version,
+                          'allowed': True, 'operation': 'new_install_only', 'reason': None,
+                          'resource_effects': {
+                              'network_download': True, 'may_start_background_process': True,
+                              'program_storage': 'vendor_selected_netdisk_bd2_directory',
+                              'application_data': 'current_owner_Downloads_and_native_application_state',
+                              'file_tool_sandbox_applies': False,
+                              'native_application_delegation': True},
+                          'package_selection': 'factory_current_module_id',
+                          'version_is_observed_not_final_attestation': True,
+                          'effect_summary': '原厂安装器可能联网下载百度网盘v2模块，写入独立程序目录和当前管理员应用状态，并启动后台进程；后续原生网盘任务可使用管理员Downloads。该应用不因Toolbox文件授权而成为文件沙箱。'}
+                _authorize(authorizer, operation, {}, {})
+                if not mutation:
+                    result.update(available=True, status='ok', data=public)
+                    return result
+                if arguments['expected_version'] != version:
+                    raise BusinessTransportError('installation_plan_changed')
+                params, body = _validate('application_install', {}, candidate['body'])
+                _authorize(authorizer, operation, params, body)
+                attempted = True
+                status, frame = self.client.request(operation, params, body, authorizer, confirmed=True)
+                responded = True
+                code = _native_code(operation, frame)
+                result['native'] = {'http_status': status, 'code': code}
+                if status != 200 or code not in (None, 0):
+                    _authorize(authorizer, operation, params, body)
+                    result.update(status='native_error', reason='native_request_rejected', mutation_outcome='rejected')
+                    return result
+                # Audited appcenter success may omit code, but must echo both
+                # exact object fields. No current-id or synthetic task is ACK.
+                if (type(frame.get('apply_id')) is not int or frame['apply_id'] != identifier
+                        or frame.get('module_name') != candidate['body']['module_name']):
+                    raise BusinessTransportError('invalid_json')
+                _authorize(authorizer, operation, params, body)
+                result.update(available=True, status='ok', mutation_outcome='acknowledged', data={
+                    'application_id': identifier, 'name': candidate['body']['module_name'],
+                    'target_version': candidate['body']['version'], 'accepted': True,
+                    'effect_confirmed': False, 'factory_acknowledgement_only': True,
+                    'native_task_id': None, 'next_step': 'get_application_install_progress'})
+        except BusinessTransportError as error:
+            result['reason'] = error.reason
+            if mutation:
+                unknown = responded or error.request_sent
+                result['mutation_outcome'] = 'unknown' if unknown else 'not_sent'
+                if unknown:
+                    result.update(reason='result_unconfirmed', failure_reason=error.reason)
+        except Exception:
+            result['reason'] = 'transport_failed'
+            if mutation and attempted:
+                # An unknown adapter failure must not authorize retrying a write.
+                result.update(reason='result_unconfirmed', mutation_outcome='unknown')
+        finally:
+            if pending is not None:
+                self._idempotency.finish(pending, result)
+        return result
+
     def execute(self, tool, arguments=None, *, principal=None, authorizer=None):
         result = {'schema_version': 1, 'available': False, 'status': 'unavailable',
                   'reason': None, 'data': None, 'native': {'http_status': None, 'code': None},
@@ -484,6 +671,8 @@ class NativeCapabilities:
         pending, responded, mutation = None, False, tool in _WRITES if type(tool) is str else False
         try:
             arguments = {} if arguments is None else arguments
+            if type(tool) is str and tool in _INSTALL_TOOLS:
+                return self._installation(tool, arguments, principal, authorizer, result)
             params, body = _arguments(tool, arguments)
             operation = _OPERATIONS[tool]
             _authorize(authorizer, operation, params, body)
@@ -672,7 +861,7 @@ def collect_application_package_context(root='/', *, authorizer=None, client=Non
                            'install_flag': 0, 'update_flag': 1,
                            'native_worker_is_asynchronous': True,
                            'independent_signature_requirement': False,
-                           'pending_reason': PENDING['install_application']}}
+                           'pending_reason': PENDING['install_other_applications']}}
     try:
         _authorize(authorizer, operation, params, body)
         native = client or VendorBusinessClient(root=root)

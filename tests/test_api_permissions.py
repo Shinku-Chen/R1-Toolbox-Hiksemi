@@ -196,6 +196,8 @@ class ApiPermissionTests(unittest.TestCase):
                 tools.append('plan_docker_project_update')
             if name == 'execute_docker_deployment':
                 tools.append('plan_docker_deployment')
+            if name == 'install_native_application':
+                tools.append('plan_native_application_install')
             for level, role in enumerate(ROLES):
                 for domain_granted in (False, True):
                     for tool_granted in (False, True):
@@ -233,6 +235,17 @@ class ApiPermissionTests(unittest.TestCase):
         self.assertTrue(permissions.valid_docker_projects(key['docker_projects'], 'readwrite', ['docker']))
         key['tool_grants'] = ['plan_docker_project_update']
         self.assertFalse(permissions.permission_allows(key, 'docker', 'admin', tool_name='plan_docker_project_update'))
+
+    def test_native_install_requires_explicit_plan_and_admin_without_legacy_expansion(self):
+        tools = ['plan_native_application_install', 'install_native_application']
+        key = explicit_principal('admin', tools, ['apps'])
+        self.assertTrue(permissions.permission_allows(key, 'apps', 'admin', tool_name='install_native_application'))
+        key['tool_grants'].remove('plan_native_application_install')
+        self.assertFalse(permissions.permission_allows(key, 'apps', 'admin', tool_name='install_native_application'))
+        key = explicit_principal('readwrite', tools, ['apps'])
+        self.assertFalse(permissions.permission_allows(key, 'apps', 'admin', tool_name='install_native_application'))
+        for name in tools:
+            self.assertNotIn(name, permissions.LEGACY_TOOLS)
 
     def test_v3_malformed_tools_or_resource_grants_fail_closed(self):
         good = explicit_principal('admin', ['get_nas_status'])

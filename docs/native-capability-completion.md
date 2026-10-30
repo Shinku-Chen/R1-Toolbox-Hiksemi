@@ -4,12 +4,14 @@
 
 实现验证包括离线固件审计、本地 fixture，以及下文记录的固定 NAS 查询收据复核；未向 NAS 安装应用、修改名称、切换识别、删除相册或控制备份。下面的“已实现”指有真实固定执行器及自动测试，不代表已经完成 NAS 写入验收。新增模块库存工具的本地验证也不等于已完成该接口的 NAS 验收。
 
-## 已实现十五项
+## 已实现十七项
 
 | 工具 | 最低角色／功能域 | 参数与实际效果 |
 | --- | --- | --- |
 | `list_native_applications` | 读写／`apps` | 固定 `get_apply_list`＋`opttype=0`，返回原厂 `apply_id`、名称、版本、原始安装状态；不把目录当完整已装或运行清单，不输出来源 URL、`vid`、路径 |
 | `list_native_modules` | 读写／`apps` | 显式固定 `get_modulize_table`，将 `available_list/installed_list` 分开返回，仅有限模块身份、版本和原始整数状态；原厂可能联系厂商更新支持状态，不输出安装路径或参数，不推断运行，不授予安装或卸载权限 |
+| `plan_native_application_install` | 管理员／`apps` | `application_id`；固定两目录交叉核对，仅预览已审计白名单的未安装普通应用，返回 opaque 当前版本及下载、后台进程、独立安装目录和原生应用数据影响；查询可能更新原厂支持状态，不执行安装 |
+| `install_native_application` | 管理员／`apps` | `application_id/expected_version`＋确认／本键幂等；仅对白名单新装应用重新核对两目录后固定 `install_apply/flag=0`，不接收包地址、路径、脚本或 action。原厂 ACK 仅代表受理，不伪造任务 ID、完成或进度 |
 | `get_application_install_progress` | 管理员／`apps` | `application_id`＋确认／幂等键；先核对固定所有者目录，再调用原厂 `get_install_progress`。此动作会同步插件、修改完成状态并写缓存，属于管理操作。只保留原厂 `size/total_size/status` 等数值，不编造百分比 |
 | `list_backup_tasks` | 读写／`backup` | 固定 `get_backup_task_list`，只接受当前管理员归属，投影运行／等待／完成组、原始状态、字节量和内部任务版本，不返回来源、目标、磁盘身份或动作原文。原厂缺失的组保持 `null`，不补零 |
 | `get_auto_backup_settings` | 读写／`backup` | 固定 `get_auto_backup`，投影 `udisk_a_status/sd_status/udisk_a_type/sd_type` 原始整数，缺失为 `null`，不猜枚举意义 |
@@ -24,7 +26,7 @@
 | `get_movie_library_scan_status` | 读写／`movie` | 明确 `library_id`，固定 POST `lib_scan_status`，仅投影 `status/scaned/total/timestamp/num` 原始数字，不启动扫描，不返回路径或推算进度 |
 | `delete_album` | 读写／`albums` | `album_id`＋确认／幂等键；先核对当前所有者目录，只接受 `type=custom` 且 ID 大于七的普通自建相册，不允许保留／共享相册。原厂删除相册表、索引归属和相关共享任务元数据，异步清理 ACK 不表示已经完成 |
 
-所有十五项原厂请求都可能通过共同认证初始化所有者资源，因此没有 `readOnlyHint` 或幂等查询承诺，最低角色也不降为只读。原有五项脱敏业务缓存保持被动只读，不会因为这些新工具而自动联网刷新。
+所有十七项原厂请求都可能通过共同认证初始化所有者资源，因此没有 `readOnlyHint` 或幂等查询承诺，最低角色也不降为只读。原有五项脱敏业务缓存保持被动只读，不会因为这些新工具而自动联网刷新。
 
 “暂停／取消备份”和“关闭自动导入”只收紧既有原厂任务，不提供恢复、开启、创建任务或变更目的地。这些新增目标操作需要先证明真实 Users 根及 ACL；不能沿用本页的停用权限扩大为任意备份文件操作。AI 识别开关属于管理员对原厂后台功能的配置，不授予模型照片内容访问。
 
@@ -48,7 +50,7 @@
 
 一个普通工具最多一次固定请求；删除相册、应用进度和备份停用操作最多一次固定所有者目录预检加一次固定写请求。模块锁等待最长十秒，每次网络请求共享自身十秒绝对截止时间；不做自动重试或无限等待。两请求工具最长包含三个有界窗口。最终发请求前检查的是外层原工具权限，预检不会悄悄授予独立列表工具权限。暂停与取消共享同一原厂 `backup_task_halt` 标识，授权器必须绑定外层工具，不能从原厂动作一对一反推权限。
 
-七个显式写工具均需 `confirmed:true` 和本 Key 的 `idempotency_key`。进程内记录绑定 `key_id/grant_revision/credential_generation` 及规范化请求摘要，重复键不重放原厂写请求，不同请求复用键拒绝；存储满时拒绝新写而不淘汰未知结果。明确未发送才释放幂等记录；可能发送但没有可信回执或写后撤权时保留 `mutation_outcome:unknown`，返回 `result_unconfirmed`。原厂 `code=0` 仅返回 `factory_acknowledgement_only`，不编造异步完成和任务百分比。
+八个显式写工具均需 `confirmed:true` 和本 Key 的 `idempotency_key`。进程内记录绑定 `key_id/grant_revision/credential_generation` 及规范化请求摘要，重复键不重放原厂写请求，不同请求复用键拒绝；存储满时拒绝新写而不淘汰未知结果。明确未发送才释放幂等记录；可能发送但没有可信回执或写后撤权时保留 `mutation_outcome:unknown`，返回 `result_unconfirmed`。原厂 `code=0` 仅返回 `factory_acknowledgement_only`，不编造异步完成和任务百分比。
 
 应用进度查询本身是一次管理写操作。同一幂等键再次调用取得原记录；用户确实要再次观察新状态时应明确使用新幂等键，而不是轮询后台自动更换键。重启后内存记录消失，不能据此认定旧写没有执行，应先核对实际状态。
 
@@ -58,7 +60,7 @@
 
 仍不注册下列假执行器：
 
-- 应用安装／卸载／更新／通用启停。原厂安装器接收目录字段、应用 ID 和固定操作枚举，`source` 在本固件中是整数，不是包 URL。原厂目录条目加确认、幂等可以作为后续固定安装工具的输入设计；本批尚未闭合目录条目与实际模块包身份、完整异步任务及卸载效果，故不注册写回调。不要求额外的外部独立签名，也不据现有证据宣称原厂有或没有签名验证；禁止开放任意包 URL／安装脚本代理。
+- 非白名单应用安装、所有应用卸载／更新／通用启停。原厂安装器接收目录字段、应用 ID 和固定操作枚举，`source` 在本固件中是整数，不是包 URL。当前只接下文审计的固定普通应用新增安装，不因任意目录条目存在而开放写入。不要求额外的外部独立签名，也不据现有证据宣称原厂有或没有签名验证；禁止开放任意包 URL／安装脚本代理。
 - 共享创建与相册成员变更。须核实服务端分享 ID／外链、共享相册归属及成员邀请枚举，不本地伪造分享链接或创建真实样本。
 - 相册文件、影视来源／播放／字幕、备份新目标和恢复。须与真实 `/drives/*/Users/` 根、原厂 ACL 和最终文件句柄绑定；不能通过原厂媒体路径绕开文件能力，也不能用原厂目录规划摘要冒充最终文件打开权限。
 - 用户创建、删除、重置口令和权限修改。需逐对象账号权限、所有者保护及凭据传输契约，不把已审计只读用户目录当通用用户管理桥。
@@ -93,14 +95,34 @@
 
 前台安装函数对 `ipc/update_desc/frpc/nginx` 存在特殊处理分支，说明该模块系统涵盖核心服务，并非全部都是普通可卸载应用。`appcenter` 删除请求还固定携带 `data_clr=1`；`rest_modulize_set_oper@0x22c195–0x22c1a3` 将其写入删除结构 `+0xd48`。本批尚未逐模块证明该标记和删除回调的用户数据范围，不能把卸载包装成“保留数据”，也不能让安装器管理 Toolbox 的 Docker／运行环境依赖。
 
-后续写工具固定采用以下契约，当前尚未注册未闭合的回调：
+应用写工具统一采用以下契约；当前仅下文已审计的新装能力实现，更新与卸载仍不注册未闭合回调：
 
 1. 管理员只选择当前所有者目录的 `application_id` 和执行器生成的 opaque `expected_version`；版本绑定 ID、模块名称、`vid/module_type/source/version/size` 及当前安装状态。请求不接收 URL、`paramList`、脚本、路径、原厂 action 或任意模块名。
 2. 发送前重读同一固定目录，核对目录条目与原厂模块表的精确对应。只允许已审计的普通应用；核心服务及 Toolbox 依赖不得因管理员角色而跳过保护，未知模块保持不可执行。
 3. 安装／更新仅由服务端重新验证的条目构造固定 `install_apply` body 和 `flag=0/1`。卸载须先核实该模块的真实停止、程序清理、数据清理及依赖语义；不得暗改原厂 `data_clr`，也不得把原厂模块删除变成任意文件删除入口。
 4. 三类写入均要求确认、本键幂等、发送前和结果后的当前授权／身份复验。仅保留原厂实际 ACK、错误码和已返回的任务标识；受理不表示完成，未知结果不重放，进度只沿现有显式安装状态工具读取原厂值。
 
-目前阻塞点是实际目录身份与模块映射、逐模块清理边界及异步状态契约，不是额外独立签名要求。结构诊断先提供上述当前列表证据；不能据缺失字段推断原厂不存在包校验，也不会为填满工具目录而接受任意地址安装。
+对于其余模块和更新／卸载，阻塞点是实际目录身份与模块映射、逐模块清理边界及异步状态契约，不是额外独立签名要求。结构诊断提供上述当前列表证据；不能据缺失字段推断原厂不存在包校验，也不会为填满工具目录而接受任意地址安装。
+
+## 已审计普通应用的新增安装
+
+本轮先实现固定白名单 `application_id:34/module_name:netdisk_bd2`（百度网盘 v2）新增安装，未实现更新或卸载。它不是按 `source=0` 推导的普通应用：还须应用目录的精确 ID／名称／`source:0/module_type:0` 与模块可用表的精确 ID／名称／`type:extension` 对应，已安装表没有该 ID 或同名别名，当前原厂版本为字符串 `0`；目标 `latest_ver` 与应用目录 `version`、两处大小必须一致。任何原始重复 ID、同名异 ID、空名称、安装中或已安装状态都拒绝。核心 `ipc/update_desc/frpc/nginx`、Docker、下载引擎及其它未审计模块不在白名单内，管理员也不能跳过。
+
+固件 `modulize_mod_netdisk_bd2_register@0x76f755` 在 `0x76f7a3` 注册固定名称 `netdisk_bd2`，在 `0x76f7ce/0x76f7d5` 绑定安装回调 `modulize_mod_netdisk_bd2_install@0x76f1ae`。回调核对当前用户资源，调用 `netd2_get_install_path@0x32bdd6` 获取原厂选定的独立 `netdisk_bd2` 程序目录；`netd2_get_download_path@0x32bedd` 以原厂选定磁盘和当前用户构造 `Users/<user>/Downloads` 应用数据位置，并写入模块运行上下文。安装后的启动回调 `modulize_mod_netdisk_bd2_start@0x76efb0` 调原厂 `netd2_init@0x31e775`；文件检查回调还核验该模块的 `libkernel.so/P2PClient/baiduNas_v2`。没有执行这些厂商 ELF 或回调地址。
+
+原厂包选择委托固定模块 ID，不接收调用者的 URL 或脚本。`appcenter install_apply_request@0x3543` 清零结构，读取固定 JSON 字段；`flag=0` 进入新增安装，`flag=1` 更新不在本工具范围内。`client_id` 缺失仅记录日志，工具使用固定 `r1-toolbox`；`vid` 可为空字符串，缺失的可选 `paramList/support_terminal` 不伪造补齐，也不向调用者开放。传输只允许十个固定 body 字段：`client_id/flag/size/apply_id/module_name/vid/module_type/source/version/guest`，`flag/source/module_type/guest` 必须为整数零，ID 和名称固定为该白名单。原厂通过先前审计的固定模块安装链下载／部署包，既有安装检查会拒绝已经安装的模块；Toolbox 不添加外部独立签名要求，也不宣称进行了原厂不存在于当前证据中的包校验。
+
+`plan_native_application_install` 参数只有 `application_id`，最低管理员＋`apps`＋精确工具授权。它显式查询当前应用与模块库存，不安装；原厂查询可能联网更新支持状态。允许时返回 `app_install_<32hex>` 的 `expected_version`，绑定精确包字段、当前未安装证明、原厂私有目录摘要以及当前 Key／授权修订／凭据代际／服务代际。目录私有路径只在宿主内参与摘要，响应只有固定资源类别和实际影响说明。拒绝时给出固定原因和 `allowed:false`，不产生可安装版本。
+
+实际影响是：原厂可能联网下载模块包，写入独立程序目录及管理员原生应用状态，启动百度网盘后台进程；原生网盘后续任务可使用管理员 Downloads。此功能属于管理员明确委托原厂应用安装，不能宣传原生进程已被 Toolbox 文件授权沙箱化，也不能拿安装授权执行任意文件操作。计划中的版本是最后观察到的厂商候选版本；固定原厂后端按当前模块 ID 选择包，不提供目标字节或最终已安装版本证明。返回明确 `package_selection:factory_current_module_id/version_is_observed_not_final_attestation:true`，最终状态仍须核对。
+
+`install_native_application` 要求同一应用 ID、当前 `expected_version`、`confirmed:true` 和本 Key 的 `idempotency_key`。发送前在有界共享锁内重新查询两目录并重建相同版本；版本变化、撤权、轮换、服务重开或身份变化拒绝。固定调用 `POST /rest/1.1/applycenter?action=install_apply`，不把原厂用户参数、包地址或安装目录转成 HTTP 输入。
+
+`appcenter` 在 `0x4651` 保存等待状态，`0x46a6` 排入真实异步队列。成功分支 `0x4700–0x479d` 只输出精确 `module_name/apply_id`，可能省略 `code`；工具只在这两个身份字段精确匹配且没有明确非零错误码时标记 `accepted:true/factory_acknowledgement_only:true/effect_confirmed:false`。没有真实独立任务 ID 时返回 `native_task_id:null`，不拿应用 ID 冒充任务 ID。继续使用已有 `get_application_install_progress` 显式查询原厂状态，该查询本身仍须管理员确认与新幂等标识。
+
+可能已发送但没有可信 ACK，或写入后撤权，保留 `mutation_outcome:unknown` 和 `result_unconfirmed`，相同 Key／修订／凭据代际的同幂等标识不会再次发送。明确未发送可重试；已受理、拒绝或未知结果都保留内存回执；进程重启后的内存回执不构成持久幂等保证。共享锁等待最长十秒，安装最多两个固定目录查询与一个写请求，各自使用原有十秒绝对网络窗口。
+
+2026-10-30 的模块实机收据已证明 ID `34` 的应用版本与可用表候选 `V1.0.14` 相同、当前版本为 `0` 且不在已安装表；`usable:0` 在已安装记录中也普遍存在，因此本实现保留该原始码参与版本，不将它猜为不可用布尔。实现与本地真实 HTTP fixture 已覆盖计划、固定 POST、身份／版本变化、核心保护、幂等、撤权和不确定 ACK；尚未在 NAS 实际安装该应用。真实写入验收须先向用户展示当前计划和上述具体影响，再由用户选择该普通应用；不会为查询形状再次添加零散诊断字段打包试探。
 
 ## `364b858` 实机复核与模块库存工具
 
