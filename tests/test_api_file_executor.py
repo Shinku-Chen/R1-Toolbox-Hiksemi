@@ -278,7 +278,27 @@ class OpenedFileTests(unittest.TestCase):
         with mock.patch('api_file_executor.os.open', side_effect=track):
             result = self.call('prepare_file_download', 'public/fifo')
         self.assertFalse(result['ok'])
-        self.assertTrue(all(flags & os.O_PATH for path, flags in seen))
+        self.assertEqual(result['error']['code'], 'unsupported_file_type')
+        fifo_opens = [flags for path, flags in seen if os.fspath(path) == 'fifo']
+        self.assertTrue(fifo_opens, 'The final FIFO component must be inspected.')
+        self.assertTrue(all(flags & os.O_PATH and flags & os.O_NOFOLLOW
+                            for flags in fifo_opens))
+        self.assertFalse(any(os.fspath(path).startswith('/proc/self/fd/')
+                             for path, unused_flags in seen))
+        # Both modules share os: this mock also sees the fixed proc metadata reads
+        # needed to verify every O_PATH handle's mount identity.
+        mountinfo = self.root / 'proc/self/mountinfo'
+        fdinfo = self.root / 'proc/self/fdinfo'
+        metadata_opens = [(Path(path), flags) for path, flags in seen
+                          if not flags & os.O_PATH]
+        self.assertTrue(any(path == mountinfo for path, unused_flags in metadata_opens))
+        for path, flags in metadata_opens:
+            self.assertTrue(path == mountinfo or
+                            path.parent == fdinfo and path.name.isascii() and path.name.isdigit(),
+                            f'Unexpected ordinary open before FIFO rejection: {path}')
+            self.assertEqual(flags & os.O_ACCMODE, os.O_RDONLY)
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            self.assertTrue(flags & os.O_NONBLOCK)
 
     def test_native_authority_pipeline_runs_fixed_owner_sql_tls_parser_and_real_fd_reads(self):
         import api_file_provider as provider
