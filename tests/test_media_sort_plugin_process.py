@@ -31,6 +31,26 @@ def write_stat(folder, *, pid=None, name='scraper', start=123, complete=True):
         (number + ' (' + name + ') ' + ' '.join(fields) + '\n').encode('ascii'))
 
 
+def elf_read_hook(read, fstat, binary_identity, on_elf_read):
+    """Leave shared proc reads intact; trigger once on the confirmed ELF FD."""
+    triggered = False
+
+    def read_block(descriptor, limit):
+        nonlocal triggered
+        block = read(descriptor, limit)
+        if block and not triggered:
+            try:
+                info = fstat(descriptor)
+            except OSError:
+                return block
+            if (info.st_dev, info.st_ino) == binary_identity:
+                on_elf_read(block)
+                triggered = True
+        return block
+
+    return read_block
+
+
 class MediaSortProcessPortableTests(unittest.TestCase):
     def identity_folder(self):
         directory = tempfile.TemporaryDirectory(prefix='r1-media-process-parser-')
@@ -249,14 +269,39 @@ class MediaSortProcessLinuxTests(unittest.TestCase):
         self.assert_unavailable(expected=expected)
 
     def test_pid_generation_change_during_real_hash_read_is_rejected(self):
-        calls = [0]
+        real_read, real_identity = plugin.os.read, plugin._kernel_identity
+        binary_identity = (self.binary.stat().st_dev, self.binary.stat().st_ino)
+        for observed in (False, True):
+            with self.subTest(observer=observed):
+                write_stat(self.folder, start=123)
+                identities, changed_at_read = [], []
+                observer = plugin._Diagnostics().process(41) if observed else None
 
-        def change_generation():
-            calls[0] += 1
-            if calls[0] == 2:
-                write_stat(self.folder, start=124)
+                def capture_identity(folder):
+                    value = real_identity(folder)
+                    identities.append(value)
+                    return value
 
-        self.assert_unavailable(guard=change_generation)
+                def change_after_elf_read(block):
+                    # The shared hook has already selected the actual ELF FD;
+                    # proc reads may occur before the first identity is known.
+                    self.assertTrue(identities)
+                    self.assertEqual(identities[0], (41, b'scraper', 123))
+                    changed_at_read.append(block)
+                    write_stat(self.folder, start=124)
+
+                read_hook = elf_read_hook(real_read, os.fstat, binary_identity, change_after_elf_read)
+                with mock.patch.object(plugin.os, 'read', side_effect=read_hook), \
+                        mock.patch.object(plugin, '_kernel_identity', side_effect=capture_identity):
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.root, 41, self.guard, observer=observer)
+                self.assertEqual(changed_at_read, [b'TEST'])
+                self.assertEqual((caught.exception.code, caught.exception.stage, caught.exception.reason),
+                                 ('unavailable', 'process_final', 'identity_changed'))
+                if observer is not None:
+                    self.assertEqual(observer.value['status'], 'identity_changed')
+                    self.assertTrue(all(not stage['observations']
+                                        for stage in observer.value['stages'].values()))
 
     def test_discover_collects_all_valid_pids_even_for_same_data_directory(self):
         self.make_process(42)

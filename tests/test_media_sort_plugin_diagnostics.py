@@ -22,6 +22,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 import media_sort_plugin as plugin
+import vendor_runtime
+from test_media_sort_plugin_process import elf_read_hook
 
 
 PROCESS_STAGES = ('comm', 'stat', 'uid', 'namespace_mnt', 'namespace_net',
@@ -48,6 +50,14 @@ def file_stat(**changes):
                   st_uid=0, st_gid=0, st_nlink=1, st_size=4,
                   st_mtime_ns=1, st_ctime_ns=1)
     return SimpleNamespace(**{**values, **changes})
+
+
+def record_connections(connect, connections):
+    """Observe the SQLite API without shadowing its uri keyword argument."""
+    def record_connect(database_uri, *args, **kwargs):
+        connections.append((database_uri, kwargs.get('uri')))
+        return connect(database_uri, *args, **kwargs)
+    return record_connect
 
 
 class _ProcFixture:
@@ -184,6 +194,65 @@ class MediaSortProcessDiagnosticsTests(unittest.TestCase):
                 self.assertGreaterEqual(row['stages'][stage]['elapsed_ms'], 0)
         self.assertNotIn(SECRET, json.dumps(row))
         self.assertNotIn('/audited/scraper', json.dumps(row))
+
+    def test_hash_read_generation_race_rejects_with_and_without_observer(self):
+        real_identity, real_read, real_fstat = plugin._kernel_identity, os.read, os.fstat
+        self.assertIs(vendor_runtime.os, os)
+        self.assertIs(plugin._read, vendor_runtime._read)
+        self.assertIs(real_identity, vendor_runtime._kernel_identity)
+        binary_identity = (self.fixture.info.st_dev, self.fixture.info.st_ino)
+        for observed in (False, True):
+            with self.subTest(observer=observed):
+                write_stat(self.fixture.folder, start=123)
+                identities, changed_at_read, reads = [], [], []
+                observer = plugin._Diagnostics().process(41) if observed else None
+
+                def capture_identity(folder):
+                    value = real_identity(folder)
+                    identities.append(value)
+                    return value
+
+                def read(descriptor, limit):
+                    # The vendor reader keeps real open/read/close for proc.
+                    # Only the executable FD belongs to the explicit facade.
+                    block = (self.fixture.read(descriptor, limit) if descriptor == 9001
+                             else real_read(descriptor, limit))
+                    if block:
+                        reads.append((descriptor == 9001, block, len(identities), bool(changed_at_read)))
+                    return block
+
+                def fstat(descriptor):
+                    return self.fixture.fstat(descriptor) if descriptor == 9001 else real_fstat(descriptor)
+
+                def change_after_elf_read(block):
+                    self.assertEqual(identities[0], (41, b'scraper', 123))
+                    changed_at_read.append(block)
+                    write_stat(self.fixture.folder, start=124)
+
+                read_hook = elf_read_hook(read, fstat, binary_identity, change_after_elf_read)
+                with mock.patch.object(os, 'read', side_effect=read_hook), \
+                        mock.patch.object(self.fixture.os, 'read', side_effect=read_hook), \
+                        mock.patch.object(plugin, '_kernel_identity', side_effect=capture_identity):
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.fixture.root, 41, self.fixture.guard, observer=observer)
+                self.assertEqual(changed_at_read, [b'TEST'])
+                first_elf = next(i for i, event in enumerate(reads) if event[0])
+                before_elf = reads[:first_elf]
+                self.assertTrue(any(block == b'scraper\n' and captured == 0
+                                    for _, block, captured, _ in before_elf))
+                self.assertTrue(any(block.startswith(b'41 (scraper) ') and captured == 0
+                                    for _, block, captured, _ in before_elf))
+                self.assertTrue(all(not is_elf and not changed
+                                    for is_elf, _, _, changed in before_elf))
+                self.assertGreater(reads[first_elf][2], 0)
+                self.assertEqual((caught.exception.code, caught.exception.stage, caught.exception.reason),
+                                 ('unavailable', 'process_final', 'identity_changed'))
+                if observer is not None:
+                    self.assertEqual(observer.value['status'], 'identity_changed')
+                    self.assertIsNone(observer.value['start_ticks'])
+                    self.assertTrue(all(not stage['observations']
+                                        for stage in observer.value['stages'].values()))
+                    self.assertNotIn(SECRET, json.dumps(observer.value))
 
     def test_comm_rejection_is_visible_and_does_not_hash_or_open_database(self):
         (self.fixture.folder / 'comm').write_bytes(b'other\n')
@@ -853,6 +922,42 @@ class MediaSortDiagnosticCacheTests(unittest.TestCase):
 
 
 class MediaSortDatabaseStageDiagnosticsTests(unittest.TestCase):
+    def test_connect_recorder_preserves_uri_keyword_and_read_only_sqlite(self):
+        # Exercise the same recorder used by the Linux chain before _operation
+        # can redact a test-hook TypeError. Only URI location/FD enumeration are
+        # synthetic here; real no-follow and SQLite FD proof remain Linux-only.
+        from test_media_sort_plugin import initialize
+
+        directory = tempfile.TemporaryDirectory(prefix='r1-media-diag-uri-')
+        self.addCleanup(directory.cleanup)
+        database = Path(directory.name) / 'scraper.db'
+        connect = plugin.sqlite3.connect
+        with connect(database) as writer:
+            initialize(writer)
+        writer.close()
+        opened = plugin._Opened.__new__(plugin._Opened)
+        opened.directory = 9001
+        opened.main_identity = plugin._stable(database.stat())
+        opened.guard = mock.Mock()
+        opened.current = mock.Mock()
+        connections = []
+        database_uri = database.as_uri()
+        with mock.patch.object(plugin, 'quote', return_value=database_uri[len('file:'):]) as quote, \
+                mock.patch.object(plugin, '_fd_states', side_effect=[{}, {9002: opened.main_identity}]), \
+                mock.patch.object(plugin.sqlite3, 'connect',
+                                  side_effect=record_connections(connect, connections)):
+            con = opened.connect()
+            try:
+                self.assertEqual(con.execute('PRAGMA query_only').fetchone()[0], 1)
+                self.assertEqual(con.execute('SELECT count(*) FROM metadata').fetchone()[0], 1)
+                with self.assertRaises(plugin.sqlite3.OperationalError):
+                    con.execute('UPDATE metadata SET timestamp=123')
+            finally:
+                con.close()
+        quote.assert_called_once_with('/proc/self/fd/9001/scraper.db', safe='/')
+        self.assertEqual(connections, [(database_uri + '?mode=ro', True)])
+        self.assertEqual(opened.sqlite_fd, 9002)
+
     """Exercise real current/schema calls with precisely failing dependencies."""
 
     def database(self, fail_statement):
@@ -1013,17 +1118,14 @@ class MediaSortDiagnosticLinuxChainTests(unittest.TestCase):
         connections = []
         connect = plugin.sqlite3.connect
 
-        def record_connect(uri, *args, **kwargs):
-            connections.append((uri, kwargs.get('uri')))
-            return connect(uri, *args, **kwargs)
-
         def assert_read_only(opened, con):
             self.assertEqual(con.execute('PRAGMA query_only').fetchone()[0], 1)
             self.assertTrue(opened.sqlite_fd >= 0)
             self.assertEqual(plugin._stable(os.fstat(opened.sqlite_fd)), opened.main_identity)
             return describe(opened, con)
 
-        with mock.patch.object(plugin.sqlite3, 'connect', side_effect=record_connect), \
+        with mock.patch.object(plugin.sqlite3, 'connect',
+                               side_effect=record_connections(connect, connections)), \
                 mock.patch.object(self.value, '_describe', side_effect=assert_read_only):
             state = self.probe()
         self.assertTrue(connections)

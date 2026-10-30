@@ -107,6 +107,8 @@ END;
 
 本功能配有原始 SQL 合同、SQLite 事务／并发插入回归、后端备份／权限检查、真实 HTTP 授权与撤权回归，以及独立浏览器交互检查。Linux 文件句柄检查以 Linux CI 为准；Windows 不具备的检查标记 skip，不冒充通过。
 
+进程换代回归在已捕获初始身份后的首次非空 ELF 读取处触发，不依赖授权 `guard` 的调用次数。共享全局 `os.read` 也承接 proc 读取，因此测试补丁须先按 FD 的设备号与 inode 筛选 ELF，其他 FD 原样返回，不能在 comm／stat 尚未完成时断言初始身份。便携回归保留原 `vendor_runtime._read` 的真实 proc 读取，证明前面的 comm／stat 不触发换代，ELF 才触发；有／无诊断 observer 均须拒绝该来源。SQLite 连接记录器透明转发数据库位置与 `uri=True`，首参不得与 SQLite 关键字重名。便携回归检查真实只读 SQLite 连接与 `query_only`，其中可执行文件 FD、URI 定位和 SQLite FD 枚举是明确的合成边界，不能替代 Linux 的真实 no-follow／SQLite FD 全链验收。`7cd1563` 的 Linux CI 暴露了上述两项测试夹具问题；它们不构成 NAS 身份失败的证据，修复后的 Linux 结果仍须独立核验。
+
 生产来源与数据库核验全部通过后，已经存在相同原始规则的 NAS 会识别为“已启用”，不会重复安装、重新 seed 或升级。
 
 2026-10-31，NAS 已运行 `sha-d9a9639d0902cd1cc25f6586a958b4cfbf976db5`。一次显式 probe 返回 HTTP 200、`unavailable` 与空候选，且未达到 12 秒超时；结合该版本发现流程，只能定位为发现／进程身份阶段拒绝，尚不能确定是 UID、命名空间、ELF、参数或其他具体进程门。该结果不证明数据库、原始 INSERT 或触发器规则失败，也未执行应用／撤销。新增固定阶段诊断尚待实机验证，不能将其实现等同于根因已经查明。
