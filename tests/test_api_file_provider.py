@@ -70,10 +70,11 @@ class Connection:
 class RuleTests(unittest.TestCase):
     def test_private_admin_recovery_is_not_a_read_or_write_subject(self):
         for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_fixture/source',
-                     '.R1-TOOLBOX-OPS/source', '.r1-toolbox-opſ/source'):
+                     '.R1-TOOLBOX-OPS/source', '.r1-toolbox-opſ/source',
+                     'folder/.r1-toolbox-ops/source', 'old-admin/.R1-TOOLBOX-OPS/source'):
             self.assertFalse(files.audited_owner_read_rule(path))
             self.assertFalse(files.audited_owner_write_rule(path))
-        for path in ('.r1-toolbox-ops2', 'folder/.r1-toolbox-ops/source'):
+        for path in ('.r1-toolbox-ops2', 'folder/.r1-toolbox-ops2/source'):
             self.assertTrue(files.audited_owner_read_rule(path))
             self.assertTrue(files.audited_owner_write_rule(path))
 

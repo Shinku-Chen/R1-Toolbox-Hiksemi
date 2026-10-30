@@ -46,6 +46,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const rotatedSecret = 'r1-fixture-rotated-ONLY-ONCE-<svg onload=x>';
   const unsafeName = '<img src=x onerror="window.apiNameInjected=1">客厅 AI';
   const calls = [];
+  let preflightCase = 'ready', privateRecoveryCase = false;
   let reads = 0, contractReads = 0, projectReads = 0, deploymentReads = 0, failDeploymentRead = false, failDeploymentWrite = false, serviceReads = 0, failServiceRead = true, failServiceWrite = false, releaseServiceWrite = null, holdServiceWrite = false, failContracts = false, failCreate = false, failRead = false, failManage = false;
   const fixtureTools = [
     ['get_nas_status', 'read', 'readonly'], ['get_media_status', 'media', 'readwrite'],
@@ -67,8 +68,9 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const deploymentId = 'deployment_' + '5'.repeat(24), unsafeDeployment = '<svg onload="window.apiDeploymentInjected=1">未来服务';
   const recoveryLocation = { boundary: 'admin', relative_path: '.r1-toolbox-ops', layout: 'admin_custody_v1', anchor_component: 'admin_root' };
   const recoveryChecks = ['namespace_root', 'drives_directory', 'physical_mount', 'users_root', 'admin_root'].map((component, index) => ({
-    component, uid: 0, mode: [1, 3].includes(index) ? '0777' : '0755', mount_id: '517', same_mount: index >= 2 ? true : null,
-    group_other_writable: [1, 3].includes(index), access_acl: 'absent', default_acl: 'absent', same_object: true, trusted: ![1, 3].includes(index),
+    component, uid: index === 1 ? 1046 : 0, mode: index === 1 ? '0775' : index === 3 ? '0777' : '0755', mount_id: '517', same_mount: index >= 2 ? true : null,
+    group_other_writable: [1, 3].includes(index), access_acl: 'absent', default_acl: 'absent', same_object: true,
+    required_for_trust: index === 4, gate: index === 4 ? 'trust_anchor' : 'location_only', trusted: index === 4 ? true : null,
   }));
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
@@ -180,18 +182,27 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       if (url.pathname.startsWith('/api/files/authority/')) {
         const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
         assert.equal(body.root_id, 'root_' + '1'.repeat(24));
-        if (url.pathname.endsWith('/preflight')) return reply(200, { ok: true, ready: false,
-          blockers: ['drives_directory_untrusted_mode_or_acl', 'users_root_untrusted_mode_or_acl'],
-          checks: recoveryChecks, recovery_location: recoveryLocation, recovery_anchor: recoveryChecks[4],
-          source_binding: { native_owner: 'verified', root_metadata_matches: true, same_mount: true }, existing_directory: 'absent' });
+        if (url.pathname.endsWith('/preflight')) {
+          const checks = structuredClone(recoveryChecks), registration = state.file_mutation_authority.authorities.find(row => row.root_id === body.root_id);
+          if (preflightCase === 'admin_mode') Object.assign(checks[4], { mode: '0777', group_other_writable: true, trusted: false });
+          if (preflightCase === 'admin_acl') Object.assign(checks[4], { access_acl: 'present', trusted: false });
+          return reply(200, { ok: true, ready: preflightCase === 'ready', trust_boundary: 'admin',
+            registration_trust_boundary: registration ? registration.trust_boundary : null,
+            owner_revalidation_required: !!registration && registration.trust_boundary === 'complete_ancestors_legacy',
+            blockers: preflightCase === 'ready' ? [] : ['admin_root_untrusted_mode_or_acl'],
+            checks, recovery_location: recoveryLocation, recovery_anchor: checks[4],
+            source_binding: { native_owner: 'verified', root_metadata_matches: true, same_mount: true }, existing_directory: registration ? 'registered' : 'absent' });
+        }
         if (url.pathname.endsWith('/initialize')) {
-          assert.equal(body.confirmed, true);
+          assert.deepEqual(body, { root_id: 'root_' + '1'.repeat(24), confirmed: true });
+          const previous = state.file_mutation_authority.authorities.find(row => row.root_id === body.root_id);
           state.file_mutation_authority.authorities = [...state.file_mutation_authority.authorities.filter(row => row.root_id !== body.root_id),
-            { root_id: body.root_id, enabled: true, status: 'registered', revision: 1, recovery_location: recoveryLocation }];
+            { root_id: body.root_id, enabled: true, status: 'registered', revision: previous ? previous.revision + 1 : 1,
+              recovery_location: recoveryLocation, trust_boundary: 'admin' }];
           return reply(200, { ok: true });
         }
         if (url.pathname.endsWith('/inspect')) return reply(200, { ok: true,
-          recoveries: [{ recovery_id: 'operation_' + 'a'.repeat(32), path: '接口验收/源.txt', tool: 'rename_file', state: 'result_unconfirmed', objects: ['source'] }] });
+          recoveries: [{ recovery_id: 'operation_' + 'a'.repeat(32), path: privateRecoveryCase ? 'folder/.r1-toolbox-ops/旧资料' : '接口验收/源.txt', tool: 'rename_file', state: 'result_unconfirmed', objects: ['source'] }] });
         if (url.pathname.endsWith('/restore')) {
           assert.deepEqual(body, { root_id: 'root_' + '1'.repeat(24), recovery_id: 'operation_' + 'a'.repeat(32), confirmed: true });
           return reply(200, { ok: true, recovery: { state: 'restored', index_verified: false } });
@@ -298,20 +309,43 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       && (await legacyAuthority.innerText()).includes('需先使用原镜像处理保管对象')
       && await legacyAuthority.locator('button:disabled').count() === 4);
     await manager.locator('[data-authority-preflight]').first().click();
-    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: 'users_root_untrusted_mode_or_acl' }).waitFor();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '初始化条件已通过' }).waitFor();
     const preflightEvidence = JSON.parse(await manager.locator('[data-ref="fileRecoveries"] pre').innerText());
     check('恢复预检完整显示五级链及admin恢复位置和锚点', JSON.stringify(preflightEvidence.checks) === JSON.stringify(recoveryChecks)
       && JSON.stringify(preflightEvidence.recovery_location) === JSON.stringify(recoveryLocation)
       && JSON.stringify(preflightEvidence.recovery_anchor) === JSON.stringify(recoveryChecks[4])
+      && preflightEvidence.trust_boundary === 'admin' && preflightEvidence.registration_trust_boundary === null && preflightEvidence.owner_revalidation_required === false
       && JSON.stringify(preflightEvidence.source_binding) === JSON.stringify({ native_owner: 'verified', root_metadata_matches: true, same_mount: true }));
-    check('admin锚点通过仍显示drives及Users阻断不冒充就绪', (await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('drives_directory_untrusted_mode_or_acl')
-      && !(await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('初始化条件已通过') && calls.filter(call => call.path.endsWith('/initialize')).length === 0);
+    check('父drives真实UID1046权限0775及Users0777仅定位不阻断admin就绪', preflightEvidence.checks[1].uid === 1046 && preflightEvidence.checks[1].mode === '0775'
+      && preflightEvidence.checks[3].uid === 0 && preflightEvidence.checks[3].mode === '0777'
+      && preflightEvidence.checks.slice(0, 4).every(row => row.required_for_trust === false && row.gate === 'location_only' && row.trusted === null)
+      && preflightEvidence.recovery_anchor.required_for_trust === true && preflightEvidence.recovery_anchor.mode === '0755' && preflightEvidence.recovery_anchor.trusted === true
+      && (await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('外层目录仅提供定位信息') && calls.filter(call => call.path.endsWith('/initialize')).length === 0);
+    for (const failure of ['admin_mode', 'admin_acl']) {
+      preflightCase = failure;
+      await manager.locator('[data-authority-preflight]').first().click();
+      await page.waitForFunction(kind => {
+        const pre = document.querySelector('#r1ApiManager [data-ref="fileRecoveries"] pre');
+        if (!pre) return false;
+        const anchor = JSON.parse(pre.textContent).recovery_anchor;
+        return anchor && (kind === 'admin_mode' ? anchor.mode === '0777' : anchor.access_acl === 'present');
+      }, failure);
+      await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: 'admin_root_untrusted_mode_or_acl' }).waitFor();
+      const evidence = JSON.parse(await manager.locator('[data-ref="fileRecoveries"] pre').innerText());
+      check(`admin权限或ACL负例${failure}保留实际阻断`, evidence.recovery_anchor.required_for_trust === true && evidence.recovery_anchor.trusted === false
+        && (failure === 'admin_mode' ? evidence.recovery_anchor.mode === '0777' : evidence.recovery_anchor.access_acl === 'present')
+        && !(await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('初始化条件已通过'));
+    }
+    preflightCase = 'ready';
+    await manager.locator('[data-authority-preflight]').first().click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '初始化条件已通过' }).waitFor();
     await page.setViewportSize({ width: 320, height: 960 });
     check('320px完整恢复预检证据不横滚', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
     await page.setViewportSize({ width: 1280, height: 1000 });
     await manager.locator('[data-authority-init]').first().click();
     check('初始化确认明确admin私有新位置和旧区不复用', (await page.locator('.fullmask').last().innerText()).includes('Users/admin/.r1-toolbox-ops')
-      && (await page.locator('.fullmask').last().innerText()).includes('完整祖先权限')
+      && (await page.locator('.fullmask').last().innerText()).includes('admin 及私有恢复区权限与实际挂载身份')
+      && !(await page.locator('.fullmask').last().innerText()).includes('完整祖先权限')
       && (await page.locator('.fullmask').last().innerText()).includes('旧 Users 恢复区不会自动搬动或复用'));
     await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-authority-init]').first().waitFor();
@@ -379,6 +413,54 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('.r1-api-recovery button').click(); await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '原厂索引尚未确认' }).waitFor();
     check('当前已撤销新布局仍可发送所有者明确恢复', calls.filter(call => call.path.endsWith('/restore')).length === beforeRevokedRestore + 1 && revokedAuthority.enabled === false);
+    const legacyTrustAuthority = { ...revokedAuthority, enabled: true, status: 'registered', revision: 7, trust_boundary: 'complete_ancestors_legacy' };
+    state.file_mutation_authority.authorities = state.file_mutation_authority.authorities.filter(row => row.root_id !== revokedAuthority.root_id);
+    state.file_mutation_authority.authorities.push(legacyTrustAuthority);
+    const beforeUpgrade = calls.filter(call => call.path.endsWith('/initialize')).length;
+    for (let refreshIndex = 0; refreshIndex < 2; refreshIndex += 1) {
+      await manager.locator('[data-ref="refresh"]').click();
+      await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+    }
+    const trustRoot = manager.locator('[data-authority-root="' + revokedAuthority.root_id + '"]');
+    check('旧完整祖先策略元数据刷新不自动升级且单独提供核验入口', (await trustRoot.innerText()).includes('旧完整祖先信任策略登记')
+      && (await trustRoot.locator('[data-authority-init]').innerText()) === '核验并升级信任策略'
+      && await trustRoot.locator('[data-authority-init]').isEnabled() && legacyTrustAuthority.trust_boundary === 'complete_ancestors_legacy'
+      && calls.filter(call => call.path.endsWith('/initialize')).length === beforeUpgrade);
+    await trustRoot.locator('[data-authority-preflight]').click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '初始化条件已通过' }).waitFor();
+    const upgradeEvidence = JSON.parse(await manager.locator('[data-ref="fileRecoveries"] pre').innerText());
+    check('旧登记预检区分拟升级admin边界和仍生效的旧策略', upgradeEvidence.trust_boundary === 'admin'
+      && upgradeEvidence.registration_trust_boundary === 'complete_ancestors_legacy' && upgradeEvidence.owner_revalidation_required === true
+      && legacyTrustAuthority.trust_boundary === 'complete_ancestors_legacy');
+    await trustRoot.locator('[data-authority-inspect]').click();
+    await manager.locator('.r1-api-recovery button').waitFor();
+    const oldTrustCalls = calls.length;
+    check('未升级旧登记的恢复卡保持禁用', await manager.locator('.r1-api-recovery button').isDisabled());
+    await manager.locator('.r1-api-recovery button').evaluate(button => button.onclick());
+    check('未升级旧信任登记恢复回调不能确认或POST', calls.length === oldTrustCalls && await page.locator('.fullmask [data-yes]').count() === 0);
+    await trustRoot.locator('[data-authority-init]').click();
+    check('升级确认明确核原inode绑定admin且不搬动重建', (await page.locator('.fullmask').last().innerText()).includes('原 inode')
+      && (await page.locator('.fullmask').last().innerText()).includes('绑定当前 admin')
+      && (await page.locator('.fullmask').last().innerText()).includes('不搬动、不重建')
+      && (await page.locator('.fullmask').last().innerText()).includes('启用新变更授权'));
+    await page.locator('.fullmask [data-no]').click();
+    check('取消显式升级不提交请求或改登记', calls.filter(call => call.path.endsWith('/initialize')).length === beforeUpgrade && legacyTrustAuthority.trust_boundary === 'complete_ancestors_legacy');
+    await trustRoot.locator('[data-authority-init]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => { const row = document.querySelector('#r1ApiManager [data-authority-root]'); return row && row.dataset.legacyTrust === 'false' && row.dataset.enabled === 'true'; });
+    const upgradeRequest = calls.filter(call => call.path.endsWith('/initialize')).at(-1), upgradedAuthority = state.file_mutation_authority.authorities.find(row => row.root_id === revokedAuthority.root_id);
+    check('升级只发精确rootID及confirmed且登记显式换admin修订', JSON.stringify(upgradeRequest.body) === JSON.stringify({ root_id: revokedAuthority.root_id, confirmed: true })
+      && upgradedAuthority.trust_boundary === 'admin' && upgradedAuthority.revision === 8 && calls.filter(call => call.path.endsWith('/initialize')).length === beforeUpgrade + 1);
+    await trustRoot.locator('[data-authority-inspect]').click();
+    await page.waitForFunction(() => { const button = document.querySelector('#r1ApiManager .r1-api-recovery button'); return button && !button.disabled; });
+    check('仅显式升级后的当前admin登记恢复入口可用', await manager.locator('.r1-api-recovery button').isEnabled());
+    privateRecoveryCase = true;
+    await trustRoot.locator('[data-authority-inspect]').click();
+    await manager.locator('.r1-api-recovery .sub').filter({ hasText: '原路径无法核验' }).waitFor();
+    const beforePrivateRestore = calls.length;
+    check('恢复卡同样拒绝任意层级的私有保留目录', await manager.locator('.r1-api-recovery button').isDisabled());
+    await manager.locator('.r1-api-recovery button').evaluate(button => button.onclick());
+    check('嵌套私有恢复路径不能弹确认或提交请求', calls.length === beforePrivateRestore && await page.locator('.fullmask [data-yes]').count() === 0);
+    privateRecoveryCase = false;
     await view('create');
     await manager.locator('[data-ref="scopes"] input[value="apps"]').check();
     check('新增只读业务工具按功能启用而不自动勾选', !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isDisabled()) && !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isChecked()));
@@ -560,13 +642,13 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '相对 POSIX 路径' }).waitFor();
     check('越界及非规范子目录均在本地拒绝且不提交', calls.length === writesBeforeFiles);
-    for (const privatePath of ['.r1-toolbox-ops', '.r1-toolbox-ops/source', '.R1-TOOLBOX-OPS/source']) {
+    for (const privatePath of ['.r1-toolbox-ops', '.r1-toolbox-ops/source', '.R1-TOOLBOX-OPS/source', 'folder/.r1-toolbox-ops', 'folder/.r1-toolbox-ops/source', 'folder/.R1-TOOLBOX-OPS/source']) {
       await writableRoot.locator('[data-root-path]').fill(privatePath);
       await manager.locator('[data-ref="create"]').click();
       await manager.locator('[data-ref="error"]').filter({ hasText: '仅由所有者恢复界面管理' }).waitFor();
       check(`私有恢复范围${privatePath}本地拒绝且无请求`, calls.length === writesBeforeFiles && await page.locator('.fullmask [data-yes]').count() === 0);
     }
-    for (const allowedPath of ['.r1-toolbox-ops2', 'folder/.r1-toolbox-ops']) {
+    for (const allowedPath of ['.r1-toolbox-ops2', 'folder/.r1-toolbox-ops2']) {
       await writableRoot.locator('[data-root-path]').fill(allowedPath);
       await manager.locator('[data-ref="create"]').click();
       await page.locator('.fullmask [data-yes]').waitFor();

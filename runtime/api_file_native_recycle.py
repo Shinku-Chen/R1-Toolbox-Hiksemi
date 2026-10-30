@@ -252,6 +252,23 @@ def _record_identity(connection, record, *, expected_id=None, absent=False):
     return rows[0][10]
 
 
+def _trusted_archive(opened):
+    """Check admin and archive data; outer path modes do not grant file access."""
+    if opened.admin_fd is None or opened.admin_fd not in opened.descriptors:
+        raise FileAccessError('write_backend_unverified')
+    start = opened.descriptors.index(opened.admin_fd)
+    for descriptor in opened.descriptors[start:]:
+        checked = os.open('/proc/self/fd/' + str(descriptor),
+                          os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            if (_stable(os.fstat(checked)) != _stable(os.fstat(descriptor))
+                    or _descriptor_mount_id(opened.root, checked) != opened.mount_id):
+                raise FileAccessError('file_changed')
+            _trusted(checked)
+        finally:
+            os.close(checked)
+
+
 class _OpenedRecycle:
     """Trusted no-link exact-mount factory archive and existing SQLite database."""
 
@@ -265,17 +282,7 @@ class _OpenedRecycle:
             self.mount_id = self.archive.mount_id
             if self.users.mount_id != self.mount_id:
                 raise FileAccessError('root_unavailable')
-            # Check every actual ancestor, not only the final directory.
-            for descriptor in self.archive.descriptors:
-                # An O_PATH handle is an identity anchor, not an xattr fd.
-                checked = os.open('/proc/self/fd/' + str(descriptor),
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-                try:
-                    if _stable(os.fstat(checked)) != _stable(os.fstat(descriptor)):
-                        raise FileAccessError('file_changed')
-                    _trusted(checked)
-                finally:
-                    os.close(checked)
+            _trusted_archive(self.archive)
             self.archive_state = _stable(os.fstat(self.archive.fd))
             parent = os.open('..', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                              dir_fd=self.users.fd)
@@ -329,6 +336,7 @@ class _OpenedRecycle:
         _gate(self.current, self.deadline)
         from api_file_executor import _Handle, _UsersHandle
         with _Handle(self.root, self.row, _ARCHIVE, directory=True) as archive:
+            _trusted_archive(archive)
             if archive.mount_id != self.mount_id or _stable(os.fstat(archive.fd)) != self.archive_state:
                 raise FileAccessError('file_changed')
         with _UsersHandle(self.root, self.row) as users:

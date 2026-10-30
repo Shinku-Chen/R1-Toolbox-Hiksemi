@@ -1152,7 +1152,7 @@ function r1OpenApiManager(initialPage = 'manage') {
         </form><h3>已登记的部署资源</h3><div class="r1-api-list" data-ref="registeredDeployments"></div>
       </details>
       <details data-ref="fileAuthorityManager"><summary>文件变更与恢复</summary>
-        <p class="sub">覆盖、改名、移动和新建目录使用所选磁盘的 Users/admin/.r1-toolbox-ops 专用恢复区，仅由所有者恢复界面管理。首次初始化需要所有者确认并通过完整祖先权限与挂载检查；此操作可能唤醒磁盘。打开页面只读 Toolbox 登记，不扫描文件。撤销后停止新操作，已保留对象仍可检查和恢复。</p>
+        <p class="sub">覆盖、改名、移动和新建目录使用所选磁盘的 Users/admin/.r1-toolbox-ops 专用恢复区，仅由所有者恢复界面管理。首次初始化需要所有者确认，核验 admin 及私有恢复区权限与实际挂载身份；外层目录仅提供定位信息。此操作可能唤醒磁盘。打开页面只读 Toolbox 登记，不扫描文件。撤销后停止新操作，已保留对象仍可检查和恢复。</p>
         <div data-ref="fileAuthorityRoots" class="r1-api-list"></div><p class="sub" data-ref="fileAuthorityStatus" role="status"></p><div data-ref="fileRecoveries" class="r1-api-list"></div>
       </details>
       <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
@@ -1172,7 +1172,7 @@ function r1OpenApiManager(initialPage = 'manage') {
         <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
         <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
         <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
-        <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/admin；子目录相对 admin 根填写，无需添加 admin/ 前缀。根下有其他挂载不影响选择，实际操作仍拒绝进入子挂载。内部 .r1-toolbox-ops 及其后代仅由所有者恢复界面管理，Token 不可访问或单独授权。旧 Users 根授权须重新选择，不自动换根或改写路径。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+        <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/admin；子目录相对 admin 根填写，无需添加 admin/ 前缀。根下有其他挂载不影响选择，实际操作仍拒绝进入子挂载。任意层级的 .r1-toolbox-ops 保留目录及其后代仅由所有者恢复界面管理，Token 不可访问或单独授权。旧 Users 根授权须重新选择，不自动换根或改写路径。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
         <fieldset class="r1-api-file-roots" data-ref="applicationInstalls" hidden><legend>允许新装的原厂应用</legend><p class="sub">安装需要管理员、应用功能和安装工具，以及这里明确选择的应用。只支持未安装的审计模块，不会自动卸载或更新已有应用；新应用默认不授权。原厂安装可能启动后台服务并访问其自身数据目录。</p><div data-ref="applicationInstallOptions"></div></fieldset>
         <fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许访问的已登记 Docker 项目</legend><p class="sub">现有项目按读取、启停重启、镜像更新分别授权；写操作需要管理员及对应工具。未来新服务使用下面独立的部署资源。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
         <fieldset class="r1-api-file-roots" data-ref="dockerDeployments" hidden><legend>允许访问的未来部署资源</legend><p class="sub">先在「Token 操作 → 部署资源管理」登记固定资源。默认只选读取，部署／更新、启停重启和删除须管理员明确勾选，且仍须对应工具授权。</p><p class="sub" data-ref="dockerDeploymentsStatus"></p><div data-ref="dockerDeploymentOptions"></div></fieldset>
@@ -1236,7 +1236,7 @@ function r1OpenApiManager(initialPage = 'manage') {
     x.registeredDeployments.querySelectorAll('button').forEach(button => { button.disabled = value || deploymentsBusy || button.dataset.revoked === 'true'; });
     for (const row of x.fileAuthorityRoots.querySelectorAll('[data-authority-root]')) {
       row.querySelector('[data-authority-preflight]').disabled = value;
-      row.querySelector('[data-authority-init]').disabled = value || row.dataset.readOnly === 'true' || row.dataset.enabled === 'true';
+      row.querySelector('[data-authority-init]').disabled = value || row.dataset.readOnly === 'true' || (row.dataset.enabled === 'true' && row.dataset.legacyTrust !== 'true');
       row.querySelector('[data-authority-inspect]').disabled = value || row.dataset.registered !== 'true';
       row.querySelector('[data-authority-revoke]').disabled = value || row.dataset.enabled !== 'true';
     }
@@ -1257,8 +1257,7 @@ function r1OpenApiManager(initialPage = 'manage') {
   };
   /** A path grant is relative to an independently discovered storage root. */
   const validSubpath = value => typeof value === 'string' && [...value].length <= 1024 && new TextEncoder().encode(value).length <= 4096 && !/[\\\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(value) && !/^[A-Za-z]:/.test(value)
-    && !/^\.r1-toolbox-ops(?:\/|$)/iu.test(value)
-    && (!value || value.split('/').every(part => part && part !== '.' && part !== '..'));
+    && (!value || value.split('/').every(part => part && part !== '.' && part !== '..' && !/^\.r1-toolbox-ops$/iu.test(part)));
   const updatePermissions = () => {
     const role = x.role.value, legacy = role === 'legacy' && editing, level = legacy ? Infinity : roleLevel[role] ?? -1;
     const selected = new Set([...x.scopes.querySelectorAll('input:checked')].map(input => input.value));
@@ -1459,6 +1458,7 @@ function r1OpenApiManager(initialPage = 'manage') {
       // its disabled registration as a revoked new-layout authority to enable.
       if (entries.some(entry => legacy(entry) && entry.root_id === root.id)) continue;
       const registration = entries.find(entry => entry.root_id === root.id);
+      const legacyTrust = !!registration && registration.trust_boundary === 'complete_ancestors_legacy';
       const recoveryBindingCurrent = () => {
         const currentRegistry = state && state.file_mutation_authority;
         const currentEntries = currentRegistry && Array.isArray(currentRegistry.authorities) ? currentRegistry.authorities : [];
@@ -1470,30 +1470,38 @@ function r1OpenApiManager(initialPage = 'manage') {
         const currentRegistration = currentRegistrations[0], location = currentRegistration.recovery_location;
         // Revocation stops new mutations, but a current-layout owner may still
         // restore retained objects. Bind the action to layout and revision.
-        return !legacy(currentRegistration) && currentRegistration.revision === registration.revision
+        return !legacy(currentRegistration) && currentRegistration.trust_boundary === 'admin'
+          && currentRegistration.revision === registration.revision
           && !!location && location.boundary === 'admin' && location.relative_path === '.r1-toolbox-ops'
           && location.layout === 'admin_custody_v1' && location.anchor_component === 'admin_root';
       };
       const row = mount('<article class="r1-api-audit r1-api-authority"><strong></strong><p class="sub" data-authority-state></p><div class="r1-api-actions"><button class="btn" type="button" data-authority-preflight>检查初始化条件</button><button class="btn" type="button" data-authority-init>初始化恢复区</button><button class="btn" type="button" data-authority-inspect>检查保留对象</button><button class="btn" type="button" data-authority-revoke>停止新变更</button></div></article>');
-      setText(row.querySelector('strong'), root.label); setText(row.querySelector('[data-authority-state]'), registration ? registration.enabled ? '已登记；每次操作仍核验实际身份与权限。' : '已撤销；保留对象未删除。' : '未初始化。');
-      row.dataset.authorityRoot = root.id; row.dataset.readOnly = String(root.read_only); row.dataset.registered = String(!!registration); row.dataset.enabled = String(!!(registration && registration.enabled));
+      setText(row.querySelector('strong'), root.label); setText(row.querySelector('[data-authority-state]'), legacyTrust
+        ? '旧完整祖先信任策略登记；刷新不会升级。须由所有者核验并升级后，才能按 admin 信任边界恢复保留对象。'
+        : registration ? registration.enabled ? '已登记；每次操作仍核验实际身份与权限。' : '已撤销；保留对象未删除。' : '未初始化。');
+      row.dataset.authorityRoot = root.id; row.dataset.readOnly = String(root.read_only); row.dataset.registered = String(!!registration); row.dataset.enabled = String(!!(registration && registration.enabled)); row.dataset.legacyTrust = String(legacyTrust);
       const init = row.querySelector('[data-authority-init]'), inspect = row.querySelector('[data-authority-inspect]'), revoke = row.querySelector('[data-authority-revoke]');
-      init.disabled = busy || root.read_only || !!(registration && registration.enabled); inspect.disabled = busy || !registration; revoke.disabled = busy || !registration || !registration.enabled;
-      if (registration && !registration.enabled) setText(init, '重新启用恢复区');
+      init.disabled = busy || root.read_only || !!(registration && registration.enabled && !legacyTrust); inspect.disabled = busy || !registration; revoke.disabled = busy || !registration || !registration.enabled;
+      if (legacyTrust) setText(init, '核验并升级信任策略');
+      else if (registration && !registration.enabled) setText(init, '重新启用恢复区');
       const perform = async action => {
         if (busy) return;
         const reading = ['inspect', 'preflight'].includes(action);
-        if (!reading && !(await R1.ask(action === 'initialize' ? '初始化文件恢复区？' : '停止新的文件变更？', action === 'initialize' ? `将在「${esc(root.label)}」的 Users/admin/.r1-toolbox-ops 创建专用恢复区，可能唤醒磁盘。只有完整祖先权限和挂载检查通过才启用；已有同名目录不会被接管，旧 Users 恢复区不会自动搬动或复用。` : '停止新的文件变更授权。保留的对象和恢复记录不会删除。'))) return;
+        if (!reading && !(await R1.ask(action === 'initialize' ? legacyTrust ? '核验并升级恢复区信任策略？' : '初始化文件恢复区？' : '停止新的文件变更？', action === 'initialize'
+          ? legacyTrust ? `将核验「${esc(root.label)}」现有 Users/admin/.r1-toolbox-ops 的原 inode，绑定当前 admin 并切换信任策略；不搬动、不重建已有恢复区。只有 admin 及私有恢复区权限与实际挂载身份检查通过，才启用新变更授权。外层目录仅提供定位信息，可能唤醒磁盘。`
+            : `将在「${esc(root.label)}」的 Users/admin/.r1-toolbox-ops 创建专用恢复区，可能唤醒磁盘。只有 admin 及私有恢复区权限与实际挂载身份检查通过才启用；外层目录仅提供定位信息。已有同名目录不会被接管，旧 Users 恢复区不会自动搬动或复用。`
+          : '停止新的文件变更授权。保留的对象和恢复记录不会删除。'))) return;
         pending(true);
         try {
           const result = await R1.post('/api/files/authority/' + action, { root_id: root.id, ...(reading ? {} : { confirmed: true }) });
           if (!result || result.ok !== true) throw new Error(result && result.error && result.error.code || '操作结果未确认');
           if (action === 'preflight') {
-            setText(x.fileAuthorityStatus, result.ready === true ? '初始化条件已通过；仍需明确初始化后才能执行文件变更。'
+            setText(x.fileAuthorityStatus, result.ready === true ? '初始化条件已通过；权限信任锚为 admin 及私有恢复区，外层目录仅提供定位信息。仍需明确初始化后才能执行文件变更。'
               : `初始化条件未通过：${(result.blockers || []).join('、') || '身份或权限无法核验'}。`);
             x.fileRecoveries.replaceChildren();
             const evidence = document.createElement('pre'); evidence.className = 'sub mono'; evidence.style.whiteSpace = 'pre-wrap'; evidence.style.overflowWrap = 'anywhere';
-            evidence.textContent = JSON.stringify({ recovery_location: result.recovery_location, recovery_anchor: result.recovery_anchor,
+            evidence.textContent = JSON.stringify({ trust_boundary: result.trust_boundary, registration_trust_boundary: result.registration_trust_boundary,
+              owner_revalidation_required: result.owner_revalidation_required, recovery_location: result.recovery_location, recovery_anchor: result.recovery_anchor,
               checks: result.checks, source_binding: result.source_binding, existing_directory: result.existing_directory }, null, 2);
             x.fileRecoveries.append(evidence);
           } else if (action === 'inspect') {
@@ -1904,7 +1912,7 @@ function r1OpenApiManager(initialPage = 'manage') {
         if (item.dataset.available === 'false') { fail(new Error('原文件范围当前失效，请明确取消失效范围或保持原文件配置。')); return; }
         for (const range of item.querySelectorAll('[data-root-range]')) {
           const path = range.querySelector('[data-root-path]').value, access = range.querySelector('[data-root-access]').value;
-          if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符和 4096 个 UTF-8 字节；内部 .r1-toolbox-ops 及其后代仅由所有者恢复界面管理。')); return; }
+          if (!validSubpath(path)) { fail(new Error('文件子目录必须是相对 POSIX 路径，不接受绝对路径、空路径段、反斜杠、. 或 ..，且不超过 1024 个字符和 4096 个 UTF-8 字节；任意层级的 .r1-toolbox-ops 及其后代仅由所有者恢复界面管理。')); return; }
           if (!['readonly', 'readwrite'].includes(access) || (access === 'readwrite' && (role === 'readonly' || item.dataset.readOnly === 'true'))) { fail(new Error('只读角色或只读挂载不能授予文件读写权限。')); return; }
           const identity = item.dataset.rootId + '\n' + path;
           if (identities.has(identity)) { fail(new Error('同一存储根的相同子目录不能重复授权。')); return; }

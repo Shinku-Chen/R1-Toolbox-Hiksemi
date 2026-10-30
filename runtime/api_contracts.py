@@ -516,6 +516,10 @@ _CATALOG = {
         'opened_path_may_cross_mounts': False,
         'file_recovery_directory': '/drives/*/Users/admin/.r1-toolbox-ops/',
         'file_recovery_directory_machine_access_allowed': False,
+        'file_recovery_trust_boundary': 'admin',
+        'file_recovery_ancestor_permissions_required': False,
+        'file_recovery_admin_identity_bound': True,
+        'file_private_recovery_name_reserved_at_any_depth': True,
     },
     'http_contracts': [{
         'route_template': '/api/integration/files/transfers/{transfer_id}/content',

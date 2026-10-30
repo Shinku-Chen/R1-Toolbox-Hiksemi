@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -235,6 +236,43 @@ class NativeRecycleLinuxTests(unittest.TestCase):
         self.assertFalse(self.instance.verify(receipt, ROW, PATH, self.fd, current=lambda: self.current))
         self.notification.assert_called_once()
 
+    def test_factory_writable_outer_directories_do_not_authorize_or_block_admin_archive(self):
+        drives = self.root / 'drives'
+        drives.chmod(0o775)
+        os.chown(drives, 1046, -1)
+        self.users.chmod(0o777)
+        plan = self.instance.preflight(ROW, PATH, current=lambda: self.current)
+        receipt = self.instance.archive_captured(plan, ROW, PATH, self.fd, self.stage,
+                                                 current=lambda: self.current)
+        self.assertTrue(self.instance.verify(receipt, ROW, PATH, self.fd, current=lambda: self.current))
+        archived = self.archive / receipt.record[6]
+        self.assertEqual(archived.stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual(archived.read_bytes(), b'owner isolated fixture')
+        self.assertEqual(drives.stat().st_uid, 1046)
+        self.assertEqual(self.users.stat().st_mode & 0o777, 0o777)
+
+    def test_admin_and_fixed_factory_database_still_require_trusted_permissions(self):
+        for target in (self.admin, self.db.parent):
+            before = target.stat().st_mode & 0o777
+            target.chmod(0o777)
+            try:
+                with self.subTest(path=str(target)), self.assertRaises(FileAccessError):
+                    self.instance.preflight(ROW, PATH, current=lambda: self.current)
+            finally:
+                target.chmod(before)
+        self.assertTrue((self.stage_path / 'source').exists())
+
+    def test_live_archive_check_revalidates_admin_and_archive_permissions(self):
+        with recycle._OpenedRecycle(self.root, ROW, lambda: self.current,
+                                     time.monotonic() + 8) as opened:
+            for target in (self.admin, self.archive.parent, self.archive):
+                before = target.stat().st_mode & 0o777
+                target.chmod(0o777)
+                try:
+                    with self.subTest(path=str(target)), self.assertRaises(FileAccessError):
+                        opened.check()
+                finally:
+                    target.chmod(before)
     def test_admin_root_file_recycle_verifies_same_inode_and_exact_native_key(self):
         path = 'source.bin'
         plan = self.instance.preflight(ROW, path, current=lambda: self.current)

@@ -223,7 +223,7 @@ class ApiPermissionTests(unittest.TestCase):
 
     def test_private_custody_grants_are_preserved_but_cannot_enable_file_tools(self):
         for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_fixture/source',
-                     '.R1-TOOLBOX-OPS/source'):
+                     '.R1-TOOLBOX-OPS/source', 'old-admin/.r1-toolbox-ops/source'):
             key = explicit_principal('readwrite', ['copy_file'])
             key['file_roots'] = [{'id': ROOT_ID, 'path': path, 'access': 'readwrite'}]
             self.assertTrue(permissions.valid_file_roots(key['file_roots'], key['role'], key['scopes']))

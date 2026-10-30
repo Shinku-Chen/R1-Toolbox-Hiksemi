@@ -264,6 +264,17 @@ class OpenedFileTests(unittest.TestCase):
             _Handle(self.root, legacy, 'admin/payload.bin')
         self.assertEqual(caught.exception.code, 'invalid_arguments')
 
+    def test_child_handle_retains_real_admin_anchor_for_boundary_checks(self):
+        for path, options in (('', {'directory': True}),
+                              ('payload.bin', {'reader': True})):
+            with self.subTest(path=path), _Handle(self.root, ROW, path, **options) as opened:
+                anchor = os.fstat(opened.admin_fd)
+                actual = self.admin.stat()
+                self.assertEqual((anchor.st_dev, anchor.st_ino), (actual.st_dev, actual.st_ino))
+                if path:
+                    self.assertNotEqual(anchor.st_ino, os.fstat(opened.fd).st_ino)
+            self.assertIsNone(opened.admin_fd)
+
     def test_literal_admin_and_public_children_stay_inside_selected_root(self):
         for name in ('admin', 'public'):
             (self.admin / name).mkdir()
@@ -286,7 +297,44 @@ class OpenedFileTests(unittest.TestCase):
         self.assertIn('.r1-toolbox-ops2', [item['path'] for item in result['entries']])
         self.assertTrue(all(call.args[3] != '.r1-toolbox-ops' for call in roots.call_args_list))
         self.assertTrue(all(path != '.r1-toolbox-ops' for root_id, path in self.authority.calls))
-        self.assertTrue(self.call('list_directory', 'folder/.r1-toolbox-ops')['ok'])
+        self.assertEqual(self.call('list_directory', 'folder/.r1-toolbox-ops')['error']['code'],
+                         'permission_denied')
+        self.assertEqual(self.call('list_directory', 'folder')['entries'], [])
+
+    def test_moved_admin_custody_and_nested_filesystem_alias_remain_private(self):
+        private = self.admin / '.r1-toolbox-ops'
+        private.mkdir(mode=0o700)
+        (private / 'source').write_bytes(b'old admin private bytes')
+        displaced = self.admin.with_name('displaced-admin')
+        self.admin.rename(displaced)
+        self.admin.mkdir()
+        (self.admin / 'folder').mkdir()
+        moved = self.admin / 'folder/old-admin'
+        displaced.rename(moved)
+        (moved / 'ops-alias').mkdir()
+        identity = moved.stat().st_dev, moved.stat().st_ino
+        real_open, children = os.open, []
+        def alias_open(path, flags, *args, **options):
+            if os.fspath(path) == 'source':
+                children.append(path)
+            parent = options.get('dir_fd')
+            if os.fspath(path) == 'ops-alias' and parent is not None:
+                info = os.fstat(parent)
+                if (info.st_dev, info.st_ino) == identity:
+                    path = '.r1-toolbox-ops'
+            return real_open(path, flags, *args, **options)
+        with mock.patch('api_file_executor.os.open', side_effect=alias_open):
+            for suffix in ('.r1-toolbox-ops/source', 'ops-alias/source'):
+                for tool in ('get_file_info', 'prepare_file_download', 'list_directory'):
+                    denied = self.call(tool, 'folder/old-admin/' + suffix)
+                    self.assertEqual(denied['error']['code'], 'permission_denied', denied)
+            listing = self.call('list_directory', 'folder/old-admin')
+            self.assertTrue(listing['ok'], listing)
+            self.assertNotIn('.r1-toolbox-ops', [entry['name'] for entry in listing['entries']])
+            self.assertNotIn('ops-alias', [entry['name'] for entry in listing['entries']])
+            self.assertTrue(self.call('get_file_info', 'folder/old-admin/payload.bin')['ok'])
+        self.assertFalse(children, 'moved private child must never be opened')
+        self.assertEqual((moved / '.r1-toolbox-ops/source').read_bytes(), b'old admin private bytes')
 
     def test_same_inode_private_name_alias_is_denied_without_reading_its_children(self):
         private = self.admin / '.r1-toolbox-ops'

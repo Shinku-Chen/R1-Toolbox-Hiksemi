@@ -328,7 +328,8 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
     def test_persisted_private_grants_stay_editable_but_are_not_available_or_listed(self):
         self.root_catalog()
         self.server.api_access.configure({'enabled': True})
-        for path in ('.r1-toolbox-ops/source', '.R1-TOOLBOX-OPS/source'):
+        for path in ('.r1-toolbox-ops/source', '.R1-TOOLBOX-OPS/source',
+                     'old-admin/.r1-toolbox-ops/source'):
             grants = [{'id': ROOT_ID, 'path': path, 'access': 'readonly'}]
             body = self.create_body('readonly', ['files'], file_roots=grants,
                                     tool_grants=['get_file_info'])

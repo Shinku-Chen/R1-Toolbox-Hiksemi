@@ -1,10 +1,10 @@
 # 文件变更与恢复
 
-更新于 2026-10-30。文件执行器已提供新文件上传、已有文件覆盖、单目录创建、普通文件复制、改名、同盘移动和移入原厂回收站。代码、隔离测试和 NAS 实机验收分别记录；注册工具不代表当前磁盘已通过门槛。原 v2 SSD 根曾受 Users 下十四个 overlay 子挂载阻断；7fcd12b 实机已确认 v3 admin 根保留这十四个子挂载并通过真实句柄检查，原测试文件的信息、HEAD 与 1 KiB Range 读取通过。SSD 与主磁盘的恢复区预检仍因可写祖先及 Users 权限拒绝，原预检规则继续保留；尚未执行 NAS 文件变更或应用新装。读取中的原厂服务错误及有限复核范围见[实机记录](file-users-boundary.md#2026-10-307fcd12b-实机只读核对)。
+更新于 2026-10-30。文件执行器已提供新文件上传、已有文件覆盖、单目录创建、普通文件复制、改名、同盘移动和移入原厂回收站。代码、隔离测试和 NAS 实机验收分别记录；注册工具不代表当前磁盘已通过门槛。原 v2 SSD 根曾受 Users 下十四个 overlay 子挂载阻断；7fcd12b 实机已确认 v3 admin 根保留这十四个子挂载并通过真实句柄检查，原测试文件的信息、HEAD 与 1 KiB Range 读取通过。此前版本的恢复区预检因可写祖先及 Users 权限拒绝；c2acce7 已确认新位置的 admin 本身合格。本次新策略改为 admin 信任锚，外层权限不再否决；尚未将新策略作为 NAS 写入验收通过，也未执行 NAS 文件变更或应用新装。读取中的原厂服务错误及有限复核范围见[实机记录](file-users-boundary.md#2026-10-307fcd12b-实机只读核对)。
 
 ## 授权与范围
 
-所有文件内容仍限定在 `/drives/*/Users/admin/`，以可信 `root_id` 和相对路径调用。读取仅支持经原厂固定管理员 ACL 核验的 admin 子树；写入仅支持已核验内置 SATA 的 `admin` 后代，不修改其他用户、`admin` 根、隐藏路径或授权外的父目录。相对 admin 根的固定原厂内部树 `.DATA_CACHE` 及后代不作为普通写入或复制源开放；真实回收仅由内部固定协议访问。
+所有文件内容仍限定在 `/drives/*/Users/admin/`，以可信 `root_id` 和相对路径调用。读取仅支持经原厂固定管理员 ACL 核验的 admin 子树；写入仅支持已核验内置 SATA 的 `admin` 后代，不修改其他用户、`admin` 根、内部保留路径或授权外的父目录。相对 admin 根的固定原厂内部树 `.DATA_CACHE` 及后代不作为普通写入或复制源开放；真实回收仅由内部固定协议访问。
 
 机器调用同时要求当前 Token、真实来源、读写或管理员角色、`files` 域、精确工具和对应子目录。管理员不能绕过范围。复制来源可只读，目标与目标父目录须读写；改名、移动、覆盖和回收需要原对象及其父目录的读写授权。源版本从 `get_file_info.entry.object_version` 取得；它绑定 inode 和 stat 状态，不宣称内容强 ETag。
 
@@ -26,13 +26,15 @@
 
 Linux 不提供按 inode 比较后原子改名的系统调用；`stat` 后直接按路径 `rename` 不能保证改的是同一对象。Toolbox 先将源捕获到受信恢复区，再用已持有 FD、实际 inode、元数据和完整内容哈希核对。捕获到不同对象时保留现场，停止发布和原厂索引通知，返回结果未确认。此过程可能暂时移走原名，不能描述成单步源 CAS。
 
-恢复区固定为所选 `Users/admin/.r1-toolbox-ops`，所有用户文件与保管对象均在 admin 内。只能由网页登录所有者显式初始化；机器 Token 和开发白名单不能自登记。该精确私有子树从普通文件列表隐藏，不能作为文件读取、下载、复制来源、写目标或新授权范围；整根 Token 也不能访问。初始化检查 namespace root、/drives、物理分区、Users、admin 的完整属主、权限、ACL、挂载与同对象身份，创建 root 专用 `0700` 目录，不接管未知目录，不修改原厂目录权限。移入 admin 不消除上级路径的安全要求，预检须按实际 evidence 返回阻断。
+恢复区固定为所选 `Users/admin/.r1-toolbox-ops`，所有用户文件与保管对象均在 admin 内。只能由网页登录所有者显式初始化；机器 Token 和开发白名单不能自登记。该精确私有子树从普通文件列表隐藏，不能作为文件读取、下载、复制来源、写目标或新授权范围；整根 Token 也不能访问。文件信任锚为实际 admin 目录 FD，要求 root 属主、无组／其他用户写权限、无扩展 ACL；私有恢复区另要求 `0700`。namespace root、/drives、物理分区和 Users 的属主、可写位与 ACL 不作为新信任模型的权限门槛；仍保留固定路径、逐级 no-follow、真实句柄、物理盘身份和挂载核验，不提供这些目录的文件访问。不接管未知目录，不修改原厂目录权限。
 
-新恢复登记只写 `file-mutation-admin-authorities.json`，版本为 2，每项显式标记 `layout:admin_custody_v1`。旧 `file-mutation-authorities.json` 版本 1 保持只读与原字节：其中 Users v2 根投影为 `status:legacy_boundary`／`reason:legacy_users_boundary_v2`；其中 admin v3 根虽然 root ID 与当前一致，实际保管位置仍是 Users，投影为 `status:legacy_layout`／`reason:legacy_recovery_layout`。两类旧登记的变更、初始化和恢复入口均须在触碰错误位置前拒绝，不能仅凭 root ID、inode 相同或手动移动旧目录就当作新布局。升级前须用原镜像处理旧保管对象。本次 NAS 尚无恢复登记或保管对象。
+新恢复登记写 `file-mutation-admin-authorities.json`，版本为 3。实际位置仍为 `layout:admin_custody_v1`，新项另存 `trust_model:admin_anchor_v1` 与 `admin_identity:[dev,ino,S_IFDIR]`。旧版此文件的版本 2 只读加载后仍按原完整祖先策略执行，不因升级程序而自动放宽；只有所有者显式确认初始化／核验升级、精确核对原恢复区 inode 后才绑定当前 admin，并原子保存新策略。版本 3 允许保留未升级的旧项，其旧策略不变。原 `file-mutation-authorities.json` 版本 1 保持只读与原字节：Users v2 根为 `legacy_boundary`／`legacy_users_boundary_v2`；admin v3 根但实际保管于 Users 的项为 `legacy_layout`／`legacy_recovery_layout`。两类旧位置均不可借本次核验升级搬动、接管或重新解释，须先用原镜像处理旧保管对象。本次 NAS 尚无恢复登记或保管对象。
 
-预检显式返回 `recovery_location`，其中 `boundary:admin`、`relative_path:.r1-toolbox-ops`、`layout:admin_custody_v1`、`anchor_component:admin_root`。`recovery_anchor` 是已观察到的 admin 检查记录，未取得证据时保持 `null`。`checks` 分别给出 namespace root、drives、物理分区、Users、admin 的 UID、mode、ACL、句柄身份与挂载证据；前两级的 `same_mount:null` 表示不以数据盘 mount ID 判断这两级。位置声明与 `ready` 分开，任何祖先或 admin 不满足可信要求都返回实际阻断。
+预检显式返回 `trust_boundary:admin` 及 `recovery_location`，后者包含 `boundary:admin`、`relative_path:.r1-toolbox-ops`、`layout:admin_custody_v1`、`anchor_component:admin_root`。`recovery_anchor` 是已观察到的 admin 检查记录，未取得证据时保持 `null`。`checks` 保留逐级定位证据；admin 项为 `required_for_trust:true`／`gate:trust_anchor`，其余为 `required_for_trust:false`／`gate:location_only`／`trusted:null`，不能将父目录 UID 或可写位显示成恢复区资格失败。前两级 `same_mount:null` 不以数据盘 mount ID 判断；物理分区及其后代仍须实际匹配。`registration_trust_boundary` 和 `owner_revalidation_required` 区分已有登记与本次所有者核验目标，预检本身不保存或授予机器新策略。
 
-私有目录保护不依赖 `0700` 阻止宿主 root 读取：文件授权和逻辑路径检查保留该根级名字的大小写变体；真实打开第一个 admin 后代时，另以固定 admin 句柄获取恢复区 inode 元数据，拒绝同对象的文件系统名称别名，再允许读取用户内容。它不读取保管内容，不自动创建目录；证据无法确认时拒绝操作。类似 `.r1-toolbox-ops2` 或普通子目录内的同名目录不被当作这个固定根级恢复区。
+初始化前后以及每次实际消费、检查和恢复时，重新从固定规范路径打开 admin，核对持久 admin inode、设备及本次实际挂载，再核对私有恢复区 inode。父 Users 可写意味着其他进程仍可重命名整个 admin；重复核验可以发现替换，不能阻止动作之间的重命名，也不是原子路径锁。检测到丢失或替换时拒绝后续操作并保留登记及对象，不追扫磁盘、不自动重建或换绑。重启后只有原 admin 在规范位置且身份一致才可重开；不能保证被其他进程移走的恢复区始终能自动找到。原厂回收的数据归档同样从 admin 起校验权限，其固定数据库与 journal 保留独立的严格身份、权限与 SQL 证明。
+
+私有目录保护不依赖 `0700` 阻止宿主 root 读取：所有相对路径组件中的 `.r1-toolbox-ops` 名字及大小写变体都保留，不再允许普通子目录中的同名目录。真实打开每个后代时，另以实际父目录 FD 获取其固定私有名字的 inode 元数据，拒绝同对象的文件系统名称别名，再允许读取用户内容。因此旧 admin 即使被外部移入新 admin 的普通子目录，也不能通过深层路径或短名别名读取保管对象。检查不读取保管内容、不自动创建目录，证据无法确认时拒绝操作。`.r1-toolbox-ops2` 及其嵌套路径仍是普通名字。
 
 网页“API 管理 → Token 操作 → 文件变更与恢复”提供预检、初始化、检查保留对象、停止新变更和恢复。固定所有者接口为：
 
@@ -40,7 +42,7 @@ Linux 不提供按 inode 比较后原子改名的系统调用；`stat` 后直接
 | --- | --- | --- |
 | `GET /api/files/authority` | 无查询参数 | 只读 Toolbox 登记，不打开 Users |
 | `POST /api/files/authority/preflight` | `{"root_id":"root_…"}` | 显式检查 UID、权限、ACL、挂载和未知同名目录，可能唤盘；不创建目录 |
-| `POST /api/files/authority/initialize` | `{"root_id":"root_…","confirmed":true}` | 创建或重新启用当前身份一致的恢复区 |
+| `POST /api/files/authority/initialize` | `{"root_id":"root_…","confirmed":true}` | 创建、重新启用或显式核验升级当前身份一致的恢复区 |
 | `POST /api/files/authority/inspect` | `{"root_id":"root_…"}` | 显式列出此根保留记录，可能唤盘 |
 | `POST /api/files/authority/revoke` | `{"root_id":"root_…","confirmed":true}` | 停止新变更，不删除保留对象 |
 | `POST /api/files/authority/restore` | `{"root_id":"root_…","recovery_id":"operation_…","confirmed":true}` | 只恢复记录绑定的原路径；目标存在时拒绝覆盖 |

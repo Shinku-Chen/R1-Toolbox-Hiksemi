@@ -70,9 +70,9 @@ def physical_mount_path(admin_root):
 
 
 def is_private_recovery_path(value):
-    """Reserve custody name variants; real opens also reject same-object aliases."""
+    """Reserve every custody component, including moved admin and name variants."""
     return (isinstance(value, str)
-            and value.split('/', 1)[0].casefold() == '.r1-toolbox-ops')
+            and any(part.casefold() == '.r1-toolbox-ops' for part in value.split('/')))
 
 
 def valid_relative_file_path(value):

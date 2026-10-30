@@ -162,6 +162,10 @@ class ApiContractsTests(unittest.TestCase):
         self.assertFalse(boundaries['opened_path_may_cross_mounts'])
         self.assertEqual(boundaries['file_recovery_directory'], '/drives/*/Users/admin/.r1-toolbox-ops/')
         self.assertFalse(boundaries['file_recovery_directory_machine_access_allowed'])
+        self.assertEqual(boundaries['file_recovery_trust_boundary'], 'admin')
+        self.assertFalse(boundaries['file_recovery_ancestor_permissions_required'])
+        self.assertTrue(boundaries['file_recovery_admin_identity_bound'])
+        self.assertTrue(boundaries['file_private_recovery_name_reserved_at_any_depth'])
         self.assertIs(boundaries['legacy_whole_disk_grants_auto_migrate'], False)
 
     def test_admin_boundary_failures_match_the_public_error_contract(self):

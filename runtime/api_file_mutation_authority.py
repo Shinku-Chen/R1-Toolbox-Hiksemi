@@ -1,9 +1,10 @@
 """Owner-established admin-root custody for recoverable file changes.
 
 Machine requests can consume a registered directory, never create or adopt one.
-The first mkdir is permitted only below a complete root-owned, non-writable,
-ACL-free descriptor chain. That trusted parent closes mkdir's missing birth-fd
-problem; checking a random name after mkdir in an untrusted parent does not.
+The actual admin inode and its private directory are the permission trust
+anchors. Outer ancestors supply no-follow, physical-disk and mount evidence,
+not ownership/ACL policy. Reopening detects a moved/replaced admin; it cannot
+lock the namespace against a writer of Users between two checks.
 """
 
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ _DIRECTORY = '.r1-toolbox-ops'
 _REGISTRY = 'file-mutation-admin-authorities.json'
 _LEGACY_REGISTRY = 'file-mutation-authorities.json'
 _LAYOUT = 'admin_custody_v1'
+_TRUST_MODEL = 'admin_anchor_v1'
 _ROOT = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
 _OPERATION = re.compile(r'operation_[0-9a-f]{32}\Z', re.ASCII)
 _MAX_STATE = 4 * 1024 ** 2
@@ -221,23 +223,32 @@ class FileMutationAuthority:
         if self._entries is None:
             with self._state() as parent:
                 legacy = _read_at(parent, _LEGACY_REGISTRY, {'version': 1, 'entries': {}})
-                current = _read_at(parent, _REGISTRY, {'version': 2, 'entries': {}})
+                current = _read_at(parent, _REGISTRY, {'version': 3, 'entries': {}})
             entries = {}
-            for data, version in ((legacy, 1), (current, 2)):
+            for data, legacy_file in ((legacy, True), (current, False)):
                 if (type(data) is not dict or set(data) != {'version', 'entries'}
-                        or type(data['version']) is not int or data['version'] != version
+                        or type(data['version']) is not int
+                        or data['version'] not in ((1,) if legacy_file else (2, 3))
                         or type(data['entries']) is not dict or len(data['entries']) > 128):
                     raise FileAccessError('write_backend_unverified')
                 fields = {'row', 'identity', 'mount_id', 'enabled', 'revision'}
-                if version == 2:
+                if not legacy_file:
                     fields.add('layout')
                 for identifier, entry in data['entries'].items():
+                    bound = type(entry) is dict and 'trust_model' in entry
+                    allowed_fields = fields | ({'trust_model', 'admin_identity'} if bound else set())
                     if (type(identifier) is not str or not _ROOT.fullmatch(identifier)
-                            or identifier in entries or type(entry) is not dict or set(entry) != fields
+                            or identifier in entries or type(entry) is not dict or set(entry) != allowed_fields
                             or type(entry['row']) is not dict or entry['row'].get('id') != identifier
-                            or not (is_admin_root_path(entry['row'].get('mount')) or version == 1
+                            or not (is_admin_root_path(entry['row'].get('mount')) or legacy_file
                                     and is_users_root_path(entry['row'].get('mount')))
-                            or version == 2 and entry['layout'] != _LAYOUT
+                            or not legacy_file and entry['layout'] != _LAYOUT
+                            or bound and (legacy_file or data['version'] != 3
+                                or entry['trust_model'] != _TRUST_MODEL
+                                or type(entry['admin_identity']) is not list
+                                or len(entry['admin_identity']) != 3
+                                or any(type(v) is not int or v < 0 for v in entry['admin_identity'])
+                                or entry['admin_identity'][2] != stat.S_IFDIR)
                             or type(entry['identity']) is not list or len(entry['identity']) != 3
                             or any(type(v) is not int or v < 0 for v in entry['identity'])
                             or type(entry['mount_id']) is not str or not entry['mount_id'].isdigit()
@@ -257,7 +268,14 @@ class FileMutationAuthority:
         entries = {identifier: entry for identifier, entry in self._entries.items()
                    if entry.get('layout') == _LAYOUT}
         with self._state() as parent:
-            _write_at(parent, _REGISTRY, {'version': 2, 'entries': entries})
+            _write_at(parent, _REGISTRY, {'version': 3, 'entries': entries})
+
+    @staticmethod
+    def _trust_boundary(entry=None):
+        # Unbound admin-layout v2 records retain their original permission
+        # policy until an explicit owner initialize pins the current admin.
+        return ('complete_ancestors_legacy' if entry is not None
+                and entry.get('trust_model') != _TRUST_MODEL else 'admin')
 
     @staticmethod
     def _location(*, legacy=False):
@@ -277,6 +295,7 @@ class FileMutationAuthority:
                     'recovery_location': FileMutationAuthority._location(legacy=True)}
         return {'root_id': identifier, 'enabled': entry['enabled'],
                 'revision': entry['revision'], 'status': 'registered' if entry['enabled'] else 'revoked',
+                'trust_boundary': FileMutationAuthority._trust_boundary(entry),
                 'recovery_location': FileMutationAuthority._location()}
 
     def _reject_legacy(self, root_id, row=None):
@@ -304,17 +323,19 @@ class FileMutationAuthority:
         return {'ok': True, 'authorities': result}
 
     def preflight(self, root_id, *, current):
-        """Explicit owner evidence, including every rejected mode/ACL boundary.
+        """Owner initialization/revalidation evidence, not machine authority.
 
         This never creates, chmods or adopts custody. Unlike catalog it opens
-        the selected admin ancestry and can wake that disk. Metadata is useful
-        when a factory image uses writable parents, which must stay rejected.
+        the selected admin ancestry and can wake that disk.
+        Outer permission metadata is evidence only; admin remains protected.
         """
         _authorized(current)
         if type(root_id) is not str or not _ROOT.fullmatch(root_id):
             raise FileAccessError('invalid_arguments')
         result = {'ok': True, 'root_id': root_id, 'ready': False, 'checks': [],
             'recovery_location': self._location(), 'recovery_anchor': None,
+            'trust_boundary': 'admin', 'registration_trust_boundary': None,
+            'owner_revalidation_required': False,
             'source_binding': {'native_owner': 'unverified', 'root_metadata_matches': False,
                                'same_mount': False},
             'existing_directory': 'unavailable', 'blockers': [], 'may_wake_disks': True}
@@ -324,6 +345,12 @@ class FileMutationAuthority:
             self._reject_legacy(root_id)
             row = self._authority.authorize(root_id, '.r1-authority-proof', current)
             self._reject_legacy(root_id, row)
+            entry = self._load().get(root_id)
+            if entry is not None:
+                if not _same_root(entry['row'], row):
+                    raise FileAccessError('root_unavailable')
+                result['registration_trust_boundary'] = self._trust_boundary(entry)
+                result['owner_revalidation_required'] = self._trust_boundary(entry) != 'admin'
             result['source_binding']['native_owner'] = 'verified'
             result['source_binding']['root_metadata_matches'] = True
             with self._handle(row) as opened:
@@ -351,7 +378,10 @@ class FileMutationAuthority:
                                  'mount_id': observed_mount, 'same_mount': same_mount,
                                  'group_other_writable': bool(stat.S_IMODE(info.st_mode) & 0o022),
                                  'access_acl': 'unavailable', 'default_acl': 'unavailable',
-                                 'same_object': _stable(info) == _stable(os.fstat(held)), 'trusted': False}
+                                 'same_object': _stable(info) == _stable(os.fstat(held)),
+                                 'required_for_trust': index == 4,
+                                 'gate': 'trust_anchor' if index == 4 else 'location_only',
+                                 'trusted': False if index == 4 else None}
                         for field, name in (('access_acl', 'system.posix_acl_access'),
                                             ('default_acl', 'system.posix_acl_default')):
                             try:
@@ -361,13 +391,16 @@ class FileMutationAuthority:
                                     (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP) else 'unavailable')
                             else:
                                 check[field] = 'present'
-                        check['trusted'] = (check['uid'] == 0 and not check['group_other_writable']
-                            and check['same_object'] and check['access_acl'] == 'absent'
-                            and check['default_acl'] == 'absent' and same_mount is not False)
+                        if check['required_for_trust']:
+                            check['trusted'] = (check['uid'] == 0 and not check['group_other_writable']
+                                and check['same_object'] and check['access_acl'] == 'absent'
+                                and check['default_acl'] == 'absent' and same_mount is not False)
                         result['checks'].append(check)
                         if check['component'] == 'admin_root':
                             result['recovery_anchor'] = dict(check)
-                        if not check['trusted']:
+                        if not check['same_object'] or observed_mount is None or same_mount is False:
+                            result['blockers'].append('root_unavailable')
+                        if check['required_for_trust'] and not check['trusted']:
                             result['blockers'].append(check['component'] + '_untrusted_mode_or_acl')
                     finally:
                         os.close(descriptor)
@@ -375,16 +408,20 @@ class FileMutationAuthority:
                     os.stat(_DIRECTORY, dir_fd=opened.fd, follow_symlinks=False)
                 except FileNotFoundError:
                     result['existing_directory'] = 'absent'
+                    if entry is not None:
+                        result['blockers'].append('file_changed')
                 else:
-                    entry = self._load().get(root_id)
                     if entry is None:
                         result['existing_directory'] = 'unknown'
                         result['blockers'].append('existing_directory_not_registered')
                     else:
                         if not _same_root(entry['row'], row):
                             raise FileAccessError('root_unavailable')
-                        self._verify_anchor(row, entry)
+                        candidate = self._bound_entry(entry, _stable(os.fstat(opened.fd)))
+                        self._verify_anchor(row, candidate)
                         result['existing_directory'] = 'registered'
+                self._verify_admin(row, _stable(os.fstat(opened.fd)),
+                    entry=entry if entry is not None and self._trust_boundary(entry) == 'admin' else None)
             result['ready'] = not result['blockers']
         except FileAccessError as error:
             if error.code == 'invalid_key':
@@ -408,22 +445,42 @@ class FileMutationAuthority:
             return _Handle(self.root, row, '', directory=True)
         return self._handle_factory(self.root, row, '', directory=True)
 
-    def _trusted_chain(self, opened):
+    @staticmethod
+    def _bound_entry(entry, admin_identity):
+        """An owner-only candidate; never silently repin an existing binding."""
+        if entry.get('trust_model') == _TRUST_MODEL:
+            return entry
+        return dict(entry, trust_model=_TRUST_MODEL, admin_identity=admin_identity)
+
+    def _trusted_chain(self, opened, *, entry=None):
+        admin_identity = _stable(os.fstat(opened.fd))
+        legacy = entry is not None and self._trust_boundary(entry) != 'admin'
+        if entry is not None and not legacy and admin_identity != entry['admin_identity']:
+            raise FileAccessError('file_changed')
         for descriptor in opened.descriptors:
             # O_PATH cannot be used with fgetxattr. Reopen our held, inspected
             # kernel fd; never resolve a caller-provided pathname again.
             inspected = os.open('/proc/self/fd/' + str(descriptor),
                                 os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             try:
-                if _stable(os.fstat(inspected)) != _stable(os.fstat(descriptor)):
+                info = os.fstat(inspected)
+                if _stable(info) != _stable(os.fstat(descriptor)) or not stat.S_ISDIR(info.st_mode):
                     raise FileAccessError('file_changed')
-                _trusted(inspected)
+                if legacy or _stable(info) == admin_identity:
+                    _trusted(inspected)
             finally:
                 os.close(inspected)
 
+    def _verify_admin(self, row, identity, *, entry=None):
+        """Detect canonical-path replacement; this is not a namespace lock."""
+        with self._handle(row) as current:
+            self._trusted_chain(current, entry=entry)
+            if _stable(os.fstat(current.fd)) != identity:
+                raise FileAccessError('file_changed')
+
     def _verify_anchor(self, row, entry):
         with self._handle(row) as opened:
-            self._trusted_chain(opened)
+            self._trusted_chain(opened, entry=entry)
             descriptor = os.open(_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY
                 | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=opened.fd)
             try:
@@ -432,6 +489,7 @@ class FileMutationAuthority:
                     raise FileAccessError('file_changed')
             finally:
                 os.close(descriptor)
+            self._verify_admin(row, _stable(os.fstat(opened.fd)), entry=entry)
 
     def initialize(self, root_id, *, confirmed, current):
         _authorized(current)
@@ -446,8 +504,15 @@ class FileMutationAuthority:
             self._reject_legacy(root_id, row)
             with self._handle(row) as opened:
                 self._trusted_chain(opened)
+                admin_identity = _stable(os.fstat(opened.fd))
                 _authorized(current)
                 entry = entries.get(root_id)
+                # A bound authority cannot be silently rebound, even by another
+                # initialize. The original admin inode must be put back first.
+                if entry is not None and entry.get('trust_model') == _TRUST_MODEL:
+                    self._trusted_chain(opened, entry=entry)
+                self._verify_admin(row, admin_identity)
+                _authorized(current)
                 if entry is None:
                     if len(entries) >= 128:
                         raise FileAccessError('limit_exceeded')
@@ -465,11 +530,24 @@ class FileMutationAuthority:
                     identity = _stable(info)
                     if entry is not None and (entry['identity'] != identity or not _same_root(entry['row'], row)):
                         raise FileAccessError('file_changed')
-                    entries[root_id] = {'row': dict(row), 'identity': identity, 'layout': _LAYOUT,
+                    candidate = {'row': dict(row), 'identity': identity, 'layout': _LAYOUT,
+                        'trust_model': _TRUST_MODEL, 'admin_identity': admin_identity,
                         'mount_id': opened.mount_id, 'enabled': True,
                         'revision': (entry['revision'] + 1) if entry is not None else 1}
                     _authorized(current)
-                    self._save()
+                    self._verify_anchor(row, candidate)
+                    _authorized(current)
+                    entries[root_id] = candidate
+                    try:
+                        self._save()
+                    except Exception:
+                        if entry is None:
+                            entries.pop(root_id, None)
+                        else:
+                            entries[root_id] = entry
+                        raise
+                    self._verify_anchor(row, candidate)
+                    _authorized(current)
                 finally:
                     os.close(descriptor)
             return {'ok': True, 'authority': self._public(root_id, entries[root_id]),
@@ -483,7 +561,7 @@ class FileMutationAuthority:
         with self._lock:
             entry = self._check_registered(row, allow_revoked=allow_revoked)
             with self._handle(row) as opened:
-                self._trusted_chain(opened)
+                self._trusted_chain(opened, entry=entry)
                 parent = os.open(_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY
                     | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=opened.fd)
                 descriptor = None
@@ -491,6 +569,7 @@ class FileMutationAuthority:
                     if (_stable(_trusted(parent, private=True)) != entry['identity']
                             or _descriptor_mount_id(self.root, parent) != opened.mount_id):
                         raise FileAccessError('file_changed')
+                    self._verify_anchor(row, entry)
                     _authorized(current)
                     if create:
                         # Exclusive, trusted private parent proves this birth.
@@ -524,10 +603,13 @@ class FileMutationAuthority:
                 raise FileAccessError('root_unavailable')
             records = []
             with self._handle(row) as opened:
+                self._trusted_chain(opened, entry=entry)
+                self._verify_anchor(row, entry)
                 parent = os.open(_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY
                     | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=opened.fd)
                 try:
-                    if _stable(_trusted(parent, private=True)) != entry['identity']:
+                    if (_stable(_trusted(parent, private=True)) != entry['identity']
+                            or _descriptor_mount_id(self.root, parent) != opened.mount_id):
                         raise FileAccessError('file_changed')
                     for name in os.listdir(parent):
                         if len(records) >= 4096:
@@ -552,6 +634,7 @@ class FileMutationAuthority:
                                 os.close(fd)
                 finally:
                     os.close(parent)
+                self._verify_anchor(row, entry)
             _authorized(current)
             return {'ok': True, 'authority': self._public(root_id, entry),
                     'recoveries': records, 'may_wake_disks': True}

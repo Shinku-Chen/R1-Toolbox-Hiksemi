@@ -165,7 +165,7 @@ class ArgumentTests(unittest.TestCase):
         key.update(role='readwrite', tool_grants=list(mutations.TOOLS) + ['prepare_file_upload'])
         key['file_roots'][0].update(path='', access='readwrite')
         for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_private/source',
-                     '.R1-TOOLBOX-OPS/source'):
+                     '.R1-TOOLBOX-OPS/source', 'folder/.r1-toolbox-ops/file'):
             with self.assertRaises(FileAccessError) as caught:
                 writer._grant(key, 'prepare_file_upload', ROOT, path)
             self.assertEqual(caught.exception.code, 'unsupported_path_class')
@@ -173,7 +173,7 @@ class ArgumentTests(unittest.TestCase):
                 with self.assertRaises(FileAccessError) as caught:
                     writer.mutations._grant(key, 'copy_file', ROOT, path, write=write)
                 self.assertEqual(caught.exception.code, 'unsupported_path_class')
-        for path in ('.r1-toolbox-ops2/file', 'folder/.r1-toolbox-ops/file'):
+        for path in ('.r1-toolbox-ops2/file', 'folder/.r1-toolbox-ops2/file'):
             self.assertEqual(writer._grant(key, 'prepare_file_upload', ROOT, path)[1], 'file')
             self.assertEqual(writer.mutations._grant(key, 'copy_file', ROOT, path, write=False)[1], 'file')
 
@@ -251,14 +251,9 @@ class FileMutationTests(unittest.TestCase):
         os.utime(descriptor, ns=(before.st_atime_ns, before.st_mtime_ns))
         return changed
 
-    def test_owner_bootstrap_requires_confirmation_and_rejects_unknown_or_writable_parents(self):
+    def test_owner_bootstrap_requires_confirmation_and_rejects_unknown_custody(self):
         with self.assertRaises(FileAccessError):
             self.owner_authority.initialize(ROOT, confirmed=False, current=lambda: True)
-        os.chmod(self.users, 0o777)
-        with self.assertRaises(FileAccessError):
-            self.initialize()
-        self.assertFalse((self.admin / '.r1-toolbox-ops').exists())
-        os.chmod(self.users, 0o755)
         unknown = self.admin / '.r1-toolbox-ops'
         unknown.mkdir(mode=0o700)
         (unknown / 'keep.txt').write_bytes(b'unknown custody')
@@ -275,15 +270,18 @@ class FileMutationTests(unittest.TestCase):
         with self.assertRaises(FileAccessError):
             self.owner_authority.open(ROW, 'operation_' + 'a' * 32, current=lambda: True)
 
-    def test_authority_stays_inside_admin_with_all_ancestors_trusted(self):
+    def test_authority_persists_admin_inode_and_private_location(self):
         import api_file_mutation_authority as custody
         self.initialize()
         self.assertTrue((self.admin / '.r1-toolbox-ops').is_dir())
         self.assertFalse((self.users / '.r1-toolbox-ops').exists())
         registry = self.state_dir / custody._REGISTRY
         saved = json.loads(registry.read_bytes())
-        self.assertEqual(saved['version'], 2)
+        self.assertEqual(saved['version'], 3)
         self.assertEqual(saved['entries'][ROOT]['layout'], 'admin_custody_v1')
+        self.assertEqual(saved['entries'][ROOT]['trust_model'], 'admin_anchor_v1')
+        self.assertEqual(saved['entries'][ROOT]['admin_identity'],
+                         [self.admin.stat().st_dev, self.admin.stat().st_ino, stat.S_IFDIR])
         self.assertEqual(stat.S_IMODE((self.admin / '.r1-toolbox-ops').stat().st_mode), 0o700)
         self.assertFalse((self.state_dir / custody._LEGACY_REGISTRY).exists())
         evidence = self.owner_authority.preflight(ROOT, current=lambda: True)
@@ -297,11 +295,14 @@ class FileMutationTests(unittest.TestCase):
         self.assertEqual(evidence['recovery_anchor']['component'], 'admin_root')
         self.assertTrue(evidence['recovery_anchor']['same_mount'])
         self.assertTrue(evidence['recovery_anchor']['trusted'])
+        self.assertEqual(evidence['trust_boundary'], 'admin')
+        self.assertEqual(evidence['registration_trust_boundary'], 'admin')
+        self.assertFalse(evidence['owner_revalidation_required'])
         reloaded = FileMutationAuthority(None, root=self.root, state_dir=self.state_dir,
                                         authority=WriteAuthorityFixture())
         self.assertEqual(reloaded.preflight(ROOT, current=lambda: True)['existing_directory'], 'registered')
 
-    def test_admin_mode_or_real_posix_acl_never_relaxes_the_ancestor_gate(self):
+    def test_admin_mode_or_real_posix_acl_remains_a_permission_gate(self):
         os.chmod(self.admin, 0o777)
         evidence = self.owner_authority.preflight(ROOT, current=lambda: True)
         self.assertFalse(evidence['ready'])
@@ -444,13 +445,306 @@ class FileMutationTests(unittest.TestCase):
     def test_owner_preflight_reports_real_uid_mode_acl_and_never_creates(self):
         os.chmod(self.users, 0o777)
         evidence = self.owner_authority.preflight(ROOT, current=lambda: True)
-        self.assertFalse(evidence['ready'])
+        self.assertTrue(evidence['ready'], evidence)
         users = [r for r in evidence['checks'] if r['component'] == 'users_root'][0]
         self.assertEqual(users['mode'], '0777')
         self.assertTrue(users['group_other_writable'])
+        self.assertFalse(users['required_for_trust'])
+        self.assertEqual(users['gate'], 'location_only')
+        self.assertIsNone(users['trusted'])
         self.assertIn(users['access_acl'], ('absent', 'present', 'unavailable'))
         self.assertEqual(evidence['source_binding']['native_owner'], 'verified')
         self.assertFalse((self.admin / '.r1-toolbox-ops').exists())
+
+    def test_real_writable_nonroot_parents_allow_admin_custody_and_owner_restore(self):
+        drives = self.root / 'drives'
+        os.chown(drives, 1046, 1046)
+        os.chmod(drives, 0o775)
+        os.chmod(self.users, 0o777)
+        evidence = self.owner_authority.preflight(ROOT, current=lambda: True)
+        self.assertTrue(evidence['ready'], evidence)
+        self.assertEqual(evidence['blockers'], [])
+        self.assertIsNone(evidence['registration_trust_boundary'])
+        self.assertFalse(evidence['owner_revalidation_required'])
+        self.assertEqual(evidence['checks'][1]['uid'], 1046)
+        for check in evidence['checks'][:-1]:
+            self.assertFalse(check['required_for_trust'])
+            self.assertEqual(check['gate'], 'location_only')
+            self.assertIsNone(check['trusted'])
+        self.assertTrue(evidence['recovery_anchor']['required_for_trust'])
+        self.assertTrue(evidence['recovery_anchor']['trusted'])
+        self.initialize()
+        args = self.rename_args()
+        (self.admin / 'renamed.bin').write_bytes(b'preserve target')
+        result = self.writer.execute('rename_file', args, self.key)
+        self.assertEqual(result['operation']['state'], 'result_unconfirmed', result)
+        self.assertFalse((self.admin / 'source.bin').exists())
+        operation_id = result['operation']['operation_id']
+        self.assertEqual((self.admin / '.r1-toolbox-ops' / operation_id / 'source').read_bytes(), DATA)
+        self.index.ready = True
+        with mock.patch('api_file_native_index.NativeFileIndex', return_value=self.index):
+            restored = self.owner_authority.restore(ROOT, operation_id, confirmed=True, current=lambda: True)
+        self.assertEqual(restored['recovery']['state'], 'restored', restored)
+        self.assertTrue(restored['recovery']['index_verified'])
+        self.assertEqual((self.admin / 'source.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'renamed.bin').read_bytes(), b'preserve target')
+
+    def test_nonroot_admin_is_rejected_even_when_parent_permissions_are_ignored(self):
+        os.chmod(self.users, 0o777)
+        os.chown(self.admin, 1046, 1046)
+        result = self.owner_authority.preflight(ROOT, current=lambda: True)
+        self.assertFalse(result['ready'])
+        self.assertEqual(result['recovery_anchor']['uid'], 1046)
+        self.assertIn('admin_root_untrusted_mode_or_acl', result['blockers'])
+        with self.assertRaises(FileAccessError):
+            self.initialize()
+        self.assertFalse((self.admin / '.r1-toolbox-ops').exists())
+
+    def test_outer_real_posix_acl_is_evidence_but_private_acl_remains_forbidden(self):
+        import errno
+        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in (
+            (1, 7, 0xffffffff), (2, 7, 1001), (4, 5, 0xffffffff),
+            (16, 7, 0xffffffff), (32, 7, 0xffffffff)))
+        try:
+            os.setxattr(self.users, 'system.posix_acl_access', acl)
+        except OSError as error:
+            if error.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+                self.skipTest('fixture filesystem does not support actual POSIX ACLs')
+            raise
+        result = self.owner_authority.preflight(ROOT, current=lambda: True)
+        self.assertTrue(result['ready'], result)
+        users = next(item for item in result['checks'] if item['component'] == 'users_root')
+        self.assertEqual(users['access_acl'], 'present')
+        self.assertIsNone(users['trusted'])
+        self.initialize()
+        stage = self.owner_authority.open(ROW, 'operation_' + 'd' * 32, current=lambda: True)
+        self.addCleanup(stage.close)
+        private = self.admin / '.r1-toolbox-ops'
+        private_acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in (
+            (1, 7, 0xffffffff), (2, 0, 1001), (4, 0, 0xffffffff),
+            (16, 0, 0xffffffff), (32, 0, 0xffffffff)))
+        os.setxattr(private, 'system.posix_acl_access', private_acl)
+        self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+        with self.assertRaises(FileAccessError):
+            stage.verify(lambda: True)
+        self.assertFalse(self.owner_authority.preflight(ROOT, current=lambda: True)['ready'])
+
+    def test_registered_admin_replaced_by_empty_directory_is_not_preflight_ready(self):
+        self.initialize()
+        self.admin.rename(self.users / 'preserved-admin')
+        self.admin.mkdir(mode=0o755)
+        result = self.owner_authority.preflight(ROOT, current=lambda: True)
+        self.assertFalse(result['ready'], result)
+        self.assertIn('file_changed', result['blockers'])
+        self.assertEqual(result['existing_directory'], 'absent')
+        self.assertTrue((self.users / 'preserved-admin/.r1-toolbox-ops').is_dir())
+
+    def test_admin_inode_replacement_cannot_adopt_even_the_original_ops_inode(self):
+        import api_file_mutation_authority as custody
+        self.initialize()
+        stage = self.owner_authority.open(ROW, 'operation_' + 'd' * 32, current=lambda: True)
+        self.addCleanup(stage.close)
+        registry = self.state_dir / custody._REGISTRY
+        saved = registry.read_bytes()
+        original = self.users / 'original-admin'
+        self.admin.rename(original)
+        self.admin.mkdir(mode=0o755)
+        (original / '.r1-toolbox-ops').rename(self.admin / '.r1-toolbox-ops')
+        reloaded = FileMutationAuthority(None, root=self.root, state_dir=self.state_dir,
+                                        authority=WriteAuthorityFixture())
+        for authority in (self.owner_authority, reloaded):
+            for action in (lambda: authority.open(ROW, 'operation_' + 'e' * 32, current=lambda: True),
+                    lambda: authority.snapshot(ROOT, current=lambda: True),
+                    lambda: authority.initialize(ROOT, confirmed=True, current=lambda: True)):
+                with self.assertRaises(FileAccessError) as caught:
+                    action()
+                self.assertEqual(caught.exception.code, 'file_changed')
+            self.assertFalse(authority.preflight(ROOT, current=lambda: True)['ready'])
+        with self.assertRaises(FileAccessError) as caught:
+            stage.verify(lambda: True)
+        self.assertEqual(caught.exception.code, 'file_changed')
+        self.assertEqual(registry.read_bytes(), saved)
+        (self.admin / '.r1-toolbox-ops').rename(original / '.r1-toolbox-ops')
+        self.admin.rmdir()
+        original.rename(self.admin)
+        stage.verify(lambda: True)
+        self.assertTrue(reloaded.snapshot(ROOT, current=lambda: True)['ok'])
+
+    def test_registered_admin_mount_change_invalidates_held_stage_and_inventory(self):
+        self.initialize()
+        stage = self.owner_authority.open(ROW, 'operation_' + 'd' * 32, current=lambda: True)
+        self.addCleanup(stage.close)
+        with (self.root / 'proc/self/mountinfo').open('a') as stream:
+            stream.write(f'88 1 {self.device} / /drives/data/Users/admin rw - ext4 /dev/sda1 rw\n')
+        for action in (lambda: stage.verify(lambda: True),
+                lambda: self.owner_authority.snapshot(ROOT, current=lambda: True)):
+            with self.assertRaises(FileAccessError) as caught:
+                action()
+            self.assertEqual(caught.exception.code, 'root_unavailable')
+        self.assertFalse(self.owner_authority.preflight(ROOT, current=lambda: True)['ready'])
+
+    def test_ops_replacement_and_weakened_permissions_invalidate_every_held_stage(self):
+        self.initialize()
+        stage = self.owner_authority.open(ROW, 'operation_' + 'd' * 32, current=lambda: True)
+        self.addCleanup(stage.close)
+        private = self.admin / '.r1-toolbox-ops'
+        os.chmod(private, 0o750)
+        for action in (lambda: stage.verify(lambda: True),
+                lambda: self.owner_authority.snapshot(ROOT, current=lambda: True)):
+            with self.assertRaises(FileAccessError):
+                action()
+        os.chmod(private, 0o700)
+        private.rename(self.admin / 'preserved-private')
+        private.mkdir(mode=0o700)
+        with self.assertRaises(FileAccessError) as caught:
+            stage.verify(lambda: True)
+        self.assertEqual(caught.exception.code, 'file_changed')
+        self.assertFalse(self.owner_authority.preflight(ROOT, current=lambda: True)['ready'])
+        self.assertTrue((self.admin / 'preserved-private' / stage.operation_id).exists())
+
+    def test_initialize_detects_admin_replacement_after_mkdir_without_adopting_or_deleting(self):
+        import api_file_mutation_authority as custody
+        original = self.users / 'preserved-admin'
+        real_mkdir = os.mkdir
+        replaced = False
+        def swap_after_mkdir(path, *args, **options):
+            nonlocal replaced
+            result = real_mkdir(path, *args, **options)
+            if path == '.r1-toolbox-ops' and not replaced:
+                replaced = True
+                self.admin.rename(original)
+                real_mkdir(self.admin, 0o755)
+            return result
+        with mock.patch.object(custody.os, 'mkdir', side_effect=swap_after_mkdir):
+            with self.assertRaises(FileAccessError) as caught:
+                self.initialize()
+        self.assertEqual(caught.exception.code, 'file_changed')
+        self.assertTrue((original / '.r1-toolbox-ops').is_dir())
+        self.assertFalse((self.admin / '.r1-toolbox-ops').exists())
+        self.assertNotIn(ROOT, self.owner_authority._load())
+        self.assertFalse((self.state_dir / custody._REGISTRY).exists())
+
+    def test_initialize_save_failure_preserves_unregistered_object_and_old_memory(self):
+        with mock.patch.object(self.owner_authority, '_save', side_effect=FileAccessError('write_backend_unverified')):
+            with self.assertRaises(FileAccessError):
+                self.initialize()
+        self.assertNotIn(ROOT, self.owner_authority._load())
+        self.assertTrue((self.admin / '.r1-toolbox-ops').is_dir())
+        with self.assertRaises(FileAccessError):
+            self.initialize()
+
+    def test_initialize_rechecks_canonical_admin_after_durable_save(self):
+        import api_file_mutation_authority as custody
+        save = self.owner_authority._save
+        original = self.users / 'preserved-admin'
+        def swap_after_save():
+            save()
+            self.admin.rename(original)
+            self.admin.mkdir(mode=0o755)
+        with mock.patch.object(self.owner_authority, '_save', side_effect=swap_after_save):
+            with self.assertRaises(FileAccessError) as caught:
+                self.initialize()
+        self.assertEqual(caught.exception.code, 'file_changed')
+        saved = json.loads((self.state_dir / custody._REGISTRY).read_bytes())['entries'][ROOT]
+        self.assertEqual(saved['admin_identity'][1], original.stat().st_ino)
+        with self.assertRaises(FileAccessError):
+            self.owner_authority.open(ROW, 'operation_' + 'd' * 32, current=lambda: True)
+        self.assertTrue((original / '.r1-toolbox-ops').is_dir())
+
+    def test_snapshot_discards_inventory_if_admin_is_moved_during_manifest_read(self):
+        import api_file_mutation_authority as custody
+        self.initialize()
+        with self.owner_authority.open(ROW, 'operation_' + 'd' * 32, current=lambda: True) as stage:
+            stage.record({'restore_path': 'source.bin', 'tool': 'rename_file'}, current=lambda: True)
+        read = custody._read_at
+        original = self.users / 'preserved-admin'
+        def swap_after_read(parent, name, *args):
+            result = read(parent, name, *args)
+            if name == 'manifest.json':
+                self.admin.rename(original)
+                self.admin.mkdir(mode=0o755)
+            return result
+        with mock.patch.object(custody, '_read_at', side_effect=swap_after_read):
+            with self.assertRaises(FileAccessError) as caught:
+                self.owner_authority.snapshot(ROOT, current=lambda: True)
+        self.assertEqual(caught.exception.code, 'file_changed')
+
+    def test_old_admin_v2_keeps_full_chain_policy_until_explicit_owner_revalidation(self):
+        import api_file_mutation_authority as custody
+        self.initialize()
+        registry = self.state_dir / custody._REGISTRY
+        old = json.loads(registry.read_bytes())['entries'][ROOT]
+        del old['trust_model'], old['admin_identity']
+        with self.owner_authority._state() as parent:
+            custody._write_at(parent, custody._REGISTRY, {'version': 2, 'entries': {ROOT: old}})
+        before = registry.read_bytes()
+        reloaded = FileMutationAuthority(None, root=self.root, state_dir=self.state_dir,
+                                        authority=WriteAuthorityFixture())
+        self.assertEqual(reloaded.catalog(current=lambda: True)['authorities'][0]['trust_boundary'],
+                         'complete_ancestors_legacy')
+        with reloaded.open(ROW, 'operation_' + 'd' * 32, current=lambda: True) as stage:
+            stage.verify(lambda: True)
+        self.assertEqual(registry.read_bytes(), before)
+        os.chmod(self.users, 0o777)
+        with self.assertRaises(FileAccessError):
+            reloaded.open(ROW, 'operation_' + 'e' * 32, current=lambda: True)
+        with self.assertRaises(FileAccessError):
+            reloaded.snapshot(ROOT, current=lambda: True)
+        preflight = reloaded.preflight(ROOT, current=lambda: True)
+        self.assertTrue(preflight['ready'], preflight)
+        self.assertTrue(preflight['owner_revalidation_required'])
+        self.assertEqual(preflight['registration_trust_boundary'], 'complete_ancestors_legacy')
+        self.assertEqual(registry.read_bytes(), before)
+        upgraded = reloaded.initialize(ROOT, confirmed=True, current=lambda: True)
+        self.assertEqual(upgraded['authority']['trust_boundary'], 'admin')
+        self.assertEqual(upgraded['authority']['revision'], old['revision'] + 1)
+        saved = json.loads(registry.read_bytes())
+        self.assertEqual(saved['version'], 3)
+        self.assertEqual(saved['entries'][ROOT]['identity'], old['identity'])
+        with reloaded.open(ROW, 'operation_' + 'e' * 32, current=lambda: True) as stage:
+            stage.verify(lambda: True)
+
+    def test_mixed_v3_records_keep_unbound_entries_and_current_mount_id_is_not_persistent_identity(self):
+        import api_file_mutation_authority as custody
+        self.initialize()
+        registry = self.state_dir / custody._REGISTRY
+        data = json.loads(registry.read_bytes())
+        data['entries'][ROOT]['mount_id'] = '123456789'
+        other = copy.deepcopy(data['entries'][ROOT])
+        other['row']['id'] = 'root_' + 'f' * 24
+        other['row']['mount'] = '/drives/another/Users/admin'
+        del other['trust_model'], other['admin_identity']
+        data['entries'][other['row']['id']] = other
+        with self.owner_authority._state() as parent:
+            custody._write_at(parent, custody._REGISTRY, data)
+        reloaded = FileMutationAuthority(None, root=self.root, state_dir=self.state_dir,
+                                        authority=WriteAuthorityFixture())
+        with reloaded.open(ROW, 'operation_' + 'e' * 32, current=lambda: True) as stage:
+            stage.verify(lambda: True)
+        reloaded.revoke(ROOT, confirmed=True, current=lambda: True)
+        self.assertEqual(json.loads(registry.read_bytes())['entries'][other['row']['id']], other)
+
+    def test_failed_explicit_upgrade_never_enables_admin_only_policy_in_memory(self):
+        import api_file_mutation_authority as custody
+        self.initialize()
+        registry = self.state_dir / custody._REGISTRY
+        old = json.loads(registry.read_bytes())['entries'][ROOT]
+        del old['trust_model'], old['admin_identity']
+        with self.owner_authority._state() as parent:
+            custody._write_at(parent, custody._REGISTRY, {'version': 2, 'entries': {ROOT: old}})
+        original = registry.read_bytes()
+        os.chmod(self.users, 0o777)
+        reloaded = FileMutationAuthority(None, root=self.root, state_dir=self.state_dir,
+                                        authority=WriteAuthorityFixture())
+        with mock.patch.object(reloaded, '_save', side_effect=FileAccessError('write_backend_unverified')):
+            with self.assertRaises(FileAccessError):
+                reloaded.initialize(ROOT, confirmed=True, current=lambda: True)
+        self.assertEqual(reloaded._load()[ROOT], old)
+        self.assertEqual(registry.read_bytes(), original)
+        with self.assertRaises(FileAccessError):
+            reloaded.open(ROW, 'operation_' + 'd' * 32, current=lambda: True)
+        self.assertEqual(reloaded.catalog(current=lambda: True)['authorities'][0]['trust_boundary'],
+                         'complete_ancestors_legacy')
 
     def test_same_inode_private_alias_cannot_be_a_copy_source(self):
         self.initialize()

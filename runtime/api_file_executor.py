@@ -111,7 +111,7 @@ class _Handle:
             raise FileAccessError('invalid_arguments')
         self.root, self.row, self.path = root, dict(row), path
         self.descriptors = []
-        self.fd, self.mount_id = None, None
+        self.fd, self.admin_fd, self.mount_id = None, None, None
         try:
             try:
                 mounts = _mounts(root)
@@ -149,6 +149,11 @@ class _Handle:
                 if (stat.S_ISLNK(info.st_mode) or not (stat.S_ISDIR(info.st_mode)
                                                      or final and stat.S_ISREG(info.st_mode))):
                     raise FileAccessError('unsupported_file_type')
+                if index == len(boundary) - 1:
+                    # Hold the actual admin anchor even when fd later denotes
+                    # a child or its readable duplicate. Outer modes are not
+                    # authority over files below this verified boundary.
+                    self.admin_fd = parent
                 if index >= 1:
                     # /drives/<disk> and every descendant must stay on the exact
                     # mount, even if st_dev is shared by an unexpected bind.
@@ -157,9 +162,9 @@ class _Handle:
                             or f'{os.major(info.st_dev)}:{os.minor(info.st_dev)}' != device):
                         descendant = index >= len(boundary) and observed_mount is not None
                         raise FileAccessError('cross_mount_denied' if descendant else 'root_unavailable')
-                if index == len(boundary):
-                    # The first descendant can be a short/case-insensitive FS
-                    # alias even when its spelling passes the lexical guard.
+                if index >= len(boundary):
+                    # An admin moved below another admin may retain custody at
+                    # any depth. Check each actual parent for FS-name aliases.
                     _deny_private_alias(root, self.descriptors[-2], parent)
             self.fd = parent
             self.identity = _object_identity(os.fstat(self.fd))
@@ -196,6 +201,7 @@ class _Handle:
             os.close(descriptor)
         self.descriptors = []
         self.fd = None
+        self.admin_fd = None
 
     def detach(self):
         descriptor = self.fd
@@ -224,6 +230,7 @@ class _UsersHandle(_Handle):
             admin = self.descriptors.pop()
             self.fd = self.descriptors[-1]
             os.close(admin)
+            self.admin_fd = None  # This internal view retains only Users.
             self.identity = _object_identity(os.fstat(self.fd))
             readable = os.open('/proc/self/fd/' + str(self.fd),
                                os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)

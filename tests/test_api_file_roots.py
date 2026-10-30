@@ -19,12 +19,13 @@ class ApiFileRootsTests(unittest.TestCase):
         catalog = self.catalog()
         root = catalog['roots'][0]['id']
         for path in ('.r1-toolbox-ops', '.r1-toolbox-ops/operation_fixture/source',
-                     '.R1-TOOLBOX-OPS/source', '.r1-toolbox-opſ/source'):
+                     '.R1-TOOLBOX-OPS/source', '.r1-toolbox-opſ/source',
+                     'folder/.r1-toolbox-ops', 'folder/.R1-TOOLBOX-OPS/source'):
             self.assertTrue(is_private_recovery_path(path))
             for access in ('readonly', 'readwrite'):
                 with self.assertRaisesRegex(ValueError, '内部恢复区'):
                     validate_file_grants([{'id': root, 'path': path, 'access': access}], catalog)
-        for path in ('', '.r1-toolbox-ops2', 'folder/.r1-toolbox-ops'):
+        for path in ('', '.r1-toolbox-ops2', 'folder/.r1-toolbox-ops2'):
             self.assertFalse(is_private_recovery_path(path))
             validate_file_grants([{'id': root, 'path': path, 'access': 'readwrite'}], catalog)
 
