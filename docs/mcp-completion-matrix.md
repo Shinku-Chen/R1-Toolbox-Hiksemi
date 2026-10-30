@@ -1,8 +1,8 @@
 # MCP 功能完成矩阵
 
-更新于 2026-10-30。目标是让局域网 AI 尽可能管理 NAS；当前有 **65 个真实工具回调**，并未完成全部海康 APP、客户端和云端功能替代。以下把「已实现」「当前 NAS 是否通过门槛」「仍缺什么」分开记录，不把固件动作表、工具注册、HTTP 200、原厂 ACK 或本地 fixture 当作实机完成证明。
+更新于 2026-10-30。目标是让局域网 AI 尽可能管理 NAS；当前有 **69 个真实工具回调**，并未完成全部海康 APP、客户端和云端功能替代。以下把「已实现」「当前 NAS 是否通过门槛」「仍缺什么」分开记录，不把固件动作表、工具注册、HTTP 200、原厂 ACK 或本地 fixture 当作实机完成证明。
 
-目录唯一来源为 `runtime/mcp_service.py`，原厂第二批定义为 `runtime/native_capability_specs.py`；实际调用与 `api_permissions.py` 使用同一角色、域、精确工具和资源判定。65 项组成：原 36＋文件只读／传输 5＋下载器扩展 6＋未来 Docker 部署 4＋原厂第二批 14。二十项文件／Docker 合同中 12 项已实现，8 项文件写待接入，不额外注册占位回调。
+目录唯一来源为 `runtime/mcp_service.py`，原厂第二批定义为 `runtime/native_capability_specs.py`；实际调用与 `api_permissions.py` 使用同一角色、域、精确工具和资源判定。69 项组成：原 36＋文件只读／传输 5＋下载器扩展 6＋未来 Docker 部署 4＋原厂第二批 14＋缓存监控 3＋固定项目资源读数 1。二十项既定文件／Docker 合同中 12 项已实现，8 项文件写待接入，扩展工具不冒充这些未实现合同。
 
 ## 权限与网页管理
 
@@ -14,14 +14,14 @@
 
 | 用户目标 | 已实现工具 | 仍缺具体功能 | 证据与实机条件 |
 | --- | --- | --- | --- |
-| 健康、设备、网络、存储和应用状态 | `get_nas_status`；缓存 `get_app_status/get_download_status/get_movie_status/get_album_status/get_share_status` | 完整历史查询、网络配置、存储池创建／格式化／修复、休眠阈值修改等 | 共享真实监控与已有缓存，未知保持 null；不为填数据临时 SMART 或自动刷新原厂。完整 SN 只走专用所有者／开发入口，不扩大机器权限。见[三端覆盖](data-coverage.md) |
+| 健康、设备、网络、存储和应用状态 | `get_nas_status/get_monitoring_history/get_health_events/get_network_traffic_totals`；五类既有业务缓存 | 网络配置、存储池创建／格式化／修复、休眠阈值修改等 | 十一项固定指标历史、同代健康事件及日／月观测流量仅读缓存，未知保持 null，过期或缺测不报健康；不临时 SMART 或刷新原厂。完整 SN 不扩大机器权限。见[缓存监控工具](mcp-monitoring-tools.md) |
 | 风扇与温控 | `set_fan_policy/release_fan` | 未核验固件／驱动的通用调速、无测速设备的真实 RPM | 保留原厂二进制、唯一进程、设备／驱动、租约及温度保护；系统自动档与高／中／低须真实交接，不把缓存／ACK 当物理转速。实机排障固定 `/api/dev/fan` |
 | 灯效 | `set_light_policy/set_rgb` | 原厂四种效果之外的任意灯带／地址控制 | 固定硬件与现有效果，保留控制器预检；不盲扫 I²C |
 | 小屏与屏保 | `set_screen/update_screen_settings` | 通过机器 Token 管理小屏服务授权、任意原厂窗口／脚本控制 | 既有设置与实际状态分开，不能由保存勾选推断接管成功；服务开关只能所有者管理 |
 | 电源 | `request_power/cancel_power` | 固件升级、网络唤醒／自动开机等未审定控制 | 管理员、确认、五秒可取消；不拿其他系统 getter 扩展电源权限 |
 | 文件浏览与下载 | `list_file_roots/list_directory/get_file_info/prepare_file_download/get_file_transfer/cancel_file_transfer` | 其他用户私有树、写入与完整文件管理 | 仅匹配固件的固定原厂所有者及 `admin/public` 正子集，完整逻辑 ACL、同挂载拓扑、最终句柄和逐块授权同时通过。**d507 实机七根均未过挂载门，未取得目录／样本字节证明。** 先显式 `file_protocol` 抓完整现场，再按明确范围比对样本。见[真实只读后端](native-file-readonly.md) |
 | 文件上传及管理 | 当前无生产写工具；仅有严格传输／staging 组件和合同 | `prepare_file_upload/commit_file_upload/create_directory/rename_file/copy_file/move_file/trash_file/get_file_operation` | 须闭合目标 ACL、配额、原厂索引、原子安装、覆盖冲突、回收站、幂等及中断。不能把临时 fd、root 权限或读许可当写权限；不退化成永久删除 |
-| 已有 Docker 项目 | `list_docker_projects/get_docker_project_status/get_docker_project_summary/control_docker_project/plan_docker_project_update/execute_docker_project_update/get_docker_project_task` | 任意 Compose 编辑、多服务复杂重建、任意 bind／设备／特权操作 | 所有者登记真实项目，精确 `inspect/control/update_image`；写需管理员、固定 Engine／peer、项目／配置／容器身份。更新为受审单服务及同仓库 digest，保留卷与未知现场。见[固定项目操作](docker-project-operations.md) |
+| 已有 Docker 项目 | `list_docker_projects/get_docker_project_status/get_docker_project_summary/get_docker_project_resource_usage/control_docker_project/plan_docker_project_update/execute_docker_project_update/get_docker_project_task` | 任意 Compose 编辑、多服务复杂重建、任意 bind／设备／特权操作 | 所有者登记项目，精确 `inspect/control/update_image`；资源只读逐服务 stats，无实际双帧则 CPU 百分比为 null，不估算工作集或重复汇总。写保持管理员与固定身份，更新保留卷与未知现场。见[项目读取](docker-projects.md)及[项目操作](docker-project-operations.md) |
 | 新建 Docker 服务 | `list_docker_deployments/plan_docker_deployment/execute_docker_deployment/get_docker_deployment_task`；支持 `deploy/update/start/stop/restart/remove` | 任意多服务 Compose、创建卷／网络、bind、环境／命令透传、私有仓库认证、无约束镜像运行 | 所有者先登记独立 `deployment_*` 固定合同，精确 `inspect/deploy/control/remove`。已有 local 具名卷／受限 bridge 或 none、固定仓库／IP／端口、非 root 和资源限额。Toolbox 卷按真实逻辑／挂载身份保护；删除已停止容器保留卷，健康／Running 同时核验后才清旧备份。仅隔离 HTTP／Unix fixture，NAS 写验收需专用资源。见[受控部署](docker-deployments.md) |
 | 下载器 | `list_download_tasks/get_download_task/pause_download_task/resume_download_task/remove_download_task/set_download_task_limits/get_download_limits/set_download_limits/recheck_download_task/rename_download_task/set_download_task_force_start/set_download_task_queue_position`，另有缓存工具 | 新建链接／种子任务、修改下载目录、删除数据、Tracker／分类等完整设置、下载器安装 | 前六项任务工具支持固定 qB／aria2；全局限速写需管理员，后四项仅 qB。唯一监听、连接后授权、任务／配置版本、确认和本键幂等；不传目录或内容。委托原生引擎不等于整个进程被 Users 沙箱隔离。专用任务逐项验收 |
 | 应用市场与安装 | `get_app_status/list_native_applications/get_application_install_progress` | 安装／卸载／更新、原厂包身份与完整异步任务核验、通用应用启停和安装失败恢复 | 应用目录不是完整已装／运行清单；安装进度会同步插件、写缓存，需管理员确认／幂等，不是纯 getter。`packages` 统一采集字段形状、整数枚举、URL 类别及校验字段格式，包执行验证仍为 false；不额外要求独立签名。见[原厂第二批](native-capability-completion.md) |

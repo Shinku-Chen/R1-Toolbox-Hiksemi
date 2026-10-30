@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -180,6 +181,43 @@ class TransportTests(unittest.TestCase):
             self.request()
         self.assertFalse(self.connection.sent)
 
+    def test_default_binary_gate_uses_listener_tuple_pid_and_exact_running_inode(self):
+        disk = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_dev=8, st_ino=123,
+                               st_size=files.FIRMWARE_SIZE, st_mtime_ns=11, st_ctime_ns=12)
+        opened = []
+        disk_path = Path('/FIXTURE').absolute() / 'histor/bin/emhistor'
+        running_path = Path('/FIXTURE').absolute() / 'proc/12/exe'
+
+        def binary_stat(path, **options):
+            value = Path(path)
+            opened.append(value)
+            self.assertIn(value, (disk_path, running_path))
+            return disk
+
+        client = self.client()
+        client._binary = files._runtime_binary_matches
+        with mock.patch.object(files.os, 'stat', side_effect=binary_stat), \
+             mock.patch.object(files, '_firmware_identity', return_value=True):
+            self.assertEqual(client.request(MOUNT, '', 'get_info', deadline=13,
+                                           authorizer=self.auth), frame())
+        self.assertGreaterEqual(opened.count(running_path), 3)
+        self.assertEqual(len(self.connection.sent), 1)
+
+        self.connection = Connection()
+        running = SimpleNamespace(**vars(disk))
+        running.st_ino += 1
+        with mock.patch.object(files.os, 'stat', side_effect=(disk, running)), \
+             mock.patch.object(files, '_firmware_identity', return_value=True), \
+             self.assertRaises(files.BusinessTransportError) as caught:
+            self.request_with_default_binary_gate()
+        self.assertEqual(caught.exception.reason, 'identity_unverified')
+        self.assertFalse(self.connection.sent)
+
+    def request_with_default_binary_gate(self):
+        client = self.client()
+        client._binary = files._runtime_binary_matches
+        return client.request(MOUNT, '', 'get_info', deadline=13, authorizer=self.auth)
+
     def test_last_identity_scan_cannot_mask_revocation_and_absolute_deadline(self):
         checks = 0
         def listener(**kw):
@@ -266,6 +304,22 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaises(files.BusinessTransportError):
             self.collect()
         self.assertEqual(len(self.calls), 1)
+
+    def test_missing_users_or_mount_refusal_is_not_a_listener_identity_failure(self):
+        for code in ('not_found', 'root_unavailable'):
+            with self.subTest(code=code):
+                guard = mock.Mock(side_effect=FileAccessError(code))
+                result = files.collect_file_protocol_probe(None, authorizer=lambda: True,
+                    root_collector=lambda unused: CATALOG, client=self.client,
+                    firmware_reader=lambda **kw: True, root_guard=guard)
+                self.assertTrue(result['complete'])
+                self.assertEqual(result['requests_completed'], 0)
+                self.assertEqual(len(result['roots'][0]['queries']), 6)
+                self.assertTrue(all(row['reason'] == 'root_open_unverified'
+                                    and row['open_error_code'] == code
+                                    and row['http_status'] is None
+                                    for row in result['roots'][0]['queries']))
+        self.assertFalse(self.calls)
 
 
 class NativeAuthorityTests(unittest.TestCase):

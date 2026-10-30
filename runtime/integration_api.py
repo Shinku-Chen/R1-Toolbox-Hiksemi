@@ -26,6 +26,7 @@ from vendor_media_operations import MediaOperations, TOOLS as MEDIA_OPERATION_TO
 from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
 from native_capability_specs import TOOL_SPECS as NATIVE_TOOL_SPECS
 from vendor_native_capabilities import NativeCapabilities, _OPERATIONS as NATIVE_OPERATIONS
+import api_monitoring
 
 
 # Each media domain receives only its own rows, never the whole media cache.
@@ -436,6 +437,14 @@ class IntegrationApi:
             return {'ok': False, 'error': {'code': 'invalid_key', 'message': 'MCP 服务已停止。', 'retryable': False}}
         if name in FILE_READ_TOOLS:
             return self.file_operations.execute(name, arguments, principal)
+        if name in api_monitoring.TOOLS:
+            denied = {'ok': False, 'error': {'code': 'invalid_key', 'message': '读取期间授权已失效。', 'retryable': False}}
+            if not permission_allows(principal, 'read', 'readonly', tool_name=name) or not self._is_current(principal):
+                return denied
+            result = api_monitoring.execute(getattr(self.web, 'monitoring', None), name, arguments)
+            return result if self._is_current(principal) else denied
+        if name == 'get_docker_project_resource_usage':
+            return self.docker_projects.get_resource_usage(principal, arguments['project_id'], authorizer=self._is_current)
         if name == 'list_docker_deployments':
             return self.deployment_operations.list_deployments(principal)
         if name == 'plan_docker_deployment':

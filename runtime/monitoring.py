@@ -709,6 +709,12 @@ class MonitoringService:
         with self.lock:
             return copy.deepcopy(self.alerts_cache)
 
+    def health_events(self):
+        """One cache generation for machine health assessment and its alerts."""
+        with self.lock:
+            return copy.deepcopy({'alerts': {key: self.alerts_cache[key] for key in ('active', 'events')},
+                'state': {'current': {'sampled_at': self.current.get('sampled_at')}, 'summary': self.summary}})
+
     def report(self):
         with self.lock:
             return copy.deepcopy({"schema_version": 1, "generated_at": int(self.wall_clock()), "scope": "locally_observed_metrics",

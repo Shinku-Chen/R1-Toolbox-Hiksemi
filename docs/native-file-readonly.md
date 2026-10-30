@@ -57,6 +57,14 @@ result = collect_file_protocol_probe(panel, root='/', authorizer=current_dev_win
 
 `file_access_available:false` 是诊断本身不发执行授权的固定声明，不能被请求方当作后端能力结果。`file_access_readiness` 仍只检查根规划，其 `execution_backend.status=requires_per_operation_verification`；只有执行时完整通过上述所有门槛才可读。静态／fixture 的通过不冒充 NAS 实机通过。
 
+### 首次完整实机现场与元数据短读修复
+
+`45e75d3` 的一次完整现场确认精确固件匹配，Toolbox、PID 1 与原厂进程的挂载命名空间摘要相同，根拓扑前后稳定。七个规划候选中，四个分区的 `Users` 打开返回 `ENOENT`；另外三个能够打开物理挂载与 `Users`，两级实际 mount ID 与设备号各自相同，但读取到的预期挂载条目缺失。这个结果不能解释成原厂 ACL 拒绝：原厂查询尚未发出，原先的 `identity_unverified` 由本地根打开门槛失败统一映射而来。
+
+已修正固定 proc 元数据读取器的一次 `os.read` 假设。`mountinfo` 是大小为零的 proc seq_file，一次读取允许在 EOF 前返回短块；读取器现在在同一 fd 内有界累积到 EOF 或上限外一个字节，然后按原规则复验身份、大小与时间，并统一 UTF-8 解码。没有将预期 mount ID 改成从待验证句柄自行推导，也没有降低设备、挂载、符号链接或 ACL 校验。诊断里的本地失败现在明确为 `root_open_unverified`，附固定 `open_error_code`，不会冒充 listener／运行 ELF 核验失败。
+
+规划器仍只读取挂载元数据与既有身份缓存，所以一个候选不等于其 `Users` 已存在。不存在的四个候选继续按真实失败拒绝，不在被动根规划中新增目录访问或创建 `Users`。只读实机验收应选择显式诊断中完整通过真实挂载的根；修复后的 NAS 结果与字节比对仍须独立核对。监听身份元组的第一项为 PID，已增加默认运行二进制核验的契约测试，未将短读故障误修成放宽 listener 身份。
+
 ## 验证
 
 ```bash

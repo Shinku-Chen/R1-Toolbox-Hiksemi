@@ -32,6 +32,12 @@ MAX_BODY = 1024 * 1024
 MAX_TOTAL = 8 * MAX_BODY
 MAX_HEADER = 16384
 MAX_STATE = 512 * 1024
+MAX_STATS_SERVICES = 32
+MAX_STATS_INTERFACES = 64
+MAX_STATS_BLOCK_ROWS = 1024
+MAX_STATS_BLOCK_DEVICES = 128
+MAX_STATS_OUTPUT = 128 * 1024
+_SAFE_INTEGER = 2 ** 53 - 1
 _NAME = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}\Z', re.ASCII)
 _HEX = re.compile(r'[0-9a-f]{64}\Z', re.ASCII)
 _PROJECT = re.compile(r'project_[0-9a-f]{24}\Z', re.ASCII)
@@ -43,6 +49,7 @@ _ENGINE = re.compile(r'[A-Za-z0-9:_-]{16,128}\Z', re.ASCII)
 _LABEL = 'com.docker.compose.'
 _READ_LOCK = threading.Lock()
 _MESSAGES = {
+    'invalid_key': '项目读取期间密钥授权已失效。',
     'permission_denied': '当前密钥未获授该项目读取权限。',
     'invalid_arguments': '项目参数格式无效。',
     'project_unavailable': '未取得身份完整且已登记的项目。',
@@ -99,6 +106,16 @@ def _remaining(deadline, clock):
     if left <= 0:
         raise ProjectError('timeout')
     return left
+
+
+def _authorized(authorizer):
+    """Only a trusted in-process callback can renew an authenticated read."""
+    try:
+        accepted = callable(authorizer) and authorizer() is True
+    except Exception:
+        accepted = False
+    if not accepted:
+        raise ProjectError('invalid_key')
 
 
 def _locked(function):
@@ -207,16 +224,25 @@ class LocalDockerReader:
             connection.close()
             raise
 
-    def _get(self, path, deadline, context):
-        if path not in ('/info', '/containers/json?all=1&limit=129') and not re.fullmatch(
-                r'/containers/[0-9a-f]{64}/json', path, re.ASCII):
+    def _get(self, path, deadline, context, *, authorizer=None, stats=False):
+        ordinary = path in ('/info', '/containers/json?all=1&limit=129') or re.fullmatch(
+                r'/containers/[0-9a-f]{64}/json', path, re.ASCII)
+        # Existing callers keep exactly their old GET allowlist. Only the
+        # resource sampler opts into this one literal, non-streaming query.
+        sample = stats is True and re.fullmatch(
+            r'/containers/[0-9a-f]{64}/stats\?stream=false&one-shot=true', path, re.ASCII)
+        if not ordinary and not sample:
             raise ProjectError('invalid_arguments')
+        if authorizer is not None:
+            _authorized(authorizer)
         connection = self._connection(deadline)
         try:
             peer = self._peer_check(connection)
             if context['peer'] is not None and context['peer'] != peer:
                 raise ProjectError('project_binding_changed')
             context['peer'] = peer
+            if authorizer is not None:
+                _authorized(authorizer)
             connection.settimeout(_remaining(deadline, self._clock))
             connection.sendall(('GET ' + path + ' HTTP/1.1\r\nHost: localhost\r\n'
                                 'Accept: application/json\r\nAccept-Encoding: identity\r\n'
@@ -301,7 +327,10 @@ class LocalDockerReader:
             if buffer or self._peer_check(connection) != peer:
                 raise ProjectError('project_binding_changed')
             _remaining(deadline, self._clock)
-            return _json(body)
+            value = _json(body)
+            if authorizer is not None:
+                _authorized(authorizer)
+            return value
         finally:
             connection.close()
 
@@ -382,6 +411,218 @@ class LocalDockerReader:
             raise ProjectError('native_unavailable') from None
         finally:
             _READ_LOCK.release()
+
+    def resource_usage(self, identity, *, authorizer, deadline=None):
+        """Sample only one already-registered project, with one stats per CID.
+
+        All frames share the same peer, engine, eight-second deadline and byte
+        budget. No cross-request cache or daemon stream supplies invented rates.
+        """
+        if not _valid_identity(identity):
+            raise ProjectError('project_binding_changed')
+        if len(identity['services']) > MAX_STATS_SERVICES:
+            raise ProjectError('limit_exceeded')
+        if not _READ_LOCK.acquire(blocking=False):
+            raise ProjectError('resource_busy')
+        try:
+            _authorized(authorizer)
+            deadline = min(self._clock() + NETWORK_SECONDS, deadline) if deadline is not None else self._clock() + NETWORK_SECONDS
+            context = {'bytes': 0, 'peer': None}
+            fetch = lambda path, **kwargs: self._get(path, deadline, context,
+                authorizer=authorizer, **kwargs)
+            if fetch('/info').get('ID') != identity['engine']:
+                raise ProjectError('project_binding_changed')
+            _stats_membership(fetch('/containers/json?all=1&limit=129'), identity)
+            configuration = identity['configuration']
+            if self._config_identity(configuration['path']) != configuration:
+                raise ProjectError('project_binding_changed')
+            initial, output = {}, []
+
+            def inspect(service):
+                value = fetch('/containers/' + service['container'] + '/json')
+                parsed = _container(value, service['container'], identity['name'], self._config_identity)
+                if parsed['identity'] != service or parsed['configuration'] != configuration:
+                    raise ProjectError('project_binding_changed')
+                return _stats_lifecycle(value)
+
+            for service in identity['services']:
+                initial[service['container']] = inspect(service)
+            for service in identity['services']:
+                lifecycle = initial[service['container']]
+                native = fetch('/containers/' + service['container'] + '/stats?stream=false&one-shot=true', stats=True)
+                # Docker may return an empty object for a stopped container.
+                # Only that exact no-counters case can lack an echoed ID; the
+                # same stopped lifecycle is still inspected before and after.
+                empty_stopped = native == {} and lifecycle['running'] is False
+                if (not isinstance(native, dict) or not empty_stopped and native.get('id') != service['container']
+                        or 'name' in native and native['name'] != lifecycle['name']):
+                    raise ProjectError('project_binding_changed')
+                if inspect(service) != lifecycle:
+                    raise ProjectError('project_binding_changed')
+                read_at = _stats_time(native.get('read'))
+                started_at = _stats_time(lifecycle['started_at'], historical=True)
+                if read_at is not None and read_at < started_at:
+                    raise ProjectError('project_binding_changed')
+                record = _stats_projection(native, running=lifecycle['running'], started_at=started_at)
+                record.update(service_id='service_' + _hash([_hash(identity), service])[:24],
+                              name=service['name'], running=lifecycle['running'])
+                output.append(record)
+            # Revalidate every service, not just the last one sampled, so a
+            # restart during another service's read cannot escape the batch.
+            for service in identity['services']:
+                if inspect(service) != initial[service['container']]:
+                    raise ProjectError('project_binding_changed')
+            _stats_membership(fetch('/containers/json?all=1&limit=129'), identity)
+            if (fetch('/info').get('ID') != identity['engine']
+                    or self._config_identity(configuration['path']) != configuration):
+                raise ProjectError('project_binding_changed')
+            _remaining(deadline, self._clock)
+            _authorized(authorizer)
+            if len(json.dumps(output, ensure_ascii=True, allow_nan=False).encode('ascii')) > MAX_STATS_OUTPUT:
+                raise ProjectError('limit_exceeded')
+            return output
+        except ProjectError:
+            raise
+        except (TimeoutError, socket.timeout):
+            raise ProjectError('timeout') from None
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, UnicodeError, RecursionError):
+            raise ProjectError('native_unavailable') from None
+        finally:
+            _READ_LOCK.release()
+
+
+def _stats_membership(rows, identity):
+    if not isinstance(rows, list) or len(rows) > MAX_CONTAINERS:
+        raise ProjectError('limit_exceeded')
+    selected, seen = [], set()
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get('Id'), str)
+                or not _HEX.fullmatch(row['Id']) or row['Id'] in seen):
+            raise ProjectError('native_unavailable')
+        seen.add(row['Id'])
+        labels = row.get('Labels')
+        if isinstance(labels, dict) and labels.get(_LABEL + 'project') == identity['name']:
+            selected.append(row['Id'])
+    if sorted(selected) != sorted(service['container'] for service in identity['services']):
+        raise ProjectError('project_binding_changed')
+
+
+def _stats_lifecycle(detail):
+    state = detail.get('State')
+    image, name = detail.get('Image'), detail.get('Name')
+    if (not isinstance(state, dict) or type(state.get('Running')) is not bool
+            or _stats_integer(state.get('Pid'), 2 ** 31 - 1) is None
+            or state['Running'] and state['Pid'] < 1
+            or _stats_integer(detail.get('RestartCount')) is None
+            or not isinstance(name, str) or not re.fullmatch(r'/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', name)
+            or not isinstance(image, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', image)
+            or _stats_time(state.get('StartedAt'), historical=True) is None):
+        raise ProjectError('project_binding_changed')
+    return {'name': name, 'image': image, 'running': state['Running'], 'pid': state['Pid'],
+            'started_at': state['StartedAt'], 'restart_count': detail['RestartCount']}
+
+
+def _stats_integer(value, maximum=_SAFE_INTEGER):
+    return value if type(value) is int and 0 <= value <= maximum else None
+
+
+def _stats_time(value, *, historical=False):
+    if not isinstance(value, str) or not re.fullmatch(
+            r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})', value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return parsed if historical or parsed.year >= 1970 else None
+    except ValueError:
+        return None
+
+
+def _stats_cpu_count(frame):
+    if not isinstance(frame, dict):
+        return None
+    online = frame.get('online_cpus')
+    if online is not None:
+        return online if type(online) is int and 1 <= online <= 4096 else None
+    usage = frame.get('cpu_usage')
+    per_cpu = usage.get('percpu_usage') if isinstance(usage, dict) else None
+    if (not isinstance(per_cpu, list) or not 1 <= len(per_cpu) <= 4096
+            or any(_stats_integer(value) is None for value in per_cpu)):
+        return None
+    return len(per_cpu)
+
+
+def _stats_projection(native, *, running, started_at=None):
+    """Only raw counters and valid Docker frame deltas; never add aggregates."""
+    cpu = native.get('cpu_stats') if isinstance(native.get('cpu_stats'), dict) else {}
+    previous = native.get('precpu_stats') if isinstance(native.get('precpu_stats'), dict) else {}
+    usage = cpu.get('cpu_usage') if isinstance(cpu.get('cpu_usage'), dict) else {}
+    before_usage = previous.get('cpu_usage') if isinstance(previous.get('cpu_usage'), dict) else {}
+    total, system = _stats_integer(usage.get('total_usage')), _stats_integer(cpu.get('system_cpu_usage'))
+    before_total = _stats_integer(before_usage.get('total_usage'))
+    before_system = _stats_integer(previous.get('system_cpu_usage'))
+    count, before_count = _stats_cpu_count(cpu), _stats_cpu_count(previous)
+    invalid_previous_count = (previous.get('online_cpus') is not None
+        or before_usage.get('percpu_usage') is not None) and before_count is None
+    read, preread = _stats_time(native.get('read')), _stats_time(native.get('preread'))
+    percent = None
+    if (running is True and read is not None and count is not None
+            and all(value is not None for value in (total, system, before_total, before_system))
+            and before_system > 0 and system > before_system and total >= before_total
+            and total - before_total <= system - before_system
+            and not invalid_previous_count
+            and (before_count is None or before_count == count)
+            and preread is not None and preread < read
+            and (started_at is None or preread >= started_at)):
+        percent = round((total - before_total) / (system - before_system) * count * 100.0, 6)
+    memory = native.get('memory_stats') if isinstance(native.get('memory_stats'), dict) else {}
+    memory_fields = memory.get('stats') if isinstance(memory.get('stats'), dict) else {}
+    cache_field = 'cache' if 'cache' in memory_fields else 'file'
+    inactive_field = 'total_inactive_file' if 'total_inactive_file' in memory_fields else 'inactive_file'
+    cache, inactive = _stats_integer(memory_fields.get(cache_field)), _stats_integer(memory_fields.get(inactive_field))
+    networks = native.get('networks')
+    interfaces = None
+    if isinstance(networks, dict):
+        if len(networks) > MAX_STATS_INTERFACES:
+            raise ProjectError('limit_exceeded')
+        interfaces = []
+        for name, value in sorted(networks.items()):
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}', name) or not isinstance(value, dict):
+                raise ProjectError('native_unavailable')
+            interfaces.append({'name': name, **{field: _stats_integer(value.get(field)) for field in
+                ('rx_bytes', 'tx_bytes', 'rx_packets', 'tx_packets', 'rx_errors', 'tx_errors', 'rx_dropped', 'tx_dropped')}})
+    block = native.get('blkio_stats') if isinstance(native.get('blkio_stats'), dict) else {}
+    rows, devices = block.get('io_service_bytes_recursive'), None
+    if isinstance(rows, list):
+        if len(rows) > MAX_STATS_BLOCK_ROWS:
+            raise ProjectError('limit_exceeded')
+        indexed, seen = {}, set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ProjectError('native_unavailable')
+            operation = row.get('op')
+            if operation not in ('Read', 'Write'):
+                continue
+            major, minor = _stats_integer(row.get('major'), 2 ** 32 - 1), _stats_integer(row.get('minor'), 2 ** 32 - 1)
+            if major is None or minor is None or (major, minor, operation) in seen:
+                raise ProjectError('native_unavailable')
+            seen.add((major, minor, operation))
+            value = indexed.setdefault((major, minor), {'major': major, 'minor': minor,
+                                                       'read_bytes': None, 'write_bytes': None})
+            value['read_bytes' if operation == 'Read' else 'write_bytes'] = _stats_integer(row.get('value'))
+            if len(indexed) > MAX_STATS_BLOCK_DEVICES:
+                raise ProjectError('limit_exceeded')
+        # Nonempty overlap-only/unknown rows cannot establish zero directional
+        # I/O. Preserve unknown instead of turning filtering into an empty sum.
+        devices = [indexed[key] for key in sorted(indexed)] if indexed or not rows else None
+    return {'read_at': native.get('read') if read is not None else None,
+            'cpu': {'usage_percent': percent, 'online_cpus': count,
+                    'total_usage_ns': total, 'system_usage_ns': system},
+            'memory': {'usage_bytes': _stats_integer(memory.get('usage')),
+                       'limit_bytes': _stats_integer(memory.get('limit')),
+                       'cache_bytes': cache, 'cache_source': cache_field if cache is not None else None,
+                       'inactive_file_bytes': inactive,
+                       'inactive_file_source': inactive_field if inactive is not None else None},
+            'network': {'interfaces': interfaces}, 'block_io': {'devices': devices}}
 
 
 def _running(items):
@@ -806,3 +1047,40 @@ class DockerProjectRegistry:
                         'observed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}
             except ProjectError as error:
                 return _failure(error.code)
+
+    def get_resource_usage(self, principal, project_id, *, authorizer):
+        """Return current counters only after exact grant/lifecycle rechecks.
+
+        The callback is supplied by the integration's trusted current-key gate,
+        never by a JSON field. Registry locks are held only while copying each
+        revision, so an owner can revoke registration during network reads.
+        """
+        try:
+            _authorized(lambda: authorizer(principal))
+            ids = self._grants(principal, 'get_docker_project_resource_usage')
+            if not isinstance(project_id, str) or project_id not in ids:
+                raise ProjectError('permission_denied')
+            with self._lock:
+                rows = [row for row in self._read()['projects'] if row['id'] == project_id and not row['revoked']]
+                if len(rows) != 1:
+                    raise ProjectError('permission_denied')
+                selected = copy.deepcopy(rows[0])
+
+            def current():
+                _authorized(lambda: authorizer(principal))
+                if project_id not in self._grants(principal, 'get_docker_project_resource_usage'):
+                    return False
+                with self._lock:
+                    active = [row for row in self._read()['projects'] if row['id'] == project_id and not row['revoked']]
+                    return len(active) == 1 and active[0] == selected
+
+            services = self.backend.resource_usage(selected['identity'], authorizer=current)
+            _authorized(current)
+            return {'ok': True, 'project_id': selected['id'], 'label': selected['label'],
+                    'observed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                    'source': 'engine_stats', 'consistency': 'per_service_observation',
+                    'services': services}
+        except ProjectError as error:
+            return _failure(error.code)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, UnicodeError, RecursionError):
+            return _failure('native_unavailable')

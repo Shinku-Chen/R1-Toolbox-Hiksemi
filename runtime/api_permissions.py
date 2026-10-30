@@ -57,6 +57,9 @@ SCOPE_CATALOG = (
 )
 MIN_ROLE_BY_TOOL = {
     'get_nas_status': 'readonly',
+    'get_monitoring_history': 'readonly', 'get_health_events': 'readonly',
+    'get_network_traffic_totals': 'readonly',
+    'get_docker_project_resource_usage': 'readonly',
     'get_app_status': 'readonly',
     'get_download_status': 'readonly',
     'get_movie_status': 'readonly',
@@ -114,6 +117,9 @@ _ROOT_ID_RE = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
 _PROJECT_ID_RE = re.compile(r'project_[0-9a-f]{24}\Z', re.ASCII)
 SCOPE_BY_TOOL = {
     'get_nas_status': 'read', 'get_media_status': 'media',
+    'get_monitoring_history': 'read', 'get_health_events': 'read',
+    'get_network_traffic_totals': 'read',
+    'get_docker_project_resource_usage': 'docker',
     'get_app_status': 'apps', 'get_download_status': 'downloads',
     'get_movie_status': 'movie', 'get_album_status': 'albums',
     'get_share_status': 'sharing',

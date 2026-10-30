@@ -77,6 +77,8 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 
 ## 代码约定
 
+- MCP 缓存历史、健康事件和流量仅读已有内存；健康必须同锁取得告警及评估，缺测、过期或不完整不得报正常，不输出动态 SMART／传感器身份。固定项目 stats 只使用已登记项目及 `inspect`，每次连接后复核授权和容器生命周期；CPU 无合法实际两帧差分则 `null`，网络／块 I/O 不重复聚合。proc 元数据必须有界读至 EOF，不能把一次短读当完整 mountinfo。见 `docs/mcp-monitoring-tools.md` 与 `docs/docker-projects.md`。
+
 - 镜像 RAM 缓存严格拒绝清单之外的文件和目录；所有执行或导入缓存运行时的 Python 入口必须带 `-B`，包括启动脚本在 `exec --resident` 前的导入，避免字节码缓存污染导致重启失败。
 - 小屏是触摸优先：最小点击目标 56px、正文 22px、导航 18px、单列布局、底部六标签导航；不引入 hover 依赖、PC 双栏或需要精确指针的交互。风扇/灯光策略、登录口令等复杂设置只放在网页。
 - 小屏实际展示与 `docs/prototypes/r1-small-screen.html` 必须保持一致。图标、样式通过 `scripts/build-prototype.py` 从实际小屏同步，原型专有 CSS 只用于外部画板；可见交互改动同步更新离线演示及检查，不能只改正式界面。CI 用 `--check` 拒绝未同步的图标与样式。
@@ -89,7 +91,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 小屏与网页的系统自动／高／中／低必须同义，明确请求原厂档位，不能把退出接管但保留高档显示成自动；CPU 高／中／低仍是独立固定输出。真实系统接管尚未释放时，配置 `fan_mode=5` 不能省略交接。恢复前保留安全全速，原厂初始化并同步自动后不得再写全速覆盖；恢复失败保留未确认原因和安全保护。原厂 `/tmp/fan` 是控制用档位缓存，不是 PWM 或 RPM 读回；原厂同档可能不重复写入，不能用配置或 ACK 证明物理调速。
 - 文件／Docker 的二十项合同维护在 `runtime/api_contracts.py`，同步到 `docs/api/file-docker-contracts.json`。当前十二项已接入（根元数据、五项只读文件／传输、三个项目读取及三项更新工具），其余八项文件写合同不得注册假回调。所有者查定义不授执行权；policy v1／v2 固定原十工具，v3 才按精确工具及资源授权。存储 v5 新增 `docker_deployments`；旧 v4 读取不改字节，真实写原子迁移，不升级权限。机器根信息不返回宿主绝对挂载路径。固定 Docker 写只用已登记项目或独立 `deployment_*` 未来资源、对应操作及固定传输，不提供任意 Compose／命令代理。未来资源由所有者网页登记已有卷／网络、固定仓库／端口／非 root 用户和配额，机器不能自登记或重核生命周期；新建／更新／启停／删除共用计划、真实任务与幂等，失败保留现场，不删卷。Toolbox 卷同时按短名、Compose 逻辑卷标签和实际挂载身份保护。见 `docs/docker-deployments.md` 与 `docs/file-docker-api-plan.md`。
 - 文件五项只读执行器严格限定匹配固件的原厂固定所有者与 `admin/public` 正子集，完整核验逻辑 ACL、唯一 emhistor／TLS 会话、同挂载、无链接拓扑及最终句柄，每个下载块续验授权。禁止把 NAS 逻辑 ID 当 Unix UID，禁止根规划、O_PATH 元数据或管理员会话单独证明文件权限。其他用户和全部写入仍待闭合。`file_protocol` 只作为第十项显式诊断，默认四项不变；完整采集阶段 errno、mount／device 和 namespace，不反复加字段部署试探。此前 `d5075ed` 实机七根未通过挂载门，不能据 fixture 或注册成功宣称已可读。见 `docs/native-file-readonly.md`。
-- MCP 当前六十五工具（原三十六＋文件五＋下载六＋Docker 部署四＋原厂十四）。显式下载任务操作与被动业务缓存分开；qB／aria2 均核验固定唯一监听，连接完成后、发送前复验授权、进程和剩余时间。任务写须当前任务版本、确认和本键幂等标识，移除始终保留文件；全局限速为管理员及独立版本。新增 qB 校验、显示改名、强制运行和排队仍只面向既有任务，不接收地址、Cookie、任意 RPC 或目标目录。继续／校验／强制运行属于原生引擎委托，不声称整个进程沙箱化到 Users；新增内容和目的地仍须文件证明。
+- MCP 当前六十九工具（原三十六＋文件五＋下载六＋Docker 部署四＋原厂十四＋缓存监控三＋项目资源一）。显式下载任务操作与被动业务缓存分开；qB／aria2 均核验固定唯一监听，连接完成后、发送前复验授权、进程和剩余时间。任务写须当前任务版本、确认和本键幂等标识，移除始终保留文件；全局限速为管理员及独立版本。新增 qB 校验、显示改名、强制运行和排队仍只面向既有任务，不接收地址、Cookie、任意 RPC 或目标目录。继续／校验／强制运行属于原生引擎委托，不声称整个进程沙箱化到 Users；新增内容和目的地仍须文件证明。
 - 新原厂相册／影视库目录也可能初始化或修复内部状态，最低读写，不能标记只读或无副作用；原缓存五工具保持只读。固定七操作复用管理员已有会话、20443 叶证书 pin 和严格 emhistor 监听身份。写入须确认与本键幂等，原厂 ACK 不是异步完成；不明结果不重放。新目录验证仅显式 `/api/dev/media` 的 `probe_business`＋`confirm:true`；`file_backend_context` 仅显式统一开发诊断，目录元数据可能唤盘，不加入默认四项。详见 `docs/mcp-business-operations.md`。
 - 原厂第二批十四工具的定义唯一来源为 `native_capability_specs.py`：应用目录／有副作用安装进度、备份目录／设置及停用／暂停／取消、用户目录／设备名／AI 开关、影视扫描状态、普通相册删除。所有原厂请求都可能初始化资源，不降为只读或幂等查询；七个写入口须确认和本键幂等，ACK 不代表异步完成。备份只收紧现有任务，不开放新目标或恢复；安装进度会同步插件和写缓存，需管理员。固定 `POST /api/dev/native` 仅接受 `{"action":"probe","confirm":true}` 或 `{"action":"packages","confirm":true}`，不执行安装或 setter，包字段形状不是可信安装证据。见 `docs/native-capability-completion.md`、`docs/mcp-completion-matrix.md`。
 - 中文正文、UI 文案与文档使用全角标点；代码、路径、标识符保持原样。

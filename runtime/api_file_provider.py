@@ -559,8 +559,15 @@ def collect_file_protocol_probe(panel, *, root='/', authorizer=None,
                             with (root_guard or _root_metadata_guard)(root, row, component):
                                 frame = native.request(row['mount'], component, action,
                                                        deadline=deadline, authorizer=current)
-                        except FileAccessError:
-                            raise BusinessTransportError('identity_unverified') from None
+                        except FileAccessError as error:
+                            # A local Users/mount rejection happens before the
+                            # transport. Do not label it a listener/ELF failure.
+                            output['queries'].append({
+                                'action': action, 'subject_path_class': component or 'users_root',
+                                'http_status': None, 'reason': 'root_open_unverified',
+                                'open_error_code': error.code, 'native_success': False,
+                                'acl_proven': False, 'opened_object_proven': False})
+                            continue
                         query = project_protocol_frame(frame, row['mount'], component, action)
                         result['requests_completed'] += 1
                     except BusinessTransportError as error:

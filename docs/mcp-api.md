@@ -2,6 +2,8 @@
 
 Toolbox 在常驻 Web 的 `18732` 端口提供 MCP 与固定 REST 接口，供局域网 AI／自动化客户端读取 NAS 状态和执行明确授权的操作。小屏可独立关闭，MCP 默认关闭；开启后仍需独立 Token。配置与 Token 摘要随原 `r1-toolbox-data` 数据卷保存，重建服务后继续有效。
 
+当前六十九工具中新增三项缓存只读查询：`get_monitoring_history/get_health_events/get_network_traffic_totals`，均要求 `read` 域和精确工具；详见[监控历史与事件](mcp-monitoring-tools.md)。固定项目另有 `get_docker_project_resource_usage`，要求 `docker`、具体工具和已登记项目 `inspect`，只投影一次原厂 Docker stats，见[固定项目读取](docker-projects.md)。
+
 ## 网页配置
 
 进入网页“设置 → API 管理”，卡片直接开关 MCP／REST，无需打开另一个窗口或再次确认；保存失败会回读真实状态，不重放写入。“添加 Token”填写新授权，“Token 管理”编辑、暂停、启用、轮换或撤销，“Token 操作”查看能力、接入地址和调用记录；三个页面可直接切换。具体交互见[管理页面](mcp-management-ui.md)。创建命名 Token 时选择角色、功能域、具体工具、文件范围、已登记 Docker 项目、来源 IP／CIDR 和有效期。默认只读，仅勾选状态读取，有效期九十天；可选择长期。创建或轮换成功时只显示一次完整 Token 与可复制的 MCP 配置，关闭密钥窗口即清空，后续列表不再提供明文。
@@ -37,7 +39,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 工具列表和实际调用使用同一个权限判断；缺少域、具体工具或所需资源时拒绝，角色等级不足也不能调用。HTTP 200 或工具出现在客户端缓存中均不代表操作已获授权。policy v1／v2 固定保留原十工具，再受其原角色与域限制；以前勾选过 `files/docker` 的预授权也不会自动激活新能力。所有者须明确选择升级并勾选具体工具，提交 `tool_grants` 后才进入 policy v3。
 
-当前共六十五个真实 MCP／REST 工具：原三十六项，加五项文件读取／传输、六项下载器扩展、四项未来部署和十四项原厂业务能力。目录与调用均以真实回调为准；已注册仍须通过当前来源、逐项授权和后端运行门槛。具体工具如下：
+当前共六十九个真实 MCP／REST 工具：原三十六项，加五项文件读取／传输、六项下载器扩展、四项未来部署和十四项原厂业务能力。目录与调用均以真实回调为准；已注册仍须通过当前来源、逐项授权和后端运行门槛。具体工具如下：
 
 | 权限 | 新密钥最低角色 | 工具 | 行为 |
 |---|---|---|---|
@@ -90,7 +92,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 二十项接口的[机器可读定义](api/file-docker-contracts.json)中，十二项已有执行适配，另外八项文件写合同仍待接入。所有者可在 API 管理中按需查看，或读取 `GET /api/access/contracts`。该入口不接受机器 Token 或单独开发窗口；读取定义本身不授予执行权限，也不迁移旧键。单项 `implemented` 不替代当前授权、后端门槛或实机验收。
 
-`files/docker/apps/downloads/movie/albums/sharing/backup/system` 均已部分接入，新增工具与资源默认不选。应用安装、分享创建、完整影视／相册／备份管理和任意 Compose 仍未完成。详细差异见[完成矩阵](mcp-completion-matrix.md)；不能把六十五工具当作 NAS APP 全功能覆盖率。
+`files/docker/apps/downloads/movie/albums/sharing/backup/system` 均已部分接入，新增工具与资源默认不选。应用安装、分享创建、完整影视／相册／备份管理和任意 Compose 仍未完成。详细差异见[完成矩阵](mcp-completion-matrix.md)；不能把六十九工具当作 NAS APP 全功能覆盖率。
 
 勾选文件管理时，必须选择当前可信的 `/drives/<disk>/Users` 根，可填写其内相对 POSIX 子目录，并为每个范围选择只读或读写。文件总边界固定为 `/drives/*/Users/`，不授予整个数据盘、兄弟目录或系统目录。只读角色不能授予读写范围；只读挂载不能授予写入。规划来自已有物理盘身份缓存、sysfs／udev 生命周期核验与 `/proc/self/mountinfo`，不检查 Users 是否存在，也不访问用户文件。缺少身份、歧义挂载、Users 内额外挂载、无法核对的 RAID／虚拟源等不会生成可选目录。详见[Users 文件边界](file-users-boundary.md)。
 

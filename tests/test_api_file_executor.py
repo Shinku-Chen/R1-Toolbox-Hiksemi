@@ -365,6 +365,18 @@ class OpenedFileTests(unittest.TestCase):
         self.assertNotIn('payload.bin', json.dumps(result))
         self.assertFalse(result['native_acl_proven'])
 
+    def test_short_proc_reads_preserve_real_mount_gate_and_file_execution(self):
+        from api_file_provider import collect_opened_root_evidence
+        real_read = os.read
+        with mock.patch('api_file_operations.os.read', side_effect=lambda fd, count:
+                        real_read(fd, min(count, 7))):
+            evidence = collect_opened_root_evidence(self.root, ROW)
+            result = self.call('list_directory', 'public')
+        self.assertTrue(evidence['same_mount'], evidence)
+        self.assertEqual(evidence['expected_mount_id'], self.mount_id)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['entries'][0]['name'], 'payload.bin')
+
     def test_mount_mismatch_probe_keeps_complete_topology_but_never_sends_native_request(self):
         import api_file_provider as provider
         (self.root / 'proc/self/mountinfo').write_text(
@@ -383,5 +395,7 @@ class OpenedFileTests(unittest.TestCase):
         self.assertEqual(evidence['directory_stages'][-1]['mount_id'], self.mount_id)
         self.assertTrue(result['roots'][0]['root_topology_stable'])
         self.assertEqual(len(result['roots'][0]['queries']), 6)
-        self.assertTrue(all(q['reason'] == 'identity_unverified'
+        self.assertTrue(all(q['reason'] == 'root_open_unverified'
+                            for q in result['roots'][0]['queries']))
+        self.assertTrue(all(q['open_error_code'] == 'root_unavailable'
                             for q in result['roots'][0]['queries']))

@@ -174,6 +174,8 @@ class ApiPermissionTests(unittest.TestCase):
             'list_movie_libraries', 'rename_movie_library', 'revoke_share', 'control_docker_project',
             'get_download_limits', 'set_download_limits', 'recheck_download_task', 'rename_download_task',
             'set_download_task_force_start', 'set_download_task_queue_position',
+            'get_monitoring_history', 'get_health_events', 'get_network_traffic_totals',
+            'get_docker_project_resource_usage',
             'list_docker_deployments', 'plan_docker_deployment', 'execute_docker_deployment', 'get_docker_deployment_task'}
         operations |= {item['name'] for item in permissions._NATIVE_TOOL_SPECS}
         self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared) | set(business) | operations)

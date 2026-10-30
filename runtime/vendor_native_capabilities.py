@@ -135,34 +135,168 @@ def _native_code(operation, frame):
 
 
 def _applications(frame):
+    """Isolate bad records while rejecting every ambiguous native identity.
+
+    Count IDs before checking labels: an invalid duplicate node must not make
+    another record with that ID look uniquely owned during write preflight.
+    """
     rows = frame.get('list')
     if type(rows) is not list or len(rows) > 256:
         raise BusinessTransportError('invalid_json')
-    items, seen = [], set()
+    identities = {}
     for row in rows:
-        if type(row) is not dict:
-            raise BusinessTransportError('invalid_json')
-        name = _label(row.get('module_name'), 63)
-        identifier = _number(row.get('apply_id'))
-        if name is None or identifier is None or not 1 <= identifier <= 2 ** 31 - 1 or identifier in seen:
-            raise BusinessTransportError('invalid_json')
-        seen.add(identifier)
+        identifier = _number(row.get('apply_id')) if type(row) is dict else None
+        if identifier is not None and 1 <= identifier <= 2 ** 31 - 1:
+            identities[identifier] = identities.get(identifier, 0) + 1
+    items, rejected = [], {}
+    for row in rows:
+        identifier = _number(row.get('apply_id')) if type(row) is dict else None
+        name = _label(row.get('module_name'), 63) if type(row) is dict else None
+        reason = ('unsupported_application_entry' if type(row) is not dict else
+                  'invalid_application_id' if identifier is None or not 1 <= identifier <= 2 ** 31 - 1 else
+                  'duplicate_application_id' if identities[identifier] != 1 else
+                  'invalid_application_label' if name is None else None)
+        if reason is not None:
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
         raw_status = row.get('status')
         status = raw_status if type(raw_status) is int and -(2 ** 31) <= raw_status < 2 ** 31 else None
         items.append({'application_id': identifier, 'name': name,
                       'version': _label(row.get('version'), 63),
                       'installation_status_code': status, 'running': None})
+    if rows and not items:
+        raise BusinessTransportError('invalid_json')
     return {'items': items, 'returned_count': len(items), 'complete': False,
+            'accepted_entries': len(items), 'rejected_entries': sum(rejected.values()),
+            'partial': bool(rejected),
+            'rejections': [{'code': code, 'count': rejected[code]} for code in (
+                'unsupported_application_entry', 'invalid_application_id',
+                'duplicate_application_id', 'invalid_application_label') if code in rejected],
             'catalog_is_installed_inventory': False, 'package_sources_omitted': True}
+
+
+_STRUCTURE_FIELDS = frozenset((
+    'code', 'msg', 'data', 'result', 'value', 'list', 'count', 'support_ecloud',
+    'apply_id', 'module_name', 'vid', 'module_type', 'source', 'version', 'size',
+    'status', 'guest', 'apply_opt', 'upgradable', 'support_terminal', 'path',
+    'install_time', 'paramList', 'download_url', 'package_url', 'url', 'md5',
+    'sha1', 'sha256', 'sha512', 'checksum', 'hash', 'signature',
+    'run_list', 'wait_list', 'done_list', 'list_cm', 'task_id', 'task_status', 'user',
+    'total_size', 'done_time', 'atid', 'from', 'to', 'disk_uuid'))
+
+
+def _native_response_structure(frame):
+    """Describe one already-returned frame without disclosing any native value.
+
+    Only fixed schema field names may appear. Unknown names and their values
+    are represented by counts, including inside arrays and future wrappers.
+    Array variants are grouped by identical shape while inspecting every
+    bounded entry; no arbitrary keys, native paths or exception text escape.
+    """
+    budget, bounded = [8192], [False]
+
+    def shape(value, depth=0):
+        budget[0] -= 1
+        if budget[0] < 0 or depth > 6:
+            bounded[0] = True
+            return {'type': 'uninspected', 'reason': 'structure_bounds'}
+        if value is None:
+            return {'type': 'null'}
+        if type(value) is bool:
+            return {'type': 'boolean'}
+        if type(value) is int:
+            return {'type': 'integer'}
+        if type(value) is float:
+            return {'type': 'number'}
+        if type(value) is str:
+            return {'type': 'string', 'utf8_bytes': len(value.encode('utf8', errors='replace'))}
+        if type(value) is dict:
+            fields = {key: shape(value[key], depth + 1) for key in sorted(_STRUCTURE_FIELDS.intersection(value))}
+            return {'type': 'object', 'fields': fields,
+                    'omitted_field_count': len(value) - len(fields)}
+        if type(value) is list:
+            bounded[0] |= len(value) > 256
+            variants = {}
+            for item in value[:256]:
+                item_shape = shape(item, depth + 1)
+                identity = json.dumps(item_shape, sort_keys=True, separators=(',', ':'))
+                if identity not in variants:
+                    variants[identity] = {'count': 0, 'shape': item_shape}
+                variants[identity]['count'] += 1
+            return {'type': 'array', 'count': len(value), 'inspected_count': min(256, len(value)),
+                    'item_shapes': list(variants.values())}
+        return {'type': 'unsupported'}
+
+    structure = shape(frame)
+    return {'schema_version': 1, 'values_omitted': True, 'structure': structure,
+            'complete': not bounded[0]}
+
+
+def _catalog_projection_checks(operation, frame):
+    """Fixed per-record rejection codes for the two native schema failures."""
+    issues = []
+    if type(frame) is not dict:
+        return [{'location': 'frame', 'reason': 'expected_object'}]
+    if operation == 'apply_list':
+        groups = (('list', frame.get('list')),)
+    else:
+        groups = tuple((key, _backup_group_rows(frame.get(key))) for key in
+                       ('run_list', 'wait_list', 'done_list'))
+    seen, application_ids = set(), {}
+    if operation == 'apply_list' and type(frame.get('list')) is list:
+        for row in frame['list'][:256]:
+            identifier = _number(row.get('apply_id')) if type(row) is dict else None
+            if identifier is not None and 1 <= identifier <= 2 ** 31 - 1:
+                application_ids[identifier] = application_ids.get(identifier, 0) + 1
+    for group, rows in groups:
+        if type(rows) is not list:
+            issues.append({'location': group, 'reason': 'expected_array'})
+            continue
+        if len(rows) > 256:
+            issues.append({'location': group, 'reason': 'array_limit'})
+        for index, row in enumerate(rows[:256]):
+            location = {'location': group, 'row_index': index}
+            if type(row) is not dict:
+                issues.append({**location, 'reason': 'expected_object'})
+                continue
+            field = 'apply_id' if operation == 'apply_list' else 'task_id'
+            identifier = _number(row.get(field))
+            if identifier is None or identifier == 0 or operation == 'apply_list' and identifier > 2 ** 31 - 1:
+                issues.append({**location, 'field': field, 'reason': 'invalid_object_id'})
+            elif identifier in seen or operation == 'apply_list' and application_ids.get(identifier, 0) > 1:
+                issues.append({**location, 'field': field, 'reason': 'duplicate_object_id'})
+            else:
+                seen.add(identifier)
+            if operation == 'apply_list':
+                if _label(row.get('module_name'), 63) is None:
+                    issues.append({**location, 'field': 'module_name', 'reason': 'invalid_label'})
+            else:
+                if type(row.get('user')) is not int or row['user'] != OWNER_ID:
+                    issues.append({**location, 'field': 'user', 'reason': 'owner_identity_unverified'})
+                for field in ('atid', 'from', 'to', 'disk_uuid'):
+                    value = row.get(field)
+                    if value is not None and (type(value) is not str or len(value.encode('utf8', errors='replace')) > 4096):
+                        issues.append({**location, 'field': field, 'reason': 'invalid_private_identity_shape'})
+    return issues
+
+
+def _backup_group_rows(value):
+    """Build 260907 wraps each backup group in its fixed list_cm object.
+
+    Bare arrays are retained for the existing documented fixture/older shape;
+    no generic data/result wrapper or unknown owner normalization is allowed.
+    """
+    return value.get('list_cm') if type(value) is dict else value
 
 
 def _backup_tasks(frame):
     groups, counts, observed, all_seen = {}, {}, 0, set()
     for source, target in (('run_list', 'running'), ('wait_list', 'waiting'), ('done_list', 'done')):
-        value = frame.get(source)
-        if value is None:
+        raw = frame.get(source)
+        if raw is None:
             groups[target], counts[target] = None, None
             continue
+        value = _backup_group_rows(raw)
         if type(value) is not list or len(value) > 256:
             raise BusinessTransportError('invalid_json')
         observed += 1
@@ -265,9 +399,10 @@ class NativeCapabilities:
     original operation authorization; a process restart drops memory receipts.
     """
 
-    def __init__(self, root='/', *, client=None, idempotency_store=None):
+    def __init__(self, root='/', *, client=None, idempotency_store=None, diagnostic=False):
         self.client = client or VendorBusinessClient(root=root)
         self._idempotency = idempotency_store or _STORE
+        self._diagnostic = diagnostic is True
 
     def execute(self, tool, arguments=None, *, principal=None, authorizer=None):
         result = {'schema_version': 1, 'available': False, 'status': 'unavailable',
@@ -328,6 +463,9 @@ class NativeCapabilities:
                 status, frame = self.client.request(operation, params, body, authorizer,
                                                     confirmed=mutation)
                 responded = True
+                if self._diagnostic and operation in ('apply_list', 'backup_tasks_list'):
+                    result['response_structure'] = _native_response_structure(frame)
+                    result['projection_issues'] = _catalog_projection_checks(operation, frame)
                 code = _native_code(operation, frame)
                 result['native'] = {'http_status': status if type(status) is int else None,
                                     'code': code}
@@ -342,6 +480,9 @@ class NativeCapabilities:
                               mutation_outcome='acknowledged' if mutation else None)
         except BusinessTransportError as error:
             result['reason'] = error.reason
+            if error.reason == 'authorization_denied':
+                result.pop('response_structure', None)
+                result.pop('projection_issues', None)
             if error.http_status is not None:
                 result['native']['http_status'] = error.http_status
             if mutation:
@@ -365,7 +506,7 @@ def collect_native_capabilities_probe(root='/', *, authorizer=None, client=None)
     The host must enforce the developer peer, absolute window and confirmation.
     This never calls application progress, setters, deletion or task control.
     """
-    backend = NativeCapabilities(root, client=client)
+    backend = NativeCapabilities(root, client=client, diagnostic=True)
     names = ('list_native_applications', 'list_backup_tasks', 'get_auto_backup_settings',
              'list_nas_users', 'get_nas_name', 'get_nas_ai_settings')
     return {'schema_version': 1, 'explicit_only': True,
@@ -449,6 +590,8 @@ def collect_application_package_context(root='/', *, authorizer=None, client=Non
     operation, params, body = 'apply_list', {}, {}
     result = {'schema_version': 2, 'available': False, 'status': 'unavailable',
               'reason': None, 'items': None, 'explicit_only': True,
+              'response_structure': None, 'projection_issues': None,
+              'catalog_projection_valid': False,
               'native_query_may_update_state': True, 'may_wake_disks': True,
               'trusted_package_manifest_verified': False,
               'package_execution_available': False,
@@ -463,13 +606,31 @@ def collect_application_package_context(root='/', *, authorizer=None, client=Non
         _authorize(authorizer, operation, params, body)
         native = client or VendorBusinessClient(root=root)
         status, frame = native.request(operation, params, body, authorizer)
+        _authorize(authorizer, operation, params, body)
+        structure = _native_response_structure(frame)
+        issues = _catalog_projection_checks(operation, frame)
+        result.update(response_structure=structure, projection_issues=issues)
         code = _native_code(operation, frame)
         if status != 200 or code not in (None, 0):
             result['reason'] = 'native_request_rejected'
             return result
-        catalog = _applications(frame)['items']
+        rows = frame.get('list')
+        if type(rows) is not list or len(rows) > 256:
+            _authorize(authorizer, operation, params, body)
+            result.update(status='diagnostic_only', reason='catalog_projection_rejected',
+                          response_structure=structure, projection_issues=issues)
+            return result
+        try:
+            catalog = _applications(frame)
+            projection_valid = not catalog['partial']
+        except BusinessTransportError:
+            projection_valid = False
         shapes = []
-        for metadata, row in zip(catalog, frame['list']):
+        for index, row in enumerate(rows):
+            if type(row) is not dict:
+                continue
+            identifier = _number(row.get('apply_id'))
+            identifier = identifier if identifier is not None and 1 <= identifier < 2 ** 31 else None
             enum_keys = ('module_type', 'source', 'status', 'guest', 'apply_opt',
                          'upgradable', 'support_terminal', 'support_ecloud')
             url_keys = ('download_url', 'package_url', 'url')
@@ -486,15 +647,22 @@ def collect_application_package_context(root='/', *, authorizer=None, client=Non
             if type(row.get('source')) is str:
                 urls['source'] = _package_url_shape(row['source'])
             checksums = {key: _package_checksum_shape(row.get(key), key) for key in checksum_keys}
-            shapes.append({'application_id': metadata['application_id'], 'name': metadata['name'],
-                           'version': metadata['version'], 'field_shapes': fields,
+            shapes.append({'row_index': index, 'application_id': identifier,
+                           'name': _label(row.get('module_name'), 63),
+                           'version': _label(row.get('version'), 63), 'field_shapes': fields,
                            'enum_fields': enums, 'url_fields': urls,
                            'checksum_fields': checksums,
                            'trusted_source_verified': False, 'signature_verified': False})
         _authorize(authorizer, operation, params, body)
-        result.update(available=True, status='ok', items=shapes)
+        result.update(available=True, status='ok' if projection_valid else 'diagnostic_only', items=shapes,
+                      reason=None if projection_valid else 'catalog_projection_rejected',
+                      catalog_projection_valid=projection_valid,
+                      response_structure=structure, projection_issues=issues)
     except BusinessTransportError as error:
         result['reason'] = error.reason
+        if error.reason == 'authorization_denied':
+            result.update(items=None, response_structure=None, projection_issues=None,
+                          catalog_projection_valid=False)
     except Exception:
         result['reason'] = 'transport_failed'
     return result

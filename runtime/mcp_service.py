@@ -14,6 +14,7 @@ import re
 from api_permissions import LEGACY_TOOLS, MIN_ROLE_BY_TOOL, permission_allows
 from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
 from native_capability_specs import TOOL_SPECS as NATIVE_TOOL_SPECS
+from api_monitoring import METRICS as MONITORING_METRICS, RANGES as MONITORING_RANGES
 
 
 MODERN_VERSION = '2026-07-28'
@@ -92,6 +93,28 @@ _TOOLS = (
           'read', _object_schema({'section': {'type': 'string',
                                              'enum': list(READ_SECTIONS),
                                              'default': 'overview'}}), read_only=True),
+    _tool('get_monitoring_history', '读取监控历史',
+          '只读内存中的单指标历史缓存，最多七百二十点；不查询数据库、不启动采集。'
+          '空缺保持 null，CPU 封装功耗来自 RAPL；风扇百分比是请求输出，不是实测转速。',
+          'read', _object_schema({'metric': {'type': 'string', 'enum': list(MONITORING_METRICS)},
+                                  'range': {'type': 'string', 'enum': list(MONITORING_RANGES), 'default': '1h'},
+                                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 720, 'default': 720}},
+                                 ('metric',)), read_only=True),
+    _tool('get_health_events', '读取健康告警与事件',
+          '只读已有告警和最近事件缓存；缺测、过期或不完整的健康评估保持 unknown。'
+          '不运行 SMART，不输出磁盘序列号或原始诊断文本。',
+          'read', _object_schema({'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 50},
+                                  'since': {'type': 'number', 'minimum': 0, 'maximum': 9007199254740991}}),
+          read_only=True),
+    _tool('get_network_traffic_totals', '读取网络流量累计',
+          '只读已有网卡日／月流量缓存；仅含实际观测计数增量，缺测保持 null，'
+          '不补算断网或重启缺口，不重新汇总接口。',
+          'read', _object_schema(), read_only=True),
+    _tool('get_docker_project_resource_usage', '读取固定项目资源用量',
+          '显式读取已登记项目各服务的一次 Docker stats；核验引擎、项目和容器身份。'
+          'CPU 仅用合法原始计数差分；缺少差分保持 null，不返回原始 Docker 响应或日志。',
+          'docker', _object_schema({'project_id': {'type': 'string', 'pattern': '^project_[0-9a-f]{24}$'}},
+                                   ('project_id',)), read_only=True),
     _tool('get_media_status', '读取媒体状态',
           '按需查询原厂媒体状态，face 为相册识别，all 为七类固定检测。'
           '原厂查询可能写完成标记或触发修复分支；不视为无副作用读取，不自动轮询。'

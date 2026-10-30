@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -88,6 +89,53 @@ class FileContextTests(unittest.TestCase):
         result = self.collect(owner_reader=lambda **unused: False)
         self.assertEqual(result['unix_mapping']['reason'], 'unix_mapping_metadata_unavailable')
         self.assertNotIn(PRIVATE, json.dumps(result))
+
+    def test_zero_size_proc_short_reads_keep_later_mounts_and_exact_ids(self):
+        rows = ('100 1 8:2 / /drives/system rw - ext4 /dev/sda2 rw\n'
+                '605 1 8:17 / /drives/data rw - ext4 /dev/sdb1 rw\n'
+                '638 1 8:1 / /drives/another rw - ext4 /dev/sda1 rw\n')
+        (self.root / 'proc/self/mountinfo').write_text(rows, encoding='utf-8')
+        real_read, real_fstat = os.read, os.fstat
+
+        def proc_stat(descriptor):
+            value = real_fstat(descriptor)
+            return SimpleNamespace(st_size=0, **{field: getattr(value, field) for field in
+                ('st_mode', 'st_dev', 'st_ino', 'st_mtime_ns')})
+
+        with mock.patch.object(files.os, 'read', side_effect=lambda fd, count:
+                               real_read(fd, min(count, 7))), \
+             mock.patch.object(files.os, 'fstat', side_effect=proc_stat):
+            result = files._mounts(self.root)
+        self.assertEqual(result, {'/drives/system': [('100', '8:2')],
+                                  '/drives/data': [('605', '8:17')],
+                                  '/drives/another': [('638', '8:1')]})
+
+    def test_zero_size_proc_short_reads_still_enforce_cap_and_close_handle(self):
+        real_open, real_read, real_fstat, real_close = os.open, os.read, os.fstat, os.close
+        opened, closed = [], []
+
+        def track_open(*args, **kwargs):
+            descriptor = real_open(*args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        def track_close(descriptor):
+            closed.append(descriptor)
+            return real_close(descriptor)
+
+        def proc_stat(descriptor):
+            value = real_fstat(descriptor)
+            return SimpleNamespace(st_size=0, **{field: getattr(value, field) for field in
+                ('st_mode', 'st_dev', 'st_ino', 'st_mtime_ns')})
+
+        with mock.patch.object(files.os, 'open', side_effect=track_open), \
+             mock.patch.object(files.os, 'read', side_effect=lambda fd, count:
+                               real_read(fd, min(count, 3))), \
+             mock.patch.object(files.os, 'fstat', side_effect=proc_stat), \
+             mock.patch.object(files.os, 'close', side_effect=track_close), \
+             self.assertRaisesRegex(ValueError, 'metadata_changed'):
+            files._read_fixed(self.root, 'proc/self/mountinfo', maximum=16)
+        self.assertEqual(opened, closed)
 
     def test_root_limit_and_failures_keep_a_complete_fixed_gap_report(self):
         self.catalog['roots'] *= 9

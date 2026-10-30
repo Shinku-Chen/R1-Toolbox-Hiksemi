@@ -82,7 +82,14 @@ def _read_fixed(root, relative, maximum=_MAX_METADATA):
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
             raise ValueError('invalid_metadata')
-        raw = os.read(descriptor, maximum + 1)
+        # proc seq_files have st_size == 0 and may short-read before EOF. A
+        # single read can silently omit later mount rows even below this cap.
+        raw = bytearray()
+        while len(raw) <= maximum:
+            block = os.read(descriptor, min(65536, maximum + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
         after = os.fstat(descriptor)
         if (len(raw) > maximum or before.st_size and len(raw) != before.st_size
                 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
