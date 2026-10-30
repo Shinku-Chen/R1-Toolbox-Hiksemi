@@ -159,8 +159,8 @@ class FileUploadHTTPRules(UploadHTTPBase):
         self.assertIn('prepare_file_upload', names)
         self.assertTrue({'prepare_file_overwrite', 'create_directory', 'rename_file', 'copy_file', 'move_file', 'trash_file'} <= names)
         self._patch(self.server.integration, 'file_root_catalog', return_value={
-            'boundary_version': 2, 'status': 'authorization_plan', 'available': True,
-            'roots': [{'id': ROOT, 'mount': '/drives/fixture/Users', 'read_only': False}]})
+            'boundary_version': 3, 'status': 'authorization_plan', 'available': True,
+            'roots': [{'id': ROOT, 'mount': '/drives/fixture/Users/admin', 'read_only': False}]})
         status, _, value = self.browser('POST', '/api/access/keys', {
             'name': 'explicit concrete writer', 'role': 'readwrite', 'scopes': ['files'],
             'file_roots': [{'id': ROOT, 'path': '', 'access': 'readwrite'}],
@@ -342,13 +342,13 @@ class ProductionFileUploadHTTPTests(completion_fixture.CompletionHTTPBase):
             capacity=lambda descriptor, remaining: None)
         integration.file_operations = executor
         self._patch(integration, 'file_root_catalog', return_value={
-            'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
+            'available': True, 'status': 'authorization_plan', 'boundary_version': 3,
             'roots': [dict(read_fixture.ROW)]})
         self.file_key = self.key('readwrite', ['files'], UPLOAD_TOOLS + ['get_file_info'],
-            roots=[{'id': read_fixture.ROOT, 'path': 'admin', 'access': 'readwrite'}])
+            roots=[{'id': read_fixture.ROOT, 'path': '', 'access': 'readwrite'}])
 
     def prepare(self, *, key=None, **changes):
-        arguments = {'root_id': read_fixture.ROOT, 'path': 'admin/new.bin',
+        arguments = {'root_id': read_fixture.ROOT, 'path': 'new.bin',
             'size_bytes': len(DATA), 'sha256': hashlib.sha256(DATA).hexdigest(),
             'idempotency_key': 'http:production:prepare', **changes}
         return self.good(self.call(key or self.file_key, 'prepare_file_upload', arguments))
@@ -359,14 +359,14 @@ class ProductionFileUploadHTTPTests(completion_fixture.CompletionHTTPBase):
 
     def test_real_production_prepare_put_commit_and_index_confirmation(self):
         prepared = self.prepare()
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
         status, uploaded = self.binary(prepared['content_path'], key=self.file_key, data=DATA)
         self.assertEqual(status, 200)
         self.assertEqual(uploaded['transfer']['state'], 'verified')
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
         committed = self.good(self.commit(prepared, rest=True))
         self.assertEqual(committed['operation']['state'], 'pending')
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
         self.assertEqual(len(self.index.notifications), 1)
         replay = self.good(self.commit(prepared))
         self.assertEqual(replay['operation']['operation_id'], committed['operation']['operation_id'])
@@ -381,26 +381,26 @@ class ProductionFileUploadHTTPTests(completion_fixture.CompletionHTTPBase):
         self.assertRegex(completed['operation']['result_version'], '^file_[0-9a-f]{48}$')
 
     def test_file_range_parent_access_and_schema_cannot_authorize_public_or_overwrite(self):
-        for changes in ({'path': 'public/new.bin'}, {'path': 'admin'},
+        for changes in ({'path': '../public/new.bin'}, {'path': ''},
                         {'overwrite': True}, {'expected_target_version': 'file_version'},
                         {'confirmed': True}, {'size_bytes': 8 * 1024 ** 3 + 1}):
-            arguments = {'root_id': read_fixture.ROOT, 'path': 'admin/new.bin',
+            arguments = {'root_id': read_fixture.ROOT, 'path': 'new.bin',
                 'size_bytes': len(DATA), 'sha256': hashlib.sha256(DATA).hexdigest(),
                 'idempotency_key': 'reject:write', **changes}
             self.bad(self.call(self.file_key, 'prepare_file_upload', arguments))
         leaf = self.key('readwrite', ['files'], UPLOAD_TOOLS,
-            roots=[{'id': read_fixture.ROOT, 'path': 'admin/new.bin', 'access': 'readwrite'}])
-        arguments = {'root_id': read_fixture.ROOT, 'path': 'admin/new.bin',
+            roots=[{'id': read_fixture.ROOT, 'path': 'new.bin', 'access': 'readwrite'}])
+        arguments = {'root_id': read_fixture.ROOT, 'path': 'new.bin',
             'size_bytes': len(DATA), 'sha256': hashlib.sha256(DATA).hexdigest(),
             'idempotency_key': 'reject:parent'}
         self.bad(self.call(leaf, 'prepare_file_upload', arguments))
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
         self.assertEqual(self.index.notifications, [])
 
     def test_concurrent_target_is_preserved_and_failed_operation_is_not_completion(self):
         prepared = self.prepare()
         self.assertEqual(self.binary(prepared['content_path'], key=self.file_key, data=DATA)[0], 200)
-        target = self.users / 'admin/new.bin'
+        target = self.admin / 'new.bin'
         target.write_bytes(b'keep existing user file')
         result = self.commit(prepared)
         value = result['structuredContent']
@@ -416,7 +416,7 @@ class ProductionFileUploadHTTPTests(completion_fixture.CompletionHTTPBase):
         status, _, _ = self.rest_action(self.file_key, 'commit_file_upload', {
             'transfer_id': prepared['transfer_id'], 'idempotency_key': 'revoked:commit'})
         self.assertEqual(status, 401)
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
         self.assertEqual(self.index.notifications, [])
 
 

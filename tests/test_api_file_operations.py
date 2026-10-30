@@ -21,6 +21,16 @@ PRIVATE = 'private-account-credential-fixture'
 
 
 class FileContextTests(unittest.TestCase):
+    def test_legacy_users_authority_error_is_fixed_and_not_retryable(self):
+        self.assertEqual(files.FileAccessError('legacy_users_boundary_v2').result(), {
+            'ok': False, 'error': {'code': 'legacy_users_boundary_v2',
+                'message': '旧 Users 根的恢复登记尚未迁移，请先使用原镜像处理保管对象。', 'retryable': False}})
+
+    def test_cross_mount_error_is_fixed_and_not_retryable(self):
+        self.assertEqual(files.FileAccessError('cross_mount_denied').result(), {
+            'ok': False, 'error': {'code': 'cross_mount_denied',
+                'message': '此路径进入额外挂载，当前文件授权不允许跨越该挂载。', 'retryable': False}})
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='r1-file-context-')
         self.addCleanup(temporary.cleanup)
@@ -34,8 +44,8 @@ class FileContextTests(unittest.TestCase):
             '100 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n', encoding='utf-8')
         (self.root / 'proc/self/ns/mnt').write_text('fixture namespace', encoding='utf-8')
         os.link(self.root / 'proc/self/ns/mnt', self.root / 'proc/1/ns/mnt')
-        self.catalog = {'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
-                        'roots': [{'id': ROOT, 'mount': '/drives/data/Users',
+        self.catalog = {'available': True, 'status': 'authorization_plan', 'boundary_version': 3,
+                        'roots': [{'id': ROOT, 'mount': '/drives/data/Users/admin',
                                    'label': 'fixture', 'read_only': False}]}
 
     def collect(self, **options):
@@ -46,7 +56,7 @@ class FileContextTests(unittest.TestCase):
 
     def topology(self, catalog=None):
         catalog = self.catalog if catalog is None else catalog
-        return {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 2,
+        return {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 3,
             'available': True, 'complete': True, 'reason_codes': [],
             'catalog_fingerprint': hashlib.sha256(json.dumps(catalog, sort_keys=True,
                 ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest(),
@@ -59,7 +69,7 @@ class FileContextTests(unittest.TestCase):
                 'stats_data_paths': False, 'grants_authorization': False}}
 
     def verified_context(self, **options):
-        with mock.patch.object(files, '_users_context', return_value={
+        with mock.patch.object(files, '_admin_context', return_value={
                 'root_id': ROOT, 'status': 'verified', 'reason': 'directory_handle_metadata_only',
                 'handle_fingerprint': 'a' * 64}):
             return self.collect(owner_reader=lambda **unused: True, **options)
@@ -162,7 +172,7 @@ class FileContextTests(unittest.TestCase):
 
     def test_root_limit_and_failures_keep_a_complete_fixed_gap_report(self):
         self.catalog['roots'] *= 9
-        with mock.patch.object(files, '_users_context', return_value={
+        with mock.patch.object(files, '_admin_context', return_value={
                 'root_id': ROOT, 'status': 'unverified', 'reason': 'fixture'}):
             result = self.collect(owner_reader=lambda **unused: True)
         self.assertEqual(len(result['roots']), 8)
@@ -174,7 +184,7 @@ class FileContextTests(unittest.TestCase):
         after = copy.deepcopy(self.catalog)
         after['roots'][0]['id'] = 'root_' + 'b' * 24
         collector = mock.Mock(side_effect=[copy.deepcopy(self.catalog), after])
-        with mock.patch.object(files, '_users_context', return_value={
+        with mock.patch.object(files, '_admin_context', return_value={
                 'root_id': ROOT, 'status': 'verified', 'reason': 'directory_handle_metadata_only',
                 'handle_fingerprint': 'a' * 64}):
             result = files.collect_file_backend_context(None, root=self.root,
@@ -207,7 +217,7 @@ class FileContextTests(unittest.TestCase):
     def test_rejected_topology_survives_zero_selected_roots_without_opening_data(self):
         self.catalog.update(available=False, status='unavailable', roots=[])
         topology = self.topology()
-        with mock.patch.object(files, '_users_context', side_effect=AssertionError('no data path')) as users, \
+        with mock.patch.object(files, '_admin_context', side_effect=AssertionError('no data path')) as users, \
                 mock.patch.object(files.os, 'scandir', side_effect=AssertionError('no directory listing')), \
                 mock.patch.object(files.os, 'listdir', side_effect=AssertionError('no directory listing')):
             result = self.collect(topology_collector=lambda unused: topology)
@@ -219,7 +229,7 @@ class FileContextTests(unittest.TestCase):
         self.assertFalse(result['file_access_available'])
 
     def test_selected_users_failure_does_not_erase_complete_topology(self):
-        with mock.patch.object(files, '_users_context', return_value={
+        with mock.patch.object(files, '_admin_context', return_value={
                 'root_id': ROOT, 'status': 'unverified', 'reason': 'safe_metadata_open_unavailable'}):
             result = self.collect(topology_collector=lambda unused: self.topology())
         self.assertTrue(result['root_topology']['complete'])
@@ -257,7 +267,7 @@ class FileContextTests(unittest.TestCase):
         after = copy.deepcopy(self.catalog)
         after['roots'][0]['label'] = 'changed label without changing root ID'
         topology = self.topology()
-        with mock.patch.object(files, '_users_context', return_value={
+        with mock.patch.object(files, '_admin_context', return_value={
                 'root_id': ROOT, 'status': 'verified', 'handle_fingerprint': 'a' * 64}):
             result = files.collect_file_backend_context(None, root=self.root,
                 root_collector=mock.Mock(side_effect=[copy.deepcopy(self.catalog), after]),
@@ -317,7 +327,9 @@ class FileContextTests(unittest.TestCase):
     def test_linux_directory_handle_refuses_users_symlink_and_reports_only_metadata(self):
         users = self.root / 'drives/data/Users'
         users.mkdir(parents=True)
-        descriptor = os.open(users, os.O_PATH | os.O_DIRECTORY)
+        admin = users / 'admin'
+        admin.mkdir()
+        descriptor = os.open(admin, os.O_PATH | os.O_DIRECTORY)
         try:
             expected_id = Path('/proc/self/fdinfo/' + str(descriptor)).read_text().split('mnt_id:\t')[1].splitlines()[0]
             info = os.fstat(descriptor)
@@ -325,18 +337,71 @@ class FileContextTests(unittest.TestCase):
         finally:
             os.close(descriptor)
         with mock.patch.object(files, '_descriptor_mount_id', return_value=expected_id):
-            value = files._users_context(self.root, self.catalog['roots'][0], expected)
+            value = files._admin_context(self.root, self.catalog['roots'][0], expected)
         self.assertEqual(value['status'], 'verified')
         self.assertEqual(value['native_acl'], 'unverified')
         self.assertNotIn(str(self.root), json.dumps(value))
+        admin.rmdir()
         users.rmdir()
         target = self.root / 'outside'
         target.mkdir()
         users.symlink_to(target, target_is_directory=True)
         with mock.patch.object(files, '_descriptor_mount_id', return_value=expected_id):
-            value = files._users_context(self.root, self.catalog['roots'][0], expected)
+            value = files._admin_context(self.root, self.catalog['roots'][0], expected)
         self.assertEqual(value['status'], 'unverified')
         self.assertIsNone(value['handle_fingerprint'])
+
+    def test_admin_context_opens_five_fixed_stages_and_checks_each_physical_descendant(self):
+        fakeos = mock.Mock(wraps=os)
+        fakeos.name = 'posix'
+        for name, fallback in (('O_PATH', 0x200000), ('O_DIRECTORY', 0x10000),
+                               ('O_NOFOLLOW', 0x20000), ('O_CLOEXEC', 0x80000)):
+            setattr(fakeos, name, getattr(os, name, fallback))
+        fakeos.open.side_effect = range(10, 15)
+        fakeos.fstat.side_effect = lambda fd: SimpleNamespace(st_dev=1, st_ino=fd, st_ctime_ns=123)
+        fakeos.major, fakeos.minor = mock.Mock(return_value=8), mock.Mock(return_value=1)
+        fakeos.close.return_value = None
+        with mock.patch.object(files, 'os', fakeos), \
+             mock.patch.object(files, '_descriptor_mount_id', return_value='100') as mount:
+            result = files._admin_context(self.root, self.catalog['roots'][0], ('100', '8:1'))
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual([call.args[0] for call in fakeos.open.call_args_list[1:]],
+                         ['drives', 'data', 'Users', 'admin'])
+        self.assertEqual([call.args[1] for call in mount.call_args_list], [12, 13, 14])
+        self.assertEqual([call.args[0] for call in fakeos.close.call_args_list], [14, 13, 12, 11, 10])
+        self.assertNotIn(str(self.root), json.dumps(result))
+
+    def test_admin_context_stops_at_users_or_admin_same_device_bind_mount(self):
+        for mount_ids, expected_opened in ((['100', '101'], 4), (['100', '100', '101'], 5)):
+            with self.subTest(mount_ids=mount_ids):
+                fakeos = mock.Mock(wraps=os)
+                fakeos.name = 'posix'
+                for name, fallback in (('O_PATH', 0x200000), ('O_DIRECTORY', 0x10000),
+                                       ('O_NOFOLLOW', 0x20000), ('O_CLOEXEC', 0x80000)):
+                    setattr(fakeos, name, getattr(os, name, fallback))
+                fakeos.open.side_effect = range(10, 15)
+                fakeos.fstat.side_effect = lambda fd: SimpleNamespace(st_dev=1, st_ino=fd, st_ctime_ns=123)
+                fakeos.major, fakeos.minor = mock.Mock(return_value=8), mock.Mock(return_value=1)
+                fakeos.close.return_value = None
+                with mock.patch.object(files, 'os', fakeos), \
+                     mock.patch.object(files, '_descriptor_mount_id', side_effect=mount_ids):
+                    result = files._admin_context(self.root, self.catalog['roots'][0], ('100', '8:1'))
+                self.assertEqual(result['status'], 'unverified')
+                self.assertEqual(result['reason'], 'opened_mount_identity_unconfirmed')
+                self.assertEqual(fakeos.open.call_count, expected_opened)
+                self.assertEqual(fakeos.close.call_count, expected_opened)
+
+    def test_context_rejects_legacy_users_boundary_even_if_root_id_shape_is_valid(self):
+        for version, path in ((2, '/drives/data/Users'), (3, '/drives/data/Users'),
+                              (3, '/drives/data/Users/public')):
+            with self.subTest(version=version, path=path):
+                self.catalog['boundary_version'] = version
+                self.catalog['roots'][0]['mount'] = path
+                with mock.patch.object(files, '_admin_context', side_effect=AssertionError('legacy must not open')):
+                    result = self.collect(owner_reader=lambda **unused: True,
+                                          topology_collector=lambda unused: self.topology())
+                self.assertFalse(result['complete'])
+                self.assertEqual(result['roots'], [])
 
 
 if __name__ == '__main__':

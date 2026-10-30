@@ -8,7 +8,7 @@ turn this diagnostic into a file backend or a runtime authorization decision.
 import copy
 import re
 
-from api_file_roots import collect_file_roots, is_users_root_path, valid_relative_file_path
+from api_file_roots import collect_file_roots, is_admin_root_path, valid_relative_file_path
 
 
 _ROOT_ID = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
@@ -26,7 +26,7 @@ _STATIC_REFERENCE = {
     'unverified': ['http_method_and_encoding', 'virtual_path_to_root_mapping',
                    'nas_subject_to_unix_identity', 'native_acl_to_opened_object',
                    'namespace_race_safety', 'complete_range_response_contract'],
-    'reason': '已实现精确固件的管理员／public 只读后端；本诊断不主动执行其原厂和真实句柄核验。',
+    'reason': '已实现精确固件的 admin 只读后端；本诊断不主动执行其原厂和真实句柄核验。',
 }
 
 
@@ -39,7 +39,7 @@ def _project_roots(raw):
     """Project bounded planner metadata; never copy mounts, secrets or extras."""
     if (not isinstance(raw, dict) or raw.get('available') is not True
             or raw.get('status') != 'authorization_plan'
-            or type(raw.get('boundary_version')) is not int or raw['boundary_version'] != 2
+            or type(raw.get('boundary_version')) is not int or raw['boundary_version'] != 3
             or not isinstance(raw.get('roots'), list)
             or not 0 < len(raw['roots']) <= _MAX_ROOTS):
         return []
@@ -47,7 +47,7 @@ def _project_roots(raw):
     for row in raw['roots']:
         if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
                 or not _ROOT_ID.fullmatch(row['id']) or row['id'] in identities
-                or not is_users_root_path(row.get('mount'))
+                or not is_admin_root_path(row.get('mount'))
                 or type(row.get('read_only')) is not bool
                 or not _plain(row.get('label'), 128)):
             return []
@@ -81,7 +81,7 @@ def _selection(grants, roots):
         elif identity in identities:
             reason = '文件范围重复；未合并或扩大授权。'
         elif root is None:
-            reason = '当前 Users 根规划无法确认此绑定；不换绑旧整盘授权或其他盘。'
+            reason = '当前 admin 根规划无法确认此绑定；不换绑旧 Users 授权或其他盘。'
         elif root['read_only'] and access == 'readwrite':
             reason = '当前挂载只读，不能确认原读写范围。'
         else:
@@ -137,7 +137,7 @@ def collect_file_access_readiness(panel, *, grants=None, root_collector=None):
         _check('uid_gid_groups_mapping', 'unverified', 'runtime_unix_identity',
                '不采用 NAS ID 到 Unix UID 的等值映射；只读后端按原厂逻辑 ACL 对同一真实对象判权。'),
         _check('native_acl_semantics', 'unverified', 'effective_acl_for_same_object',
-               '生产后端限已审计的管理员／public 子树，每次以原厂根读取许可和同对象拓扑重验；此处尚未执行。'),
+               '生产后端限已审计的 admin 子树，每次以原厂根读取许可和同对象拓扑重验；此处尚未执行。'),
         _check('live_root_object_identity', 'unverified' if selected else 'not_selected',
                'runtime_opened_object',
                '根规划不是实际打开时的挂载、父目录与目标对象证明。' if selected
@@ -161,7 +161,7 @@ def collect_file_access_readiness(panel, *, grants=None, root_collector=None):
             'status': 'requires_per_operation_verification',
             'implemented_tools': ['list_directory', 'get_file_info', 'prepare_file_download',
                                   'get_file_transfer', 'cancel_file_transfer'],
-            'supported_path_classes': ['owner_admin', 'public'],
+            'supported_path_classes': ['owner_admin'],
             'authorization_model': 'native_logical_owner_acl_for_same_opened_object',
             'runtime_verified': None, 'write_implemented': False,
             'reason': '本入口只检查规划；实际访问须重新核验原厂许可、精确固件和同一文件句柄。'},

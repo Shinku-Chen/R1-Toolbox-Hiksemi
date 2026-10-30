@@ -6128,7 +6128,7 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <fieldset class="r1-api-scopes"><legend>允许的功能</legend><div data-ref="scopes"></div></fieldset>
 <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
 <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
-<fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/ 下的已核验目录；下面只保存明确勾选的根与相对子目录授权。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+<fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/admin；子目录相对 admin 根填写，无需添加 admin/ 前缀。根下有其他挂载不影响选择，实际操作仍拒绝进入子挂载。旧 Users 根授权须重新选择，不自动换根或改写路径。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="applicationInstalls" hidden><legend>允许新装的原厂应用</legend><p class="sub">安装需要管理员、应用功能和安装工具，以及这里明确选择的应用。只支持未安装的审计模块，不会自动卸载或更新已有应用；新应用默认不授权。原厂安装可能启动后台服务并访问其自身数据目录。</p><div data-ref="applicationInstallOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许访问的已登记 Docker 项目</legend><p class="sub">现有项目按读取、启停重启、镜像更新分别授权；写操作需要管理员及对应工具。未来新服务使用下面独立的部署资源。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="dockerDeployments" hidden><legend>允许访问的未来部署资源</legend><p class="sub">先在「Token 操作 → 部署资源管理」登记固定资源。默认只选读取，部署／更新、启停重启和删除须管理员明确勾选，且仍须对应工具授权。</p><p class="sub" data-ref="dockerDeploymentsStatus"></p><div data-ref="dockerDeploymentOptions"></div></fieldset>
@@ -6200,8 +6200,11 @@ x.fileRecoveries.querySelectorAll('button').forEach(button => { button.disabled 
 };
 const names = () => new Map((Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []).map(scope => [scope.id, scope.label || scope.id]));
 const filesSelected = () => !!x.scopes.querySelector('input[value="files"]:checked');
-const fileRoots = () => state && state.file_root_catalog && state.file_root_catalog.available === true && Array.isArray(state.file_root_catalog.roots)
-? state.file_root_catalog.roots.filter(root => root && /^root_[0-9a-f]{24}$/.test(root.id) && typeof root.label === 'string' && typeof root.mount === 'string' && typeof root.read_only === 'boolean') : [];
+const adminBoundaryReady = () => !!(state && state.file_root_catalog && state.file_root_catalog.boundary_version === 3);
+const fileRoots = () => adminBoundaryReady() && state.file_root_catalog.available === true && Array.isArray(state.file_root_catalog.roots)
+? state.file_root_catalog.roots.filter(root => root && /^root_[0-9a-f]{24}$/.test(root.id) && typeof root.label === 'string' && typeof root.mount === 'string'
+&& /^\/drives\/[^/\\]+\/Users\/admin$/.test(root.mount) && !['.', '..'].includes(root.mount.split('/')[2])
+&& !/[\u0000-\u001f\u007f-\u009f]/.test(root.mount) && typeof root.read_only === 'boolean') : [];
 const roles = () => (Array.isArray(state && state.role_catalog) ? state.role_catalog : []).filter(role => Object.hasOwn(roleLevel, role.id));
 const scopeMinimum = scope => Object.hasOwn(roleLevel, scope.min_role) ? scope.min_role : (defaultMinRole[scope.id] || 'readonly');
 const scopeName = (id, labels) => {
@@ -6256,7 +6259,7 @@ range.querySelector('[data-root-path]').disabled = !checked;
 }
 item.querySelector('[data-root-fields]').hidden = !checked;
 setText(item.querySelector('[data-root-note]'), item.dataset.readOnly === 'true' ? '此存储根为只读挂载，只能授权读取。'
-: item.dataset.available === 'false' ? '原范围当前失效；元数据编辑仍保留绑定，不按名称换盘。' : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '授权仅限 Users 目录内已勾选的根与子目录；仍须选择已接入的具体工具。');
+: item.dataset.available === 'false' ? '原范围当前失效，须明确重新选择 admin 根。旧 Users 授权和路径不自动转换；仅编辑元数据仍保留原绑定。' : role === 'readonly' ? '当前角色只能授权读取；切换为读写或管理员后可选择读写。' : '授权仅限 admin 根内已勾选的相对子目录；实际操作不进入子挂载，仍须选择已接入的具体工具。');
 }
 x.dockerProjects.hidden = !selected.has('docker');
 for (const row of x.dockerProjectOptions.querySelectorAll('[data-project-row]')) {
@@ -6286,7 +6289,7 @@ setText(x.dockerDeploymentsStatus, deploymentRows().some(row => row.revoked !== 
 pending(busy);
 };
 const appendRange = (item, draft = {}) => {
-const range = mount('<div class="r1-api-file-range" data-root-range><label class="r1-api-input">子目录（可选）<input class="textfield" data-root-path maxlength="2048" autocomplete="off" placeholder="例如：电影/2026"><span class="sub">最多 1024 个 Unicode 字符；相对目录以 / 分隔，空表示整个已选根。</span></label><label class="r1-api-input">访问方式<select class="textfield" data-root-access><option value="readonly">只读</option><option value="readwrite">读写</option></select></label><button class="btn" type="button" data-remove-range>移除此范围</button></div>');
+const range = mount('<div class="r1-api-file-range" data-root-range><label class="r1-api-input">admin 内子目录（可选）<input class="textfield" data-root-path maxlength="2048" autocomplete="off" placeholder="例如：电影/2026（相对 admin 根）"><span class="sub">相对 admin 根填写，无需添加 admin/ 前缀；空表示整个已选 admin 根。最多 1024 个 Unicode 字符，相对目录以 / 分隔。</span></label><label class="r1-api-input">访问方式<select class="textfield" data-root-access><option value="readonly">只读</option><option value="readwrite">读写</option></select></label><button class="btn" type="button" data-remove-range>移除此范围</button></div>');
 const path = range.querySelector('[data-root-path]'), access = range.querySelector('[data-root-access]');
 path.value = typeof draft.path === 'string' ? draft.path : ''; access.value = draft.access === 'readwrite' ? 'readwrite' : 'readonly';
 path.setAttribute('aria-label', '文件子目录'); access.setAttribute('aria-label', '文件访问方式');
@@ -6303,10 +6306,11 @@ const drawFileRoots = (prefill = null) => {
 const drafts = new Map([...x.fileRootOptions.querySelectorAll('.r1-api-file-root')].map(item => [item.dataset.rootId,
 { checked: item.querySelector('[data-root-check]').checked, ranges: [...item.querySelectorAll('[data-root-range]')].map(range => ({ path: range.querySelector('[data-root-path]').value, access: range.querySelector('[data-root-access]').value })) }]));
 const roots = [...fileRoots()];
-if (editing) for (const grant of prefill || editing.file_roots || []) if (!roots.some(root => root.id === grant.id)) roots.push({ id: grant.id, label: '当前未确认的存储根', mount: '', read_only: false, unavailable: true });
+if (editing) for (const grant of prefill || editing.file_roots || []) if (!roots.some(root => root.id === grant.id)) roots.push({ id: grant.id, label: '失效的原文件范围；需重选 admin 根', mount: '', read_only: false, unavailable: true });
 x.fileRootOptions.replaceChildren();
 const reason = state.file_root_catalog && state.file_root_catalog.reason;
-setText(x.fileRootsStatus, roots.length ? '请至少勾选一个存储根；子目录留空表示整个已选根。' : `没有已确认的存储根，不能创建文件权限。${reason ? '原因：' + String(reason) : '请确认磁盘已挂载后刷新。'}`);
+setText(x.fileRootsStatus, !adminBoundaryReady() ? '尚未取得 admin 专用 v3 根目录，请刷新后重新选择文件范围；旧 Users 授权不会自动转换。'
+: roots.length ? '请至少勾选一个 admin 存储根；子目录留空表示整个已选 admin 根。' : `没有已确认的存储根，不能创建文件权限。${reason ? '原因：' + String(reason) : '请确认磁盘已挂载后刷新。'}`);
 for (const root of roots) {
 const item = mount('<article class="r1-api-file-root"><label class="r1-api-root-choice"><input type="checkbox" data-root-check><span data-root-label></span></label><p class="sub mono" data-root-mount></p><div class="r1-api-file-fields" data-root-fields hidden><div data-root-ranges></div><button class="btn" type="button" data-add-range>增加同根子目录范围</button></div><p class="sub" data-root-note></p></article>');
 item.dataset.rootId = root.id; item.dataset.readOnly = String(root.read_only); item.dataset.available = String(!root.unavailable);
@@ -6427,7 +6431,7 @@ x.fileRecoveries.replaceChildren();
 for (const recovery of Array.isArray(result.recoveries) ? result.recoveries : []) {
 if (!/^operation_[0-9a-f]{32}$/.test(recovery.recovery_id)) continue;
 const item = mount('<article class="r1-api-audit r1-api-recovery"><strong class="mono"></strong><p class="sub"></p><button class="btn" type="button">恢复到原路径</button></article>');
-const restorePath = validSubpath(recovery.path) && recovery.path.startsWith('admin/') ? recovery.path : null;
+const restorePath = validSubpath(recovery.path) && recovery.path ? recovery.path : null;
 setText(item.querySelector('strong'), restorePath || recovery.recovery_id);
 setText(item.querySelector('.sub'), `${recovery.recovery_id}；${recovery.state || 'result_unconfirmed'}；保留对象：${(recovery.objects || []).join('、') || '无'}${restorePath ? '' : '；原路径无法核验，暂不能恢复。'}`);
 const canRestore = !!(recovery.objects || []).length && !!restorePath && recovery.state !== 'restored';
@@ -6453,6 +6457,11 @@ setText(x.fileAuthorityStatus, result.recoveries && result.recoveries.length ? '
 };
 row.querySelector('[data-authority-preflight]').onclick = () => perform('preflight');
 init.onclick = () => perform('initialize'); inspect.onclick = () => perform('inspect'); revoke.onclick = () => perform('revoke'); x.fileAuthorityRoots.append(row);
+}
+for (const registration of entries.filter(entry => entry && (entry.status === 'legacy_boundary' || entry.reason === 'legacy_users_boundary_v2'))) {
+const row = mount('<article class="r1-api-audit r1-api-authority" data-legacy-authority><strong>旧 Users 边界恢复登记</strong><p class="sub">旧 Users 边界登记，需先使用原镜像处理保管对象。不会自动转换为 admin 根，也不会删除或接管旧恢复区。</p><p class="sub mono" data-legacy-root></p><div class="r1-api-actions"><button class="btn" type="button" disabled>初始化恢复区</button><button class="btn" type="button" disabled>检查保留对象</button><button class="btn" type="button" disabled>恢复保留对象</button><button class="btn" type="button" disabled>停止新变更</button></div></article>');
+setText(row.querySelector('[data-legacy-root]'), String(registration.root_id || '未知根') + '；修订：' + String(registration.revision ?? '--'));
+x.fileAuthorityRoots.append(row);
 }
 };
 const draw = () => {
@@ -6504,10 +6513,10 @@ setText(applications, (key.application_ids || []).map(id => (applicationRows().f
 k.deployments.after(mount('<dt>允许新装应用</dt>'), applications);
 const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
 if (!grants.length) setText(k.files, '未授予文件范围');
-else k.files.append(mount('<p class="sub">仅限已核验的 Users 目录；具体操作以已授权的接入工具为准。</p>'));
+else k.files.append(mount('<p class="sub">当前边界仅限已核验的 admin 专用 v3 根；旧 Users 根失效，须明确重选，原路径不会自动转换。具体操作以已授权的接入工具为准。</p>'));
 for (const grant of grants) {
 const root = fileRoots().find(item => item.id === grant.id), row = document.createElement('p');
-setText(row, `${root ? root.label : '当前未确认的存储根（' + String(grant.id || '未知') + '）'} · ${grant.path ? '子目录：' + String(grant.path) : '整个已选根'} · ${({ readonly: '只读', readwrite: '读写' })[grant.access] || '权限未知'}`);
+setText(row, `${root ? root.label : '原文件范围已失效，需重选 admin 根（' + String(grant.id || '未知') + '）'} · ${grant.path ? '子目录：' + String(grant.path) : '整个已选根'} · ${({ readonly: '只读', readwrite: '读写' })[grant.access] || '权限未知'}`);
 k.files.append(row);
 }
 setText(k.ips, Array.isArray(key.allowed_ips) && key.allowed_ips.length ? key.allowed_ips.join('、') : '持密钥的局域网客户端');
@@ -6850,7 +6859,7 @@ const tool = currentTools().find(item => item.name === name);
 if (!tool || !scopes.includes(tool.scope) || roleLevel[role] < roleLevel[tool.min_role]) { fail(new Error('具体工具不满足当前角色和功能权限，请重新选择。')); return; }
 }
 const labels = names(), grant = scopes.map(id => labels.get(id) || id).join('、');
-const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root ? root.label : item.id) + '／' + esc(item.path || '整个已选根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。边界仅限已核验的 Users 目录，具体操作还须有对应工具授权。` : '';
+const rangeNote = file_roots.length ? `文件范围：${file_roots.map(item => { const root = fileRoots().find(root => root.id === item.id); return esc(root ? root.label : item.id) + '／' + esc(item.path || '整个已选 admin 根') + '（' + (item.access === 'readwrite' ? '读写' : '只读') + '）'; }).join('、')}。边界仅限已核验的 admin 专用 v3 根；旧根失效，须重选后方可使用，不自动转换原路径。具体操作还须有对应工具授权。` : '';
 const body = { name, allowed_ips };
 if (!editing || dirty.role || upgrade) body.role = role;
 if (!editing || dirty.scopes || upgrade) body.scopes = scopes;
@@ -6861,7 +6870,7 @@ if (exactPolicy() && changeDeployments) body.docker_deployments = scopes.include
 if (exactPolicy() && (!editing || dirty.applications || upgrade)) body.application_ids = scopes.includes('apps') && role === 'admin'
 ? [...x.applicationInstallOptions.querySelectorAll('input:checked')].map(input => Number(input.value)) : [];
 const applicationNote = Array.isArray(body.application_ids) && body.application_ids.length
-? `允许新装应用：${body.application_ids.map(id => esc((applicationRows().find(app => app.application_id === id) || {}).label || String(id))).join('、')}。原生应用安装影响不受文件工具的 Users 子目录授权限制，执行前还须预览实际影响。` : '';
+? `允许新装应用：${body.application_ids.map(id => esc((applicationRows().find(app => app.application_id === id) || {}).label || String(id))).join('、')}。原生应用安装影响不受文件工具的 admin 范围授权限制，执行前还须预览实际影响。` : '';
 if (!editing || x.expiry.value !== 'keep') body.expires_days = Number(x.expiry.value);
 if (editing) {
 body.id = editing.id;

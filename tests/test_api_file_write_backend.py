@@ -94,9 +94,9 @@ class NewFileTests(unittest.TestCase):
         self.key.update(role='readwrite', tool_grants=[
             'prepare_file_upload', 'commit_file_upload', 'get_file_operation',
             'get_file_transfer', 'cancel_file_transfer'])
-        self.key['file_roots'][0].update(path='admin', access='readwrite')
+        self.key['file_roots'][0].update(path='', access='readwrite')
 
-    def prepare(self, path='admin/new.bin', **changes):
+    def prepare(self, path='new.bin', **changes):
         args = {'root_id': ROOT, 'path': path, 'size_bytes': len(DATA),
                 'sha256': hashlib.sha256(DATA).hexdigest(), 'idempotency_key': 'prepare-1'}
         args.update(changes)
@@ -120,14 +120,14 @@ class NewFileTests(unittest.TestCase):
         descriptor = self.manager._sessions[receipt['transfer_id']]['fd']
         inode = os.fstat(descriptor).st_ino
         self.assertEqual(os.fstat(descriptor).st_nlink, 0)
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
         self.receive(receipt)
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
         committed = self.commit(receipt)
         self.assertTrue(committed['ok'], committed)
         self.assertEqual(committed['operation']['state'], 'pending')
-        self.assertEqual((self.users / 'admin/new.bin').stat().st_ino, inode)
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'new.bin').stat().st_ino, inode)
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
         self.assertEqual(self.commit(receipt), committed)
         self.assertEqual(len(self.index.notifications), 1)
         self.assertEqual(self.operation(committed)['operation']['state'], 'pending')
@@ -141,7 +141,7 @@ class NewFileTests(unittest.TestCase):
     def test_create_conflict_never_overwrites_or_notifies_and_is_not_unconfirmed(self):
         receipt = self.prepare()
         self.receive(receipt)
-        destination = self.users / 'admin/new.bin'
+        destination = self.admin / 'new.bin'
         destination.write_bytes(b'keep concurrent original')
         result = self.commit(receipt)
         self.assertEqual(result['operation']['state'], 'failed', result)
@@ -151,22 +151,22 @@ class NewFileTests(unittest.TestCase):
         self.assertIsNone(self.manager._sessions[receipt['transfer_id']]['fd'])
 
     def test_public_user_root_readonly_role_leaf_only_and_overwrite_are_rejected(self):
-        for path in ('public/new.bin', 'admin'):
+        for path in ('../public/new.bin', ''):
             self.assertFalse(self.prepare(path)['ok'])
         self.assertFalse(self.prepare(overwrite=True)['ok'])
         self.assertFalse(self.prepare(expected_target_version='file_' + 'a' * 48)['ok'])
         self.key['role'] = 'readonly'
         self.assertFalse(self.prepare()['ok'])
         self.key['role'] = 'readwrite'
-        self.key['file_roots'][0]['path'] = 'admin/new.bin'
+        self.key['file_roots'][0]['path'] = 'new.bin'
         self.assertFalse(self.prepare()['ok'])
-        self.assertFalse((self.users / 'admin/new.bin').exists())
+        self.assertFalse((self.admin / 'new.bin').exists())
 
     def test_parent_replacement_after_prepare_cannot_receive_or_publish(self):
-        folder = self.users / 'admin/folder'
+        folder = self.admin / 'folder'
         folder.mkdir()
-        receipt = self.prepare('admin/folder/new.bin')
-        folder.rename(self.users / 'admin/moved')
+        receipt = self.prepare('folder/new.bin')
+        folder.rename(self.admin / 'moved')
         folder.mkdir()
         with self.assertRaises(FileAccessError) as caught:
             self.receive(receipt)
@@ -178,8 +178,8 @@ class NewFileTests(unittest.TestCase):
         receipt = self.prepare()
         self.receive(receipt)
         committed = self.commit(receipt)
-        target = self.users / 'admin/new.bin'
-        target.rename(self.users / 'admin/moved.bin')
+        target = self.admin / 'new.bin'
+        target.rename(self.admin / 'moved.bin')
         target.write_bytes(b'concurrent replacement')
         self.index.ready = True
         result = self.operation(committed)
@@ -198,7 +198,7 @@ class NewFileTests(unittest.TestCase):
         result = self.operation(committed)
         self.assertEqual(result['error']['code'], 'invalid_key')
         self.assertEqual(self.index.verifications, 0)
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
 
     def test_lost_index_notification_never_republishes_or_claims_rollback(self):
         def lost(*args, **kwargs):
@@ -209,7 +209,7 @@ class NewFileTests(unittest.TestCase):
         self.receive(receipt)
         committed = self.commit(receipt)
         self.assertEqual(committed['operation']['state'], 'result_unconfirmed')
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
         self.assertEqual(self.commit(receipt), committed)
         self.assertEqual(self.operation(committed)['operation']['state'], 'result_unconfirmed')
         self.assertEqual(len(self.index.notifications), 1)
@@ -226,7 +226,7 @@ class NewFileTests(unittest.TestCase):
         self.assertIsNone(row['fd'])
         self.assertEqual(self.index.verifications, 0)
         self.assertEqual(len(self.index.notifications), 1)
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
 
     def test_new_prepare_cleans_expired_pending_install_without_a_live_pending_receipt(self):
         receipt = self.prepare()
@@ -238,7 +238,7 @@ class NewFileTests(unittest.TestCase):
         deadline = row['deadline']
         # Creating an unrelated staging object used to close the installed fd
         # but leave operation=pending forever, bypassing get_operation's gate.
-        new = self.prepare('admin/another.bin', idempotency_key='prepare-2')
+        new = self.prepare('another.bin', idempotency_key='prepare-2')
         self.assertTrue(new['ok'], new)
         self.assertIsNone(row['fd'])
         with self.assertRaises(OSError):
@@ -247,14 +247,14 @@ class NewFileTests(unittest.TestCase):
         self.assertEqual(self.operation(committed)['operation']['state'], 'result_unconfirmed')
         self.assertEqual(self.commit(receipt)['operation']['state'], 'result_unconfirmed')
         changed = row['changed']
-        third = self.prepare('admin/third.bin', idempotency_key='prepare-3')
+        third = self.prepare('third.bin', idempotency_key='prepare-3')
         self.assertTrue(third['ok'], third)
         self.assertEqual(row['changed'], changed)
         self.assertEqual(row['deadline'], deadline)
         self.assertEqual(len(self.index.notifications), 1)
         self.assertEqual(self.index.verifications, 0)
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
-        self.assertFalse((self.users / 'admin/another.bin').exists())
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
+        self.assertFalse((self.admin / 'another.bin').exists())
 
     def test_revocation_during_index_verification_discards_a_successful_match(self):
         receipt = self.prepare()
@@ -271,7 +271,7 @@ class NewFileTests(unittest.TestCase):
         self.assertEqual(row['operation']['state'], 'result_unconfirmed')
         self.assertIsNone(row['fd'])
         self.assertEqual(self.index.verifications, 1)
-        self.assertEqual((self.users / 'admin/new.bin').read_bytes(), DATA)
+        self.assertEqual((self.admin / 'new.bin').read_bytes(), DATA)
 
     def test_missing_native_index_bridge_refuses_before_creating_staging(self):
         self.writer._index = SimpleNamespace(preflight=lambda *a, **kw: None)

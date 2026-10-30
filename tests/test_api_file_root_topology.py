@@ -62,8 +62,8 @@ class ApiFileRootTopologyTests(unittest.TestCase):
         result, catalog = self.topology(), roots.collect_file_roots(self.panel)
         expected_fp = hashlib.sha256(json.dumps(catalog, sort_keys=True, ensure_ascii=True,
             separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest()
-        identity = ['r1-file-users-root-v2', 'PRIVATE-SERIAL', '/dev/sda1', '8:1',
-                    'ext4', '/drives/data/Users']
+        identity = ['r1-file-admin-root-v3', 'PRIVATE-SERIAL', '/dev/sda1', '8:1',
+                    'ext4', '/drives/data/Users/admin']
         expected_id = 'root_' + hashlib.sha256(json.dumps(identity, ensure_ascii=True,
             separators=(',', ':')).encode('ascii')).hexdigest()[:24]
         self.assertTrue(result['available'])
@@ -71,7 +71,7 @@ class ApiFileRootTopologyTests(unittest.TestCase):
         self.assertEqual(result['reason_codes'], [])
         self.assertEqual(result['schema_version'], 1)
         self.assertEqual(result['scope'], 'file_root_topology')
-        self.assertEqual(result['boundary_version'], 2)
+        self.assertEqual(result['boundary_version'], 3)
         self.assertEqual(result['catalog_fingerprint'], expected_fp)
         self.assertEqual(result['catalog_root_ids'], [expected_id])
         candidate = self.candidate(result)
@@ -137,7 +137,6 @@ class ApiFileRootTopologyTests(unittest.TestCase):
             ('super_flags_invalid', line(superflags='relatime'), None, '/drives/data'),
             ('root_ancestor_stacked', line() + line('/', mid=1) + line('/', mid=2), None, '/drives/data'),
             ('drives_ancestor_stacked', line() + line('/drives', mid=2) + line('/drives', mid=3), None, '/drives/data'),
-            ('users_mount_present', line() + line('/drives/data/Users/admin/private', mid=101), None, '/drives/data'),
             ('cached_device_identity_missing', line(), [dict(self.disk, serial=None)], '/drives/data'),
             ('cached_device_identity_ambiguous', line(), [self.disk, dict(self.disk)], '/drives/data'),
             ('cached_serial_not_unique', line(), [self.disk, dict(self.disk, name='sdb')], '/drives/data'),
@@ -163,7 +162,7 @@ class ApiFileRootTopologyTests(unittest.TestCase):
             + line('/drives/data/Users', mid=101))
         candidate = self.candidate(self.topology())
         self.assertEqual(set(candidate['reason_codes']), {
-            'root_ancestor_stacked', 'drives_ancestor_stacked', 'users_mount_present',
+            'root_ancestor_stacked', 'drives_ancestor_stacked',
             'source_unsupported', 'filesystem_unsupported', 'filesystem_root_not_full',
             'canonical_source_not_unique', 'canonical_device_not_unique',
             'mount_flags_invalid', 'super_flags_invalid'})
@@ -187,7 +186,7 @@ class ApiFileRootTopologyTests(unittest.TestCase):
         self.assertEqual(set(aliases['mount_fingerprints']),
                          {fingerprint('/drives/data'), fingerprint('/drives/alias')})
 
-    def test_users_mount_evidence_is_hashed_and_cannot_be_hidden_by_external_alias(self):
+    def test_users_mount_evidence_is_hashed_without_rejecting_admin_root(self):
         child = '/drives/data/Users/admin/secret-personal-file'
         self.set_mounts(line() + line('/home/private', mid=101) + line(child, mid=102, fsroot='/secret'))
         result = self.topology()
@@ -198,7 +197,11 @@ class ApiFileRootTopologyTests(unittest.TestCase):
             'class': 'users_descendant', 'mount_id': 102, 'parent_mount_id': 1,
             'device': '8:1', 'filesystem': 'ext4', 'filesystem_class': 'supported'}])
         self.assertNotIn('secret', json.dumps(result))
-        self.assertEqual(result['catalog_root_ids'], [])
+        self.assertTrue(candidate['eligible'])
+        self.assertTrue(candidate['qualification_passed'])
+        self.assertTrue(candidate['catalog_included'])
+        self.assertNotIn('users_mount_present', candidate['reason_codes'])
+        self.assertEqual(result['catalog_root_ids'], [candidate['root_id']])
 
     def test_secret_uuid_fsroot_options_labels_and_mount_paths_never_escape(self):
         secret = 'UNIQUE_PRIVATE_SECRET_123'
@@ -236,7 +239,7 @@ class ApiFileRootTopologyTests(unittest.TestCase):
         result, catalog = self.topology(), roots.collect_file_roots(self.panel)
         self.assertTrue(result['complete'])
         self.assertEqual(result['catalog_root_ids'], [row['id'] for row in catalog['roots']])
-        self.assertEqual([row['mount'] for row in catalog['roots']], ['/drives/a/Users', '/drives/z/Users'])
+        self.assertEqual([row['mount'] for row in catalog['roots']], ['/drives/a/Users/admin', '/drives/z/Users/admin'])
         self.assertEqual(result['candidate_count'], 2)
 
     def test_mount_escape_fingerprint_uses_exact_decoded_utf8_path(self):

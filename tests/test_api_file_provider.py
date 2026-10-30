@@ -23,8 +23,8 @@ MOUNT = '/drives/data/Users'
 IDENTITY = {'available': True, 'status': 'verified', 'pid': 12, 'start_ticks': 88,
             'socket_inode': '555', 'connect_host': '127.0.0.1'}
 PRIVATE = 'PRIVATE-NATIVE-SESSION-FIXTURE'
-CATALOG = {'available': True, 'boundary_version': 2, 'roots': [
-    {'id': ROOT, 'mount': MOUNT, 'label': 'fixture', 'read_only': False}]}
+CATALOG = {'available': True, 'boundary_version': 3, 'roots': [
+    {'id': ROOT, 'mount': MOUNT + '/admin', 'label': 'fixture', 'read_only': False}]}
 
 
 def frame(path=MOUNT, **changes):
@@ -68,16 +68,16 @@ class Connection:
 
 
 class RuleTests(unittest.TestCase):
-    def test_write_subset_requires_exact_owner_descendant_not_user_root_or_public(self):
-        for path in ('admin/new.bin', 'admin/临时共享/new.bin'):
+    def test_write_subset_starts_inside_admin_and_denies_only_root_and_invalid_paths(self):
+        for path in ('new.bin', '临时共享/new.bin', 'public/new', 'admin/new', 'Admin/new'):
             self.assertTrue(files.audited_owner_write_rule(path))
-        for path in ('', 'admin', 'public', 'public/new', 'Admin/new', 'admin-private/new',
-                     'admin/../other', 'admin//new', '/admin/new'):
+        for path in ('', '../other', 'a/../other', 'a//new', '/new'):
             self.assertFalse(files.audited_owner_write_rule(path))
-    def test_positive_subset_is_exact_native_owner_public_and_no_uid_claim(self):
-        for path in ('', 'admin', 'public', 'admin/docs/a', 'public/照片.jpg'):
+
+    def test_read_subset_is_admin_relative_and_does_not_reinterpret_child_names(self):
+        for path in ('', 'admin', 'public', 'other', 'docs/a', 'public/照片.jpg'):
             self.assertTrue(files.audited_owner_read_rule(path))
-        for path in ('other', 'Admin', 'admin-private', '/admin', 'admin/../other', 'admin//a'):
+        for path in ('/admin', '../other', 'admin/../other', 'admin//a'):
             self.assertFalse(files.audited_owner_read_rule(path))
 
     def test_exact_info_success_has_no_assumed_code_zero_and_echoes_path(self):
@@ -93,18 +93,18 @@ class RuleTests(unittest.TestCase):
 
     def test_projection_never_returns_native_name_content_path_message_or_token(self):
         value = frame(name=PRIVATE, message=PRIVATE, token=PRIVATE,
-                      list=[{'path': MOUNT + '/' + PRIVATE, 'name': PRIVATE}])
-        result = files.project_protocol_frame(value, MOUNT, '', 'get_list')
+                      list=[{'path': MOUNT + '/admin/' + PRIVATE, 'name': PRIVATE}])
+        result = files.project_protocol_frame(value, MOUNT, 'admin', 'get_list')
         self.assertNotIn(PRIVATE, json.dumps(result))
         self.assertNotIn(MOUNT, json.dumps(result))
         self.assertTrue(result['all_list_paths_contained'])
         self.assertEqual(result['field_shapes']['name'], 'string')
         result = files.project_protocol_frame(frame(list=[{'path': MOUNT + '/../secret'}]),
-                                             MOUNT, '', 'get_list')
+                                             MOUNT, 'admin', 'get_list')
         self.assertFalse(result['all_list_paths_contained'])
 
     def test_native_list_uses_literal_names_and_needs_no_path_or_code(self):
-        result = files.project_protocol_frame(listing('admin', '照片'), MOUNT, '', 'get_list')
+        result = files.project_protocol_frame(listing('admin', '照片'), MOUNT, 'admin', 'get_list')
         self.assertTrue(result['native_success'])
         self.assertEqual(result['success_contract'], 'get_list_name_children_v260907')
         self.assertIsNone(result['native_code'])
@@ -129,23 +129,23 @@ class RuleTests(unittest.TestCase):
             with self.subTest(row=row):
                 value = listing()
                 value['list'] = [row]
-                result = files.project_protocol_frame(value, MOUNT, '', 'get_list')
+                result = files.project_protocol_frame(value, MOUNT, 'admin', 'get_list')
                 self.assertFalse(result['native_success'])
                 self.assertFalse(result['all_list_paths_contained'])
-        self.assertFalse(files.project_protocol_frame(listing('admin', 'admin'), MOUNT, '',
+        self.assertFalse(files.project_protocol_frame(listing('admin', 'admin'), MOUNT, 'admin',
                                                       'get_list')['native_success'])
 
     def test_list_success_requires_metadata_and_rejects_error_or_bad_pagination(self):
-        self.assertTrue(files.project_protocol_frame(listing(), MOUNT, '', 'get_list')['native_success'])
+        self.assertTrue(files.project_protocol_frame(listing(), MOUNT, 'admin', 'get_list')['native_success'])
         for changes in ({'mtime': True}, {'file_attr': -1}, {'count': 2}, {'count': True},
                         {'totalpage': -1}, {'totalpage': True}, {'code': True}, {'code': -1110},
                         {'path': MOUNT + '/other'}, {'list': [{'name': 'x'}] * 257}):
             with self.subTest(changes=changes):
-                result = files.project_protocol_frame(listing('admin', **changes), MOUNT, '', 'get_list')
+                result = files.project_protocol_frame(listing('admin', **changes), MOUNT, 'admin', 'get_list')
                 self.assertFalse(result['native_success'])
-        self.assertFalse(files.project_protocol_frame({'code': 0}, MOUNT, '', 'get_list')['native_success'])
+        self.assertFalse(files.project_protocol_frame({'code': 0}, MOUNT, 'admin', 'get_list')['native_success'])
         self.assertFalse(files.project_protocol_frame({'code': 0, 'data': listing('admin', code=-1)},
-                                                      MOUNT, '', 'get_list')['native_success'])
+                                                      MOUNT, 'admin', 'get_list')['native_success'])
 
     def test_owner_read_is_fixed_columns_no_token_or_other_account(self):
         with tempfile.TemporaryDirectory(prefix='r1-file-owner-') as directory:
@@ -209,8 +209,8 @@ class TransportTests(unittest.TestCase):
 
     def test_native_list_request_uses_fixed_one_based_page_and_page_size(self):
         self.connection = Connection(listing('admin'))
-        value = self.client().request(MOUNT, '', 'get_list', deadline=13, authorizer=self.auth)
-        self.assertTrue(files.project_protocol_frame(value, MOUNT, '', 'get_list')['native_success'])
+        value = self.client().request(MOUNT, 'admin', 'get_list', deadline=13, authorizer=self.auth)
+        self.assertTrue(files.project_protocol_frame(value, MOUNT, 'admin', 'get_list')['native_success'])
         request = self.connection.sent[0].decode('ascii')
         self.assertIn('&page=1&pagesize=2&', request)
         self.assertNotIn('limit=', request)
@@ -218,7 +218,9 @@ class TransportTests(unittest.TestCase):
 
     def test_route_component_action_and_authorization_rejection_touch_nothing(self):
         for mount, component, action in (('/etc', '', 'get_info'), (MOUNT, '../other', 'get_info'),
-                                          (MOUNT, '', 'delete'), (MOUNT, 'other', 'get_list')):
+                                          (MOUNT, '', 'delete'), (MOUNT, 'other', 'get_list'),
+                                          (MOUNT, '', 'get_list'), (MOUNT, 'public', 'get_info'),
+                                          (MOUNT, 'public', 'get_list')):
             with self.assertRaises(files.BusinessTransportError):
                 self.client().request(mount, component, action, deadline=13,
                                       authorizer=self.auth)
@@ -337,7 +339,9 @@ class ProbeTests(unittest.TestCase):
 
     def test_complete_fixed_probe_all_roots_is_bounded_and_strips_native_values(self):
         result = self.collect()
-        self.assertEqual(len(self.calls), 6)
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.calls, [(MOUNT, '', 'get_info'), (MOUNT, 'admin', 'get_info'),
+                                     (MOUNT, 'admin', 'get_list')])
         self.assertTrue(result['complete'])
         self.assertTrue(result['effects']['enumerates_user_directories'])
         self.assertFalse(result['effects']['opens_user_files'])
@@ -380,7 +384,7 @@ class ProbeTests(unittest.TestCase):
                     firmware_reader=lambda **kw: True, root_guard=guard)
                 self.assertTrue(result['complete'])
                 self.assertEqual(result['requests_completed'], 0)
-                self.assertEqual(len(result['roots'][0]['queries']), 6)
+                self.assertEqual(len(result['roots'][0]['queries']), 3)
                 self.assertTrue(all(row['reason'] == 'root_open_unverified'
                                     and row['open_error_code'] == code
                                     and row['http_status'] is None
@@ -396,14 +400,14 @@ class NativeAuthorityTests(unittest.TestCase):
             root_collector=lambda unused: copy.deepcopy(catalog), root_guard=lambda *a: nullcontext())
         with mock.patch.object(files, '_fixed_owner', return_value=True), \
              mock.patch.object(files, '_firmware_identity', return_value=True):
-            self.assertEqual(authority.authorize(ROOT, 'admin/new', lambda: True)['mount'], MOUNT)
+            self.assertEqual(authority.authorize(ROOT, 'new', lambda: True)['mount'], MOUNT + '/admin')
             catalog['roots'][0]['read_only'] = True
             with self.assertRaises(FileAccessError) as caught:
-                authority.authorize(ROOT, 'admin/new', lambda: True)
+                authority.authorize(ROOT, 'new', lambda: True)
             self.assertEqual(caught.exception.code, 'permission_denied')
             count = client.request.call_count
             with self.assertRaises(FileAccessError):
-                authority.authorize(ROOT, 'public/new', lambda: True)
+                authority.authorize(ROOT, '', lambda: True)
             self.assertEqual(client.request.call_count, count)
     def test_transport_failures_use_existing_availability_codes_without_retry_or_acl_claim(self):
         for reason, code in (('authorization_denied', 'invalid_key'), ('timeout', 'timeout'),
@@ -419,7 +423,7 @@ class NativeAuthorityTests(unittest.TestCase):
                 with mock.patch.object(files, '_fixed_owner', return_value=True), \
                      mock.patch.object(files, '_firmware_identity', return_value=True), \
                      self.assertRaises(FileAccessError) as caught:
-                    authority.authorize(ROOT, 'admin/sample', lambda: True)
+                    authority.authorize(ROOT, 'sample', lambda: True)
                 self.assertEqual(caught.exception.code, code)
                 self.assertNotIn(PRIVATE, json.dumps(caught.exception.result()))
                 request.assert_called_once()
@@ -431,11 +435,31 @@ class NativeAuthorityTests(unittest.TestCase):
                            root_guard=lambda *a: nullcontext())
         with mock.patch.object(files, '_fixed_owner', return_value=True), \
              mock.patch.object(files, '_firmware_identity', return_value=True):
-            self.assertEqual(authority.authorize(ROOT, 'admin/sample', lambda: True)['mount'], MOUNT)
+            self.assertEqual(authority.authorize(ROOT, 'sample', lambda: True)['mount'], MOUNT + '/admin')
+            client.request.assert_called_once_with(MOUNT, '', 'get_info',
+                deadline=files.TIMEOUT, authorizer=mock.ANY)
             with self.assertRaises(FileAccessError) as caught:
-                authority.authorize(ROOT, 'other/sample', lambda: True)
+                authority.authorize(ROOT, '../other/sample', lambda: True)
             self.assertEqual(caught.exception.code, 'unsupported_path_class')
             client.request.assert_called_once()
+
+    def test_legacy_users_catalog_is_not_reinterpreted_as_admin_authority(self):
+        legacy = copy.deepcopy(CATALOG)
+        legacy['boundary_version'] = 2
+        legacy['roots'][0]['mount'] = MOUNT
+        before = json.dumps(legacy, sort_keys=True)
+        client = SimpleNamespace(clock=lambda: 0, request=mock.Mock())
+        guard = mock.Mock()
+        authority = files.NativeOwnerReadAuthority(None, client=client,
+            root_collector=lambda unused: legacy, root_guard=guard)
+        with mock.patch.object(files, '_fixed_owner', return_value=True), \
+             mock.patch.object(files, '_firmware_identity', return_value=True), \
+             self.assertRaises(FileAccessError) as caught:
+            authority.authorize(ROOT, 'sample', lambda: True)
+        self.assertEqual(caught.exception.code, 'root_unavailable')
+        client.request.assert_not_called()
+        guard.assert_not_called()
+        self.assertEqual(json.dumps(legacy, sort_keys=True), before)
 
     def test_native_denial_unknown_shape_or_missing_owner_never_grants_local_access(self):
         for value in ({'code': 0}, frame(code=-1110), frame(path='/other'), frame(isdir=0)):
@@ -446,4 +470,4 @@ class NativeAuthorityTests(unittest.TestCase):
             with mock.patch.object(files, '_fixed_owner', return_value=True), \
                  mock.patch.object(files, '_firmware_identity', return_value=True), \
                  self.assertRaises(FileAccessError):
-                authority.authorize(ROOT, 'public/a', lambda: True)
+                authority.authorize(ROOT, 'a', lambda: True)

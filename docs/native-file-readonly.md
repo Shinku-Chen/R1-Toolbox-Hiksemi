@@ -1,6 +1,6 @@
 # 原厂主体、真实文件读取与受限文件变更
 
-已接入五项真实读取执行器：`list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer`。生产代码为 `runtime/api_file_provider.py` 与 `runtime/api_file_executor.py`，内容传输复用 `api_file_transfers.py`。固定原厂所有者、精确固件和当前 `Users` 根均核验后，读取仅支持管理员 `admin` 与 `public` 子树；其他用户子树明确返回 `unsupported_path_class`。上传后端位于 `api_file_write_backend.py`，受限变更位于 `api_file_mutations.py`，已增加目录创建、普通文件复制／改名／同盘移动、版本覆盖和真实原厂回收站的生产回调；完整范围、所有者 custody 初始化、确认、版本与持久恢复规则见 [file-mutations.md](file-mutations.md)。本文件保留早期只读／新文件子集证据，并在末节记录最新固定索引和回收后端；生产实现存在不代表这些新增效果已通过 NAS 实机验收。
+已接入五项真实读取执行器：`list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer`。生产代码为 `runtime/api_file_provider.py` 与 `runtime/api_file_executor.py`，内容传输复用 `api_file_transfers.py`。固定原厂所有者、精确固件和当前 v3 admin 根均核验后，文件访问仅限 `/drives/*/Users/admin/`。public、其他用户及上层 Users 不开放；旧 v2 根和相对路径不静默迁移。上传后端位于 `api_file_write_backend.py`，受限变更位于 `api_file_mutations.py`，已增加目录创建、普通文件复制／改名／同盘移动、版本覆盖和真实原厂回收站的生产回调；完整范围、所有者 custody 初始化、确认、版本与持久恢复规则见 [file-mutations.md](file-mutations.md)。本文件保留早期只读／新文件子集证据，并在末节记录最新固定索引和回收后端；生产实现存在不代表这些新增效果已通过 NAS 实机验收。
 
 ## 判权依据与完整分支
 
@@ -14,7 +14,7 @@
 | 内部空间，原厂 `+0x11a8 != 0` | `Users` 根类别 2，读类别加管理员成立 | 用户名相同或 `public` 的类别 3／4，包含子目录和普通文件 |
 | 外部空间分支 | `user_id` 的原厂 `external_disk` 许可必须精确返回 1 | 相同根下的管理员／`public`，仍主动收窄 |
 
-实现没有猜测空间标记。每次访问先用固定所有者既有会话执行原厂 `get_info(Users根)`：分派器 `0x158436–0x15845d` 在没有 `scraper` 绕过参数时以 `eAuth=1` 调用同一 ACL。这个实际成功结果覆盖上表各分支各自的必要许可；然后在同一真实根的已打开对象拓扑上重新执行上述确定的管理员／`public` 正子集。它不是拿原厂任意管理员会话当全盘授权，也不把 O_PATH 目录存在或布尔 `acl_verified` 当权限证明。
+实现没有猜测空间标记。每次访问先用固定所有者既有会话执行原厂 `get_info(Users根)`：分派器 `0x158436–0x15845d` 在没有 `scraper` 绕过参数时以 `eAuth=1` 调用同一 ACL。这个实际成功结果覆盖上表各分支各自的必要许可；然后在同一真实根的已打开对象拓扑上只开放已证明的管理员子集。原厂支持 public 的分支不等于 Toolbox 开放该路径。它不是拿原厂任意管理员会话当全盘授权，也不把 O_PATH 目录存在或布尔 `acl_verified` 当权限证明。
 
 `rest_get_info@0x13ba38` 的成功 JSON **不必有 `code:0`**：`0x13c467` 起构造原请求 `path`、`isdir`、`size`、`ctime`、`mtime` 等；失败走 `0x183964`。这里严格要求回显路径精确等于目标 `Users`、`isdir` 为整数 1、`size` 为整数 0、时间为有界非负整数；若出现 `code` 则只能为整数 0。缺字段、错误、改变路径、认证失败或不识别格式均不可用。请求不带 `size`、`append`、`temp_suffix` 等参数，避免该 handler 的临时文件／扩展属性修复分支；文件协议差异不得靠轮询重试写操作探测。
 
@@ -24,7 +24,7 @@
 - 只读固定 `USER_AUTH_DB_101.tb_user_auth` 的 `user_id/user_type/user_name`，必须唯一为 `100000/0/admin`。不从请求接受账号，不推断 Unix UID；SQLite authorizer 拒绝其他表、列和视图带入凭据。原厂访问令牌只由既有会话模块在 TLS 验证后私下读取，不登录或修改认证。
 - 固定 `/histor/bin/emhistor` 普通文件必须完整匹配上述大小和 SHA-256，正在拥有唯一 20443 监听的 `/proc/<pid>/exe` 必须是同一 inode／设备／大小／mtime／ctime。缓存只复用完全相同文件身份，身份变化重新散列。未知固件不降级成 root 读取。
 - 每次原厂请求均核对唯一进程／启动时刻／监听 inode、固定回环地址和公开叶证书 pin；连接后与发送前再次核对授权、身份和剩余时间，响应后复验。单次请求固定 12 秒绝对期限，无任意 action／URL／参数／账号代理。
-- 在发原厂根请求前已使用目录 O_PATH 句柄核验真实根没有链接／额外挂载；请求后再次核对。实际目录或文件访问从真实根逐级 `O_NOFOLLOW`，每级 `mnt_id` 与设备号必须相同，拒绝 Users 下额外挂载。
+- 固定 Users ACL 前置使用私有目录 O_PATH 句柄核验同挂载且无链接，请求后再次核对；实际 admin 数据路径另须逐级核验其物理挂载、Users 和 admin。根下存在额外挂载不再整根拒绝；实际访问逐级 O_NOFOLLOW，每级 mnt_id 与设备号必须相同，跨入子挂载（含同设备 bind）仍拒绝。
 - 最终对象先用 O_PATH 检查类型。符号链接、硬链接普通文件、FIFO、socket、字符／块设备均拒绝。只有已检查的普通文件／目录才能经本进程 `/proc/self/fd/<owned-fd>` 取得同 inode 只读 fd，避免先打开设备再判断类型。不会普通路径重开或通过符号链接跟随。
 - 返回元数据与每个下载块之前都重新执行当前原厂许可、当前键和根／对象拓扑；重开严格句柄链比较最终对象的 inode、设备、类型、链接数、大小与时间。期间撤权、换盘、改挂载、改名替换、内容变化或服务关闭即丢弃结果／停止发送。已经交给客户端的块无法撤回；不能宣传客户端已落盘。
 
@@ -32,7 +32,7 @@
 
 ## 浏览与下载
 
-目录最多扫描 4096 项，一页最多 200 项，JSON 上限 128 KiB。`Users` 根只检查两个固定子目录，不枚举其他用户名。只投影当前授权且支持的对象，`visibility=authorized_supported_only`、`consistency=best_effort`，不返回未过滤总数。分页游标只存在内存，绑定真实 peer、键、修订、代际、根、路径、页大小和目录版本；改名或更新后需重新浏览。
+目录最多扫描 4096 项，一页最多 200 项，JSON 上限 128 KiB。根目录直接枚举 admin 内条目，不再伪造 admin/public 二选一入口；子挂载入口跳过，普通兄弟条目继续返回。只投影当前授权且支持的对象，`visibility=authorized_supported_only`、`consistency=best_effort`，不返回未过滤总数。分页游标只存在内存，绑定真实 peer、键、修订、代际、根、路径、页大小和目录版本；改名或更新后需重新浏览。
 
 下载准备只返回绑定该普通文件的随机传输 ID 与 Toolbox 相对内容地址，原厂令牌不离开宿主：
 
@@ -53,7 +53,7 @@ from api_file_provider import collect_file_protocol_probe
 result = collect_file_protocol_probe(panel, root='/', authorizer=current_dev_window)
 ```
 
-不接受外部路径／action。只从当前规划取得最多八个 Users 根，分别检查根／`admin`／`public` 的 `get_info` 与最多两项的 `get_list`，总计最多 48 次、共享 12 秒窗口。每项单独保留失败原因；总窗口结束时保留已完成的结构化项目并标记不完整，不循环重试。当前开发窗口和根规划变化时丢弃整次结果。只有精确固件且真实目录句柄可确认时才发原厂请求。结果包括 host root／drives／实际挂载／Users 四阶段的打开 errno、预期／实际 mount ID 与设备号、目录身份和 self／PID1／emhistor 挂载 namespace 摘要，以及前后拓扑是否稳定；还包括固定路径类别、HTTP／原厂状态、白名单字段的类型与包含关系。不返回目录项名称、原始路径、文件内容、会话、任意原厂消息。
+不接受外部路径／action。只从当前规划取得最多八个 admin 根，固定核对 Users get_info 的内部 ACL 前置，以及 admin 的 get_info／有界 get_list，不枚举 Users 或 public；保留最多 24 次、共享 12 秒窗口的上限。每项单独保留失败原因；总窗口结束时保留已完成的结构化项目并标记不完整，不循环重试。当前开发窗口和根规划变化时丢弃整次结果。只有精确固件且真实目录句柄可确认时才发原厂请求。结果包括 host root／drives／实际挂载／Users／admin 五阶段的打开 errno、预期／实际 mount ID 与设备号、目录身份和 self／PID1／emhistor 挂载 namespace 摘要，以及前后拓扑是否稳定；还包括固定路径类别、HTTP／原厂状态、白名单字段的类型与包含关系。不返回目录项名称、原始路径、文件内容、会话、任意原厂消息。
 
 `file_access_available:false` 是诊断本身不发执行授权的固定声明，不能被请求方当作后端能力结果。`file_access_readiness` 仍只检查根规划，其 `execution_backend.status=requires_per_operation_verification`；只有执行时完整通过上述所有门槛才可读。静态／fixture 的通过不冒充 NAS 实机通过。
 
@@ -147,7 +147,7 @@ verify_new(receipt, row, relative_path, fd, *, directory=False, current)  # 精�
 
 ### 下一次一次性采集与验收的明确范围
 
-早期 d507 七根挂载／目录问题已通过完整 `file_protocol` 定位，后续三个真实根已完成上述只读浏览验收。不重复旧上下文取样，不改成只比设备号、跟随链接或忽略挂载 ID。SSD 完整文件系统的外部 `/home`／`/mnt` 别名不会成为第二个授权根；多个可选 `/drives/<name>` 完整根、缺失 canonical 根或 Users 内额外挂载仍拒绝，最终真实句柄门槛不变。
+早期 d507 七根挂载／目录问题已通过完整 `file_protocol` 定位，后续三个真实根已完成上述只读浏览验收。不重复旧上下文取样，不改成只比设备号、跟随链接或忽略挂载 ID。SSD 完整文件系统的外部 `/home`／`/mnt` 别名不会成为第二个授权根；多个可选 `/drives/<name>` 完整根或缺失 canonical 根仍拒绝。Users 子挂载存在不再否决整根，实际跨挂载句柄仍拒绝。
 
 新增文件的受限验收已按上一节获得授权；以下较广的原生 HTTP／复制／移动／回收站矩阵仍是后续方案，未授权也未执行。只使用所有者选定的独立临时对象，不加入统一被动诊断，也不通过“缺参调用 writer”推测方法。未来一次隔离验收应收齐：
 

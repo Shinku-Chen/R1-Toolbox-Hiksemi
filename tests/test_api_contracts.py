@@ -153,10 +153,20 @@ def valid_outputs():
 
 
 class ApiContractsTests(unittest.TestCase):
-    def test_file_contracts_keep_the_users_boundary_and_do_not_migrate_old_grants(self):
+    def test_file_contracts_keep_the_admin_boundary_and_do_not_migrate_old_grants(self):
         boundaries = catalog()['boundaries']
-        self.assertEqual(boundaries['file_path_boundary'], '/drives/*/Users/')
+        self.assertEqual(boundaries['file_path_boundary'], '/drives/*/Users/admin/')
+        self.assertEqual(boundaries['file_root_boundary_version'], 3)
+        self.assertFalse(boundaries['legacy_users_grants_auto_migrate'])
+        self.assertFalse(boundaries['nested_mount_presence_rejects_entire_root'])
+        self.assertFalse(boundaries['opened_path_may_cross_mounts'])
         self.assertIs(boundaries['legacy_whole_disk_grants_auto_migrate'], False)
+
+    def test_admin_boundary_failures_match_the_public_error_contract(self):
+        from api_file_operations import FileAccessError
+        for code in ('cross_mount_denied', 'legacy_users_boundary_v2'):
+            with self.subTest(code=code):
+                self.valid('get_file_info', FileAccessError(code).result(), output=True)
 
     @classmethod
     def setUpClass(cls):

@@ -18,8 +18,8 @@ MISSING = 'root_' + 'b' * 24
 
 
 def root_catalog(*, read_only=False):
-    return {'available': True, 'status': 'authorization_plan', 'boundary_version': 2, 'roots': [
-        {'id': ROOT, 'label': '视频资源', 'mount': '/drives/fixture-data/Users',
+    return {'available': True, 'status': 'authorization_plan', 'boundary_version': 3, 'roots': [
+        {'id': ROOT, 'label': '视频资源', 'mount': '/drives/fixture-data/Users/admin',
          'read_only': read_only}]}
 
 
@@ -146,7 +146,8 @@ class FileReadinessTests(unittest.TestCase):
         base = root_catalog()
         invalid = [None, [], {}, {'available': True, 'status': 'authorization_plan', 'roots': []},
                    dict(base, available=False), dict(base, available=1),
-                   dict(base, boundary_version=1), dict(base, boundary_version=True),
+                   dict(base, boundary_version=1), dict(base, boundary_version=2),
+                   dict(base, boundary_version=True),
                    {key: value for key, value in base.items() if key != 'boundary_version'},
                    dict(base, status='live_verified'), dict(base, roots=base['roots'] * 2),
                    dict(base, roots=base['roots'] * 129)]
@@ -158,8 +159,8 @@ class FileReadinessTests(unittest.TestCase):
                 self.assertFalse(value['planning']['selection']['verified'])
                 self.assertFalse(value['file_access_available'])
 
-    def test_only_exact_users_root_metadata_can_be_projected(self):
-        for path in ('/drives/fixture-data', '/drives/fixture-data/Users2',
+    def test_only_exact_admin_root_metadata_can_be_projected(self):
+        for path in ('/drives/fixture-data', '/drives/fixture-data/Users', '/drives/fixture-data/Users2',
                      '/drives/fixture-data/users', '/drives/fixture-data/Users/alice',
                      '/drives/fixture-data/Users/../Applications',
                      '/drives/nested/data/Users'):

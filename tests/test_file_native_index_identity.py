@@ -24,7 +24,7 @@ from api_file_operations import FileAccessError
 
 
 LINUX = sys.platform.startswith('linux') and hasattr(os, 'O_PATH')
-ROW = {'id': 'root_' + 'a' * 24, 'mount': '/drives/data/Users'}
+ROW = {'id': 'root_' + 'a' * 24, 'mount': '/drives/data/Users/admin'}
 
 
 @unittest.skipUnless(LINUX, 'Linux sysfs, mknod and proc metadata semantics required')

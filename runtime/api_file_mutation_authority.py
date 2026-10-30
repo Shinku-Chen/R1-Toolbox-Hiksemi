@@ -20,7 +20,8 @@ import time
 
 from api_file_operations import FileAccessError, _descriptor_mount_id
 from api_file_provider import NativeOwnerWriteAuthority
-from api_file_roots import collect_file_roots, is_users_root_path
+from api_file_roots import (collect_file_roots, is_users_root_path, is_admin_root_path,
+                            physical_mount_path)
 
 
 _DIRECTORY = '.r1-toolbox-ops'
@@ -225,7 +226,8 @@ class FileMutationAuthority:
                 if (not _ROOT.fullmatch(identifier) or type(entry) is not dict
                         or set(entry) != {'row', 'identity', 'mount_id', 'enabled', 'revision'}
                         or type(entry['row']) is not dict or entry['row'].get('id') != identifier
-                        or not is_users_root_path(entry['row'].get('mount'))
+                        or not (is_users_root_path(entry['row'].get('mount'))
+                                or is_admin_root_path(entry['row'].get('mount')))
                         or type(entry['identity']) is not list or len(entry['identity']) != 3
                         or any(type(v) is not int or v < 0 for v in entry['identity'])
                         or type(entry['mount_id']) is not str
@@ -241,8 +243,22 @@ class FileMutationAuthority:
 
     @staticmethod
     def _public(identifier, entry):
+        if is_users_root_path(entry['row'].get('mount')):
+            return {'root_id': identifier, 'enabled': False, 'revision': entry['revision'],
+                    'status': 'legacy_boundary', 'legacy': True, 'reason': 'legacy_users_boundary_v2'}
         return {'root_id': identifier, 'enabled': entry['enabled'],
                 'revision': entry['revision'], 'status': 'registered' if entry['enabled'] else 'revoked'}
+
+    def _reject_legacy(self, root_id, row=None):
+        """Keep old bytes and objects untouched; no v2 path reinterpretation."""
+        entries = self._load()
+        entry = entries.get(root_id)
+        if entry is not None and is_users_root_path(entry['row'].get('mount')):
+            raise FileAccessError('legacy_users_boundary_v2')
+        if row is not None and is_admin_root_path(row.get('mount')):
+            users = physical_mount_path(row['mount']) + '/Users'
+            if any(item['row'].get('mount') == users for item in entries.values()):
+                raise FileAccessError('legacy_users_boundary_v2')
 
     def catalog(self, *, current):
         _authorized(current)
@@ -268,7 +284,9 @@ class FileMutationAuthority:
         if os.name != 'posix' or not hasattr(os, 'geteuid') or os.geteuid() != 0:
             result['blockers'].append('root_process_required')
         try:
-            row = self._authority.authorize(root_id, 'admin/.r1-authority-proof', current)
+            self._reject_legacy(root_id)
+            row = self._authority.authorize(root_id, '.r1-authority-proof', current)
+            self._reject_legacy(root_id, row)
             result['source_binding']['native_owner'] = 'verified'
             result['source_binding']['root_metadata_matches'] = True
             with self._handle(row) as opened:
@@ -331,6 +349,7 @@ class FileMutationAuthority:
         return result
 
     def _check_registered(self, row, *, allow_revoked=False):
+        self._reject_legacy(row.get('id'), row)
         entry = self._load().get(row.get('id'))
         if entry is None or not entry['enabled'] and not allow_revoked or not _same_root(entry['row'], row):
             raise FileAccessError('write_backend_unverified')
@@ -338,8 +357,8 @@ class FileMutationAuthority:
 
     def _handle(self, row):
         if self._handle_factory is None:
-            from api_file_executor import _Handle
-            return _Handle(self.root, row, '', directory=True)
+            from api_file_executor import _UsersHandle
+            return _UsersHandle(self.root, row)
         return self._handle_factory(self.root, row, '', directory=True)
 
     def _trusted_chain(self, opened):
@@ -375,7 +394,9 @@ class FileMutationAuthority:
             raise FileAccessError('write_backend_unverified')
         with self._lock:
             entries = self._load()
-            row = self._authority.authorize(root_id, 'admin/.r1-authority-proof', current)
+            self._reject_legacy(root_id)
+            row = self._authority.authorize(root_id, '.r1-authority-proof', current)
+            self._reject_legacy(root_id, row)
             with self._handle(row) as opened:
                 self._trusted_chain(opened)
                 _authorized(current)
@@ -443,12 +464,13 @@ class FileMutationAuthority:
         """Owner recovery inventory: only registered operation IDs, no paths."""
         _authorized(current)
         with self._lock:
+            self._reject_legacy(root_id)
             entry = self._load().get(root_id)
             if entry is None:
                 raise FileAccessError('root_unavailable')
             # Catalog is deliberately cached. A detailed owner inspection is
             # explicit and may open the selected disk.
-            row = self._authority.authorize(root_id, 'admin/.r1-authority-proof', current)
+            row = self._authority.authorize(root_id, '.r1-authority-proof', current)
             if not _same_root(row, entry['row']):
                 raise FileAccessError('root_unavailable')
             records = []
@@ -490,8 +512,8 @@ class FileMutationAuthority:
         """Owner-only review text from validated manifest fields, never raw data."""
         from api_file_provider import audited_owner_write_rule
         path = manifest.get('restore_path')
-        if (not audited_owner_write_rule(path) or path == 'admin/.DATA_CACHE'
-                or path.startswith('admin/.DATA_CACHE/')):
+        if (not audited_owner_write_rule(path) or path == '.DATA_CACHE'
+                or path.startswith('.DATA_CACHE/')):
             path = None
         tool = manifest.get('tool')
         return {'path': path, 'tool': tool if type(tool) is str and tool in _RECOVERY_TOOLS else 'unknown'}
@@ -529,8 +551,8 @@ class FileMutationAuthority:
         if self._authority.authorize(row['id'], target, current) != row \
                 or self._authority.authorize(row['id'], original, current) != row:
             raise FileAccessError('root_unavailable')
-        parent, leaf = target.rsplit('/', 1)
-        original_parent, original_leaf = original.rsplit('/', 1)
+        parent, _, leaf = target.rpartition('/')
+        original_parent, _, original_leaf = original.rpartition('/')
         with _Handle(self.root, row, original_parent, directory=True) as checked:
             try:
                 os.stat(original_leaf, dir_fd=checked.fd, follow_symlinks=False)
@@ -692,10 +714,11 @@ class FileMutationAuthority:
                 or type(recovery_id) is not str or not _OPERATION.fullmatch(recovery_id)):
             raise FileAccessError('invalid_arguments')
         with self._lock:
+            self._reject_legacy(root_id)
             entry = self._load().get(root_id)
             if entry is None:
                 raise FileAccessError('root_unavailable')
-            row = self._authority.authorize(root_id, 'admin/.r1-authority-proof', current)
+            row = self._authority.authorize(root_id, '.r1-authority-proof', current)
             if not _same_root(row, entry['row']):
                 raise FileAccessError('root_unavailable')
             with self.open(row, recovery_id, current=current, create=False, allow_revoked=True) as stage:
@@ -725,7 +748,7 @@ class FileMutationAuthority:
                     raise FileAccessError('write_backend_unverified')
                 if self._authority.authorize(root_id, path, current) != row:
                     raise FileAccessError('root_unavailable')
-                parent, leaf = path.rsplit('/', 1)
+                parent, _, leaf = path.rpartition('/')
                 from api_file_executor import _Handle
                 try:
                     descriptor = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=stage.fd)
@@ -854,6 +877,7 @@ class FileMutationAuthority:
         if confirmed is not True:
             raise FileAccessError('invalid_arguments')
         with self._lock:
+            self._reject_legacy(root_id)
             entry = self._load().get(root_id)
             if entry is None:
                 raise FileAccessError('root_unavailable')

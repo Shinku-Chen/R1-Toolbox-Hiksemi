@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 from api_file_operations import FileAccessError, _descriptor_mount_id
 from api_file_provider import audited_owner_write_rule
-from api_file_roots import is_users_root_path
+from api_file_roots import is_admin_root_path, physical_mount_path
 
 
 _TABLE = 'tb_file_db_all'
@@ -69,7 +69,7 @@ def _gate(current, deadline):
 
 
 def _arguments(row, path):
-    if (type(row) is not dict or not is_users_root_path(row.get('mount'))
+    if (type(row) is not dict or not is_admin_root_path(row.get('mount'))
             or not audited_owner_write_rule(path)
             or '|' in path
             or any(part.startswith('.') for part in path.split('/'))
@@ -77,10 +77,10 @@ def _arguments(row, path):
         raise FileAccessError('write_backend_unverified')
     # The factory INSERT at 0x56aa53 has a 0x800-byte path buffer. Reject any
     # value that could be truncated rather than query a different indexed key.
-    key = '/Users/' + path
+    key = '/Users/admin/' + path
     if len(key.encode('utf-8', 'strict')) >= 0x800:
         raise FileAccessError('write_backend_unverified')
-    return row['mount'][:-6], key
+    return physical_mount_path(row['mount']), key
 
 
 def _fd_snapshot():
@@ -148,11 +148,11 @@ class _OpenedIndex:
         try:
             if os.name != 'posix' or not hasattr(os, 'O_PATH') or not hasattr(os, 'pread'):
                 raise FileAccessError('write_backend_unverified')
-            from api_file_executor import _Handle
+            from api_file_executor import _Handle, _UsersHandle
             self.parent = _Handle(root, row, path.rpartition('/')[0], directory=True)
             self.mount_id = self.parent.mount_id
             self.parent_state = _stable(os.fstat(self.parent.fd))
-            with _Handle(root, row, '', directory=True) as users:
+            with _UsersHandle(root, row) as users:
                 self.users_state = _stable(os.fstat(users.fd))
                 flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
                 # '..' is a fixed operation on the verified Users directory,
@@ -221,12 +221,12 @@ class _OpenedIndex:
 
     def check(self):
         _gate(self.current, self.deadline)
-        from api_file_executor import _Handle
+        from api_file_executor import _Handle, _UsersHandle
         flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         with _Handle(self.root, self.row, self.path.rpartition('/')[0], directory=True) as parent:
             if (_stable(os.fstat(parent.fd)) != self.parent_state or parent.mount_id != self.mount_id):
                 raise FileAccessError('file_changed')
-        with _Handle(self.root, self.row, '', directory=True) as users:
+        with _UsersHandle(self.root, self.row) as users:
             if _stable(os.fstat(users.fd)) != self.users_state or users.mount_id != self.mount_id:
                 raise FileAccessError('root_unavailable')
             descriptors = []
@@ -529,8 +529,8 @@ class NativeFileIndexReader:
     def verify_mutation(self, receipt, row, source_path, target_path, descriptor,
                         *, operation, current):
         if (type(receipt) is not _MutationReceipt or receipt.operation != operation
-                or receipt.source.key != '/Users/' + source_path
-                or receipt.target.key != '/Users/' + target_path):
+                or receipt.source.key != '/Users/admin/' + source_path
+                or receipt.target.key != '/Users/admin/' + target_path):
             raise FileAccessError('write_backend_unverified')
         matched = self.verify_new(receipt.target, row, target_path, descriptor,
                                   directory=False, current=current,

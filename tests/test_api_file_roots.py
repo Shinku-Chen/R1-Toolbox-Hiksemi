@@ -9,7 +9,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
-from api_file_roots import (collect_file_roots, is_users_root_path,
+from api_file_roots import (collect_file_roots, is_users_root_path, is_admin_root_path,
+                            physical_mount_path,
                             validate_file_grants, valid_relative_file_path)
 
 
@@ -39,8 +40,8 @@ class ApiFileRootsTests(unittest.TestCase):
         self.assertEqual(result['status'], 'authorization_plan')
         root = result['roots'][0]
         self.assertEqual(root['label'], '主磁盘')
-        self.assertEqual(root['mount'], '/drives/data/Users')
-        self.assertEqual(result['boundary_version'], 2)
+        self.assertEqual(root['mount'], '/drives/data/Users/admin')
+        self.assertEqual(result['boundary_version'], 3)
         self.assertRegex(root['id'], r'^root_[0-9a-f]{24}$')
         self.assertFalse(root['read_only'])
         self.assertNotIn('SERIAL-A', repr(result))
@@ -64,7 +65,7 @@ class ApiFileRootsTests(unittest.TestCase):
         result = self.catalog()
         self.assertTrue(result['available'])
         self.assertNotIn(self.disk['serial'], json.dumps(result))
-        self.assertEqual(result['roots'][0]['mount'], '/drives/data/Users')
+        self.assertEqual(result['roots'][0]['mount'], '/drives/data/Users/admin')
 
     def test_reboot_mount_id_does_not_change_grant_id(self):
         original = self.catalog()['roots'][0]['id']
@@ -110,7 +111,7 @@ class ApiFileRootsTests(unittest.TestCase):
     def test_space_escapes_decode_without_treating_backslash_as_a_path(self):
         self.disk['mounts'] = [r'/drives/video\040files']
         self.set_mounts('100 1 8:1 / /drives/video\\040files rw - ext4 /dev/sda1 rw\n')
-        self.assertEqual(self.catalog()['roots'][0]['mount'], '/drives/video files/Users')
+        self.assertEqual(self.catalog()['roots'][0]['mount'], '/drives/video files/Users/admin')
         self.disk['mounts'] = [r'/drives/video\134files']
         self.set_mounts('100 1 8:1 / /drives/video\\134files rw - ext4 /dev/sda1 rw\n')
         self.assertFalse(self.catalog()['available'])
@@ -151,6 +152,21 @@ class ApiFileRootsTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(is_users_root_path(path))
 
+    def test_public_admin_boundary_and_physical_mount_helper_are_exact(self):
+        for path in ('/drives/data/Users/admin', '/drives/视频 资源/Users/admin'):
+            self.assertTrue(is_admin_root_path(path))
+            self.assertEqual(physical_mount_path(path), path[:-12])
+        for path in ('/drives/data', '/drives/data/Users', '/drives/data/Users/public',
+                     '/drives/data/Users/Admin', '/drives/data/users/admin',
+                     '/drives/data/Users/admin/', '/drives/data/Users/admin/child',
+                     '/drives/data/nested/Users/admin', '/drives/../Users/admin',
+                     '/drives//Users/admin', '/drives/data\\other/Users/admin',
+                     '/DRIVES/data/Users/admin', '/drives/data/Users/admin\x00', None):
+            with self.subTest(path=path):
+                self.assertFalse(is_admin_root_path(path))
+                with self.assertRaises(ValueError):
+                    physical_mount_path(path)
+
     def test_nested_data_mounts_never_become_extra_roots(self):
         for path in ('/drives/data/Users', '/drives/data/users', '/drives/data/Users2',
                      '/drives/data/other', '/drives/data/../another', '/drives/data/'):
@@ -169,25 +185,51 @@ class ApiFileRootsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_file_grants([{'id': old_id, 'path': '', 'access': 'readonly'}], catalog)
 
-    def test_children_or_exact_users_mounts_block_encompassing_root(self):
+    def test_old_users_id_and_paths_are_never_automatically_converted_to_admin(self):
+        identity = ['r1-file-users-root-v2', self.disk['serial'], '/dev/sda1',
+                    '8:1', 'ext4', '/drives/data/Users']
+        legacy_id = 'root_' + hashlib.sha256(json.dumps(identity, ensure_ascii=True,
+                     separators=(',', ':')).encode('ascii')).hexdigest()[:24]
+        catalog = self.catalog()
+        self.assertNotEqual(catalog['roots'][0]['id'], legacy_id)
+        legacy = {'id': legacy_id, 'path': 'admin/folder', 'access': 'readonly'}
+        with self.assertRaises(ValueError):
+            validate_file_grants([legacy], catalog)
+        self.assertEqual(legacy['path'], 'admin/folder')
+        old_catalog = dict(catalog, boundary_version=2, roots=[dict(catalog['roots'][0],
+            id=legacy_id, mount='/drives/data/Users')])
+        with self.assertRaises(ValueError):
+            validate_file_grants([legacy], old_catalog)
+        with self.assertRaises(ValueError):
+            validate_file_grants([legacy], dict(old_catalog, boundary_version=3))
+        # A literal new path beginning with "admin" means a child named admin;
+        # it is not silently stripped or normalized to the old boundary.
+        new = dict(legacy, id=catalog['roots'][0]['id'])
+        validate_file_grants([new], catalog)
+        self.assertEqual(new['path'], 'admin/folder')
+
+    def test_children_or_exact_users_admin_mounts_do_not_reject_whole_root(self):
         base = '100 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n'
         children = (
             '101 100 0:4 / /drives/data/Users rw - tmpfs tmpfs rw\n',
+            '101 100 0:4 / /drives/data/Users/admin rw - tmpfs tmpfs rw\n',
+            '101 100 0:4 / /drives/data/Users/admin/app rw - tmpfs tmpfs rw\n',
             '101 100 8:2 / /drives/data/Users/alice ro - ext4 /dev/sdb1 ro\n',
             '101 100 8:1 /private /drives/data/Users/alice rw - ext4 /dev/sda1 rw\n',
             '101 100 0:4 / /drives/data/Users/a\\134b rw - tmpfs tmpfs rw\n',
             '101 100 0:4 / /drives/data/Users/a\\012b rw - tmpfs tmpfs rw\n',
         )
+        original = self.catalog()['roots'][0]
         for child in children:
             with self.subTest(child=child):
                 self.set_mounts(base + child)
-                self.assertFalse(self.catalog()['available'])
+                self.assertEqual(self.catalog()['roots'], [original])
 
     def test_sibling_mounts_do_not_extend_users_boundary(self):
         self.set_mounts(self.mountinfo.read_text() +
                        '101 100 0:4 / /drives/data/Users2 rw - tmpfs tmpfs rw\n' +
                        '102 100 0:5 / /drives/data/Applications rw - tmpfs tmpfs rw\n')
-        self.assertEqual([row['mount'] for row in self.catalog()['roots']], ['/drives/data/Users'])
+        self.assertEqual([row['mount'] for row in self.catalog()['roots']], ['/drives/data/Users/admin'])
 
     def test_canonical_alias_mounts_with_same_source_or_device_are_ambiguous(self):
         base = self.mountinfo.read_text()
@@ -213,7 +255,7 @@ class ApiFileRootsTests(unittest.TestCase):
                 rows = self.catalog()['roots']
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]['id'], original)
-                self.assertEqual(rows[0]['mount'], '/drives/data/Users')
+                self.assertEqual(rows[0]['mount'], '/drives/data/Users/admin')
 
     def test_external_full_alias_cannot_replace_absent_or_stacked_canonical(self):
         external = '101 1 8:1 / /home/openclaw rw - ext4 /dev/sda1 rw\n'
@@ -225,14 +267,14 @@ class ApiFileRootsTests(unittest.TestCase):
                         '102 1 8:17 / /drives/data rw - ext4 /dev/sdb1 rw\n')
         self.assertFalse(self.catalog()['available'])
 
-    def test_external_full_alias_does_not_hide_users_mount_rejection(self):
+    def test_external_full_alias_and_users_mounts_do_not_reject_admin_planning(self):
         base = self.mountinfo.read_text()
         for target in ('/drives/data/Users', '/drives/data/Users/admin/app'):
             with self.subTest(target=target):
                 self.set_mounts(base +
                     '101 1 8:1 / /home/openclaw rw - ext4 /dev/sda1 rw\n' +
                     '102 100 0:4 / ' + target + ' rw - tmpfs tmpfs rw\n')
-                self.assertFalse(self.catalog()['available'])
+                self.assertEqual(self.catalog()['roots'][0]['mount'], '/drives/data/Users/admin')
 
     def test_two_data_partitions_on_same_disk_have_independent_users_roots(self):
         original = self.catalog()['roots'][0]['id']
@@ -241,10 +283,10 @@ class ApiFileRootsTests(unittest.TestCase):
                        '101 1 8:2 / /drives/other rw - ext4 /dev/sda2 rw\n')
         rows = self.catalog()['roots']
         self.assertEqual({row['mount'] for row in rows},
-                         {'/drives/data/Users', '/drives/other/Users'})
+                         {'/drives/data/Users/admin', '/drives/other/Users/admin'})
         self.assertEqual(len({row['id'] for row in rows}), 2)
         self.assertEqual(next(row['id'] for row in rows
-                              if row['mount'] == '/drives/data/Users'), original)
+                              if row['mount'] == '/drives/data/Users/admin'), original)
 
     def test_external_subdirectory_bind_does_not_revoke_canonical_users_root(self):
         original = self.catalog()['roots'][0]['id']
@@ -254,7 +296,7 @@ class ApiFileRootsTests(unittest.TestCase):
         rows = self.catalog()['roots']
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['id'], original)
-        self.assertEqual(rows[0]['mount'], '/drives/data/Users')
+        self.assertEqual(rows[0]['mount'], '/drives/data/Users/admin')
 
     def test_external_bind_is_not_a_second_selectable_drive_root(self):
         original = self.catalog()['roots'][0]['id']
@@ -262,7 +304,7 @@ class ApiFileRootsTests(unittest.TestCase):
         self.set_mounts(self.mountinfo.read_text() +
                        '101 1 8:1 /Users/fixture-user /drives/alias rw - ext4 /dev/sda1 rw\n')
         self.assertEqual([(row['id'], row['mount']) for row in self.catalog()['roots']],
-                         [(original, '/drives/data/Users')])
+                         [(original, '/drives/data/Users/admin')])
 
     def test_four_disk_dual_partition_layout_with_external_ssd_bind_is_plannable(self):
         lines, disks, expected = [], [], set()
@@ -272,7 +314,7 @@ class ApiFileRootsTests(unittest.TestCase):
                 minor = index * 16 + partition
                 mount_id = 100 + index * 2 + partition
                 lines.append(f'{mount_id} 1 8:{minor} / {mount} rw - ext4 /dev/{name}{partition} rw\n')
-                expected.add(mount + '/Users')
+                expected.add(mount + '/Users/admin')
             disks.append({'name': name, 'serial': 'FIXTURE-' + name,
                           'user_name': 'fixture-' + name, 'mounts': mounts})
         disks[-1]['mounts'].append('/home/openclaw')
@@ -304,7 +346,7 @@ class ApiFileRootsTests(unittest.TestCase):
                        '101 1 8:17 / /drives/backup rw - ext4 /dev/sdb1 rw\n')
         rows = self.catalog()['roots']
         self.assertEqual({row['mount'] for row in rows},
-                         {'/drives/data/Users', '/drives/backup/Users'})
+                         {'/drives/data/Users/admin', '/drives/backup/Users/admin'})
         self.assertEqual(len({row['id'] for row in rows}), 2)
 
     def test_stacked_ancestor_cannot_approve_hidden_data_root(self):
@@ -360,8 +402,8 @@ class ApiFileRootsTests(unittest.TestCase):
     def test_invalid_catalog_or_access_cannot_validate_grants(self):
         catalog = self.catalog()
         grant = {'id': catalog['roots'][0]['id'], 'path': '', 'access': 'readonly'}
-        for changed in (None, {}, dict(catalog, boundary_version=1),
-                        dict(catalog, boundary_version=2.0), dict(catalog, available=False),
+        for changed in (None, {}, dict(catalog, boundary_version=1), dict(catalog, boundary_version=2),
+                        dict(catalog, boundary_version=3.0), dict(catalog, available=False),
                         dict(catalog, roots=[None]), dict(catalog, roots=[]),
                         dict(catalog, roots=catalog['roots'] * 2)):
             with self.subTest(changed=changed), self.assertRaises(ValueError):

@@ -19,12 +19,12 @@ ROOT_ID = 'root_' + '1' * 24
 OTHER_ROOT_ID = 'root_' + '2' * 24
 MISSING_ROOT_ID = 'root_' + '3' * 24
 ROOT_CATALOG = {
-    'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
+    'available': True, 'status': 'authorization_plan', 'boundary_version': 3,
     'reason': '仅用于授权范围选择，当前未提供文件操作工具。',
     'roots': [
-        {'id': ROOT_ID, 'label': '主磁盘', 'mount': '/drives/data/Users', 'read_only': False},
+        {'id': ROOT_ID, 'label': '主磁盘', 'mount': '/drives/data/Users/admin', 'read_only': False},
         {'id': OTHER_ROOT_ID, 'label': '其它私有空间',
-         'mount': '/drives/private-unselected/Users', 'read_only': True},
+         'mount': '/drives/private-unselected/Users/admin', 'read_only': True},
     ],
 }
 

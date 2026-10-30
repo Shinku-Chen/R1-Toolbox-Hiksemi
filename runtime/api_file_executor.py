@@ -1,7 +1,7 @@
-"""Real read-only Users executor with native logical ACL and exact opened handles.
+"""Real admin-root executor with native logical ACL and exact opened handles.
 
 The fixed factory owner policy is evaluated independently from Unix authority.
-Only its proved positive admin/public subset is implemented. Every opened path
+Only its proved positive admin subtree is implemented. Every opened path
 uses descriptor-relative no-link traversal on one live mount, with a fresh
 native authorization and lifecycle gate before returning metadata or bytes.
 """
@@ -20,7 +20,7 @@ import time
 from api_file_operations import (FileAccessError, assert_file_grant, _mounts,
                                  _descriptor_mount_id)
 from api_file_provider import NativeOwnerReadAuthority
-from api_file_roots import is_users_root_path, valid_relative_file_path
+from api_file_roots import is_admin_root_path, physical_mount_path, valid_relative_file_path
 from api_file_transfers import DownloadSource, FileTransfers, _binding, _identity, _version
 from api_file_write_backend import FileWriteExecutor, TOOLS as WRITE_TOOLS
 
@@ -53,9 +53,17 @@ def _safe_name(value):
             and not any(0xD800 <= ord(c) <= 0xDFFF for c in value))
 
 
+def _opened_mount_id(root, descriptor):
+    """Missing mount evidence is a root failure, never a skippable child."""
+    try:
+        return _descriptor_mount_id(root, descriptor)
+    except (OSError, ValueError):
+        raise FileAccessError('root_unavailable') from None
+
+
 def _entry(path, info):
     directory = stat.S_ISDIR(info.st_mode)
-    return {'name': path.rsplit('/', 1)[-1] if path else 'Users', 'path': path,
+    return {'name': path.rsplit('/', 1)[-1] if path else 'admin', 'path': path,
             'type': 'directory' if directory else 'file',
             'size_bytes': None if directory else info.st_size,
             'modified_at': _timestamp(info.st_mtime_ns),
@@ -65,31 +73,46 @@ def _entry(path, info):
 
 
 class _Handle:
-    """Owned fd plus its exact no-symlink ancestry on the current Users mount."""
+    """Owned fd plus no-link admin ancestry, rejecting every extra mount."""
 
     def __init__(self, root, row, path, *, reader=False, directory=False):
         if os.name != 'posix' or not hasattr(os, 'O_PATH'):
             raise FileAccessError('secure_open_unavailable')
-        if not is_users_root_path(row.get('mount')) or not valid_relative_file_path(path):
+        if not is_admin_root_path(row.get('mount')) or not valid_relative_file_path(path):
             raise FileAccessError('invalid_arguments')
         self.root, self.row, self.path = root, dict(row), path
         self.descriptors = []
         self.fd, self.mount_id = None, None
         try:
-            mounts = _mounts(root)
-            expected = mounts.get(row['mount'][:-6], [])
-            if len(expected) != 1 or any(p == row['mount'] or p.startswith(row['mount'] + '/')
-                                         for p in mounts):
+            try:
+                mounts = _mounts(root)
+            except (OSError, ValueError):
+                # Fixed proc metadata failures cannot be confused with a
+                # missing or unreadable child and silently filtered by lists.
+                raise FileAccessError('root_unavailable') from None
+            physical = physical_mount_path(row['mount'])
+            expected = mounts.get(physical, [])
+            target = row['mount'] + ('/' + path if path else '')
+            # A sibling mount cannot invalidate the whole admin root. A mount
+            # on this exact ancestry remains forbidden, including same-device
+            # binds whose st_dev alone would falsely look safe.
+            if len(expected) != 1:
                 raise FileAccessError('root_unavailable')
+            for candidate in mounts:
+                if (candidate != physical and candidate.startswith(physical + '/')
+                        and (target == candidate or target.startswith(candidate + '/'))):
+                    descendant = candidate.startswith(row['mount'] + '/')
+                    raise FileAccessError('cross_mount_denied' if descendant else 'root_unavailable')
             self.mount_id, device = expected[0]
             flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
             parent = os.open(Path(root).absolute(), flags)
             self.descriptors.append(parent)
-            components = row['mount'].split('/')[1:] + (path.split('/') if path else [])
+            boundary = row['mount'].split('/')[1:]
+            components = boundary + (path.split('/') if path else [])
             for index, component in enumerate(components):
                 final = index == len(components) - 1
                 open_flags = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
-                if not final or directory:
+                if index < len(boundary) or not final or directory:
                     open_flags |= os.O_DIRECTORY
                 parent = os.open(component, open_flags, dir_fd=parent)
                 self.descriptors.append(parent)
@@ -100,9 +123,11 @@ class _Handle:
                 if index >= 1:
                     # /drives/<disk> and every descendant must stay on the exact
                     # mount, even if st_dev is shared by an unexpected bind.
-                    if (_descriptor_mount_id(root, parent) != self.mount_id
+                    observed_mount = _opened_mount_id(root, parent)
+                    if (observed_mount != self.mount_id
                             or f'{os.major(info.st_dev)}:{os.minor(info.st_dev)}' != device):
-                        raise FileAccessError('root_unavailable')
+                        descendant = index >= len(boundary) and observed_mount is not None
+                        raise FileAccessError('cross_mount_denied' if descendant else 'root_unavailable')
             self.fd = parent
             self.identity = _object_identity(os.fstat(self.fd))
             if stat.S_ISREG(self.identity[2]) and self.identity[3] != 1:
@@ -120,7 +145,7 @@ class _Handle:
                     | (os.O_DIRECTORY if directory else 0))
                 self.descriptors.append(readable)
                 if (_object_identity(os.fstat(readable)) != self.identity
-                        or _descriptor_mount_id(root, readable) != self.mount_id):
+                        or _opened_mount_id(root, readable) != self.mount_id):
                     raise FileAccessError('file_changed')
                 self.fd = readable
         except FileAccessError:
@@ -150,6 +175,33 @@ class _Handle:
 
     def __exit__(self, *unused):
         self.close()
+
+
+class _UsersHandle(_Handle):
+    """Internal fixed Users ancestor; never accepts a caller-relative path.
+
+    The public v3 admin anchor is first verified on the physical mount. Its
+    already-held Users parent then serves only native root ACL proof and the
+    fixed custody/cache protocols. Public handles never accept a v2 Users row.
+    """
+
+    def __init__(self, root, row):
+        super().__init__(root, row, '')
+        try:
+            admin = self.descriptors.pop()
+            self.fd = self.descriptors[-1]
+            os.close(admin)
+            self.identity = _object_identity(os.fstat(self.fd))
+            readable = os.open('/proc/self/fd/' + str(self.fd),
+                               os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
+            self.descriptors.append(readable)
+            if (_object_identity(os.fstat(readable)) != self.identity
+                    or _opened_mount_id(root, readable) != self.mount_id):
+                raise FileAccessError('file_changed')
+            self.fd = readable
+        except Exception:
+            self.close()
+            raise
 
 
 class FileReadExecutor:
@@ -238,20 +290,15 @@ class FileReadExecutor:
                 if saved['identity'] != identity:
                     raise FileAccessError('directory_changed')
                 after_name = saved['after_name']
-            # Users root exposes only the audited owner/public choices. It
-            # never enumerates other users' names or reports their total.
             names = []
-            if not path:
-                names = ['admin', 'public']
-            else:
-                scanned = 0
-                with os.scandir(opened.fd) as iterator:
-                    for item in iterator:
-                        scanned += 1
-                        if scanned > _MAX_SCAN or self._clock() >= deadline:
-                            raise FileAccessError('limit_exceeded')
-                        if _safe_name(item.name):
-                            names.append(item.name)
+            scanned = 0
+            with os.scandir(opened.fd) as iterator:
+                for item in iterator:
+                    scanned += 1
+                    if scanned > _MAX_SCAN or self._clock() >= deadline:
+                        raise FileAccessError('limit_exceeded')
+                    if _safe_name(item.name):
+                        names.append(item.name)
             entries = []
             for name in sorted(names):
                 if self._clock() >= deadline:
@@ -265,7 +312,7 @@ class FileReadExecutor:
                         entries.append(_entry(child, os.fstat(target.fd)))
                 except FileAccessError as error:
                     if error.code in ('permission_denied', 'not_found', 'unsupported_file_type',
-                                      'secure_open_unavailable'):
+                                      'secure_open_unavailable', 'cross_mount_denied'):
                         continue
                     raise
                 if len(entries) > limit:

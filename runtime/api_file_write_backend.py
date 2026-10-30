@@ -112,10 +112,10 @@ class FileWriteExecutor:
         if not self._current(principal):
             raise FileAccessError('invalid_key')
         parent, separator, name = path.rpartition('/') if type(path) is str else ('', '', '')
-        if (not separator or not valid_relative_file_path(path) or not name
+        if (not valid_relative_file_path(path) or not name
                 or len(name.encode('utf-8', 'strict')) > 255):
             raise FileAccessError('invalid_arguments')
-        if path == 'admin/.DATA_CACHE' or path.startswith('admin/.DATA_CACHE/'):
+        if path == '.DATA_CACHE' or path.startswith('.DATA_CACHE/'):
             # Fixed factory bookkeeping is not a user-file write surface.
             # Only NativeFileRecycle has a narrow, audited internal exception.
             raise FileAccessError('unsupported_path_class')

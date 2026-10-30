@@ -21,7 +21,7 @@ _CHECK_DETAILS = {
     'docker_project_readiness': ('固定项目就绪证据', '显式读取已核验本机 Docker 元数据和登记绑定，不部署、启停或读取 Compose 原文。'),
     'disk_activity': ('磁盘活动现场', '仅显式读取 proc/sys 磁盘和进程 I/O 计数；再次采样比较增量，不执行 SMART 或休眠命令。'),
     'file_backend_context': ('文件后端上下文', '显式核对固定管理员身份摘要与 Users 句柄元数据；不读取目录内容，但路径元数据访问可能唤盘。'),
-    'file_protocol': ('原厂文件协议与句柄现场', '显式核对固定 Users/admin/public 的原厂元数据、权限与真实挂载拓扑；可能初始化原厂资源或唤盘，不读取文件内容。'),
+    'file_protocol': ('原厂文件协议与句柄现场', '显式核对固定 Users ACL 前置及 admin 的原厂元数据与真实挂载拓扑；不枚举 Users 或 public，可能初始化原厂资源或唤盘，不读取文件内容。'),
 }
 _INVALID_REQUEST = '诊断操作或参数无效。'
 _INVALID_CHECKS = '诊断项目必须是非空且不重复的固定项目列表。'

@@ -84,14 +84,15 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
         .map(([id, label]) => ({ id, label, description: '分领域授权', min_role: 'readonly', implemented: ['files', 'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing'].includes(id) })),
       { id: 'unrecognized', label: '未知功能不可伪造', implemented: true },
     ],
-    file_root_catalog: { available: true, status: 'ok', reason: null, roots: [
-      { id: 'root_' + '1'.repeat(24), label: '<img src=x onerror="window.apiRootInjected=1">视频资源', mount: '/drives/space_1', read_only: false },
-      { id: 'root_' + '2'.repeat(24), label: '备份磁盘', mount: '/drives/space_2', read_only: true },
+    file_root_catalog: { available: true, status: 'ok', boundary_version: 3, reason: null, roots: [
+      { id: 'root_' + '1'.repeat(24), label: '<img src=x onerror="window.apiRootInjected=1">视频资源', mount: '/drives/space_1/Users/admin', read_only: false },
+      { id: 'root_' + '2'.repeat(24), label: '备份磁盘', mount: '/drives/space_2/Users/admin', read_only: true },
     ] },
     tools: fixtureTools,
     application_install_catalog: [{ application_id: 34, label: '百度网盘 v2', effect_summary: '安装并启动原厂进程。' },
       { application_id: 35, label: '<img src=x onerror="window.apiAppInjected=1">66 打印', effect_summary: '仅原厂模块状态；受理不等于打印服务启动。' }],
-    file_mutation_authority: { ok: true, authorities: [] },
+    file_mutation_authority: { ok: true, authorities: [{ root_id: 'root_' + '9'.repeat(24), enabled: false,
+      status: 'legacy_boundary', reason: 'legacy_users_boundary_v2', revision: 2 }] },
     docker_project_catalog: { ok: true, projects: [] },
     docker_deployment_catalog: { ok: true, deployments: [] },
     audit: [{ timestamp: 1793240000, key_id: 'fixture-key-1', key_name: unsafeName,
@@ -178,17 +179,18 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
           checks: [{ component: 'Users', uid: 0, mode: '0777', access_acl: 'absent' }], source_binding: { native_owner: true, same_mount: true }, existing_directory: 'absent' });
         if (url.pathname.endsWith('/initialize')) {
           assert.equal(body.confirmed, true);
-          state.file_mutation_authority.authorities = [{ root_id: body.root_id, enabled: true, status: 'registered', revision: 1 }];
+          state.file_mutation_authority.authorities = [...state.file_mutation_authority.authorities.filter(row => row.root_id !== body.root_id),
+            { root_id: body.root_id, enabled: true, status: 'registered', revision: 1 }];
           return reply(200, { ok: true });
         }
         if (url.pathname.endsWith('/inspect')) return reply(200, { ok: true,
-          recoveries: [{ recovery_id: 'operation_' + 'a'.repeat(32), path: 'admin/接口验收/源.txt', tool: 'rename_file', state: 'result_unconfirmed', objects: ['source'] }] });
+          recoveries: [{ recovery_id: 'operation_' + 'a'.repeat(32), path: '接口验收/源.txt', tool: 'rename_file', state: 'result_unconfirmed', objects: ['source'] }] });
         if (url.pathname.endsWith('/restore')) {
           assert.deepEqual(body, { root_id: 'root_' + '1'.repeat(24), recovery_id: 'operation_' + 'a'.repeat(32), confirmed: true });
           return reply(200, { ok: true, recovery: { state: 'restored', index_verified: false } });
         }
         if (url.pathname.endsWith('/revoke')) {
-          state.file_mutation_authority.authorities[0].enabled = false;
+          state.file_mutation_authority.authorities.find(row => row.root_id === body.root_id).enabled = false;
           return reply(200, { ok: true });
         }
         throw new Error('unexpected owner file authority action');
@@ -278,12 +280,16 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('默认仅勾选读取状态', JSON.stringify(await manager.locator('[data-ref="scopes"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["read"]');
     check('默认只读角色与三级选项', await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && JSON.stringify(await manager.locator('select[data-ref="role"] option').evaluateAll(options => options.map(option => option.value))) === '["readonly","readwrite","admin"]');
     check('十五项功能只显示已知领域', await manager.locator('[data-ref="scopes"] input').count() === 15 && await manager.locator('[data-ref="scopes"] input[value="unrecognized"]').count() === 0);
-    check('文件边界明确Users且按真实工具能力授权', (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('已接入'));
+    check('文件边界明确admin且按真实工具能力授权', (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/admin') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('已接入'));
     check('具体工具按真实目录展示且默认仅状态读取', await manager.locator('[data-ref="toolOptions"] input').count() === fixtureTools.length && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
     check('角色不足或未选功能的工具不可选', await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isDisabled() && await manager.locator('[data-ref="toolOptions"] input[value="list_file_roots"]').isDisabled());
     await view('operations');
     await manager.locator('[data-ref="fileAuthorityManager"] summary').click();
     check('打开恢复管理不触盘或自动初始化', calls.filter(call => call.path.startsWith('/api/files/authority')).length === 0);
+    const legacyAuthority = manager.locator('[data-legacy-authority]');
+    check('旧Users恢复登记只读展示且所有操作禁用', await legacyAuthority.count() === 1
+      && (await legacyAuthority.innerText()).includes('需先使用原镜像处理保管对象')
+      && await legacyAuthority.locator('button:disabled').count() === 4);
     await manager.locator('[data-authority-preflight]').first().click();
     await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: 'parent_writable' }).waitFor();
     check('恢复预检显示阻断和完整元数据', (await manager.locator('[data-ref="fileRecoveries"]').innerText()).includes('0777') && calls.filter(call => call.path.endsWith('/initialize')).length === 0);
@@ -293,7 +299,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('恢复区写沿用CSRF与明确确认', calls.filter(call => call.path.endsWith('/initialize')).at(-1).headers['x-fnm-request'] === '1' && calls.filter(call => call.path.endsWith('/initialize')).at(-1).body.confirmed === true);
     await manager.locator('[data-authority-inspect]').first().click();
     await manager.locator('.r1-api-recovery button').click();
-    check('恢复确认包含具体原路径', (await page.locator('.fullmask').last().innerText()).includes('admin/接口验收/源.txt'));
+    check('恢复确认使用admin内相对原路径且不补旧前缀', (await page.locator('.fullmask').last().innerText()).includes('接口验收/源.txt')
+      && !(await page.locator('.fullmask').last().innerText()).includes('admin/接口验收/源.txt'));
     await page.locator('.fullmask [data-yes]').click();
     await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '原厂索引尚未确认' }).waitFor();
     check('对象恢复成功不冒充索引已确认', !(await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('原厂索引已核对'));
@@ -450,7 +457,9 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
 
     await manager.locator('input[data-ref="name"]').fill('文件范围 AI');
     await manager.locator('[data-ref="scopes"] input[value="files"]').check();
-    check('文件功能显示真实根与Users授权边界', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 2 && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/'));
+    check('文件功能显示真实admin根与授权边界', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 2
+      && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/admin')
+      && (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('实际操作仍拒绝进入子挂载'));
     const writesBeforeFiles = calls.length;
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '请至少勾选一个' }).waitFor();
@@ -462,6 +471,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       role: document.querySelector('#r1ApiManager [data-ref="role"]').value }));
     check('默认文件范围只读且子目录为空：' + JSON.stringify(initialFileGrant), initialFileGrant.access === 'readonly' && initialFileGrant.path === '' && initialFileGrant.writeDisabled);
     check('子目录容纳1024个Unicode标量且根名称不注入 HTML', await writableRoot.locator('[data-root-path]').getAttribute('maxlength') === '2048' && await manager.locator('[data-ref="fileRootOptions"] img').count() === 0 && (await writableRoot.innerText()).includes('视频资源'));
+    check('子目录明确相对admin根且无需旧admin前缀', (await writableRoot.locator('[data-root-path]').getAttribute('placeholder')).includes('相对 admin 根')
+      && (await writableRoot.innerText()).includes('无需添加 admin/ 前缀'));
     await writableRoot.locator('[data-root-access]').evaluate(select => { select.value = 'readwrite'; });
     await manager.locator('[data-ref="create"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '只读角色或只读挂载' }).waitFor();
@@ -532,7 +543,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="scopes"] input[value="files"]').check();
 
     const rootsBeforeUnavailable = state.file_root_catalog;
-    state.file_root_catalog = { available: false, status: 'unavailable', reason: 'fixture：尚无可信挂载', roots: [] };
+    state.file_root_catalog = { available: false, status: 'unavailable', boundary_version: 3, reason: 'fixture：尚无可信挂载', roots: [] };
     await manager.locator('[data-ref="refresh"]').click();
     await manager.locator('[data-ref="fileRootsStatus"]').filter({ hasText: '尚无可信挂载' }).waitFor();
     check('缺少可信根时不造占位盘并阻止文件密钥创建', await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 0 && await manager.locator('[data-ref="create"]').isDisabled());
@@ -540,9 +551,52 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="refresh"]').click();
     await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').last().waitFor();
     check('挂载恢复不自动重新勾选文件范围', await manager.locator('[data-root-check]:checked').count() === 0);
+    for (const version of [2, undefined, '3']) {
+      state.file_root_catalog = { ...rootsBeforeUnavailable, boundary_version: version };
+      await manager.locator('[data-ref="refresh"]').click();
+      await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
+      check('旧版或未知边界不成为新admin可选根：' + String(version), await manager.locator('[data-ref="fileRootOptions"] .r1-api-file-root').count() === 0
+        && await manager.locator('[data-ref="create"]').isDisabled()
+        && (await manager.locator('[data-ref="fileRootsStatus"]').innerText()).includes('admin 专用 v3'));
+    }
+    state.file_root_catalog = rootsBeforeUnavailable;
+    await manager.locator('[data-ref="refresh"]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager').getAttribute('aria-busy') === 'false');
     await manager.locator('[data-ref="scopes"] input[value="files"]').uncheck();
 
     await view('manage');
+    const oldFileGrant = { id: 'root_' + '9'.repeat(24), path: 'admin/旧资料', access: 'readwrite' };
+    state.keys.push({ id: 'fixture-v2-users-root', name: '旧 Users 文件授权', role: 'readwrite', policy_version: 3,
+      scopes: ['files'], tool_grants: ['list_file_roots'], file_roots: [oldFileGrant], docker_projects: [],
+      docker_deployments: [], application_ids: [], allowed_ips: [], created_at: 1793240000,
+      expires_at: null, revoked_at: null, last_used_at: null, status: 'active' });
+    await manager.locator('[data-ref="refresh"]').click();
+    const oldFiles = manager.locator('.r1-api-item').filter({ hasText: '旧 Users 文件授权' });
+    await oldFiles.waitFor();
+    check('旧Users根在密钥列表明确失效且原路径保留', (await oldFiles.locator('[data-ref="files"]').innerText()).includes('已失效，需重选 admin 根')
+      && (await oldFiles.locator('[data-ref="files"]').innerText()).includes('admin/旧资料'));
+    await oldFiles.locator('[data-ref="edit"]').click();
+    const oldRoot = manager.locator('.r1-api-file-root[data-root-id="' + oldFileGrant.id + '"]');
+    check('编辑旧范围不按名称换根或剥掉admin前缀', await oldRoot.locator('[data-root-check]').isChecked()
+      && await oldRoot.locator('[data-root-path]').inputValue() === 'admin/旧资料'
+      && !(await manager.locator('.r1-api-file-root[data-root-id="root_' + '1'.repeat(24) + '"] [data-root-check]').isChecked()));
+    await manager.locator('input[data-ref="name"]').fill('旧 Users 文件授权改名');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    const oldMetadata = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('旧根仅改名称保持原授权字节语义', !Object.hasOwn(oldMetadata, 'file_roots')
+      && JSON.stringify(state.keys.find(key => key.id === 'fixture-v2-users-root').file_roots) === JSON.stringify([oldFileGrant]));
+    await oldFiles.locator('[data-ref="edit"]').click();
+    await oldRoot.locator('[data-root-check]').uncheck();
+    const selectedAdmin = manager.locator('.r1-api-file-root[data-root-id="root_' + '1'.repeat(24) + '"]');
+    await selectedAdmin.locator('[data-root-check]').check();
+    check('明确重选admin根不继承旧路径', await selectedAdmin.locator('[data-root-path]').inputValue() === '');
+    await selectedAdmin.locator('[data-root-path]').fill('旧资料');
+    await selectedAdmin.locator('[data-root-access]').selectOption('readwrite');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-ref="create"]').textContent === '创建密钥');
+    check('只有明确重选才保存新根与admin相对路径', JSON.stringify(calls.filter(call => call.path === '/api/access/keys/update').at(-1).body.file_roots)
+      === JSON.stringify([{ id: 'root_' + '1'.repeat(24), path: '旧资料', access: 'readwrite' }]));
     state.keys.push({ id: 'fixture-legacy', name: '旧权限密钥', scopes: ['read', 'power'], allowed_ips: [], created_at: 1793240000,
       expires_at: null, revoked_at: null, last_used_at: null, status: 'active' });
     await manager.locator('[data-ref="refresh"]').click();

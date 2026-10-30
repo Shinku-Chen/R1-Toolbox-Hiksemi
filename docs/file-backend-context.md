@@ -1,6 +1,6 @@
 # 文件后端上下文与字节传输
 
-本项目已有真实目录句柄诊断与有界文件传输状态机。现已增加固定管理员／`public` 子树的五项真实只读执行器，逐操作核验精确固件、原厂逻辑读许可和同一实际对象；详见 [native-file-readonly.md](native-file-readonly.md)。上传与文件变更已有受限执行器，仍须逐操作通过实际门槛，NAS 写入验收尚未完成；见[文件变更与恢复](file-mutations.md)。下面的元数据诊断本身不授予文件访问。
+本项目已有真实目录句柄诊断与有界文件传输状态机。现已增加固定管理员 admin 子树的五项真实只读执行器，逐操作核验精确固件、原厂逻辑读许可和同一实际对象；详见 [native-file-readonly.md](native-file-readonly.md)。上传与文件变更已有受限执行器，仍须逐操作通过实际门槛，NAS 写入验收尚未完成；见[文件变更与恢复](file-mutations.md)。下面的元数据诊断本身不授予文件访问。
 
 ## 已确认的原厂约束
 
@@ -25,16 +25,16 @@ context = collect_file_backend_context(panel)
 
 - 仅读取固定 `USER_AUTH_DB_101.tb_user_auth` 的 `user_id/user_type`，确认固定管理员逻辑身份；SQLite authorizer 拒绝令牌表、其他列和视图引入的凭据列，不登录或读取 access_token。
 - 固定 `/etc/passwd` 与 `/etc/group` 的有界元数据，报告是否存在相同数字 UID 候选。输出只有 `unverified` 与固定原因，不输出用户名、口令字段、原数据库或原配置。数字巧合始终不是授权证明。
-- 最多八个 Users 规划根，以 `O_PATH|O_DIRECTORY|O_NOFOLLOW` 逐级取得目录句柄，不枚举目录项、不读取文件内容。核对目录句柄 `mnt_id`、设备号及前后 boot、根规划和 mountinfo；变化后撤销本次句柄摘要。
+- 最多八个 admin v3 规划根，以 `O_PATH|O_DIRECTORY|O_NOFOLLOW` 逐级取得目录句柄，不枚举目录项、不读取文件内容。核对目录句柄 `mnt_id`、设备号及前后 boot、根规划和 mountinfo；变化后撤销本次句柄摘要。
 - 当前固定 `emhistor` TLS 监听身份是否符合已有进程／唯一 socket 核验，以及原厂文件路由、分类链的静态参考范围。不会签名或发送原厂请求，静态参考仍为 `runtime_verified:false`。
 
 目录 O_PATH 路径查找和元数据访问**可能唤醒数据盘**，因此返回 `effects.may_wake_disks:true`；不能宣传全程不唤盘。该检查不运行 SMART、空间扫描、文件内容读取、下载器或原厂业务动作。`complete` 只表示本次固定项目是否采够，不表示文件访问可用；`file_access_available` 始终为 `false`。
 
 ### 新增固定文件协议现场
 
-显式 `POST /api/dev/diagnostics` 正文 `{"action":"snapshot","checks":["file_protocol"]}` 调用 `collect_file_protocol_probe`，是目录第十项，默认 `device/storage/business/fan` 四项不变。与只看元数据的 `file_backend_context` 不同，它在精确固件和真实根句柄验证后，固定核对最多八根的 Users／admin／public 协议；共享十二秒总窗口、最多四十八次，不接受外部路径或动作。
+显式 `POST /api/dev/diagnostics` 正文 `{"action":"snapshot","checks":["file_protocol"]}` 调用 `collect_file_protocol_probe`，是目录第十项，默认 `device/storage/business/fan` 四项不变。与只看元数据的 `file_backend_context` 不同，它在精确固件和真实根句柄验证后，固定核对最多八根的 Users ACL 前置与 admin 协议，不枚举 Users／public；共享十二秒总窗口、最多二十四次，不接受外部路径或动作。
 
-该检测一次返回 host root、drives、实际挂载、Users 四阶段打开 errno、预期／实际 mount ID 与设备号，以及 self／PID1／emhistor namespace 和前后拓扑稳定性；还返回固定原厂响应白名单的形状／类型，不导出目录名、路径或内容。可能唤盘或初始化原厂资源，结束开发窗口失效即丢弃。诊断自身保持 `file_access_available:false`，执行工具另按逐次 ACL 与同句柄门判断。
+该检测一次返回 host root、drives、实际挂载、Users、admin 五阶段打开 errno、预期／实际 mount ID 与设备号，以及 self／PID1／emhistor namespace 和前后拓扑稳定性；还返回固定原厂响应白名单的形状／类型，不导出目录名、路径或内容。可能唤盘或初始化原厂资源，结束开发窗口失效即丢弃。诊断自身保持 `file_access_available:false`，执行工具另按逐次 ACL 与同句柄门判断。
 
 此前 `d5075ed` 实机七根均未通过挂载门，未证明文件浏览或样本字节可读。本版结构化现场用于先闭合该实际门槛；不能用本地 fd fixture、根规划或已有管理员会话代替实机许可与对象证据。其他用户仍不开放；已接入的文件写合同仍须独立通过恢复区、实际对象和原厂索引等门槛。详见[真实只读后端](native-file-readonly.md)、[文件变更](file-mutations.md)及[完成矩阵](mcp-completion-matrix.md)。
 
@@ -88,7 +88,7 @@ python -B -m unittest discover -s tests -p test_api_file_transfers.py -v
 
 ## 筛选前的根资格现场
 
-显式 `file_backend_context` 还返回 `context.root_topology`，用于解释某个监控挂载为什么没有进入可授权的 Users 根。它读取有界的内核挂载元数据和已有磁盘身份缓存，不打开候选数据目录、不列出用户文件、不执行原厂动作、SMART、blkid 或外部命令。Users 目录的实际句柄仍由原有上下文检查单独核验，整项检测因此仍可能唤盘。
+显式 `file_backend_context` 还返回 `context.root_topology`，用于解释某个监控挂载为什么没有进入可授权的 admin 根。它读取有界的内核挂载元数据和已有磁盘身份缓存，不打开候选数据目录、不列出用户文件、不执行原厂动作、SMART、blkid 或外部命令。Users 目录的实际句柄仍由原有上下文检查单独核验，整项检测因此仍可能唤盘。
 
 现场包含直接 `/drives/<名称>` 候选的可关联指纹、内核挂载／设备身份、完整文件系统根或子目录分类、规范别名关系、Users 内额外挂载证据、缓存身份匹配及全部拒绝原因。原始序列号、UUID、挂载选项、文件系统内部路径和动态用户路径不出宿主；已知挂载可在客户端计算同类指纹进行关联。源元数据过长、不完整、格式损坏或采集中变化时明确报告未知或不完整，不将短读当作 EOF。
 
@@ -103,6 +103,8 @@ fingerprint = hashlib.sha256(mount.encode('utf-8')).hexdigest()
 ```
 
 `candidate_id` 使用 `candidate_` 加该摘要前二十四位，始终不是可授权的 root ID。`catalog_included` 只复述原规划结果；`qualification_passed` 描述采到的局部条件，`eligible` 在输入或投影不完整时为 `null`。这些字段不能证明 Users 目录存在、原厂 ACL 允许访问或恢复区已就绪。
+
+Users 内额外挂载仍保留为脱敏诊断证据，子挂载存在不再令整个 admin 根不可选。实际访问逐级核对 mount ID，跨入子挂载仍拒绝。
 
 `root_topology.complete` 描述本次拓扑证据是否完整，不表示候选符合安全要求；被拒绝候选也保留完整原因。顶层 `context.complete` 还要求前后规划、挂载、启动身份及固定 self／PID1 挂载命名空间一致。诊断不创建 root ID 授权，不迁移旧 Token，不改变规划筛选和实际文件打开的安全门。
 

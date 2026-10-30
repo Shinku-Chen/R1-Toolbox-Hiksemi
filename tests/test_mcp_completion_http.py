@@ -332,7 +332,7 @@ class FileCompletionHTTPTests(CompletionHTTPBase):
         self.server.integration.file_operations = FileReadExecutor(None, root=self.root,
             authorizer=self.server.integration._is_current, authority=self.authority)
         self._patch(self.server.integration, 'file_root_catalog', return_value={
-            'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
+            'available': True, 'status': 'authorization_plan', 'boundary_version': 3,
             'roots': [dict(file_fixture.ROW)]})
         self.tools = sorted(['list_directory', 'get_file_info', 'prepare_file_download',
                              'get_file_transfer', 'cancel_file_transfer'])
@@ -341,7 +341,7 @@ class FileCompletionHTTPTests(CompletionHTTPBase):
 
     def prepare(self):
         data = self.good(self.call(self.file_key, 'prepare_file_download',
-                                  {'root_id': file_fixture.ROOT, 'path': 'public/payload.bin'}))
+                                  {'root_id': file_fixture.ROOT, 'path': 'payload.bin'}))
         return data['content_path']
 
     def binary(self, path, *, key=None, method='GET', headers=None, duplicates=(), body=None,

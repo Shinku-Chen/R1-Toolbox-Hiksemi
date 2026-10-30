@@ -564,8 +564,8 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         (fixture / 'proc/sys/kernel/random').mkdir(parents=True)
         (fixture / 'proc/self/mountinfo').write_text('', encoding='utf-8')
         (fixture / 'proc/sys/kernel/random/boot_id').write_text('fixture-boot', encoding='utf-8')
-        catalog = {'available': False, 'status': 'unavailable', 'boundary_version': 2, 'roots': []}
-        topology = {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 2,
+        catalog = {'available': False, 'status': 'unavailable', 'boundary_version': 3, 'roots': []}
+        topology = {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 3,
             'available': True, 'complete': True, 'reason_codes': [], 'catalog_root_ids': [],
             'catalog_fingerprint': hashlib.sha256(json.dumps(catalog, sort_keys=True,
                 ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest(),
@@ -581,8 +581,8 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         provider = self._patch(api_file_operations, 'collect_file_backend_context',
             side_effect=lambda panel: actual_context(panel, root=fixture,
                 owner_reader=lambda **unused: False, runtime_reader=lambda **unused: {}))
-        users = self._patch(api_file_operations, '_users_context',
-                            side_effect=AssertionError('no eligible Users path may open'))
+        users = self._patch(api_file_operations, '_admin_context',
+                            side_effect=AssertionError('no eligible admin path may open'))
         self.request()
         self.request({'action': 'catalog'})
         self.request(method='GET')

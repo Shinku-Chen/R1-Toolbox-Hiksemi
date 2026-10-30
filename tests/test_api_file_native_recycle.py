@@ -14,18 +14,25 @@ import api_file_native_recycle as recycle
 from api_file_operations import FileAccessError
 
 
-ROW = {'id': 'root_' + 'a' * 24, 'mount': '/drives/data/Users', 'read_only': False}
-PATH = 'admin/folder/sample.bin'
+ROW = {'id': 'root_' + 'a' * 24, 'mount': '/drives/data/Users/admin', 'read_only': False}
+PATH = 'folder/sample.bin'
 NATIVE = ((123, 40, '99', '127.0.0.1'), '100', (1, 2), (3, 4))
 CREATE = ('CREATE TABLE tb_recycle(' + ','.join('"%s" %s%s' % (name, kind,
           ' PRIMARY KEY AUTOINCREMENT' if i == 0 else '')
           for i, (name, kind) in enumerate(zip(recycle._COLUMNS, recycle._TYPES))) + ')')
 INDEX = 'CREATE INDEX deltime_index ON tb_recycle(deltime DESC)'
-RECORD = ('a' * 32, '/Users/' + PATH, 'sample.bin', 0, 1700000000,
+RECORD = ('a' * 32, '/Users/admin/' + PATH, 'sample.bin', 0, 1700000000,
           recycle.OWNER_ID, 'b' * 32 + '.bin', 8193, 1700000000, 1700000000)
 
 
 class RecycleSchemaAndContractTests(unittest.TestCase):
+    def test_admin_relative_archive_keeps_factory_archive_and_physical_database_locations(self):
+        self.assertEqual(recycle._ARCHIVE, '.DATA_CACHE/Recycle/100000')
+        self.assertEqual(ROW['mount'] + '/' + recycle._ARCHIVE,
+                         '/drives/data/Users/admin/.DATA_CACHE/Recycle/100000')
+        self.assertEqual(recycle.physical_mount_path(ROW['mount']) + '/' + '/'.join(recycle._CACHE) + '/' + recycle._DB,
+                         '/drives/data/.DATA_CACHE/Recycle/Recycle.db')
+
     def connection(self):
         connection = sqlite3.connect(':memory:', isolation_level=None)
         self.addCleanup(connection.close)
@@ -84,18 +91,23 @@ class RecycleSchemaAndContractTests(unittest.TestCase):
         self.assertEqual(connection.execute(recycle._DELETE, RECORD + (identifier,)).rowcount, 1)
         self.assertEqual(connection.execute(recycle._SELECT, (other[6], recycle.OWNER_ID)).fetchall(), [tuple(other)])
 
-    def test_scope_is_original_admin_descendant_and_not_internal_or_public(self):
+    def test_scope_is_admin_relative_and_excludes_internal_or_escape_paths(self):
         recycle._arguments(ROW, PATH)
-        for path in ('admin', 'public/file', 'another/private', 'admin/.DATA_CACHE/Recycle',
-                     '../admin/file', 'admin/a|b', 'admin/' + 'x' * 1020):
+        recycle._arguments(ROW, 'source.bin')
+        for path in ('', '/public/file', '.DATA_CACHE/Recycle', '../file',
+                     'a|b', 'x' * 1020):
             with self.assertRaises(FileAccessError, msg=path):
                 recycle._arguments(ROW, path)
+        for path in ('public/file', 'another/private', 'admin/file'):
+            recycle._arguments(ROW, path)
+        with self.assertRaises(FileAccessError):
+            recycle._arguments(dict(ROW, mount='/drives/data/Users'), PATH)
 
     def test_archive_name_bound_precedes_capture_and_supports_trailing_dot(self):
-        recycle._arguments(ROW, 'admin/folder/report.')
-        recycle._arguments(ROW, 'admin/folder/a.' + 'x' * 222)
-        self.error('limit_exceeded', lambda: recycle._arguments(ROW, 'admin/folder/a.' + 'x' * 223))
-        self.error('limit_exceeded', lambda: recycle._arguments(ROW, 'admin/folder/a.' + '字' * 75))
+        recycle._arguments(ROW, 'folder/report.')
+        recycle._arguments(ROW, 'folder/a.' + 'x' * 222)
+        self.error('limit_exceeded', lambda: recycle._arguments(ROW, 'folder/a.' + 'x' * 223))
+        self.error('limit_exceeded', lambda: recycle._arguments(ROW, 'folder/a.' + '字' * 75))
 
     def test_uuid_comes_from_audited_script_newline_hash_and_device_bound_udev(self):
         fs_uuid = '12345678-1234-1234-1234-123456789abc'
@@ -161,7 +173,8 @@ class NativeRecycleLinuxTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.users = self.root / 'drives/data/Users'
-        self.archive = self.users / recycle._ARCHIVE
+        self.admin = self.users / 'admin'
+        self.archive = self.admin / recycle._ARCHIVE
         self.archive.mkdir(parents=True)
         self.parent = self.users / 'admin/folder'
         self.parent.mkdir()
@@ -219,6 +232,43 @@ class NativeRecycleLinuxTests(unittest.TestCase):
         self.assertFalse(self.instance.verify(receipt, ROW, PATH, self.fd, current=lambda: self.current))
         self.notification.assert_called_once()
 
+    def test_admin_root_file_recycle_verifies_same_inode_and_exact_native_key(self):
+        path = 'source.bin'
+        plan = self.instance.preflight(ROW, path, current=lambda: self.current)
+        receipt = self.instance.archive_captured(plan, ROW, path, self.fd, self.stage,
+                                                 current=lambda: self.current)
+        self.assertEqual(receipt.record[1:3], ('/Users/admin/source.bin', 'source.bin'))
+        archived = self.archive / receipt.record[6]
+        self.assertEqual(archived.stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual(archived.read_bytes(), b'owner isolated fixture')
+        self.assertFalse((self.admin / path).exists())
+        self.assertTrue(self.instance.verify(receipt, ROW, path, self.fd, current=lambda: self.current))
+        self.reader._verify_absent.assert_called_once_with(plan.index, ROW, path,
+                                                          current=mock.ANY)
+        self.notification.assert_called_once()
+
+    def test_admin_root_file_archive_restores_exact_original_without_admin_prefix(self):
+        path = 'source.bin'
+        plan = self.instance.preflight(ROW, path, current=lambda: self.current)
+        receipt = self.instance.archive_captured(plan, ROW, path, self.fd, self.stage,
+                                                 current=lambda: self.current)
+        manifest = recycle._read_at(self.stage_fd, 'manifest.json')
+        with mock.patch('api_file_native_index.NativeFileIndex') as bridge:
+            bridge.return_value.verify_new.return_value = True
+            result = self.instance.restore_manifest(ROW, manifest, self.stage, current=lambda: self.current)
+        restored = self.admin / path
+        self.assertEqual(result['recovery'], {'recovery_id': self.stage.operation_id,
+                                             'state': 'restored', 'index_verified': True})
+        self.assertEqual(restored.stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual(restored.read_bytes(), b'owner isolated fixture')
+        self.assertFalse((self.archive / receipt.record[6]).exists())
+        self.assertFalse((self.admin / 'admin/source.bin').exists())
+        bridge.return_value.notify_new.assert_called_once_with(ROW, path, mock.ANY,
+                                                               directory=False, current=mock.ANY)
+        with sqlite3.connect(self.db) as connection:
+            self.assertEqual(connection.execute(recycle._SELECT,
+                (receipt.record[6], recycle.OWNER_ID)).fetchall(), [])
+
     def test_database_insert_failure_keeps_real_archive_and_durable_recovery(self):
         plan = self.instance.preflight(ROW, PATH, current=lambda: self.current)
         with mock.patch.object(recycle, '_INSERT', 'INVALID FIXTURE SQL'):
@@ -235,14 +285,14 @@ class NativeRecycleLinuxTests(unittest.TestCase):
             bridge.return_value.verify_new.return_value = True
             result = self.instance.restore_manifest(ROW, manifest, self.stage, current=lambda: self.current)
         self.assertEqual(result['recovery']['state'], 'restored')
-        self.assertEqual((self.users / PATH).stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual((self.admin / PATH).stat().st_ino, os.fstat(self.fd).st_ino)
 
     def test_restore_no_clobber_and_only_its_exact_native_record_is_removed(self):
         plan = self.instance.preflight(ROW, PATH, current=lambda: self.current)
         receipt = self.instance.archive_captured(plan, ROW, PATH, self.fd, self.stage,
                                                  current=lambda: self.current)
         manifest = recycle._read_at(self.stage_fd, 'manifest.json')
-        destination = self.users / PATH
+        destination = self.admin / PATH
         destination.write_bytes(b'existing owner file')
         with self.assertRaises(FileAccessError) as raised:
             self.instance.restore_manifest(ROW, manifest, self.stage, current=lambda: self.current)
@@ -251,18 +301,24 @@ class NativeRecycleLinuxTests(unittest.TestCase):
         self.assertTrue((self.archive / receipt.record[6]).exists())
 
     def test_pre_move_collision_recovers_only_staged_source_and_preserves_old_archive_row(self):
+        self._pre_move_collision_recovers_original(PATH)
+
+    def test_admin_root_file_staged_restore_works_without_factory_database(self):
+        self._pre_move_collision_recovers_original('source.bin')
+
+    def _pre_move_collision_recovers_original(self, path):
         deltime = 1700000000
-        name = hashlib.md5(('/Users/' + PATH + str(deltime)).encode(), usedforsecurity=False).hexdigest() + '.bin'
+        name = hashlib.md5(('/Users/admin/' + path + str(deltime)).encode(), usedforsecurity=False).hexdigest() + '.bin'
         previous = self.archive / name
         previous.write_bytes(b'previous independent archive')
         foreign = ('a' * 32, '/Users/admin/older.bin', 'older.bin', 0, deltime,
                    recycle.OWNER_ID, name, previous.stat().st_size, deltime, deltime)
         with sqlite3.connect(self.db) as connection:
             connection.execute(recycle._INSERT, foreign)
-        plan = self.instance.preflight(ROW, PATH, current=lambda: self.current)
+        plan = self.instance.preflight(ROW, path, current=lambda: self.current)
         with mock.patch.object(recycle.time, 'time', return_value=deltime):
             with self.assertRaises(FileAccessError) as raised:
-                self.instance.archive_captured(plan, ROW, PATH, self.fd, self.stage,
+                self.instance.archive_captured(plan, ROW, path, self.fd, self.stage,
                                                 current=lambda: self.current)
         self.assertEqual(raised.exception.code, 'target_exists')
         manifest = recycle._read_at(self.stage_fd, 'manifest.json')
@@ -273,7 +329,9 @@ class NativeRecycleLinuxTests(unittest.TestCase):
             bridge.return_value.verify_new.return_value = True
             result = self.instance.restore_manifest(ROW, manifest, self.stage, current=lambda: self.current)
         self.assertEqual(result['recovery']['state'], 'restored')
-        self.assertEqual((self.users / PATH).stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual((self.admin / path).stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual((self.admin / path).read_bytes(), b'owner isolated fixture')
+        self.assertFalse((self.stage_path / 'source').exists())
         self.assertEqual(previous.read_bytes(), b'previous independent archive')
         with sqlite3.connect(saved_db) as connection:
             self.assertEqual(connection.execute(recycle._SELECT, (name, recycle.OWNER_ID)).fetchall(), [foreign])
@@ -290,7 +348,7 @@ class NativeRecycleLinuxTests(unittest.TestCase):
         with self.assertRaises(FileAccessError) as raised:
             self.instance.restore_manifest(ROW, manifest, self.stage, current=lambda: self.current)
         self.assertEqual(raised.exception.code, 'file_changed')
-        self.assertFalse((self.users / PATH).exists())
+        self.assertFalse((self.admin / PATH).exists())
         self.assertTrue(archive.exists())
 
     def test_restore_failure_after_rename_has_durable_unknown_receipt_and_never_replays(self):
@@ -302,7 +360,7 @@ class NativeRecycleLinuxTests(unittest.TestCase):
             with self.assertRaises(FileAccessError) as raised:
                 self.instance.restore_manifest(ROW, manifest, self.stage, current=lambda: self.current)
         self.assertEqual(raised.exception.code, 'result_unconfirmed')
-        self.assertEqual((self.users / PATH).stat().st_ino, os.fstat(self.fd).st_ino)
+        self.assertEqual((self.admin / PATH).stat().st_ino, os.fstat(self.fd).st_ino)
         saved = recycle._read_at(self.stage_fd, 'manifest.json')
         self.assertEqual(saved['restore_receipt']['state'], 'result_unconfirmed')
         with mock.patch('api_file_mutations._rename_new') as rename:

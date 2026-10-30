@@ -55,7 +55,7 @@ qB 固定端口 8181，aria2 固定 6800；每次复核唯一服务监听和进�
 
 固定项目有 `inspect/control/update_image` 授权；启停重启和镜像更新需管理员与精确工具。更新限定单服务和同仓库固定 digest，见[固定项目操作](docker-project-operations.md)。另有四项未来部署工具，使用独立 `deployment_*` 和 `docker_deployments` 的 `inspect/deploy/control/remove`；所有者网页先登记已有卷／网络、固定仓库／端口／非 root 用户和配额，再规划／执行 `deploy/update/start/stop/restart/remove`。不支持任意 Compose／命令／bind，删除保留卷，失败保留实际现场；见[受控部署](docker-deployments.md)。
 
-文件边界保持 `/drives/*/Users/`。五项文件只读／下载执行器已接入精确固件、固定原厂所有者和 `admin/public` 正子集；完整 ACL、同挂载和最终句柄均须实时通过，不以 root 权限或根规划代替。二十合同中十二项已实现，八项文件写合同仍不注册。此前 `d5075ed` 实机七根未通过挂载门，未有样本读取证明；新增 `file_protocol` 一次返回阶段 errno、mount／device 和 namespace，需新镜像显式取证。见[真实只读后端](native-file-readonly.md)与[上下文](file-backend-context.md)。
+文件边界保持 `/drives/*/Users/admin/`。五项文件只读／下载执行器已接入精确固件、固定原厂所有者和 admin 正子树；完整 ACL、同挂载和最终句柄均须实时通过，不以 root 权限或根规划代替。二十一项文件／Docker 合同已有适配，文件写入仍须独立通过恢复区、当前对象和索引等实际门槛。此前 `d5075ed` 实机七根未通过挂载门，未有样本读取证明；新增 `file_protocol` 一次返回阶段 errno、mount／device 和 namespace，需新镜像显式取证。见[真实只读后端](native-file-readonly.md)与[上下文](file-backend-context.md)。
 
 应用安装／卸载／更新仍缺可信包、来源、版本、签名、依赖及恢复合同。影视来源／成员、照片内容、分享创建、备份新建／恢复、账户权限与凭据、网络／存储变更仍待接入；不能将部分设置／停用工具、原厂动作表或管理员角色宣传为全功能完成。
 

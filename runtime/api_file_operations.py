@@ -14,7 +14,8 @@ import re
 import stat
 import time
 
-from api_file_roots import collect_file_roots, is_users_root_path, valid_relative_file_path
+from api_file_roots import (collect_file_roots, is_admin_root_path,
+                            physical_mount_path, valid_relative_file_path)
 from api_permissions import permission_allows
 
 
@@ -23,10 +24,12 @@ _MAX_ROOTS = 8
 _MAX_METADATA = 262144
 _REFERENCE = '402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26'
 _REASONS = {
-    'root_unavailable': '当前已授权 Users 根的真实挂载与生命周期无法确认。',
+    'root_unavailable': '当前已授权 Users/admin 根的真实挂载与生命周期无法确认。',
     'unsupported_file_type': '当前对象类型、符号链接或硬链接不支持文件访问。',
-    'unsupported_path_class': '原厂文件后端仅接入管理员和 public 子树；其他用户空间尚不支持。',
-    'unsupported_precondition': '此操作需要同一已授权 Users 挂载；跨根或跨文件系统移动尚不支持。',
+    'unsupported_path_class': '原厂文件后端仅接入当前管理员子树；其他用户空间尚不支持。',
+    'legacy_users_boundary_v2': '旧 Users 根的恢复登记尚未迁移，请先使用原镜像处理保管对象。',
+    'cross_mount_denied': '此路径进入额外挂载，当前文件授权不允许跨越该挂载。',
+    'unsupported_precondition': '此操作需要同一已授权 Users/admin 挂载；跨根或跨文件系统移动尚不支持。',
     'not_found': '已授权目录中未找到此对象。',
     'target_exists': '目标名称已经存在；未覆盖、自动改名或合并。',
     'directory_changed': '目录或分页绑定发生变化，请重新浏览。',
@@ -193,30 +196,30 @@ def _descriptor_mount_id(root, descriptor):
     return matches[0] if len(matches) == 1 else None
 
 
-def _users_context(root, row, expected):
-    """Open directory handles only, rejecting links and unexpected mount hops."""
+def _admin_context(root, row, expected):
+    """Inspect physical mount, Users and admin FDs, refusing every mount hop."""
     failure = {'root_id': row['id'], 'status': 'unverified', 'reason': 'safe_metadata_open_unavailable',
                'handle_fingerprint': None, 'unix_mapping': 'unverified', 'native_acl': 'unverified'}
-    if os.name != 'posix' or not hasattr(os, 'O_PATH') or not is_users_root_path(row.get('mount')):
+    if os.name != 'posix' or not hasattr(os, 'O_PATH') or not is_admin_root_path(row.get('mount')):
         return failure
     descriptors = []
     try:
         flags = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         descriptor = os.open(Path(root).absolute(), flags)
         descriptors.append(descriptor)
-        for component in row['mount'].split('/')[1:]:
+        identity = []
+        for index, component in enumerate(row['mount'].split('/')[1:]):
             descriptor = os.open(component, flags, dir_fd=descriptor)
             descriptors.append(descriptor)
-        disk, users = descriptors[-2:]
-        disk_info, user_info = os.fstat(disk), os.fstat(users)
-        disk_mount = _descriptor_mount_id(root, disk)
-        users_mount = _descriptor_mount_id(root, users)
-        if (expected is None or disk_mount != expected[0] or users_mount != disk_mount
-                or f'{os.major(disk_info.st_dev)}:{os.minor(disk_info.st_dev)}' != expected[1]
-                or user_info.st_dev != disk_info.st_dev):
-            return dict(failure, reason='opened_mount_identity_unconfirmed')
-        identity = (disk_info.st_dev, disk_info.st_ino, disk_mount,
-                    user_info.st_dev, user_info.st_ino, user_info.st_ctime_ns)
+            if index >= 1:
+                # Physical mount, Users and admin each stay on the exact mount;
+                # stop before descending further through a same-device bind.
+                info = os.fstat(descriptor)
+                mount_id = _descriptor_mount_id(root, descriptor)
+                if (expected is None or mount_id != expected[0]
+                        or f'{os.major(info.st_dev)}:{os.minor(info.st_dev)}' != expected[1]):
+                    return dict(failure, reason='opened_mount_identity_unconfirmed')
+                identity.append((info.st_dev, info.st_ino, info.st_ctime_ns, mount_id))
         fingerprint = hashlib.sha256(repr(identity).encode('ascii')).hexdigest()
         return dict(failure, status='verified', reason='directory_handle_metadata_only',
                     handle_fingerprint=fingerprint)
@@ -241,7 +244,7 @@ def _mount_namespaces(root):
 
 def _topology_unavailable(reason):
     """No exception text, raw catalog or fallback qualification is exposed."""
-    return {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 2,
+    return {'schema_version': 1, 'scope': 'file_root_topology', 'boundary_version': 3,
             'available': False, 'complete': False, 'reason_codes': [reason],
             'catalog_fingerprint': None, 'catalog_root_ids': [], 'candidates': [],
             'inputs': {}, 'effects': {'metadata_only': True, 'opens_data_paths': False,
@@ -261,7 +264,8 @@ def _context_topology(panel, root_collector, topology_collector):
             topology_collector = collect_file_root_topology
         value = topology_collector(panel)
         if (type(value) is not dict or value.get('schema_version') != 1
-                or value.get('scope') != 'file_root_topology' or value.get('boundary_version') != 2
+                or value.get('scope') != 'file_root_topology'
+                or type(value.get('boundary_version')) is not int or value['boundary_version'] != 3
                 or type(value.get('complete')) is not bool or type(value.get('available')) is not bool
                 or type(value.get('catalog_root_ids')) is not list
                 or type(value.get('reason_codes')) is not list):
@@ -296,11 +300,11 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
                                  topology_collector=None, namespace_reader=None):
     """Explicit bounded evidence probe; injection arguments are never HTTP input.
 
-    Reading Users directory metadata may wake a disk. This function enumerates
+    Reading Users/admin directory metadata may wake a disk. This function enumerates
     no directory and opens no user content. It does not sign native requests,
     read tokens, or assert that a uid candidate can authorize a file operation.
     Topology describes all rejected candidates too, independently of whether
-    selected Users handles pass. It never supplies a root or grant to execution.
+    selected admin handles pass. It never supplies a root or grant to execution.
     """
     started = time.monotonic()
     collector = collect_file_roots if root_collector is None else root_collector
@@ -353,18 +357,19 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
                                                  and native.get('available') is True
                                                  and native.get('status') == 'verified' else 'unverified')
         rows = before.get('roots') if isinstance(before, dict) else None
-        valid_catalog = (isinstance(rows, list) and before.get('boundary_version') == 2
+        valid_catalog = (isinstance(rows, list) and type(before.get('boundary_version')) is int
+                         and before['boundary_version'] == 3
                          and before.get('available') is True and len(rows) <= 128)
         for row in rows[:_MAX_ROOTS] if valid_catalog and metadata_before else ():
             if time.monotonic() - started > 4:
                 break
             if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
                     or not re.fullmatch(r'root_[0-9a-f]{24}', row['id'], re.ASCII)
-                    or not is_users_root_path(row.get('mount'))):
+                    or not is_admin_root_path(row.get('mount'))):
                 continue
-            entries = mounts_before.get(row['mount'][:-6], [])
+            entries = mounts_before.get(physical_mount_path(row['mount']), [])
             expected = entries[0] if len(entries) == 1 else None
-            result['roots'].append(_users_context(root, row, expected))
+            result['roots'].append(_admin_context(root, row, expected))
     except Exception:
         # Partial context is useful, but exceptions may contain account/path data.
         pass
@@ -402,7 +407,8 @@ def collect_file_backend_context(panel, *, root='/', root_collector=None,
         topology['complete'] = False
         topology['reason_codes'].append('context_catalog_mismatch')
     result['complete'] = bool(metadata_after and same and type(rows) is list
-        and before.get('available') is True and before.get('boundary_version') == 2
+        and before.get('available') is True and type(before.get('boundary_version')) is int
+        and before['boundary_version'] == 3
         and len(result['roots']) == len(rows) and all(row.get('status') == 'verified'
             for row in result['roots']) and namespace['stable'] and namespace['same_namespace']
         and catalog_matches and topology['complete'])

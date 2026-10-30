@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 index = importlib.import_module('api_file_native_index')
 from api_file_operations import FileAccessError
 
-ROOT = {'id': 'root_' + '1' * 24, 'mount': '/drives/BSJQZGLBMYA/Users'}
-PATH = 'admin/临时共享/accept.bin'
+ROOT = {'id': 'root_' + '1' * 24, 'mount': '/drives/BSJQZGLBMYA/Users/admin'}
+PATH = '临时共享/accept.bin'
 IDENTITY = (8, 42, 8193, 123000000000, 124000000000)
 NATIVE = ((123, 40, '99', '127.0.0.1'), '100', (1, 2), (3, 4))
 
@@ -51,14 +51,21 @@ class NativeFileIndexTests(unittest.TestCase):
         self.assertEqual(rows[0][4].rstrip(b'\0'), b'file|create|' + absolute)
         self.assertEqual(rows[1][4].rstrip(b'\0'), b'')
 
-    def test_wire_never_truncates_or_accepts_other_subjects(self):
-        for path in ('admin', 'public/file', 'guest0/file', 'admin/../file',
-                     'admin/a\\file', 'admin/file|create|other', 'admin/parent|dir/file',
-                     'admin/' + '界' * 400):
+    def test_wire_never_truncates_or_accepts_outside_admin_boundary(self):
+        for path in ('', '../file', '/public/file',
+                     'a\\file', 'file|create|other', 'parent|dir/file',
+                     '界' * 400):
             with self.subTest(path=path), self.assertRaises(FileAccessError):
                 index._new_file_records(ROOT, path)
         with self.assertRaises(FileAccessError):
-            index._new_file_records({**ROOT, 'mount': '/drives/' + 'a' * 40 + '/Users'}, PATH)
+            index._new_file_records({**ROOT, 'mount': '/drives/' + 'a' * 40 + '/Users/admin'}, PATH)
+
+    def test_public_or_admin_named_children_are_literal_and_old_users_rows_are_rejected(self):
+        for path in ('public/file', 'guest0/file', 'admin/file'):
+            record = index._RECORD.unpack_from(index._new_file_records(ROOT, path))
+            self.assertEqual(record[3].rstrip(b'\0'), (ROOT['mount'] + '/' + path).encode())
+        with self.assertRaises(FileAccessError):
+            index._new_file_records({**ROOT, 'mount': '/drives/BSJQZGLBMYA/Users'}, PATH)
 
     def test_preflight_checks_absence_and_refuses_unverified_transport_before_send(self):
         current = self.make()
@@ -120,7 +127,7 @@ class NativeFileIndexTests(unittest.TestCase):
     def test_result_is_bound_to_opened_file_path_root_and_service_lifecycle(self):
         current = self.make()
         receipt = self.bridge.notify_new(ROOT, PATH, 7, directory=False, current=current)
-        for root, path in (({**ROOT, 'id': 'root_' + '2' * 24}, PATH), (ROOT, 'admin/other')):
+        for root, path in (({**ROOT, 'id': 'root_' + '2' * 24}, PATH), (ROOT, 'other')):
             with self.assertRaises(FileAccessError):
                 self.bridge.verify_new(receipt, root, path, 7, directory=False, current=current)
         self.object_check.return_value = (8, 43, *IDENTITY[2:])
@@ -157,7 +164,7 @@ class NativeFileIndexTests(unittest.TestCase):
 
     def test_rename_and_move_preserve_literal_real_paths_and_never_resend(self):
         current = self.make()
-        target = 'admin/临时共享/renamed.bin'
+        target = '临时共享/renamed.bin'
         for operation in ('rename', 'move'):
             with self.subTest(operation=operation):
                 self.connection.reset_mock()
@@ -191,12 +198,12 @@ class NativeFileIndexTests(unittest.TestCase):
 
     def test_prepared_receipt_cannot_change_root_paths_operation_or_service(self):
         current = self.make()
-        target = 'admin/临时共享/renamed.bin'
+        target = '临时共享/renamed.bin'
         prepared = self.bridge.preflight_mutation(ROOT, PATH, target,
                                                   operation='rename', current=current)
         for root, source, destination, operation in (
                 ({**ROOT, 'id': 'root_' + '2' * 24}, PATH, target, 'rename'),
-                (ROOT, 'admin/other', target, 'rename'), (ROOT, PATH, 'admin/other', 'rename'),
+                (ROOT, 'other', target, 'rename'), (ROOT, PATH, 'other', 'rename'),
                 (ROOT, PATH, target, 'move')):
             with self.assertRaises(FileAccessError):
                 self.bridge.notify_mutation(root, source, destination, 7,
@@ -208,8 +215,8 @@ class NativeFileIndexTests(unittest.TestCase):
         self.connection.sendall.assert_not_called()
 
     def test_no_arbitrary_event_or_cross_parent_rename_or_same_path_move(self):
-        for operation, target in (('delete', PATH), ('move', PATH), ('replace', 'admin/other'),
-                                  ('rename', 'admin/elsewhere/name')):
+        for operation, target in (('delete', PATH), ('move', PATH), ('replace', 'other'),
+                                  ('rename', 'elsewhere/name')):
             with self.assertRaises(FileAccessError):
                 index._mutation_records(ROOT, PATH, target, operation=operation)
 

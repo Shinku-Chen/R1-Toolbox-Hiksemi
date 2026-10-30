@@ -21,9 +21,9 @@ CAPABILITIES = '/api/integration/capabilities'
 ROOT_ID = 'root_' + 'a' * 24
 OTHER_ROOT_ID = 'root_' + 'b' * 24
 ROOT_CATALOG = {
-    'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
+    'available': True, 'status': 'authorization_plan', 'boundary_version': 3,
     'reason': '仅用于授权范围选择，当前未提供文件操作工具。',
-    'roots': [{'id': ROOT_ID, 'label': '主磁盘', 'mount': '/drives/data/Users', 'read_only': False}],
+    'roots': [{'id': ROOT_ID, 'label': '主磁盘', 'mount': '/drives/data/Users/admin', 'read_only': False}],
 }
 
 

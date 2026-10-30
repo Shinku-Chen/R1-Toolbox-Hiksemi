@@ -25,6 +25,7 @@ IMPLEMENTED_TOOLS = frozenset((
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',
     'role_denied', 'tool_denied', 'permission_denied', 'root_unavailable',
+    'cross_mount_denied', 'legacy_users_boundary_v2',
     'acl_unverified', 'secure_open_unavailable', 'unsupported_file_type',
     'not_found', 'directory_changed', 'file_changed', 'transfer_expired',
     'transfer_busy', 'transfer_unavailable', 'unsupported_range',
@@ -507,8 +508,12 @@ _CATALOG = {
         'credentials_or_host_paths_in_public_results': False,
         'arbitrary_action_shell_sql_or_url_proxy_allowed': False,
         'passive_polling_file_access_allowed': False,
-        'file_path_boundary': '/drives/*/Users/',
+        'file_path_boundary': '/drives/*/Users/admin/',
         'legacy_whole_disk_grants_auto_migrate': False,
+        'legacy_users_grants_auto_migrate': False,
+        'file_root_boundary_version': 3,
+        'nested_mount_presence_rejects_entire_root': False,
+        'opened_path_may_cross_mounts': False,
     },
     'http_contracts': [{
         'route_template': '/api/integration/files/transfers/{transfer_id}/content',

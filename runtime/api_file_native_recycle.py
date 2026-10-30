@@ -27,10 +27,11 @@ from api_file_native_index import (_authorized, _internal_sata, _listener_signat
                                    _paths, _RECORD, _SOCKET)
 from api_file_native_index_reader import NativeFileIndexReader, _fd_snapshot, _fd_flags
 from api_file_mutation_authority import _read_at, _trusted
+from api_file_roots import physical_mount_path
 from vendor_media_auth import OWNER_ID
 
 
-_ARCHIVE = 'admin/.DATA_CACHE/Recycle/' + str(OWNER_ID)
+_ARCHIVE = '.DATA_CACHE/Recycle/' + str(OWNER_ID)
 _CACHE = ('.DATA_CACHE', 'Recycle')
 _DB = 'Recycle.db'
 _SCRIPT_SHA256 = 'b091efc416336eae138b67b428d8d1b2d68a8de125a5d4004d3a9ea55a5ebfd4'
@@ -115,7 +116,7 @@ def _verify_bytes(descriptor, expected, current, deadline):
 def _arguments(row, path):
     _paths(row, path)
     if (not audited_owner_write_rule(path) or any(p.startswith('.') for p in path.split('/'))
-            or len(('/Users/' + path).encode('utf8')) >= 1024):
+            or len(('/Users/admin/' + path).encode('utf8')) >= 1024):
         raise FileAccessError('unsupported_path_class')
     # Native archive names retain the last extension after a 32-byte digest.
     # Check the real encoded NAME_MAX before the source can enter custody.
@@ -143,12 +144,13 @@ def _native_uuid(root, row):
             raise FileAccessError('write_backend_unverified')
         if before[3] == '/' and before[4].startswith('/drives/') and len(before[4].split('/')) == 3:
             mounts.append((before, after))
-    selected = [item for item in mounts if item[0][4] == row['mount'][:-6]]
+    physical = physical_mount_path(row['mount'])
+    selected = [item for item in mounts if item[0][4] == physical]
     if len(selected) != 1 or selected[0][1][0] != 'ext4' or len(mounts) > 128:
         raise FileAccessError('write_backend_unverified')
     values, seen = {}, set()
     for before, after in mounts:
-        # Full mount aliases have already been rejected by the Users authority.
+        # Full mount aliases have already been rejected by the admin authority.
         if after[0] != 'ext4' or re.fullmatch(r'/dev/sd[a-z]+[1-9][0-9]*', after[1]) is None:
             continue
         raw = _read_fixed(root, 'run/udev/data/b' + before[2], 65536)
@@ -179,7 +181,7 @@ def _native_uuid(root, row):
             raise FileAccessError('write_backend_unverified')
         seen.add(uuid)
         values[before[4]] = hashlib.md5((uuid + '\n').encode('ascii'), usedforsecurity=False).hexdigest()
-    value = values.get(row['mount'][:-6])
+    value = values.get(physical)
     if value is None or _internal_sata(root, row) is not True:
         raise FileAccessError('write_backend_unverified')
     return value
@@ -254,12 +256,12 @@ class _OpenedRecycle:
     """Trusted no-link exact-mount factory archive and existing SQLite database."""
 
     def __init__(self, root, row, current, deadline):
-        from api_file_executor import _Handle
+        from api_file_executor import _Handle, _UsersHandle
         self.root, self.row, self.current, self.deadline = root, row, current, deadline
         self.archive, self.users, self.fds = None, None, []
         try:
             self.archive = _Handle(root, row, _ARCHIVE, directory=True)
-            self.users = _Handle(root, row, '', directory=True)
+            self.users = _UsersHandle(root, row)
             self.mount_id = self.archive.mount_id
             if self.users.mount_id != self.mount_id:
                 raise FileAccessError('root_unavailable')
@@ -325,11 +327,11 @@ class _OpenedRecycle:
 
     def check(self, *, journal=False):
         _gate(self.current, self.deadline)
-        from api_file_executor import _Handle
+        from api_file_executor import _Handle, _UsersHandle
         with _Handle(self.root, self.row, _ARCHIVE, directory=True) as archive:
             if archive.mount_id != self.mount_id or _stable(os.fstat(archive.fd)) != self.archive_state:
                 raise FileAccessError('file_changed')
-        with _Handle(self.root, self.row, '', directory=True) as users:
+        with _UsersHandle(self.root, self.row) as users:
             descriptors = []
             try:
                 parent = os.open('..', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -545,7 +547,7 @@ class NativeFileRecycle:
                     or _content(os.stat('source', dir_fd=stage.fd, follow_symlinks=False)) != _content(before)):
                 raise FileAccessError('file_changed')
             deltime = int(time.time())
-            source = '/Users/' + path
+            source = '/Users/admin/' + path
             digest = hashlib.md5((source + str(deltime)).encode('utf8'), usedforsecurity=False).hexdigest()
             extension = os.path.splitext(path.rsplit('/', 1)[-1])[1]
             name = digest + extension
@@ -609,7 +611,7 @@ class NativeFileRecycle:
                     matched = _record_identity(connection, receipt.record,
                         expected_id=receipt.record_id, absent=True) is not None
                 from api_file_executor import _Handle
-                parent, leaf = path.rsplit('/', 1)
+                parent, _, leaf = path.rpartition('/')
                 with _Handle(self.root, row, parent, directory=True) as original:
                     try:
                         os.stat(leaf, dir_fd=original.fd, follow_symlinks=False)
@@ -639,7 +641,7 @@ class NativeFileRecycle:
             if _content(os.fstat(descriptor)) != identity:
                 return None
             _verify_bytes(descriptor, saved.get('sha256'), current, deadline)
-            parent, leaf = path.rsplit('/', 1)
+            parent, _, leaf = path.rpartition('/')
             with _Handle(self.root, row, parent, directory=True) as target:
                 stage.verify(current)
                 if (_content(os.stat('source', dir_fd=stage.fd, follow_symlinks=False)) != identity
@@ -703,7 +705,7 @@ class NativeFileRecycle:
         record_id = saved.get('record_id')
         _arguments(row, path)
         if (type(record[0]) is not str or re.fullmatch(r'[0-9a-f]{32}', record[0]) is None
-                or record[1] != '/Users/' + path
+                or record[1] != '/Users/admin/' + path
                 or record[2] != path.rsplit('/', 1)[-1] or record[3] != 0 or record[5] != OWNER_ID
                 or record_id is not None and (type(record_id) is not int or record_id <= 0)
                 or type(record[6]) is not str or len(record[6].encode('utf8')) > 255
@@ -716,7 +718,7 @@ class NativeFileRecycle:
             raise FileAccessError('write_backend_unverified')
         with _LOCK, _OpenedRecycle(self.root, row, current, deadline) as opened:
             stage.verify(current)
-            parent, leaf = path.rsplit('/', 1)
+            parent, _, leaf = path.rpartition('/')
             with _Handle(self.root, row, parent, directory=True) as target:
                 source_parent, source_name = opened.archive.fd, record[6]
                 descriptor = os.open(source_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,

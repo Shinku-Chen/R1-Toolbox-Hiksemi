@@ -163,9 +163,9 @@ class FileMutationExecutor:
         self._current(principal)
         if not audited_owner_write_rule(path):
             raise FileAccessError('unsupported_path_class')
-        if path == 'admin/.DATA_CACHE' or path.startswith('admin/.DATA_CACHE/'):
+        if path == '.DATA_CACHE' or path.startswith('.DATA_CACHE/'):
             raise FileAccessError('unsupported_path_class')
-        parent, name = path.rsplit('/', 1)
+        parent, _, name = path.rpartition('/')
         if not name or len(name.encode('utf-8', 'strict')) > 255:
             raise FileAccessError('invalid_arguments')
         assert_file_grant(principal, tool, root_id, path, write=write)
@@ -189,7 +189,8 @@ class FileMutationExecutor:
             locations = [(request['root_id'], request['path'], True)]
             if tool == 'rename_file':
                 locations.append((request['root_id'],
-                    request['path'].rsplit('/', 1)[0] + '/' + request['new_name'], True))
+                    (request['path'].rpartition('/')[0] + '/' if '/' in request['path'] else '')
+                    + request['new_name'], True))
         for root_id, path, write in locations:
             self._context(principal, tool, root_id, path, write=write)
             if request.get('prepare_tool') == 'prepare_file_overwrite':
@@ -349,7 +350,7 @@ class FileMutationExecutor:
         if tool == 'rename_file':
             source_root = target_root = args['root_id']
             source_path = args['path']
-            target_path = source_path.rsplit('/', 1)[0] + '/' + args['new_name']
+            target_path = (source_path.rpartition('/')[0] + '/' if '/' in source_path else '') + args['new_name']
         else:
             source_root, source_path = args['source_root_id'], args['source_path']
             target_root, target_path = args['target_root_id'], args['target_path']

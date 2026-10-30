@@ -1,7 +1,7 @@
 """Fixed factory file protocol evidence and audited logical read ACL rules.
 
 No public path/action proxy is provided. The explicit diagnostic consumes only
-Users roots from the live planner, sends bounded native metadata requests, and
+admin roots from the live planner, sends bounded native metadata requests, and
 never reads file bytes. Runtime ACL evidence is not converted into an execution
 grant or a Unix uid. Local opened-object access remains a separate gate.
 """
@@ -22,7 +22,8 @@ import threading
 import time
 from urllib.parse import quote, urlencode
 
-from api_file_roots import collect_file_roots, is_users_root_path
+from api_file_roots import (collect_file_roots, is_users_root_path, is_admin_root_path,
+                            physical_mount_path)
 from vendor_business_transport import BusinessTransportError, _identity
 from vendor_media_auth import OWNER_ID, read_session
 from vendor_media_probe import (MediaProbeError, MAX_HEADERS, _certificate,
@@ -34,12 +35,12 @@ FIRMWARE_SHA256 = '402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8
 FIRMWARE_SIZE = 18425520
 PORT = 20443
 TIMEOUT = 12.0
-MAX_REQUESTS = 48
+MAX_REQUESTS = 24
 MAX_ROOTS = 8
 _LOCK = threading.Lock()
 _HASH_LOCK = threading.Lock()
 _HASH_CACHE = None
-_COMPONENTS = ('', 'admin', 'public')
+_COMPONENTS = ('', 'admin')
 _ACTIONS = ('get_info', 'get_list')
 _ROOT_ID = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
 _FIELDS = ('path', 'name', 'type', 'isdir', 'occupy', 'writeable', 'file_attr',
@@ -51,8 +52,9 @@ def audited_owner_read_rule(relative_path):
     """Evaluate only the proven positive subset of rest_check_path_auth.
 
     At sample 0x281280 admin is a logical name, not a Unix uid.
-    0x281689 classifies Users and its user/public child; 0x281dc9 permits read
-    category 2 for admin and category 3/4 for the matching user or public. The
+    0x281689 classifies Users and its owner child; 0x281dc9 permits read
+    category 2 for admin and category 3/4 for the matching owner. Public paths
+    are relative to the fixed admin root, never to the Users-level subjects. The
     native root permission is independently mandatory: its successful check
     proves either the internal owner branch or current external_disk permission.
     This pure path subset does not prove either condition, subject or opened fd.
@@ -62,9 +64,9 @@ def audited_owner_read_rule(relative_path):
         return False
     if not relative_path:
         return True
-    first = relative_path.split('/', 1)[0]
-    # Factory path component comparison is case-sensitive in this branch.
-    return first in ('admin', 'public')
+    # Public paths already begin at the fixed logical owner's admin directory.
+    # A literal child named public/admin is not another Users-level subject.
+    return True
 
 
 def audited_owner_write_rule(relative_path):
@@ -72,12 +74,12 @@ def audited_owner_write_rule(relative_path):
 
     The complete 0x281dc9 branch permits eAuth=0 for category 4 only when its
     extracted user matches. Category 3 is the user root and is read-only in
-    that branch. Native writers independently reject public before this ACL.
+    that branch. The public root is admin itself; only nonempty relative paths
+    reach category 4. Literal admin/public children remain ordinary descendants.
     This is not the get_info.writeable field, a filesystem-state check.
     """
     from api_file_roots import valid_relative_file_path
-    return (valid_relative_file_path(relative_path) and relative_path.startswith('admin/')
-            and len(relative_path.split('/')) >= 2)
+    return valid_relative_file_path(relative_path) and bool(relative_path)
 
 
 def _authorized(authorizer):
@@ -202,8 +204,8 @@ def collect_opened_root_evidence(root, row):
               'expected_device': None, 'directory_stages': [],
               'namespace_fingerprints': {}, 'same_mount': False,
               'native_acl_proven': False}
-    if not is_users_root_path(row.get('mount')):
-        result['reason'] = 'invalid_users_root'
+    if not is_admin_root_path(row.get('mount')):
+        result['reason'] = 'invalid_admin_root'
         return result
     for name, relative in (('self', 'proc/self/ns/mnt'), ('pid1', 'proc/1/ns/mnt')):
         try:
@@ -218,14 +220,14 @@ def collect_opened_root_evidence(root, row):
     descriptors = []
     try:
         mounts = _mounts(root)
-        expected = mounts.get(row['mount'][:-6], [])
+        expected = mounts.get(physical_mount_path(row['mount']), [])
         if len(expected) == 1:
             result['expected_mount_id'], result['expected_device'] = expected[0]
         result['nested_mount_count'] = sum(
             len(entries) for path, entries in mounts.items()
             if path == row['mount'] or path.startswith(row['mount'] + '/'))
         targets = [('host_root', Path(root).absolute())]
-        targets += list(zip(('drives_directory', 'physical_mount', 'users_directory'),
+        targets += list(zip(('drives_directory', 'physical_mount', 'users_directory', 'admin_directory'),
                             row['mount'].split('/')[1:]))
         for stage, target in targets:
             record = {'stage': stage, 'opened': False, 'errno': None,
@@ -251,12 +253,11 @@ def collect_opened_root_evidence(root, row):
                 record['mount_id_readable'] = record['mount_id'] is not None
             except Exception:
                 record['mount_id_readable'] = False
-        if len(result['directory_stages']) == 4 and all(r['opened'] for r in result['directory_stages']):
-            disk, users = result['directory_stages'][-2:]
+        if len(result['directory_stages']) == 5 and all(r['opened'] for r in result['directory_stages']):
+            disk, users, admin = result['directory_stages'][-3:]
             result['same_mount'] = (result['expected_mount_id'] is not None
-                and disk['mount_id'] == users['mount_id'] == result['expected_mount_id']
-                and disk['device'] == users['device'] == result['expected_device']
-                and result['nested_mount_count'] == 0)
+                and disk['mount_id'] == users['mount_id'] == admin['mount_id'] == result['expected_mount_id']
+                and disk['device'] == users['device'] == admin['device'] == result['expected_device'])
             result['status'] = 'verified' if result['same_mount'] else 'unverified'
             result['reason'] = ('directory_metadata_only' if result['same_mount']
                                 else 'opened_mount_identity_mismatch')
@@ -270,15 +271,19 @@ def collect_opened_root_evidence(root, row):
 
 @contextmanager
 def _root_metadata_guard(root, row, path=''):
-    """Only directory O_PATH metadata before native calls; reject link/submount hops."""
-    from api_file_executor import _Handle
+    """Fixed Users ACL ancestor or admin directory, never Users enumeration."""
+    from api_file_executor import _Handle, _UsersHandle
     from api_file_operations import FileAccessError
-    with _Handle(root, row, path) as opened:
+    if path not in ('', 'admin'):
+        raise FileAccessError('unsupported_path_class')
+    def opened_handle():
+        return _UsersHandle(root, row) if not path else _Handle(root, row, '', directory=True)
+    with opened_handle() as opened:
         if not stat.S_ISDIR(opened.identity[2]):
             raise FileAccessError('unsupported_file_type')
         identity = opened.identity
         yield
-        with _Handle(root, row, path) as after:
+        with opened_handle() as after:
             if identity != after.identity:
                 raise FileAccessError('file_changed')
 
@@ -289,7 +294,7 @@ class NativeOwnerReadAuthority:
     An exact successful owner get_info(Users) body runs eAuth=1 through 0x281dc9. For an
     internal disk it admits the owner root; for an external disk it proves the
     current external_disk permission. In either admitted class, the same exact
-    function permits admin/public descendants. The caller must independently
+    function permits the fixed admin descendants. The caller must independently
     prove those components belong to the same live opened root/object. There
     is no Unix uid claim and no local-root/boolean-ACL fallback.
     """
@@ -302,7 +307,7 @@ class NativeOwnerReadAuthority:
 
     def authorize(self, root_id, path, current):
         from api_file_operations import FileAccessError
-        # The fixed own/public subset applies to both native class branches
+        # The fixed owner subset applies to both native class branches
         # after the current root request proves their respective prerequisites.
         if not audited_owner_read_rule(path):
             raise FileAccessError('unsupported_path_class')
@@ -311,10 +316,10 @@ class NativeOwnerReadAuthority:
         before = self.collector(self.panel)
         rows = before.get('roots') if type(before) is dict else None
         if (type(rows) is not list or before.get('available') is not True
-                or before.get('boundary_version') != 2):
+                or before.get('boundary_version') != 3):
             raise FileAccessError('root_unavailable')
         matches = [r for r in rows if type(r) is dict and r.get('id') == root_id
-                   and is_users_root_path(r.get('mount'))]
+                   and is_admin_root_path(r.get('mount'))]
         if len(matches) != 1:
             raise FileAccessError('root_unavailable')
         row = dict(matches[0])
@@ -324,10 +329,11 @@ class NativeOwnerReadAuthority:
             return current() is True and self.collector(self.panel) == before
 
         try:
+            users = physical_mount_path(row['mount']) + '/Users'
             with self._guard(self.root, row):
-                frame = self.client.request(row['mount'], '', 'get_info', deadline=deadline,
+                frame = self.client.request(users, '', 'get_info', deadline=deadline,
                                             authorizer=gate)
-            evidence = project_protocol_frame(frame, row['mount'], '', 'get_info')
+            evidence = project_protocol_frame(frame, users, '', 'get_info')
             if (evidence['native_success'] is not True
                     or evidence['path_matches_requested'] is not True):
                 raise FileAccessError('acl_unverified')
@@ -364,8 +370,8 @@ class NativeOwnerWriteAuthority(NativeOwnerReadAuthority):
 class VendorFileProtocolClient:
     """Private fixed GETs; a shared deadline and current authorization are required.
 
-    The native path is restricted to a current Users root or its two fixed ACL
-    children. This class cannot upload/download or accept URLs, arbitrary native
+    Only fixed Users get_info and admin get_info/get_list are supported. This
+    class cannot upload/download or accept URLs, arbitrary native
     actions, bodies, account IDs or a token. No credentials enter diagnostics.
     """
 
@@ -383,7 +389,7 @@ class VendorFileProtocolClient:
 
     def request(self, mount, component, action, *, deadline, authorizer):
         if (not is_users_root_path(mount) or component not in _COMPONENTS
-                or action not in _ACTIONS):
+                or action not in _ACTIONS or component == '' and action != 'get_info'):
             raise BusinessTransportError('invalid_parameters')
         _authorized(authorizer)
         _remaining(deadline, self.clock)
@@ -490,7 +496,7 @@ def _native_list_paths(rows, mount, component):
     in one flagged branch. Never unquote or Unicode-normalize a native name.
     Every optional path must name that same immediate child, not another tree.
     """
-    if (not is_users_root_path(mount) or component not in _COMPONENTS
+    if (not is_users_root_path(mount) or component != 'admin'
             or type(rows) is not list or len(rows) > 256):
         return None
     target = mount + ('/' + component if component else '')
@@ -575,11 +581,11 @@ def collect_file_protocol_probe(panel, *, root='/', authorizer=None,
         before = collector(panel)
         rows = before.get('roots') if type(before) is dict else None
         if (type(before) is not dict or before.get('available') is not True
-                or before.get('boundary_version') != 2 or type(rows) is not list
+                or before.get('boundary_version') != 3 or type(rows) is not list
                 or not 0 < len(rows) <= 128):
             rows = []
         safe = [r for r in rows if type(r) is dict and type(r.get('id')) is str
-                and _ROOT_ID.fullmatch(r['id']) and is_users_root_path(r.get('mount'))]
+                and _ROOT_ID.fullmatch(r['id']) and is_admin_root_path(r.get('mount'))]
         if len({r['id'] for r in safe}) != len(safe):
             safe = []
         firmware_matches = (firmware_reader or _firmware_identity)(root=root) is True
@@ -615,10 +621,13 @@ def collect_file_protocol_probe(panel, *, root='/', authorizer=None,
             output = {'root_id': row['id'], 'queries': [],
                       'opened_root': collect_opened_root_evidence(root, row)}
             result['roots'].append(output)
+            users = physical_mount_path(row['mount']) + '/Users'
             for component in _COMPONENTS:
                 if timed_out:
                     break
                 for action in _ACTIONS:
+                    if not component and action != 'get_info':
+                        continue
                     if clock() >= deadline:
                         timed_out = True
                         break
@@ -630,7 +639,7 @@ def collect_file_protocol_probe(panel, *, root='/', authorizer=None,
                         from api_file_operations import FileAccessError
                         try:
                             with (root_guard or _root_metadata_guard)(root, row, component):
-                                frame = native.request(row['mount'], component, action,
+                                frame = native.request(users, component, action,
                                                        deadline=deadline, authorizer=current)
                         except FileAccessError as error:
                             # A local Users/mount rejection happens before the
@@ -641,7 +650,7 @@ def collect_file_protocol_probe(panel, *, root='/', authorizer=None,
                                 'open_error_code': error.code, 'native_success': False,
                                 'acl_proven': False, 'opened_object_proven': False})
                             continue
-                        query = project_protocol_frame(frame, row['mount'], component, action)
+                        query = project_protocol_frame(frame, users, component, action)
                         result['requests_completed'] += 1
                     except BusinessTransportError as error:
                         if error.reason == 'authorization_denied':

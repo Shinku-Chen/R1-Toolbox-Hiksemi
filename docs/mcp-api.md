@@ -50,7 +50,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 | `power` | 管理员 | `request_power`、`cancel_power` | 重启／关机要求 `confirmed:true`，保留五秒可取消窗口 |
 | `media` | 读写 | `get_media_status` | `face` 查询相册识别；`all` 批量验证七类状态；原厂可能写完成标记，明确按需调用 |
 | `files` | 只读 | `list_file_roots` | 仅投影本键已授权根和子目录的绑定元数据，不列盘内文件或传输内容 |
-| `files` | 只读 | `list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer` | 精确固件下固定原厂所有者的 `admin/public` 只读子集；每次原厂 ACL、同挂载／同句柄核验，实机门槛未通过时拒绝 |
+| `files` | 只读 | `list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer` | 精确固件下固定原厂所有者的 admin 只读子树；每次原厂 ACL、同挂载／同句柄核验，实机门槛未通过时拒绝 |
 | `files` | 读写 | `prepare_file_upload`、`commit_file_upload`、`get_file_operation` | 仅已核验内置 SATA 的 admin 后代新文件；准备／固定 PUT／显式提交分开，无覆盖发布，独立原厂索引确认后才完成，目标及父目录均须读写授权 |
 | `files` | 读写 | `prepare_file_overwrite` | 独立覆盖准备，必须目标版本和确认；commit 使用可信记录恢复精确准备权限，旧对象保留 |
 | `files` | 读写 | `create_directory`、`copy_file`、`rename_file`、`move_file`、`trash_file` | 单层目录、普通文件复制／可恢复改名／同盘移动／原厂回收；源目标独立授权，恢复区和原厂记录另行核验，缺证据拒绝 |
@@ -93,19 +93,19 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 ### 文件根元数据、受限读取与新文件上传
 
-文件与固定项目合同见[接口方案](file-docker-api-plan.md)。读取支持固定原厂管理员的 admin/public 正子集，写入仅已核验 admin 后代，上传、独立覆盖、目录、复制、可恢复改名／移动及原厂回收均有适配，真实调用仍须逐项生产门槛。
+文件与固定项目合同见[接口方案](file-docker-api-plan.md)。读取支持固定原厂管理员的 admin 子树，写入仅已核验 admin 后代，上传、独立覆盖、目录、复制、可恢复改名／移动及原厂回收均有适配，真实调用仍须逐项生产门槛。
 
 二十一项接口的[机器定义](api/file-docker-contracts.json)均有实际适配；定义入口继续为所有者查阅，不授执行权、不迁移旧键，也不替代 NAS 验收。
 
 `files/docker/apps/downloads/movie/albums/sharing/backup/system` 均部分接入，新增工具与资源默认不选。任意应用安装、更新／卸载、分享创建、完整媒体／备份管理和任意 Compose 仍未完成，八十一工具不是 APP 覆盖率。见[完成矩阵](mcp-completion-matrix.md)。
 
-勾选文件管理时，必须选择当前可信的 `/drives/<disk>/Users` 根，可填写其内相对 POSIX 子目录，并为每个范围选择只读或读写。文件总边界固定为 `/drives/*/Users/`，不授予整个数据盘、兄弟目录或系统目录。只读角色不能授予读写范围；只读挂载不能授予写入。规划来自已有物理盘身份缓存、sysfs／udev 生命周期核验与 `/proc/self/mountinfo`，不检查 Users 是否存在，也不访问用户文件。缺少身份、歧义挂载、Users 内额外挂载、无法核对的 RAID／虚拟源等不会生成可选目录。详见[Users 文件边界](file-users-boundary.md)。
+勾选文件管理时，必须选择当前可信的 `/drives/<disk>/Users/admin` 根，可填写其内相对 POSIX 子目录，并为每个范围选择只读或读写。文件总边界固定为 `/drives/*/Users/admin/`，不授予整个数据盘、兄弟目录或系统目录。只读角色不能授予读写范围；只读挂载不能授予写入。规划来自已有物理盘身份缓存、sysfs／udev 生命周期核验与 `/proc/self/mountinfo`，不检查 Users／admin 是否存在，也不访问用户文件。缺少身份、歧义挂载、无法核对的 RAID／虚拟源等不会生成可选目录；根下存在子挂载不再整体拒绝，实际访问仍逐级拒绝跨挂载。详见[admin 文件边界](file-users-boundary.md)。
 
 根 ID 绑定物理身份、分区源、文件系统与挂载路径，修改显示名称不改变 ID；换盘或路径变化后旧绑定不匹配。子目录不接受绝对路径、`.`／`..`、反斜杠、重复斜杠或控制字符。网页支持同根多条子目录的无损编辑，精确重复拒绝；授权按允许范围并集计算，子目录只读授权不会收窄上级已授读写范围。
 
-规范 /drives 之外的完整文件系统别名不再误排唯一规范根，别名自身也不会成为第二授权根；多个规范 /drives 根同源、同设备、堆叠或 Users 内额外挂载继续拒绝。此修复未代替 SSD 实机安全打开或下载验收。
+规范 /drives 之外的完整文件系统别名不再误排唯一规范根，别名自身也不会成为第二授权根；多个规范 /drives 根同源、同设备或堆叠继续拒绝；Users 内子挂载只限制跨入该路径，不再排除整个 admin 根。此修复未代替 SSD 实机安全打开或下载验收。
 
-Users 边界使用独立 v2 摘要。旧整盘根不会自动改为 Users 根；原 Token 的名称／IP 等仍可编辑，但旧根显示不可用，需所有者显式重新选择。更换根也不自动注册文件内容工具。
+admin 边界使用独立 v3 摘要。旧整盘和 Users v2 根不会自动改绑，也不删除旧相对路径的 admin/ 前缀；原 Token 的名称／IP 等仍可编辑，但旧根显示不可用，需所有者显式重新选择 admin 根与相对目录。更换根也不自动注册文件内容工具。
 
 `list_file_roots` 继续只返回 `verification:metadata_only`，不暴露宿主挂载路径或授予内容权限。内容读取由精确固件、固定逻辑主体、完整原厂 ACL 正分支、同挂载无链接拓扑和最终文件句柄共同核验；不把 NAS 逻辑 ID 当 Unix UID，不回退宿主 root 读取。每个下载块前后续验授权与对象。内容只使用独立 Bearer 的 `GET|HEAD /api/integration/files/transfers/<transfer_id>/content`，单 Range 有界，不接受 Cookie 或开发白名单代替授权。详见[真实只读后端](native-file-readonly.md)。
 

@@ -16,7 +16,7 @@ import time
 
 from api_file_operations import FileAccessError, _read_fixed
 from api_file_provider import audited_owner_write_rule, _runtime_binary_matches
-from api_file_roots import is_users_root_path
+from api_file_roots import is_admin_root_path, physical_mount_path
 from vendor_business_transport import _identity as _service_identity
 from vendor_runtime import require_emhistor_listener, _socket_inodes
 
@@ -45,10 +45,10 @@ def _remaining(deadline, clock):
 def _paths(row, path, *, directory=False):
     """Only literal admin descendants and the audited finite wire grammar."""
     if (type(directory) is not bool or type(row) is not dict
-            or not is_users_root_path(row.get('mount'))
+            or not is_admin_root_path(row.get('mount'))
             or not audited_owner_write_rule(path) or '|' in path):
         raise FileAccessError('unsupported_path_class')
-    mount = row['mount'][:-6]
+    mount = physical_mount_path(row['mount'])
     absolute = row['mount'] + '/' + path
     try:
         share, encoded = mount.encode('utf-8', 'strict'), absolute.encode('utf-8', 'strict')
@@ -101,7 +101,10 @@ def _internal_sata(root, row):
     user file can be published. The root/serial lifecycle is checked separately
     by the file authority and the canonical descriptor chain.
     """
-    physical = row['mount'][:-6]
+    try:
+        physical = physical_mount_path(row.get('mount'))
+    except (AttributeError, ValueError):
+        return False
     entries = []
     for line in _read_fixed(root, 'proc/self/mountinfo').splitlines():
         halves = line.split(' - ', 1)

@@ -20,7 +20,7 @@ _FILESYSTEMS = frozenset(('ext2', 'ext3', 'ext4', 'btrfs', 'xfs', 'ntfs',
                           'ntfs3', 'fuseblk', 'exfat', 'vfat', 'f2fs', 'jfs'))
 _ESCAPE = re.compile(r'\\(040|011|012|134)')
 _ROOT_ID = re.compile(r'root_[0-9a-f]{24}\Z', re.ASCII)
-_BOUNDARY_VERSION = 2
+_BOUNDARY_VERSION = 3
 _MAX_TOPOLOGY_EVIDENCE = 512
 _MAX_CACHE_METADATA = 1048576
 _KNOWN_FILESYSTEMS = _FILESYSTEMS | frozenset((
@@ -43,7 +43,7 @@ def _unescape(value):
 
 
 def _data_path(value):
-    """Only a directly mounted /drives/<disk> may supply a Users root."""
+    """Only a directly mounted /drives/<disk> may supply an admin root."""
     return (_plain(value, 1024) and value.startswith('/drives/')
             and '\\' not in value and not value.endswith('/')
             and len(value.split('/')) == 3
@@ -51,13 +51,26 @@ def _data_path(value):
 
 
 def is_users_root_path(value):
-    """Check only lexical boundary metadata; this does not resolve the directory."""
+    """Legacy/native Users metadata only; never validate a public file grant."""
     return (isinstance(value, str) and value.endswith('/Users')
             and _data_path(value[:-6]))
 
 
+def is_admin_root_path(value):
+    """Recognize the exact v3 admin boundary without resolving any data path."""
+    return (isinstance(value, str) and value.endswith('/Users/admin')
+            and _data_path(value[:-12]))
+
+
+def physical_mount_path(admin_root):
+    """Return the canonical physical mount for a v3 root; reject other roots."""
+    if not is_admin_root_path(admin_root):
+        raise ValueError('admin_root_invalid')
+    return admin_root[:-12]
+
+
 def valid_relative_file_path(value):
-    """Accept literal POSIX paths below a selected Users root, without decoding."""
+    """Accept literal POSIX paths below a selected admin root, without decoding."""
     if (not isinstance(value, str) or len(value) > 1024 or '\\' in value
             or any(not char.isprintable() for char in value)
             or (value and any(part in ('', '.', '..') for part in value.split('/')))):
@@ -119,7 +132,8 @@ def _parse_mountinfo(text):
         mounts.setdefault(mount, []).append((before, after))
         source = _unescape(after[1])
         # Complete canonical aliases alone affect eligibility. External aliases
-        # cannot be grants or revoke one; every mount under Users still does.
+        # cannot be grants or revoke one. Child mounts remain diagnostic evidence;
+        # the real opener rejects entering a different mount, not this planner.
         if before[3] == '/' and _data_path(mount):
             full_sources.setdefault(source, []).append(mount)
             full_devices.setdefault(before[2], []).append(mount)
@@ -261,8 +275,6 @@ def _qualification(state, mount, entries):
     users = mount + '/Users'
     children = [(path, rows) for path, rows in state['mounts'].items()
                 if path == users or path.startswith(users + '/')]
-    if children:
-        common.append('users_mount_present')
     for before, after in entries:
         source, filesystem = _unescape(after[1]), after[0]
         match = _DEVICE.fullmatch(source) or _NVME.fullmatch(source)
@@ -309,7 +321,8 @@ def _qualification(state, mount, entries):
     if not reasons:
         detail = details[0]
         disk, before, after = detail['disk'], detail['before'], detail['after']
-        identity = ['r1-file-users-root-v2', disk['serial'], detail['source'], before[2], after[0], users]
+        admin = users + '/admin'
+        identity = ['r1-file-admin-root-v3', disk['serial'], detail['source'], before[2], after[0], admin]
         digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True,
                                            separators=(',', ':')).encode('ascii')).hexdigest()
         label = disk.get('user_name')
@@ -317,7 +330,7 @@ def _qualification(state, mount, entries):
             label = disk.get('volume')
         if not _plain(label, 128):
             label = mount.rsplit('/', 1)[-1]
-        root = {'id': 'root_' + digest[:24], 'label': label, 'mount': users,
+        root = {'id': 'root_' + digest[:24], 'label': label, 'mount': admin,
                 'read_only': 'ro' in detail['mount_flags'] or 'ro' in detail['super_flags']}
     return {'mount': mount, 'details': details, 'children': children, 'reasons': reasons, 'root': root}
 
@@ -348,15 +361,16 @@ def _analyze_plan(panel):
         else:
             catalog = {'available': True, 'status': 'authorization_plan', 'roots': roots,
                        'boundary_version': _BOUNDARY_VERSION,
-                       'reason': '仅规划数据盘 Users 子目录；实际操作仍须重新核验原厂权限、挂载身份与真实句柄。'}
+                       'reason': '仅规划数据盘 Users/admin 子目录；实际访问仍逐级核验原厂权限、挂载身份与真实句柄，拒绝跨入子挂载。'}
     return state, candidates, catalog
 
 
 def collect_file_roots(panel):
-    """Plan Users grants using shared metadata qualification; never open data.
+    """Plan admin grants using shared metadata qualification; never open data.
 
-    Physical identity, source, device, filesystem and the v2 Users boundary bind
-    IDs byte-for-byte as before. A diagnostic candidate is never an API grant.
+    Physical identity, source, device, filesystem and the v3 admin boundary bind
+    IDs independently of legacy whole-disk/Users grants. Child mounts do not
+    reject the entire root and never prove an actual path safe to open.
     """
     return _analyze_plan(panel)[2]
 
@@ -470,7 +484,7 @@ def collect_file_root_topology(panel):
                                  'mount_id': row['mount_id'], 'parent_mount_id': row['parent_mount_id'],
                                  'device': row['device'], 'filesystem': row['filesystem'],
                                  'filesystem_class': row['filesystem_class']})
-        root_id = included.get(mount + '/Users')
+        root_id = included.get(mount + '/Users/admin')
         reason_codes = list(dict.fromkeys(candidate['reasons'] + state['errors']))
         local_rejections = [code for code in candidate['reasons']
                             if code != 'cached_device_identity_unavailable']
@@ -533,14 +547,14 @@ def validate_file_grants(grants, catalog):
             or catalog.get('available') is not True or catalog.get('status') != 'authorization_plan'
             or not isinstance(catalog.get('roots'), list)
             or not 0 < len(catalog['roots']) <= _MAX_ROOTS):
-        raise ValueError('当前无法确认 Users 文件边界，请刷新后选择')
+        raise ValueError('当前无法确认 Users/admin 文件边界，请刷新后选择')
     roots = {}
     for row in catalog['roots']:
         if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
                 or not _ROOT_ID.fullmatch(row['id']) or row['id'] in roots
-                or not is_users_root_path(row.get('mount'))
+                or not is_admin_root_path(row.get('mount'))
                 or type(row.get('read_only')) is not bool):
-            raise ValueError('当前无法确认 Users 文件边界，请刷新后选择')
+            raise ValueError('当前无法确认 Users/admin 文件边界，请刷新后选择')
         roots[row['id']] = row
     selected = set()
     for grant in grants:

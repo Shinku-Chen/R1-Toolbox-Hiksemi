@@ -23,10 +23,10 @@ from api_docker_projects import DockerProjectRegistry
 DOCKER_TOOLS = ['list_docker_projects', 'get_docker_project_status', 'get_docker_project_summary']
 ROOT = 'root_' + '1' * 24
 OTHER_ROOT = 'root_' + '2' * 24
-CATALOG = {'available': True, 'status': 'authorization_plan', 'boundary_version': 2,
+CATALOG = {'available': True, 'status': 'authorization_plan', 'boundary_version': 3,
            'reason': 'fixture metadata only', 'roots': [
-    {'id': ROOT, 'label': '测试主磁盘', 'mount': '/drives/owner-only-fixture/Users', 'read_only': False},
-    {'id': OTHER_ROOT, 'label': '未选择的私有磁盘', 'mount': '/drives/unselected-fixture/Users', 'read_only': True},
+    {'id': ROOT, 'label': '测试主磁盘', 'mount': '/drives/owner-only-fixture/Users/admin', 'read_only': False},
+    {'id': OTHER_ROOT, 'label': '未选择的私有磁盘', 'mount': '/drives/unselected-fixture/Users/admin', 'read_only': True},
 ]}
 
 
@@ -198,7 +198,7 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
                 self.denied(name, self.call(key, name, arguments, transport=transport), 'scope_denied')
         self.assertEqual(len(self.engine.requests), before)
 
-    def test_whole_disk_token_stays_editable_until_explicit_users_regrant(self):
+    def test_whole_disk_token_stays_editable_until_explicit_admin_regrant(self):
         # Model a persisted key from the old planner through the storage layer;
         # owner creation in this version must reject the same stale root ID.
         old_root = 'root_' + 'f' * 24
@@ -244,6 +244,38 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
         self.assertEqual(current['verification'], 'metadata_only')
         self.assertEqual(current['backend']['status'], 'backend_unverified')
         self.assertEqual(len(self.engine.requests), before)
+
+    def test_users_v2_range_keeps_admin_prefix_until_explicit_admin_regrant(self):
+        # A v2 relative path cannot become an admin-relative path by silently
+        # dropping its first component when only metadata is being edited.
+        old_root = 'root_' + 'e' * 24
+        old_grants = [{'id': old_root, 'path': 'admin/reports', 'access': 'readonly'}]
+        self.server.api_access.configure({'enabled': True})
+        key = self.server.api_access.create_key(self.key_body(
+            scopes=['files'], tool_grants=['list_file_roots'], file_roots=old_grants))
+        status, _, edited = self.browser('POST', '/api/access/keys/update',
+            {'id': key['id'], 'name': '保留旧 Users 相对路径'})
+        self.assertEqual(status, 200, edited)
+        self.assertEqual(edited['key']['file_roots'], old_grants)
+        data = self.valid('list_file_roots', self.call(key, 'list_file_roots'))
+        self.assertEqual(data['roots'][0]['binding_status'], 'unavailable')
+        status, _, rejected = self.browser('POST', '/api/access/keys/update',
+            {'id': key['id'], 'file_roots': old_grants})
+        self.assertEqual(status, 400, rejected)
+        new_grants = [{'id': ROOT, 'path': 'reports', 'access': 'readonly'}]
+        status, _, changed = self.browser('POST', '/api/access/keys/update',
+            {'id': key['id'], 'file_roots': new_grants})
+        self.assertEqual(status, 200, changed)
+        self.assertEqual(changed['key']['file_roots'], new_grants)
+
+    def test_owner_cannot_create_file_grant_from_old_users_v2_catalog(self):
+        self.roots.return_value = dict(CATALOG, boundary_version=2,
+            roots=[dict(CATALOG['roots'][0], mount='/drives/owner-only-fixture/Users')])
+        self.server.api_access.configure({'enabled': True})
+        status, _, result = self.browser('POST', '/api/access/keys', self.key_body(
+            scopes=['files'], tool_grants=['list_file_roots'],
+            file_roots=[{'id': ROOT, 'path': '', 'access': 'readonly'}]))
+        self.assertEqual(status, 400, result)
 
     def test_missing_domain_tool_or_cross_project_never_reads_backend(self):
         project = self.register()

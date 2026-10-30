@@ -18,8 +18,8 @@ import api_file_native_index_reader as reader
 from api_file_operations import FileAccessError
 
 
-ROW = {'id': 'root_' + 'a' * 24, 'mount': '/drives/data/Users', 'read_only': False}
-PATH = 'admin/uploads/中文.txt'
+ROW = {'id': 'root_' + 'a' * 24, 'mount': '/drives/data/Users/admin', 'read_only': False}
+PATH = 'uploads/中文.txt'
 CREATE = ('CREATE TABLE tb_file_db_all(mkey INTEGER PRIMARY KEY AUTOINCREMENT, '
           'path VARCHAR(4096) NOT NULL UNIQUE, name VARCHAR(256), ctime int64, '
           'mtime int64, atime int64, isdir int64, size int64, deep int64, '
@@ -73,7 +73,7 @@ class SchemaAndBoundaryTests(unittest.TestCase):
                     'DELETE FROM tb_file_db_all', 'PRAGMA user_version=1'):
             with self.assertRaises(sqlite3.DatabaseError, msg=sql):
                 connection.execute(sql).fetchall()
-        self.assertEqual(connection.execute(reader._SELECT, ('/Users/' + PATH,)).fetchall(), [])
+        self.assertEqual(connection.execute(reader._SELECT, ('/Users/admin/' + PATH,)).fetchall(), [])
 
     def test_schema_authorizer_only_accepts_fixed_metadata(self):
         connection = self.database()
@@ -84,15 +84,15 @@ class SchemaAndBoundaryTests(unittest.TestCase):
                 connection.execute(sql).fetchall()
 
     def test_only_fixed_admin_descendant_and_complete_untruncated_key_is_valid(self):
-        self.assertEqual(reader._arguments(ROW, PATH), ('/drives/data', '/Users/' + PATH))
-        for path in ('admin', 'public/new', 'another-user/private', '../admin/new',
-                     'admin/.hidden', 'admin/folder/.nested', 'admin/a.ecloud.download',
-                     'admin/a|b.txt',
-                     'admin/' + '字' * 800):
+        self.assertEqual(reader._arguments(ROW, PATH), ('/drives/data', '/Users/admin/' + PATH))
+        for path in ('', '/public/new', '../new', '.hidden', 'folder/.nested',
+                     'a.ecloud.download', 'a|b.txt', '字' * 800):
             self.error('write_backend_unverified', lambda: reader._arguments(ROW, path))
-        for mount in ('/drives/data', '/drives/data/Users/admin', '/other/data/Users'):
+        for mount in ('/drives/data', '/drives/data/Users', '/drives/data/Users/public', '/other/data/Users/admin'):
             self.error('write_backend_unverified',
                        lambda: reader._arguments(dict(ROW, mount=mount), PATH))
+        for path in ('public/new', 'another-user/private', 'admin/new'):
+            self.assertEqual(reader._arguments(ROW, path), ('/drives/data', '/Users/admin/' + path))
 
     def test_authorization_and_busy_precede_any_index_open(self):
         instance = reader.NativeFileIndexReader()
@@ -114,19 +114,27 @@ class SchemaAndBoundaryTests(unittest.TestCase):
 
     def test_other_reader_or_different_path_cannot_reuse_private_receipt(self):
         instance = reader.NativeFileIndexReader()
-        receipt = reader._Receipt('different reader', '/drives/data', '/Users/' + PATH,
+        receipt = reader._Receipt('different reader', '/drives/data', '/Users/admin/' + PATH,
                                    ROW['id'], '1', (), (), True)
         self.error('write_backend_unverified', lambda: instance.verify_new(
             receipt, ROW, PATH, -1, directory=False, current=lambda: True))
 
+    def test_old_root_receipt_is_not_rebound_to_new_admin_root(self):
+        instance = reader.NativeFileIndexReader()
+        receipt = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/' + PATH,
+                                  'root_' + 'b' * 24, '1', (), (), True)
+        with mock.patch.object(reader, '_OpenedIndex', side_effect=AssertionError('no database open')):
+            self.error('write_backend_unverified', lambda: instance.verify_new(
+                receipt, ROW, PATH, -1, directory=False, current=lambda: True))
+
     def test_mutation_preflight_requires_an_existing_generation_and_absent_target(self):
         instance = reader.NativeFileIndexReader()
-        source = reader._Receipt(instance._identity, '/drives/data', '/Users/' + PATH,
+        source = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/' + PATH,
                                   ROW['id'], '1', (), (1, 2), False, 7)
         target = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/target',
                                   ROW['id'], '1', (), (1, 2), True, None)
         with mock.patch.object(instance, 'preflight', side_effect=[source, target]) as preflight:
-            result = instance.preflight_mutation(ROW, PATH, 'admin/target',
+            result = instance.preflight_mutation(ROW, PATH, 'target',
                                                   operation='move', current=lambda: True)
             self.assertIs(result.source, source)
             self.assertIs(result.target, target)
@@ -134,11 +142,11 @@ class SchemaAndBoundaryTests(unittest.TestCase):
             self.assertTrue(preflight.call_args_list[1].kwargs['require_absent'])
         with mock.patch.object(instance, 'preflight', return_value=target):
             self.error('write_backend_unverified', lambda: instance.preflight_mutation(
-                ROW, PATH, 'admin/target', operation='move', current=lambda: True))
+                ROW, PATH, 'target', operation='move', current=lambda: True))
 
     def test_mutation_requires_both_target_generation_and_source_disappearance(self):
         instance = reader.NativeFileIndexReader()
-        source = reader._Receipt(instance._identity, '/drives/data', '/Users/' + PATH,
+        source = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/' + PATH,
                                   ROW['id'], '1', (), (1, 2), False, 7)
         target = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/target',
                                   ROW['id'], '1', (), (1, 2), True, None)
@@ -146,15 +154,15 @@ class SchemaAndBoundaryTests(unittest.TestCase):
         current = lambda: True
         with mock.patch.object(instance, 'verify_new', return_value=True) as verify, \
                 mock.patch.object(instance, '_verify_absent', return_value=False) as absent:
-            self.assertFalse(instance.verify_mutation(receipt, ROW, PATH, 'admin/target', 1,
+            self.assertFalse(instance.verify_mutation(receipt, ROW, PATH, 'target', 1,
                                                       operation='move', current=current))
             self.assertEqual(verify.call_args.kwargs['after_generation'], 7)
             absent.assert_called_once()
             absent.return_value = True
-            self.assertTrue(instance.verify_mutation(receipt, ROW, PATH, 'admin/target', 1,
+            self.assertTrue(instance.verify_mutation(receipt, ROW, PATH, 'target', 1,
                                                      operation='move', current=current))
             verify.return_value = False
-            self.assertFalse(instance.verify_mutation(receipt, ROW, PATH, 'admin/target', 1,
+            self.assertFalse(instance.verify_mutation(receipt, ROW, PATH, 'target', 1,
                                                       operation='move', current=current))
 
     def test_unrelated_new_sqlite_fd_or_writable_sidecar_is_refused(self):
@@ -196,7 +204,8 @@ class NativeIndexLinuxTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.users = self.root / 'drives/data/Users'
-        self.parent = self.users / 'admin/uploads'
+        self.admin = self.users / 'admin'
+        self.parent = self.admin / 'uploads'
         self.parent.mkdir(parents=True)
         self.cache = self.root / 'drives/data/.DATA_CACHE/Users/admin/file_db'
         self.cache.mkdir(parents=True)
@@ -230,7 +239,7 @@ class NativeIndexLinuxTests(unittest.TestCase):
         return self.reader.preflight(ROW, PATH, current=lambda: self.current, **kwargs)
 
     def file(self):
-        path = self.users / PATH
+        path = self.admin / PATH
         path.write_bytes(b'new native-index test')
         descriptor = os.open(path, os.O_RDONLY)
         self.addCleanup(os.close, descriptor)
@@ -238,7 +247,7 @@ class NativeIndexLinuxTests(unittest.TestCase):
 
     def values(self, descriptor):
         info = os.fstat(descriptor)
-        return ('/Users/' + PATH, info.st_ctime_ns // 10 ** 9,
+        return ('/Users/admin/' + PATH, info.st_ctime_ns // 10 ** 9,
                 info.st_mtime_ns // 10 ** 9, 0, info.st_size, '/drives/data')
 
     def insert(self, values):
@@ -262,7 +271,7 @@ class NativeIndexLinuxTests(unittest.TestCase):
 
     def test_mkdir_requires_real_directory_metadata_and_native_index_row(self):
         receipt = self.preflight()
-        path = self.users / PATH
+        path = self.admin / PATH
         path.mkdir()
         descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, descriptor)
@@ -288,20 +297,20 @@ class NativeIndexLinuxTests(unittest.TestCase):
     def test_move_needs_new_generation_and_no_old_key_in_same_database(self):
         descriptor = self.file()
         self.insert(self.values(descriptor))
-        target = 'admin/uploads/moved.txt'
+        target = 'uploads/moved.txt'
         prepared = self.reader.preflight_mutation(ROW, PATH, target,
                                                    operation='move', current=lambda: True)
-        os.rename(self.users / PATH, self.users / target)
+        os.rename(self.admin / PATH, self.admin / target)
         info = os.fstat(descriptor)
-        values = ('/Users/' + target, info.st_ctime_ns // 10**9,
+        values = ('/Users/admin/' + target, info.st_ctime_ns // 10**9,
                   info.st_mtime_ns // 10**9, 0, info.st_size, '/drives/data')
         self.insert(values)
         self.assertFalse(self.reader.verify_mutation(prepared, ROW, PATH, target, descriptor,
                                                     operation='move', current=lambda: True))
         with sqlite3.connect(self.database) as connection:
-            connection.execute('DELETE FROM tb_file_db_all WHERE path=?', ('/Users/' + PATH,))
+            connection.execute('DELETE FROM tb_file_db_all WHERE path=?', ('/Users/admin/' + PATH,))
             connection.execute('UPDATE tb_file_db_all SET mkey=? WHERE path=?',
-                               (prepared.source.generation, '/Users/' + target))
+                               (prepared.source.generation, '/Users/admin/' + target))
         self.assertFalse(self.reader.verify_mutation(prepared, ROW, PATH, target, descriptor,
                                                     operation='move', current=lambda: True))
         self.insert(values)
@@ -375,7 +384,7 @@ class NativeIndexLinuxTests(unittest.TestCase):
             rows = original(*args, **kwargs)
             replacement = self.parent / 'fixture-new'
             replacement.write_bytes(b'replacement')
-            os.replace(replacement, self.users / PATH)
+            os.replace(replacement, self.admin / PATH)
             return rows
 
         with mock.patch.object(reader, '_query', side_effect=change):
@@ -430,7 +439,7 @@ class NativeIndexLinuxTests(unittest.TestCase):
         immutable = sqlite3.connect(self.database.as_uri() + '?mode=ro&immutable=1', uri=True)
         self.addCleanup(immutable.close)
         self.assertEqual(immutable.execute('SELECT path FROM tb_file_db_all WHERE path=?',
-                                          ('/Users/' + PATH,)).fetchall(), [])
+                                          ('/Users/admin/' + PATH,)).fetchall(), [])
 
     def test_missing_live_shm_is_rejected_without_recreating_it(self):
         self.wal_writer()

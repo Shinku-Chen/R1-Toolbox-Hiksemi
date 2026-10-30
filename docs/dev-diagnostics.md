@@ -70,18 +70,18 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `business` | 原厂应用已有缓存或 Toolbox 上次显式查询、身份确认的 aria2／qB 有界任务队列、上次显式媒体脱敏结果及真实服务现场；与原业务诊断共用采集锁，具体限制见[业务状态](business-diagnostics.md) |
 | `fan` | `FanDiagnostics.snapshot` 的被动预检与现场；不发送温控信号、不启动时间线、不应用策略、不重试接管 |
 | `file_access_readiness` | 仅读可信根规划与固定证明清单，不读内容、凭据或执行 SMART。只读执行器标记 `requires_per_operation_verification`，诊断不授执行权；根规划不算内容读取通过 |
-| `file_backend_context` | 仅显式选择：核对固定管理员逻辑身份、Unix 映射候选、受限 Users 根的句柄／生命周期元数据及固定 emhistor 监听证据。`effects.may_wake_disks:true`；不列用户目录、不读内容或凭据、不签原厂请求、不发原厂文件动作。`file_access_available:false`，上下文证据不证明 ACL 与最终安全对象已经绑定 |
+| `file_backend_context` | 仅显式选择：核对固定管理员逻辑身份、Unix 映射候选、受限 admin 根的句柄／生命周期元数据及固定 emhistor 监听证据。`effects.may_wake_disks:true`；不列用户目录、不读内容或凭据、不签原厂请求、不发原厂文件动作。`file_access_available:false`，上下文证据不证明 ACL 与最终安全对象已经绑定 |
 | `file_protocol` | 仅显式选择：固定精确固件与所有者，核对最多八个规划根的 Users／admin／public `get_info` 与最多两项 `get_list`，共享十二秒窗口、最多四十八次。先验证真实同挂载句柄，失败不发原厂请求；返回四阶段 errno、预期／实际 mount ID、设备号、self／PID1／emhistor namespace 和脱敏协议形状，不返回目录名称、路径、内容、令牌或任意原厂参数。可能唤盘／更新原厂状态，诊断自身 `file_access_available:false` |
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
 | `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
 
-Docker 候选、文件上下文和协议检查会访问元数据，部分原厂查询可能初始化状态并唤盘，只能显式选择，不加入默认采集或轮询。文件边界仍为 `/drives/*/Users/`；元数据或映射候选不代替完整原厂 ACL 和最终句柄。五项文件只读执行器另有逐次运行门槛，八项写合同仍未接入。Docker 证据见[固定项目读取](docker-projects.md)。检测结束时开发窗口失效，丢弃整次结果并返回 `403`，不续期。
+Docker 候选、文件上下文和协议检查会访问元数据，部分原厂查询可能初始化状态并唤盘，只能显式选择，不加入默认采集或轮询。文件边界仍为 `/drives/*/Users/admin/`；元数据或映射候选不代替完整原厂 ACL 和最终句柄。五项文件只读执行器另有逐次运行门槛，八项写合同仍未接入。Docker 证据见[固定项目读取](docker-projects.md)。检测结束时开发窗口失效，丢弃整次结果并返回 `403`，不续期。
 
 读取到的应用缓存不等于完整实时安装列表；下载来源不可用或需要授权时数据保持未知；媒体读取上次显式采集结果和逐项时间，不自动发起原厂媒体查询。白名单授权并不改变这些数据来源的限制。
 
 ## 文件协议与原厂业务显式取证
 
-此前 `d5075ed` 实机七个规划根均未通过挂载门，不能宣称浏览／下载已经可用。部署带 `file_protocol` 的镜像后，用上面的固定项目一次收集完整挂载和 namespace 现场；门槛通过后，文件执行器仍须精确固件、完整原厂 ACL 的 `admin/public` 正子集与真实对象句柄同时通过。见[只读后端](native-file-readonly.md)。不要反复追加少量字段再要求部署试探。
+此前 `d5075ed` 实机七个规划根均未通过挂载门，不能宣称浏览／下载已经可用。部署带 `file_protocol` 的镜像后，用上面的固定项目一次收集完整挂载和 namespace 现场；门槛通过后，文件执行器仍须精确固件、完整原厂 ACL 的 admin 正子树与真实对象句柄同时通过。见[只读后端](native-file-readonly.md)。不要反复追加少量字段再要求部署试探。
 
 独立 `POST /api/dev/native` 只接受两种严格正文：
 
@@ -132,4 +132,4 @@ Docker 候选、文件上下文和协议检查会访问元数据，部分原厂�
 
 ### 文件根被排除时
 
-`{"action":"snapshot","checks":["file_backend_context"]}` 的 `context.root_topology` 会保留筛选前的直接数据挂载候选及拒绝原因，而非只返回已进入授权列表的根。使用已知挂载的本地指纹核对候选，检查文件系统根分类、规范别名歧义、Users 内额外挂载以及当前缓存身份关联；不传入路径或原厂动作。完整字段与隐私边界见[文件后端上下文](file-backend-context.md#筛选前的根资格现场)。该字段不增加默认检测、文件权限或 MCP 工具，也不证明数据目录存在。
+`{"action":"snapshot","checks":["file_backend_context"]}` 的 `context.root_topology` 会保留筛选前的直接数据挂载候选及拒绝原因，而非只返回已进入授权列表的根。admin v3 规划允许子挂载存在，实际跨入仍由逐级句柄检查拒绝。使用已知挂载的本地指纹核对候选，检查文件系统根分类、规范别名歧义、Users 内额外挂载以及当前缓存身份关联；不传入路径或原厂动作。完整字段与隐私边界见[文件后端上下文](file-backend-context.md#筛选前的根资格现场)。该字段不增加默认检测、文件权限或 MCP 工具，也不证明数据目录存在。
