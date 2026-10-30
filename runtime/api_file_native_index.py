@@ -1,4 +1,4 @@
-"""Fixed factory indexing for a newly published owner file, never an RPC proxy.
+"""Fixed factory indexing for owner file mutations, never an RPC proxy.
 
 The exact v260907 SMB bridge receives two fixed-size create/close records. A
 successful send is only a notification; the independent fixed SQLite reader
@@ -44,7 +44,7 @@ def _remaining(deadline, clock):
 
 def _paths(row, path, *, directory=False):
     """Only literal admin descendants and the audited finite wire grammar."""
-    if (directory is not False or type(row) is not dict
+    if (type(directory) is not bool or type(row) is not dict
             or not is_users_root_path(row.get('mount'))
             or not audited_owner_write_rule(path) or '|' in path):
         raise FileAccessError('unsupported_path_class')
@@ -70,6 +70,27 @@ def _new_file_records(row, path):
     _mount, _absolute, share, encoded = _paths(row, path)
     return (_RECORD.pack(b'admin', share, 0x14, encoded, b'file|create|' + encoded)
             + _RECORD.pack(b'admin', share, 0x15, encoded, b''))
+
+
+def _new_records(row, path, *, directory):
+    _mount, _absolute, share, encoded = _paths(row, path, directory=directory)
+    # Raw 0x10 is the native mkdir event. It maps to insert-dir (4), which
+    # starts the factory directory-index worker. No fabricated file close.
+    return (_RECORD.pack(b'admin', share, 0x10, encoded, b'') if directory else
+            _new_file_records(row, path))
+
+
+def _mutation_records(row, source_path, target_path, *, operation):
+    if (operation not in ('rename', 'move', 'replace')
+            or (source_path == target_path) != (operation == 'replace')
+            or operation == 'rename' and source_path.rpartition('/')[0] != target_path.rpartition('/')[0]):
+        raise FileAccessError('invalid_arguments')
+    _mount, _absolute, share, source = _paths(row, source_path)
+    _mount, _absolute, _share, target = _paths(row, target_path)
+    # Native raw 0x21 maps to file-rename (0): delete old key, insert new key,
+    # then the original share/album/sync callbacks consume those real paths.
+    return (_new_file_records(row, target_path) if operation == 'replace' else
+            _RECORD.pack(b'admin', share, 0x21, source, target))
 
 
 def _internal_sata(root, row):
@@ -149,9 +170,10 @@ def _opened_object(root, row, path, descriptor):
     identity = lambda value: (value.st_dev, value.st_ino, value.st_size,
                                value.st_mtime_ns, value.st_ctime_ns)
     before = os.fstat(descriptor)
-    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    directory = stat.S_ISDIR(before.st_mode)
+    if not directory and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
         raise FileAccessError('file_changed')
-    with _Handle(root, row, path) as opened:
+    with _Handle(root, row, path, directory=directory) as opened:
         if identity(os.fstat(opened.fd)) != identity(before):
             raise FileAccessError('file_changed')
     if identity(os.fstat(descriptor)) != identity(before):
@@ -166,10 +188,27 @@ class _IndexReceipt:
     native: tuple
     object_identity: tuple
     reader: object
+    directory: bool = False
+
+
+@dataclass(frozen=True, repr=False)
+class _MutationPrepared:
+    root_id: str
+    source: str
+    target: str
+    operation: str
+    native: tuple
+    reader: object
+
+
+@dataclass(frozen=True, repr=False)
+class _MutationIndexReceipt:
+    prepared: _MutationPrepared
+    object_identity: tuple
 
 
 class NativeFileIndex:
-    """Private new-file bridge; all seams are trusted constructor fixtures only."""
+    """Private fixed-event bridge; seams are trusted constructor fixtures only."""
 
     def __init__(self, root='/', *, reader=None, listener_check=None,
                  disk_check=None, object_check=None, socket_factory=None, clock=None):
@@ -230,12 +269,12 @@ class NativeFileIndex:
                 raise FileAccessError('file_changed')
             _authorized(current)
             connection.settimeout(_remaining(deadline, self._clock))
-            connection.sendall(_new_file_records(row, path))
+            connection.sendall(_new_records(row, path, directory=directory))
             _authorized(current)
             if self._listener(deadline) != signature or self._object(row, path, descriptor) != identity:
                 raise FileAccessError('file_changed')
             _remaining(deadline, self._clock)
-            return _IndexReceipt(row['id'], path, signature, identity, context)
+            return _IndexReceipt(row['id'], path, signature, identity, context, directory)
         except FileAccessError:
             raise
         except Exception:
@@ -249,7 +288,8 @@ class NativeFileIndex:
         _paths(row, path, directory=directory)
         _authorized(current)
         if (not isinstance(receipt, _IndexReceipt) or receipt.root_id != row.get('id')
-                or receipt.path != path or self._object(row, path, descriptor) != receipt.object_identity):
+                or receipt.path != path or receipt.directory != directory
+                or self._object(row, path, descriptor) != receipt.object_identity):
             raise FileAccessError('file_changed')
         deadline = self._clock() + _TIMEOUT
         if self._listener(deadline) != receipt.native:
@@ -258,6 +298,91 @@ class NativeFileIndex:
                                            directory=directory, current=current)
         _authorized(current)
         if self._object(row, path, descriptor) != receipt.object_identity:
+            raise FileAccessError('file_changed')
+        _remaining(deadline, self._clock)
+        return result is True
+
+    def preflight_mutation(self, row, source_path, target_path, *, operation, current):
+        """Return a private pre-publication index generation and native binding."""
+        _authorized(current)
+        _mutation_records(row, source_path, target_path, operation=operation)
+        deadline = self._clock() + _TIMEOUT
+        try:
+            if self._disk(row) is not True:
+                raise FileAccessError('write_backend_unverified')
+            native = self._listener(deadline)
+            prepared = self._backend().preflight_mutation(row, source_path, target_path,
+                                                        operation=operation, current=current)
+            _authorized(current)
+            _remaining(deadline, self._clock)
+            return _MutationPrepared(row['id'], source_path, target_path, operation, native, prepared)
+        except FileAccessError:
+            raise
+        except Exception:
+            raise FileAccessError('write_backend_unverified') from None
+
+    @staticmethod
+    def _mutation_binding(prepared, row, source_path, target_path, operation):
+        if (type(prepared) is not _MutationPrepared or prepared.root_id != row.get('id')
+                or prepared.source != source_path or prepared.target != target_path
+                or prepared.operation != operation):
+            raise FileAccessError('write_backend_unverified')
+
+    def notify_mutation(self, row, source_path, target_path, descriptor,
+                        *, operation, current, prepared):
+        """Send exactly once after final-fd publication; uncertainty is retained."""
+        self._mutation_binding(prepared, row, source_path, target_path, operation)
+        payload = _mutation_records(row, source_path, target_path, operation=operation)
+        _authorized(current)
+        deadline = self._clock() + _TIMEOUT
+        connection = None
+        try:
+            identity = self._object(row, target_path, descriptor)
+            if self._listener(deadline) != prepared.native:
+                raise FileAccessError('native_unavailable')
+            connection = self._socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(_remaining(deadline, self._clock))
+            connection.connect(str(Path(self.root).absolute() / _SOCKET.lstrip('/')))
+            if not hasattr(socket, 'SO_PEERCRED'):
+                raise FileAccessError('native_unavailable')
+            peer = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if peer[0] != prepared.native[0][0] or peer[1] != 0:
+                raise FileAccessError('native_unavailable')
+            if (self._listener(deadline) != prepared.native
+                    or self._object(row, target_path, descriptor) != identity):
+                raise FileAccessError('file_changed')
+            _authorized(current)
+            connection.settimeout(_remaining(deadline, self._clock))
+            connection.sendall(payload)
+            _authorized(current)
+            if (self._listener(deadline) != prepared.native
+                    or self._object(row, target_path, descriptor) != identity):
+                raise FileAccessError('file_changed')
+            _remaining(deadline, self._clock)
+            return _MutationIndexReceipt(prepared, identity)
+        except FileAccessError:
+            raise
+        except Exception:
+            raise FileAccessError('result_unconfirmed') from None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def verify_mutation(self, receipt, row, source_path, target_path, descriptor,
+                        *, operation, current):
+        if type(receipt) is not _MutationIndexReceipt:
+            raise FileAccessError('write_backend_unverified')
+        self._mutation_binding(receipt.prepared, row, source_path, target_path, operation)
+        _authorized(current)
+        deadline = self._clock() + _TIMEOUT
+        if (self._listener(deadline) != receipt.prepared.native
+                or self._object(row, target_path, descriptor) != receipt.object_identity):
+            raise FileAccessError('file_changed')
+        result = self._backend().verify_mutation(receipt.prepared.reader, row, source_path,
+            target_path, descriptor, operation=operation, current=current)
+        _authorized(current)
+        if (self._listener(deadline) != receipt.prepared.native
+                or self._object(row, target_path, descriptor) != receipt.object_identity):
             raise FileAccessError('file_changed')
         _remaining(deadline, self._clock)
         return result is True

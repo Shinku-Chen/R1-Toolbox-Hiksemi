@@ -25,6 +25,7 @@ _REASONS = {
     'root_unavailable': '当前已授权 Users 根的真实挂载与生命周期无法确认。',
     'unsupported_file_type': '当前对象类型、符号链接或硬链接不支持文件访问。',
     'unsupported_path_class': '原厂文件后端仅接入管理员和 public 子树；其他用户空间尚不支持。',
+    'unsupported_precondition': '此操作需要同一已授权 Users 挂载；跨根或跨文件系统移动尚不支持。',
     'not_found': '已授权目录中未找到此对象。',
     'target_exists': '目标名称已经存在；未覆盖、自动改名或合并。',
     'directory_changed': '目录或分页绑定发生变化，请重新浏览。',

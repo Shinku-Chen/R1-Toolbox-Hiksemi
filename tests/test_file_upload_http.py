@@ -153,17 +153,24 @@ class FileUploadHTTPRules(UploadHTTPBase):
         for name in ('Transfer-Encoding', 'Expect'):
             self.assertEqual(self.binary(key=key, headers={name: 'chunked'})[0], 400)
 
-    def test_only_closed_upload_tools_are_registered_and_pending_mutations_stay_absent(self):
+    def test_concrete_mutations_register_without_expanding_old_upload_grants(self):
         self.assertTrue({'prepare_file_upload', 'commit_file_upload', 'get_file_operation'} <= IMPLEMENTED_TOOLS)
         names = {row['name'] for row in tool_catalog()}
         self.assertIn('prepare_file_upload', names)
-        self.assertFalse({'create_directory', 'rename_file', 'copy_file', 'move_file', 'trash_file'} & names)
+        self.assertTrue({'prepare_file_overwrite', 'create_directory', 'rename_file', 'copy_file', 'move_file', 'trash_file'} <= names)
+        self._patch(self.server.integration, 'file_root_catalog', return_value={
+            'boundary_version': 2, 'status': 'authorization_plan', 'available': True,
+            'roots': [{'id': ROOT, 'mount': '/drives/fixture/Users', 'read_only': False}]})
         status, _, value = self.browser('POST', '/api/access/keys', {
-            'name': 'no fake writer', 'role': 'readwrite', 'scopes': ['files'],
+            'name': 'explicit concrete writer', 'role': 'readwrite', 'scopes': ['files'],
             'file_roots': [{'id': ROOT, 'path': '', 'access': 'readwrite'}],
             'tool_grants': ['rename_file'], 'expires_days': 1})
-        self.assertEqual(status, 400)
-        self.assertFalse(value['ok'])
+        self.assertEqual(status, 200)
+        self.assertEqual(value['key']['tool_grants'], ['rename_file'])
+        old = self.machine_key(write=True)
+        principal, reason = self.server.api_access.authorize('Bearer ' + old['token'], '127.0.0.1')
+        self.assertEqual(reason, 'ok')
+        self.assertNotIn('prepare_file_overwrite', {item['name'] for item in tool_catalog(principal)})
         upload = next(row for row in contract_catalog()['tools'] if row['name'] == 'prepare_file_upload')
         self.assertTrue(upload['implemented'])
 

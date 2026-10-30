@@ -32,7 +32,8 @@ CONTENT = '/api/integration/files/transfers/' + TRANSFER + '/content'
 def entry(kind='file'):
     return {'name': '影片.mkv', 'path': '视频/影片.mkv', 'type': kind,
             'size_bytes': 1234 if kind == 'file' else None,
-            'modified_at': WHEN, 'downloadable': kind == 'file'}
+            'modified_at': WHEN, 'downloadable': kind == 'file',
+            'object_version': VERSION if kind == 'file' else None}
 
 
 def operation():
@@ -75,6 +76,8 @@ def valid_inputs():
         'get_docker_project_status': {'project_id': PROJECT},
         'get_docker_project_summary': {'project_id': PROJECT},
         'prepare_file_upload': {**change, 'size_bytes': 1234, 'sha256': HASH},
+        'prepare_file_overwrite': {**change, 'size_bytes': 1234, 'sha256': HASH,
+                                   'expected_target_version': VERSION, 'confirmed': True},
         'commit_file_upload': {'transfer_id': TRANSFER, 'idempotency_key': KEY},
         'create_directory': change,
         'rename_file': {**change, 'new_name': '新名称.txt', 'expected_source_version': VERSION},
@@ -128,6 +131,10 @@ def valid_outputs():
                                 'direction': 'upload', 'state': 'prepared', 'size_bytes': 1234,
                                 'sha256': HASH, 'overwrite': False, 'expires_at': WHEN,
                                 'may_wake_disks': True},
+        'prepare_file_overwrite': {'ok': True, 'transfer_id': TRANSFER, 'content_path': CONTENT,
+                                  'direction': 'upload', 'state': 'prepared', 'size_bytes': 1234,
+                                  'sha256': HASH, 'overwrite': True, 'expires_at': WHEN,
+                                  'may_wake_disks': True},
         'commit_file_upload': file_op,
         'create_directory': file_op,
         'rename_file': file_op,
@@ -180,9 +187,9 @@ class ApiContractsTests(unittest.TestCase):
 
     def test_twenty_definitions_register_only_concrete_callbacks(self):
         self.assertEqual(set(self.tools), set(valid_inputs()))
-        self.assertEqual(len(self.catalog['tools']), 20)
+        self.assertEqual(len(self.catalog['tools']), 21)
         self.assertEqual(sum(t['category'] == 'read' for t in self.tools.values()), 9)
-        self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 8)
+        self.assertEqual(sum(t['category'] == 'file_write' for t in self.tools.values()), 9)
         self.assertEqual(sum(t['category'] == 'docker_update' for t in self.tools.values()), 3)
         active = {item['name'] for item in tool_catalog()}
         self.assertEqual(len(active), len(tool_catalog()), 'live names must remain unique')
@@ -359,7 +366,8 @@ class ApiContractsTests(unittest.TestCase):
             self.assertEqual(rule['direction_from'], 'trusted_transfer_record')
             conditions = {item['direction']: item for item in rule['conditional_requirements']}
             self.assertEqual(conditions['upload']['minimum_role'], 'readwrite')
-            self.assertEqual(conditions['upload']['tool_grants'], ['prepare_file_upload'])
+            self.assertEqual(conditions['upload']['any_tool_grants'], ['prepare_file_upload', 'prepare_file_overwrite'])
+            self.assertEqual(conditions['upload']['prepare_tool_from'], 'trusted_transfer_record')
             self.assertEqual(conditions['upload']['original_resource_access'], 'write')
             self.assertEqual(conditions['download']['original_resource_access'], 'read')
         query = self.tools['get_file_operation']
@@ -374,7 +382,8 @@ class ApiContractsTests(unittest.TestCase):
         self.assertEqual([rule['access'] for rule in copy_rules[:2]], ['read', 'write'])
         self.assertEqual([rule['access'] for rule in move_rules[:2]], ['write', 'write'])
         self.assertFalse(move_rules[2]['copy_then_delete_fallback_allowed'])
-        self.assertTrue(move_rules[2]['atomic_move_required'])
+        self.assertFalse(move_rules[2]['atomic_move_required'])
+        self.assertTrue(move_rules[2]['two_phase_recoverable_custody'])
         rules = self.tools['get_docker_project_task']['authorization']['resource_rules']
         self.assertEqual(rules[0]['operation'], 'inspect')
         self.assertTrue(rules[1]['same_key_and_generation'])

@@ -132,7 +132,11 @@
             "PUT"
           ],
           "minimum_role": "readwrite",
-          "required_tool": "prepare_file_upload",
+          "prepare_tool_from": "trusted_prepared_transfer",
+          "required_any_tool": [
+            "prepare_file_upload",
+            "prepare_file_overwrite"
+          ],
           "resource_access": "write",
           "sha256_from": "trusted_prepared_transfer",
           "status": "registered_requires_authorization_and_live_backend",
@@ -736,6 +740,16 @@
               "name": {
                 "$ref": "#/$defs/file_name"
               },
+              "object_version": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/object_version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "path": {
                 "$ref": "#/$defs/path"
               },
@@ -755,7 +769,8 @@
               "type",
               "size_bytes",
               "modified_at",
-              "downloadable"
+              "downloadable",
+              "object_version"
             ],
             "type": "object"
           },
@@ -786,6 +801,13 @@
                 "type": "null"
               }
             ]
+          },
+          "object_version": {
+            "description": "仅作已核验对象的版本绑定；不是强内容 ETag。",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$(?![\\s\\S])",
+            "type": "string"
           },
           "path": {
             "description": "相对可信物理根的 POSIX 路径；1024 个 Unicode 标量最多 4096 个 UTF-8 字节。",
@@ -1080,6 +1102,16 @@
               "name": {
                 "$ref": "#/$defs/file_name"
               },
+              "object_version": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/object_version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "path": {
                 "$ref": "#/$defs/path"
               },
@@ -1099,7 +1131,8 @@
               "type",
               "size_bytes",
               "modified_at",
-              "downloadable"
+              "downloadable",
+              "object_version"
             ],
             "type": "object"
           },
@@ -1130,6 +1163,13 @@
                 "type": "null"
               }
             ]
+          },
+          "object_version": {
+            "description": "仅作已核验对象的版本绑定；不是强内容 ETag。",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$(?![\\s\\S])",
+            "type": "string"
           },
           "path": {
             "description": "相对可信物理根的 POSIX 路径；1024 个 Unicode 标量最多 4096 个 UTF-8 字节。",
@@ -1476,12 +1516,14 @@
                 ]
               },
               {
+                "any_tool_grants": [
+                  "prepare_file_upload",
+                  "prepare_file_overwrite"
+                ],
                 "direction": "upload",
                 "minimum_role": "readwrite",
                 "original_resource_access": "write",
-                "tool_grants": [
-                  "prepare_file_upload"
-                ]
+                "prepare_tool_from": "trusted_transfer_record"
               }
             ],
             "direction_from": "trusted_transfer_record",
@@ -1896,12 +1938,14 @@
                 ]
               },
               {
+                "any_tool_grants": [
+                  "prepare_file_upload",
+                  "prepare_file_overwrite"
+                ],
                 "direction": "upload",
                 "minimum_role": "readwrite",
                 "original_resource_access": "write",
-                "tool_grants": [
-                  "prepare_file_upload"
-                ]
+                "prepare_tool_from": "trusted_transfer_record"
               }
             ],
             "direction_from": "trusted_transfer_record",
@@ -3229,6 +3273,301 @@
             "root_fallback_allowed": false,
             "root_field": "root_id",
             "root_mutation_allowed": false,
+            "same_opened_object_required": true,
+            "target_version_required": true
+          },
+          {
+            "captured_previous_retained": true,
+            "kind": "recoverable_overwrite",
+            "owner_initialized_custody_required": true,
+            "single_step_source_cas": false,
+            "wrong_capture_preserved_without_publish": true
+          }
+        ],
+        "runtime_acl_required": true,
+        "scope": "files",
+        "tool_grant": "prepare_file_overwrite",
+        "unknown_denied": true
+      },
+      "category": "file_write",
+      "execution_allowed": false,
+      "idempotency": {
+        "automatic_retry_allowed": false,
+        "mode": "required_key",
+        "same_key_changed_arguments": "idempotency_conflict",
+        "same_key_same_arguments_returns_original": true
+      },
+      "implemented": true,
+      "inputSchema": {
+        "$defs": {
+          "change_path": {
+            "description": "非空相对路径；变更不能以授权物理根本身为对象。",
+            "maxLength": 1024,
+            "minLength": 1,
+            "pattern": "^(?!(?:.*/)?(?:\\.|\\.\\.)(?:/|$))(?:[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\ud800-\\udfff]+(?:/[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\ud800-\\udfff]+)*)?$(?![\\s\\S])",
+            "type": "string",
+            "x-maxUtf8Bytes": 4096
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$(?![\\s\\S])",
+            "type": "string"
+          },
+          "object_version": {
+            "description": "仅作已核验对象的版本绑定；不是强内容 ETag。",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:-]+$(?![\\s\\S])",
+            "type": "string"
+          },
+          "root_id": {
+            "maxLength": 29,
+            "minLength": 29,
+            "pattern": "^root_[0-9a-f]{24}$",
+            "type": "string"
+          },
+          "sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "const": true
+          },
+          "expected_target_version": {
+            "$ref": "#/$defs/object_version"
+          },
+          "idempotency_key": {
+            "$ref": "#/$defs/idempotency_key"
+          },
+          "path": {
+            "$ref": "#/$defs/change_path"
+          },
+          "root_id": {
+            "$ref": "#/$defs/root_id"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "size_bytes": {
+            "maximum": 8589934592,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "root_id",
+          "path",
+          "size_bytes",
+          "sha256",
+          "expected_target_version",
+          "confirmed",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "min_role": "readwrite",
+      "name": "prepare_file_overwrite",
+      "outputSchema": {
+        "$defs": {
+          "content_path": {
+            "maxLength": 110,
+            "minLength": 1,
+            "pattern": "^/api/integration/files/transfers/transfer_[0-9a-f]{32}/content$(?![\\s\\S])",
+            "type": "string"
+          },
+          "error": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "not_implemented",
+                  "invalid_arguments",
+                  "invalid_key",
+                  "scope_denied",
+                  "role_denied",
+                  "tool_denied",
+                  "permission_denied",
+                  "root_unavailable",
+                  "acl_unverified",
+                  "secure_open_unavailable",
+                  "unsupported_file_type",
+                  "not_found",
+                  "directory_changed",
+                  "file_changed",
+                  "transfer_expired",
+                  "transfer_busy",
+                  "transfer_unavailable",
+                  "unsupported_range",
+                  "unsupported_precondition",
+                  "unsupported_path_class",
+                  "target_exists",
+                  "target_changed",
+                  "checksum_mismatch",
+                  "recycle_unavailable",
+                  "write_backend_unverified",
+                  "idempotency_conflict",
+                  "project_unavailable",
+                  "project_binding_changed",
+                  "native_unavailable",
+                  "plan_expired",
+                  "plan_conflict",
+                  "task_unavailable",
+                  "resource_busy",
+                  "limit_exceeded",
+                  "timeout",
+                  "result_unconfirmed"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\ud800-\\udfff]*$(?![\\s\\S])",
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "type": "object"
+          },
+          "failure": {
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/error"
+              },
+              "ok": {
+                "const": false
+              }
+            },
+            "required": [
+              "ok",
+              "error"
+            ],
+            "type": "object"
+          },
+          "sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "maxLength": 40,
+            "minLength": 1,
+            "pattern": "Z$(?![\\s\\S])",
+            "type": "string"
+          },
+          "transfer_id": {
+            "maxLength": 41,
+            "minLength": 41,
+            "pattern": "^transfer_[0-9a-f]{32}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "content_path": {
+                "$ref": "#/$defs/content_path"
+              },
+              "direction": {
+                "const": "upload"
+              },
+              "expires_at": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "may_wake_disks": {
+                "const": true
+              },
+              "ok": {
+                "const": true
+              },
+              "overwrite": {
+                "const": true
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "size_bytes": {
+                "maximum": 8589934592,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "state": {
+                "const": "prepared"
+              },
+              "transfer_id": {
+                "$ref": "#/$defs/transfer_id"
+              }
+            },
+            "required": [
+              "ok",
+              "transfer_id",
+              "content_path",
+              "direction",
+              "state",
+              "size_bytes",
+              "sha256",
+              "overwrite",
+              "expires_at",
+              "may_wake_disks"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/failure"
+          }
+        ]
+      },
+      "scope": "files",
+      "status": "registered_requires_authorization",
+      "title": "准备覆盖已有文件",
+      "unimplemented_reason": null
+    },
+    {
+      "authorization": {
+        "admin_bypass_allowed": false,
+        "bearer_only": true,
+        "browser_cookie_or_developer_window_allowed": false,
+        "current_credential_required": true,
+        "current_expiry_required": true,
+        "grant_revision_required": true,
+        "mcp_enabled_required": true,
+        "minimum_role": "readwrite",
+        "policy_versions": [
+          3
+        ],
+        "real_peer_required": true,
+        "resource_rules": [
+          {
+            "access": "write",
+            "component_boundary": true,
+            "kind": "file",
+            "live_identity_required": true,
+            "native_path_class": "owner_admin_descendants",
+            "native_subject_acl_required": true,
+            "parent_access": "write",
+            "path_field": "path",
+            "root_fallback_allowed": false,
+            "root_field": "root_id",
+            "root_mutation_allowed": false,
             "same_opened_object_required": true
           },
           {
@@ -3508,8 +3847,10 @@
             "original_grant_revision": true,
             "original_resource_access": "write",
             "original_target_and_overwrite_only": true,
-            "required_tool_grants": [
-              "prepare_file_upload"
+            "prepare_tool_from": "trusted_transfer_record",
+            "required_any_tool_grants": [
+              "prepare_file_upload",
+              "prepare_file_overwrite"
             ],
             "same_key_and_generation": true,
             "same_peer": true,
@@ -3684,6 +4025,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",
@@ -3830,7 +4172,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "change_path": {
@@ -3997,6 +4339,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",
@@ -4095,20 +4438,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "新建单个目录",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -4162,7 +4494,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "change_path": {
@@ -4350,6 +4682,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",
@@ -4448,20 +4781,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "重命名文件",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -4511,7 +4833,8 @@
             "copy_then_delete_fallback_allowed": false,
             "kind": "file_change_semantics",
             "recursive": false,
-            "same_filesystem_required": false
+            "same_filesystem_required": false,
+            "two_phase_recoverable_custody": false
           }
         ],
         "runtime_acl_required": true,
@@ -4527,7 +4850,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "change_path": {
@@ -4713,6 +5036,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",
@@ -4811,20 +5135,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "复制普通文件",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -4870,11 +5183,12 @@
             "same_opened_object_required": true
           },
           {
-            "atomic_move_required": true,
+            "atomic_move_required": false,
             "copy_then_delete_fallback_allowed": false,
             "kind": "file_change_semantics",
             "recursive": false,
-            "same_filesystem_required": true
+            "same_filesystem_required": true,
+            "two_phase_recoverable_custody": true
           }
         ],
         "runtime_acl_required": true,
@@ -4890,7 +5204,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "change_path": {
@@ -5076,6 +5390,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",
@@ -5174,20 +5489,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
-      "title": "原子移动普通文件",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "status": "registered_requires_authorization",
+      "title": "可恢复移动普通文件",
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -5238,7 +5542,7 @@
         "same_key_changed_arguments": "idempotency_conflict",
         "same_key_same_arguments_returns_original": true
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "change_path": {
@@ -5420,6 +5724,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",
@@ -5518,20 +5823,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "移入原厂回收站",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "native_index_quota_atomicity",
-          "isolated_write_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -5717,6 +6011,7 @@
               "tool": {
                 "enum": [
                   "prepare_file_upload",
+                  "prepare_file_overwrite",
                   "commit_file_upload",
                   "create_directory",
                   "rename_file",

@@ -1,6 +1,6 @@
-# 原厂主体、真实文件读取与新文件上传
+# 原厂主体、真实文件读取与受限文件变更
 
-已接入五项真实读取执行器：`list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer`。生产代码为 `runtime/api_file_provider.py` 与 `runtime/api_file_executor.py`，内容传输复用 `api_file_transfers.py`。固定原厂所有者、精确固件和当前 `Users` 根均核验后，读取仅支持管理员 `admin` 与 `public` 子树；其他用户子树明确返回 `unsupported_path_class`。新增文件上传后端位于 `api_file_write_backend.py`，仅导出 `prepare_file_upload`、`commit_file_upload`、`get_file_operation`，并须逐次通过独立原厂索引桥；改名、复制、移动、目录创建、覆盖与回收站仍不注册执行回调。
+已接入五项真实读取执行器：`list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer`。生产代码为 `runtime/api_file_provider.py` 与 `runtime/api_file_executor.py`，内容传输复用 `api_file_transfers.py`。固定原厂所有者、精确固件和当前 `Users` 根均核验后，读取仅支持管理员 `admin` 与 `public` 子树；其他用户子树明确返回 `unsupported_path_class`。上传后端位于 `api_file_write_backend.py`，受限变更位于 `api_file_mutations.py`，已增加目录创建、普通文件复制／改名／同盘移动、版本覆盖和真实原厂回收站的生产回调；完整范围、所有者 custody 初始化、确认、版本与持久恢复规则见 [file-mutations.md](file-mutations.md)。本文件保留早期只读／新文件子集证据，并在末节记录最新固定索引和回收后端；生产实现存在不代表这些新增效果已通过 NAS 实机验收。
 
 ## 判权依据与完整分支
 
@@ -159,3 +159,57 @@ verify_new(receipt, row, relative_path, fd, *, directory=False, current)  # 精�
 6. 样本的原厂索引／相册／备份状态是否一致；缺少这些证据时，继续明确拒绝对应写工具，不把 HTTP 200 或文件存在当成功。
 
 这份清单是未来隔离验收合同，当前没有执行或授权其写入。纯只读检测也无法证明写入冲突、异步状态或原子提交；这些事实不能靠另一轮少量字段镜像补丁替代。
+
+## 固定索引与可恢复回收后端专项证据（2026-10-30）
+
+以下实现仍限定于 SHA-256 为 `402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26` 的原厂 `emhistor`。本次只读取已提取的 ELF 和原厂脚本，没有在 NAS 上运行程序、发送写请求或改动旧验收文件。Linux fixture、原厂协议静态证据和实机验收分别记录，不能互相替代。
+
+### 新目录、复制、覆盖、改名与同盘移动的索引确认
+
+固定 Unix 桥仍使用 `/tmp/UNIX.domain` 的 `Struct('<16s32sI1024s1024s')`。所有消息的主体为固定 `admin`，share 为当前已核验的物理挂载，source／target 为真实的最终用户路径；私有 custody 路径不进入消息，也不冒充原厂逻辑用户名。消息编号由实现固定，客户端没有 event、action 或 SQL 参数。
+
+| 文件效果 | 固定通知与静态调用链 | 独立完成证据 |
+|---|---|---|
+| 新文件与复制出的文件 | create `0x14`，随后同 source 的 close `0x15`；后者映射 insert-file `1` | 最终同一 fd、路径及原厂索引的 mount、类型、长度、秒级 ctime／mtime 全部相符 |
+| 新目录 | 单条 mkdir `0x10`；`0x5806c2` 映射 insert-dir `4`，`0x583d83 → 0x557796` 启动原厂目录索引线程 | 同一真实目录 fd 与 `isdir=1` 的精确索引行相符；通知发送不代表线程完成 |
+| 覆盖 | 新最终 inode 发布后只发送上述 create／close 固定对 | 先前目标索引代际已绑定；最终精确行的 `mkey` 必须严格前进，不能用同秒同长度旧行确认 |
+| 普通文件改名／同盘移动 | 单条 rename `0x21`；`0x5807a7` 按目标对象类型映射文件 rename `0`；`0x583d09` 先 `0x557882` 删除旧索引，再 `0x583d2a → 0x5576aa` 插入新索引 | 旧精确 key 消失、新精确 key 匹配同一最终 fd，且新 `mkey` 严格大于变更前代际 |
+
+`mkey` 并非 inode 或内容哈希。上述单文件 INSERT 的 `0x56ad1d` 使用 `INSERT OR REPLACE ... VALUES(NULL,...)`，配合已核验 `AUTOINCREMENT` 结构生成新代际，因此 rename／move 同样不是保留 `mkey` 的 UPDATE。桥将变更前的原厂身份、源／目标 key、数据库 inode 和代际封装为私有 `prepared`，执行器必须把它交回 `notify_mutation`；不能事后重新采样旧行代替变更前证据。`verify_mutation` 只观察，不重发通知。目录改名、目录复制、跨盘移动不由此证明。
+
+所有读取保持固定 `FILE_DB_V102`、精确 path 查询、模式 `mode=ro`、`query_only`、SQL authorizer、同挂载和实际 SQLite fd 门槛。增加 `mkey` 这一列不增加遍历、搜索或任意 SQL 能力；既有主库／SHM 只读与 WAL 内部 fd 规则不变。
+
+### 真实原厂回收站的结构与恢复来源
+
+回收数据库的确切位置是物理挂载下的 `.DATA_CACHE/Recycle/Recycle.db`。`0x651a11` 建表为固定十七列：`id/uuid/src/name/isdir/deltime/userid/md5name/size/mtime/ctime/i32flag1/i32flag2/i64flag1/i64flag2/szflag1/szflag2`；唯一原厂普通索引为 `deltime_index`。`0x651ce4` 插入前十一列并将六个预留列置为 NULL。`src` 保存带 `/Users/admin/...` 的挂载相对原路径，`name` 为原名称；不能填写 Toolbox staging 路径后宣称能从原位置恢复。
+
+`0x64961d` 与恢复分支 `0x64a2bd` 明确构造归档目录为：
+
+```text
+<物理挂载>/Users/admin/.DATA_CACHE/Recycle/100000/<md5name>
+```
+
+这里的 `100000` 是固定原厂逻辑所有者 ID，不是 Unix UID。`0x64a000` 从回收记录的 UUID 获取当前物理挂载，组合上述归档路径和原 `src`，再执行恢复；原厂 UI 因而可以识别同一张原厂表中的本批登记记录。原厂恢复包含遇同名后自动生成新名的分支；Toolbox 的所有者恢复更收紧为原位置空缺时 `renameat2(RENAME_NOREPLACE)`，不覆盖或自动换名。
+
+原厂 UUID 也不是可直接复制的 Linux FS UUID。`disk_create_zonelist@0xaa5d93` 把原厂 `get_zonelist_info.sh` 的第五列放入 zone `+0x45c`，`disk_get_uuid_byfilepath@0xaaf902` 与恢复的 `disk_get_mntpath_byuuid@0xaae406` 使用这一列。脚本 `MKUUID` 对 `echo <FS_UUID>` 取 MD5，即包含末尾换行；运行时必须核验固定脚本 SHA-256 `b091efc416336eae138b67b428d8d1b2d68a8de125a5d4004d3a9ea55a5ebfd4`，只从设备号绑定的 udev 与当前 sysfs partition `uevent` 读取合法 ext4 UUID。缺失、重复、脚本改变、NTFS 回退、RAID、加密或未核验盘类别都拒绝，不运行原厂脚本、blkid、SMART 或猜测标签。
+
+### 私有捕获、单条登记与失败恢复
+
+`NativeFileRecycle` 只接受已经过文件执行器完整逻辑 ACL、Token 范围、版本与哈希核验的普通文件，且文件先进入所有者显式建立的可信 `CustodyStage`。其私有接口为：
+
+```python
+preflight(row, path, *, current)  # 捕获前的固定身份、目录与数据库预检
+archive_captured(plan, row, path, fd, stage, *, current)  # 私有收据
+verify(receipt, row, path, fd, *, current)  # 不重放的独立确认
+restore_manifest(row, manifest, stage, *, current)  # 仅所有者恢复路由
+```
+
+预检只接受既有的原厂目录与原厂回收数据库，不创建或接管原厂目录、不初始化／迁移原厂 schema。完整目录链必须为 root 所有、无 group／other 写权限且无 POSIX 扩展／默认 ACL；最终目录、数据库和真实 SQLite fd 均须匹配同一已授权挂载。当前登记写子集限于原厂 rollback journal 模式，遇已有 WAL／SHM／hot journal 则拒绝，不修复、不降级、不开只读 immutable 快照冒充活库。
+
+原厂恢复 locator 在私有 manifest 中持久化后，才允许把同一已验证 `stage/source` 通过 `RENAME_NOREPLACE` 移入上述真实归档目录。固定 `BEGIN IMMEDIATE` 事务只核对本次 `md5name + userid` 精确目标、插入一条白名单记录并再次精确核对，`synchronous=FULL` 提交；schema、authorizer 和受限 SQL 都在代码中固定，任何客户端都不能提供 SQL、UUID、任意表、原厂 action 或归档目的地。主库与 journal 的实际 SQLite fd 在查询／写入前后、提交前后持续匹配当前精确 inode、打开模式和挂载；不以看似正确的 journal 路径代替 SQLite 实际持有的句柄。这是显式写入，会更新原厂数据库和 SQLite 内部 journal，不宣传全程无副作用。
+
+真实归档与登记完成后只发一次固定 `0x2a` 原路径删除通知，让原有原厂索引、相册和同步后处理消费原路径变化。完成必须同时观察同一已持有 fd／归档 inode、原路径空缺、精确原厂回收记录与原文件索引 key 消失。SQL 成功、通知发送或单独文件消失均不足以完成。内容一致性还由文件执行器在 custody／发布和后续查询的完整哈希复验保证，不能用秒级时间戳代替。
+
+移动后发生 SQL、授权、身份、同步或通知失败时，不删除归档、不恢复性重放，也不声称已回滚。私有 manifest 保留原根、原路径、归档名称、对象身份、完整 SHA-256、原厂记录 ID 与阶段。所有者显式恢复既支持已经登记的原厂归档，也支持尚未登记的同一归档，以及意图写下后尚在原 stage 的同一文件；只对本次精确登记 ID、十个业务字段和六个仍为 NULL 的预留字段共同匹配的记录执行 DELETE，不清空回收站、不列出其他条目。若归档名或数据库行冲突导致本文件尚在 stage，恢复直接使用这个同一 stage 文件，不打开原厂归档／数据库，也不删除碰撞对象；原厂 DB 缺失、hot journal 或目录故障不阻止此私有文件恢复。完整归档名的 UTF-8 长度在捕获前限制为 255 字节，尾点扩展名可恢复。原文件位置已有对象则拒绝并保留两者。恢复前后均按私有 SHA-256 全量核对字节，保留旧可写 fd 的进程即使恢复 mtime 也不能通过；该显式批量恢复沿用文件操作的 30 分钟上限。恢复移动前持久化 `result_unconfirmed` 收据，移动后失败或重启不重放；只有内核明确拒绝同名／缺源且尚未移动时才允许新的恢复尝试。机器 Token 没有这个恢复入口。
+
+新增 `tests/test_api_file_native_recycle.py` 包含 schema／authorizer／UUID 固定投影检查，以及 Linux root 下真实目录 fd、原子无覆盖移动、SQLite 单条归档与独立确认、插入失败后的持久定位／恢复、同名恢复拒绝、目录权限与 hot journal 拒绝。Windows 明确跳过 Linux 用例；这些检查不等于 NAS 上的原厂 UI 可见、原厂恢复和业务后处理已完成验收。最终一次隔离实机验收仍须使用所有者选定的临时普通文件，确认真实回收列表可见、原路径与用户绑定、原厂 UI 恢复到预期位置、字节哈希不变与未知结果不重放；不对旧文件执行覆盖或回收。

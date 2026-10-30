@@ -20,6 +20,7 @@ IMPLEMENTED_TOOLS = frozenset((
     'plan_docker_project_update', 'execute_docker_project_update', 'get_docker_project_task',
     'list_directory', 'get_file_info', 'prepare_file_download', 'get_file_transfer', 'cancel_file_transfer',
     'prepare_file_upload', 'commit_file_upload', 'get_file_operation',
+    'prepare_file_overwrite', 'create_directory', 'rename_file', 'copy_file', 'move_file', 'trash_file',
 ))
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',
@@ -81,7 +82,7 @@ _DOWNLOAD_STATES = ['prepared', 'streaming', 'ready', 'interrupted',
 _UPLOAD_STATES = ['prepared', 'receiving', 'interrupted', 'verified',
                   'committing', 'completed', 'cancelled', 'expired', 'failed']
 _FILE_WRITE_TOOLS = [
-    'prepare_file_upload', 'commit_file_upload', 'create_directory',
+    'prepare_file_upload', 'prepare_file_overwrite', 'commit_file_upload', 'create_directory',
     'rename_file', 'copy_file', 'move_file', 'trash_file',
 ]
 
@@ -132,7 +133,8 @@ _DEFS = {
         'name': _ref('file_name'), 'path': _ref('path'),
         'type': {'enum': ['file', 'directory']},
         'size_bytes': _ref('nullable_integer'),
-        'modified_at': _ref('nullable_timestamp'), 'downloadable': {'type': 'boolean'}},
+        'modified_at': _ref('nullable_timestamp'), 'downloadable': {'type': 'boolean'},
+        'object_version': _nullable(_ref('object_version'))},
         allOf=[
             {'if': {'properties': {'type': {'const': 'directory'}}, 'required': ['type']},
              'then': {'properties': {'size_bytes': {'type': 'null'},
@@ -260,7 +262,8 @@ def _transfer_rule():
                 {'direction': 'download', 'minimum_role': 'readonly',
                  'tool_grants': ['prepare_file_download'], 'original_resource_access': 'read'},
                 {'direction': 'upload', 'minimum_role': 'readwrite',
-                 'tool_grants': ['prepare_file_upload'], 'original_resource_access': 'write'},
+                 'any_tool_grants': ['prepare_file_upload', 'prepare_file_overwrite'],
+                 'prepare_tool_from': 'trusted_transfer_record', 'original_resource_access': 'write'},
             ]}
 
 
@@ -365,6 +368,21 @@ _UPLOAD_ARGUMENTS = _object({
     ['root_id', 'path', 'size_bytes', 'sha256', 'idempotency_key'])
 
 _TOOLS.extend([
+    _tool('prepare_file_overwrite', '准备覆盖已有文件', 'files', 'readwrite',
+          _object({**_CHANGE_LOCATION, 'size_bytes': _integer(8 * 1024 ** 3),
+                   'sha256': _ref('sha256'), 'expected_target_version': _ref('object_version'),
+                   'confirmed': {'const': True}, **_IDEMPOTENCY}),
+          _success({'transfer_id': _ref('transfer_id'), 'content_path': _ref('content_path'),
+                    'direction': {'const': 'upload'}, 'state': {'const': 'prepared'},
+                    'size_bytes': _integer(8 * 1024 ** 3), 'sha256': _ref('sha256'),
+                    'overwrite': {'const': True}, 'expires_at': _ref('timestamp'),
+                    'may_wake_disks': {'const': True}}),
+          [_file_rule(access='write', parent_access='write', root_mutation_allowed=False,
+                      native_path_class='owner_admin_descendants', target_version_required=True),
+           {'kind': 'recoverable_overwrite', 'owner_initialized_custody_required': True,
+            'captured_previous_retained': True, 'single_step_source_cas': False,
+            'wrong_capture_preserved_without_publish': True}],
+          category='file_write', idempotency='required_key', gates=_WRITE_GATES),
     _tool('prepare_file_upload', '准备文件上传', 'files', 'readwrite', _UPLOAD_ARGUMENTS,
           _success({'transfer_id': _ref('transfer_id'), 'content_path': _ref('content_path'),
                     'direction': {'const': 'upload'}, 'state': {'const': 'prepared'},
@@ -381,7 +399,8 @@ _TOOLS.extend([
           _object({'transfer_id': _ref('transfer_id'), **_IDEMPOTENCY}), _OPERATION_OUTPUT,
           [{'kind': 'owned_upload', 'id_field': 'transfer_id', 'same_key_and_generation': True,
             'same_peer': True, 'original_grant_revision': True,
-            'required_tool_grants': ['prepare_file_upload'], 'original_resource_access': 'write',
+            'required_any_tool_grants': ['prepare_file_upload', 'prepare_file_overwrite'],
+            'prepare_tool_from': 'trusted_transfer_record', 'original_resource_access': 'write',
             'original_target_and_overwrite_only': True, 'verified_size_and_sha256_required': True,
             'atomic_install_and_native_index_required': True}],
           category='file_write', idempotency='required_key', gates=_WRITE_GATES),
@@ -402,7 +421,7 @@ _TOOLS.extend([
 ])
 
 for _name, _title, _source_access in (
-        ('copy_file', '复制普通文件', 'read'), ('move_file', '原子移动普通文件', 'write')):
+        ('copy_file', '复制普通文件', 'read'), ('move_file', '可恢复移动普通文件', 'write')):
     _TOOLS.append(_tool(
         _name, _title, 'files', 'readwrite',
         _object({'source_root_id': _ref('root_id'), 'source_path': _ref('change_path'),
@@ -416,7 +435,8 @@ for _name, _title, _source_access in (
                     root_mutation_allowed=False, overwrite_allowed=False),
          {'kind': 'file_change_semantics', 'recursive': False,
           'same_filesystem_required': _name == 'move_file',
-          'atomic_move_required': _name == 'move_file',
+          'atomic_move_required': False,
+          'two_phase_recoverable_custody': _name == 'move_file',
           'copy_then_delete_fallback_allowed': False}],
         category='file_write', idempotency='required_key', gates=_WRITE_GATES))
 
@@ -501,7 +521,8 @@ _CATALOG = {
                          'minimum_role': 'readonly', 'resource_access': 'read',
                          'single_byte_range_only': True, 'head_starts_or_extends_deadline': False,
                          'strong_etag_or_cross_version_resume_claimed': False},
-            'upload': {'methods': ['PUT'], 'required_tool': 'prepare_file_upload',
+            'upload': {'methods': ['PUT'], 'required_any_tool': ['prepare_file_upload', 'prepare_file_overwrite'],
+                       'prepare_tool_from': 'trusted_prepared_transfer',
                        'implemented': True, 'transport_implemented': True,
                        'status': 'registered_requires_authorization_and_live_backend',
                        'minimum_role': 'readwrite', 'resource_access': 'write',

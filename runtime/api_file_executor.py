@@ -21,7 +21,7 @@ from api_file_operations import (FileAccessError, assert_file_grant, _mounts,
                                  _descriptor_mount_id)
 from api_file_provider import NativeOwnerReadAuthority
 from api_file_roots import is_users_root_path, valid_relative_file_path
-from api_file_transfers import DownloadSource, FileTransfers, _binding
+from api_file_transfers import DownloadSource, FileTransfers, _binding, _identity, _version
 from api_file_write_backend import FileWriteExecutor, TOOLS as WRITE_TOOLS
 
 
@@ -59,6 +59,8 @@ def _entry(path, info):
             'type': 'directory' if directory else 'file',
             'size_bytes': None if directory else info.st_size,
             'modified_at': _timestamp(info.st_mtime_ns),
+            'object_version': _version((info.st_dev, info.st_ino, info.st_size,
+                                        info.st_mtime_ns, info.st_ctime_ns)) if not directory else None,
             'downloadable': not directory and 0 <= info.st_size <= 8 * 1024 ** 3}
 
 
@@ -159,7 +161,7 @@ class FileReadExecutor:
     """
 
     def __init__(self, panel, *, authorizer, root='/', authority=None,
-                 handle_factory=None, clock=None):
+                 handle_factory=None, clock=None, mutation_authority=None):
         self.panel, self.root = panel, root
         self._authorizer = authorizer
         self._authority = authority or NativeOwnerReadAuthority(panel, root=root)
@@ -170,7 +172,8 @@ class FileReadExecutor:
         self._cursors = {}
         self.transfers = FileTransfers(self._current)
         self.write_operations = FileWriteExecutor(panel, root=root, authorizer=self._current,
-                                                   transfers=self.transfers)
+                                                   transfers=self.transfers,
+                                                   mutation_authority=mutation_authority)
 
     def _current(self, principal):
         try:

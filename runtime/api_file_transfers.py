@@ -52,12 +52,13 @@ class DownloadSource:
 
 @dataclass(frozen=True, repr=False)
 class UploadTarget:
-    """Backend-only authority for unnamed staging and native atomic install.
+    """Backend-only authority for unnamed staging and same-object publication.
 
     create_staging must return an unnamed O_RDWR ordinary file with native ACL,
     quota and index behavior already verified. install(principal, fd,
-    overwrite=..., expected_target_version=...) must atomically install that
-    exact object or report an unconfirmed result; there is no os.rename/root
+    overwrite=..., expected_target_version=...) must publish that exact object
+    or report an unconfirmed result. Replacement may first retain the previous
+    target in trusted custody; this is not a single atomic source CAS. No root
     fallback here. authorize_opened verifies the same live descriptor each time.
     """
 
@@ -67,6 +68,8 @@ class UploadTarget:
     create_staging: object
     authorize_opened: object
     install: object
+    prepare_tool: str = 'prepare_file_upload'
+    operation_context: bool = False
 
 
 @dataclass(frozen=True, repr=False)
@@ -207,7 +210,7 @@ class FileTransfers:
 
     def _authorize(self, principal, resource, *, write=False):
         self._current(principal)
-        assert_file_grant(principal, 'prepare_file_upload' if write else 'prepare_file_download',
+        assert_file_grant(principal, resource.prepare_tool if write else 'prepare_file_download',
                           resource.root_id, resource.path, write=write)
 
     def _opened(self, principal, resource, *, write=False):
@@ -424,6 +427,10 @@ class FileTransfers:
                        overwrite=False, expected_target_version=None, confirmed=False):
         if (not isinstance(target, UploadTarget) or not target.path or not callable(target.install)):
             raise FileAccessError('write_backend_unverified')
+        if (target.prepare_tool not in ('prepare_file_upload', 'prepare_file_overwrite')
+                or overwrite is True and target.prepare_tool != 'prepare_file_overwrite'
+                or overwrite is False and target.prepare_tool == 'prepare_file_overwrite'):
+            raise FileAccessError('invalid_arguments')
         if (type(size_bytes) is not int or not 0 <= size_bytes <= _MAX_SIZE
                 or not isinstance(sha256, str) or not _SHA.fullmatch(sha256)
                 or not isinstance(idempotency_key, str) or not _IDEMPOTENCY.fullmatch(idempotency_key)
@@ -546,8 +553,11 @@ class FileTransfers:
             self._commit_idempotency[identity] = identifier
             self._operations[operation['operation_id']] = row['id']
             try:
+                context = ({'operation_id': operation['operation_id'], 'idempotency_key': idempotency_key,
+                            'operation_deadline': row['deadline'], 'operation_clock': self._clock}
+                           if row['resource'].operation_context else {})
                 installed = row['resource'].install(principal, row['fd'], overwrite=row['overwrite'],
-                    expected_target_version=row['expected_target_version'])
+                    expected_target_version=row['expected_target_version'], **context)
                 self._check_upload(row, principal, 'verified')
                 assert_file_grant(principal, 'commit_file_upload', row['resource'].root_id,
                                   row['resource'].path, write=True)

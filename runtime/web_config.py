@@ -66,6 +66,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/access/contracts', '/api/services',
     '/api/access/file-readiness', '/api/docker/projects', '/api/docker/projects/catalog',
     '/api/docker/deployments', '/api/docker/deployments/catalog',
+    '/api/files/authority',
     '/api/business',
 )) | PANEL_QUERY_ROUTES
 
@@ -82,6 +83,8 @@ PANEL_POST_ROUTES = frozenset((
     '/api/services/screen', '/api/services/mcp', '/api/services/developer', '/api/r1/business/refresh',
     '/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke',
     '/api/docker/deployments/register', '/api/docker/deployments/revoke', '/api/docker/deployments/refresh',
+    '/api/files/authority/initialize', '/api/files/authority/inspect', '/api/files/authority/preflight',
+    '/api/files/authority/revoke', '/api/files/authority/restore',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
@@ -90,10 +93,12 @@ ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/ap
 SERVICE_POST_ROUTES = frozenset(('/api/services/screen', '/api/services/mcp', '/api/services/developer'))
 PROJECT_POST_ROUTES = frozenset(('/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke',
                                   '/api/docker/deployments/register', '/api/docker/deployments/revoke', '/api/docker/deployments/refresh'))
-MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES
+FILE_AUTHORITY_POST_ROUTES = frozenset(('/api/files/authority/initialize', '/api/files/authority/inspect', '/api/files/authority/preflight',
+                                      '/api/files/authority/revoke', '/api/files/authority/restore'))
+MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES
 OWNER_READ_ROUTES = frozenset(('/api/access', '/api/access/contracts', '/api/access/file-readiness',
                                '/api/services', '/api/docker/projects', '/api/docker/projects/catalog',
-                               '/api/docker/deployments', '/api/docker/deployments/catalog'))
+                               '/api/docker/deployments', '/api/docker/deployments/catalog', '/api/files/authority'))
 FILE_CONTENT_PREFIX = '/api/integration/files/transfers/'
 FILE_CONTENT_PATH = re.compile(r'/api/integration/files/transfers/(transfer_[0-9a-f]{32})/content\Z', re.ASCII)
 
@@ -790,6 +795,11 @@ class WebConfigServer:
                 return 200, self.integration.contracts(), 'application/json; charset=utf-8'
             if route == '/api/access/file-readiness':
                 return 200, self.integration.file_readiness(), 'application/json; charset=utf-8'
+            if route == '/api/files/authority':
+                value = self.integration.file_authority_catalog(current=lambda: (
+                    not self.integration._closed and headers.get('Authorization') is None
+                    and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open')))
+                return 200, value, 'application/json; charset=utf-8'
             if route in ('/api/docker/projects', '/api/docker/projects/catalog'):
                 value = (self.integration.docker_projects.catalog() if route.endswith('/catalog')
                          else self.integration.docker_projects.snapshot())
@@ -798,7 +808,12 @@ class WebConfigServer:
                 value = (self.integration.docker_deployments.catalog() if route.endswith('/catalog')
                          else self.integration.docker_deployments.metadata())
                 return (200 if value.get('ok') is True else 503), value, 'application/json; charset=utf-8'
-            return 200, (self.integration.snapshot() if route == '/api/access' else self.services_snapshot()), 'application/json; charset=utf-8'
+            if route == '/api/access':
+                value = self.integration.snapshot(current=lambda: (
+                    not self.integration._closed and headers.get('Authorization') is None
+                    and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open')))
+                return (200 if value.get('ok') is True else 403), value, 'application/json; charset=utf-8'
+            return 200, self.services_snapshot(), 'application/json; charset=utf-8'
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
         if route == '/api/auth/session':
@@ -966,12 +981,16 @@ class WebConfigServer:
                 return 401, {'ok': False, 'error': '未登录', 'auth_required': True}, None
             return 403, {'ok': False, 'error': 'need_pairing',
                          'message': '需要在小屏「设置 → 网页配置」生成五位配对码后解锁设置'}, None
-        if route in PROJECT_POST_ROUTES:
+        if route in PROJECT_POST_ROUTES or route in FILE_AUTHORITY_POST_ROUTES:
             # Registry has its own bounded lock; daemon reads must not hold the
             # hardware-policy lock while an owner registers metadata.
             started = time.monotonic()
             try:
-                value = self.integration.manage(route, body)
+                value = (self.integration.file_authority_manage(route, body,
+                         current=lambda: (not self.integration._closed
+                             and headers.get('Authorization') is None
+                             and self.panel_authorized(headers, peer=ip) in ('password', 'pair', 'open')))
+                         if route in FILE_AUTHORITY_POST_ROUTES else self.integration.manage(route, body))
             except (ValueError, TypeError):
                 return 400, {'ok': False, 'error': '项目登记参数无效'}, None
             except Exception:
@@ -1817,10 +1836,12 @@ class WebConfigServer:
                     if route == '/api/integration/capabilities':
                         try:
                             payload = outer.integration.capabilities(principal)
-                            status = 200
+                            status = 200 if payload.get('ok') is True else 403
                         except Exception:
                             status, payload = 503, {'ok': False, 'error': '能力目录暂不可用'}
                         outer.integration.record(principal, 'integration/capabilities', peer, payload, started=started)
+                        if not outer.integration._is_current(principal):
+                            status, payload = 403, {'ok': False, 'error': {'code': 'invalid_key', 'message': '读取能力期间授权已失效。'}}
                         self.send(status, payload)
                         return
                     if route == '/api/integration/status':

@@ -1,21 +1,25 @@
-"""New owner files only: anonymous fd staging, no-clobber install, native index.
+"""Owner file writes: anonymous fd staging, custody and verified native index.
 
 No filesystem mutation is authorized by a root plan or an input proof flag.
 The exact factory owner's audited write rule, current key, parent descriptor,
 mount identity and native indexing bridge are independent mandatory gates.
 """
 
+import hashlib
 import os
 import stat
+import time
 
 from api_file_operations import FileAccessError, assert_file_grant, _descriptor_mount_id
-from api_file_provider import NativeOwnerWriteAuthority
+from api_file_provider import NativeOwnerReadAuthority, NativeOwnerWriteAuthority
 from api_file_roots import valid_relative_file_path
 from api_file_transfers import (UploadTarget, PendingInstall, UnpublishedInstallError,
-                                _identity, _version)
+                                _identity, _version, _SHA, _IDEMPOTENCY, _VERSION)
 
 
-TOOLS = frozenset(('prepare_file_upload', 'commit_file_upload', 'get_file_operation'))
+TOOLS = frozenset(('prepare_file_upload', 'prepare_file_overwrite', 'commit_file_upload',
+                   'get_file_operation', 'create_directory', 'copy_file', 'rename_file',
+                   'move_file', 'trash_file'))
 _RESERVE = 5 * 1024 ** 3
 
 
@@ -80,10 +84,13 @@ class FileWriteExecutor:
     """
 
     def __init__(self, panel, *, authorizer, transfers, root='/', authority=None,
-                 handle_factory=None, index=None, capacity=None):
+                 handle_factory=None, index=None, capacity=None, mutation_authority=None,
+                 read_authority=None):
         self.panel, self.root, self.transfers = panel, root, transfers
         self._authorizer = authorizer
         self._authority = authority or NativeOwnerWriteAuthority(panel, root=root)
+        self._read_authority = read_authority or (authority if authority is not None else
+                                                  NativeOwnerReadAuthority(panel, root=root))
         if handle_factory is None:
             from api_file_executor import _Handle
             handle_factory = _Handle
@@ -91,6 +98,9 @@ class FileWriteExecutor:
         self._index = index
         self._capacity = capacity or _capacity
         self._closed = False
+        from api_file_mutations import FileMutationExecutor
+        self.mutations = FileMutationExecutor(self, authority=mutation_authority)
+        self.mutation_authority = self.mutations.authority
 
     def _current(self, principal):
         try:
@@ -105,6 +115,10 @@ class FileWriteExecutor:
         if (not separator or not valid_relative_file_path(path) or not name
                 or len(name.encode('utf-8', 'strict')) > 255):
             raise FileAccessError('invalid_arguments')
+        if path == 'admin/.DATA_CACHE' or path.startswith('admin/.DATA_CACHE/'):
+            # Fixed factory bookkeeping is not a user-file write surface.
+            # Only NativeFileRecycle has a narrow, audited internal exception.
+            raise FileAccessError('unsupported_path_class')
         assert_file_grant(principal, tool, root_id, path, write=True)
         assert_file_grant(principal, tool, root_id, parent, write=True)
         return parent, name
@@ -127,10 +141,11 @@ class FileWriteExecutor:
             raise FileAccessError('write_backend_unverified')
         return self._index
 
-    def _target(self, principal, args):
+    def _target(self, principal, args, *, prepare_tool='prepare_file_upload',
+                commit_tool='commit_file_upload'):
         root_id, path, size = args['root_id'], args['path'], args['size_bytes']
-        row = self._root(principal, 'prepare_file_upload', root_id, path)
-        parent, name = self._grant(principal, 'prepare_file_upload', root_id, path)
+        row = self._root(principal, prepare_tool, root_id, path)
+        parent, name = self._grant(principal, prepare_tool, root_id, path)
         bridge = self._bridge()
         current = lambda: self._current(principal)
         bridge.preflight(row, path, current=current)
@@ -155,12 +170,15 @@ class FileWriteExecutor:
         def authorize_opened(key, descriptor, *, write=False):
             if write is not True:
                 return False
+            if state.get('operation_deadline') is not None \
+                    and state['operation_clock']() >= state['operation_deadline']:
+                raise FileAccessError('transfer_expired')
             info = os.fstat(descriptor)
             if (not stat.S_ISREG(info.st_mode) or state['staging'] != _stable(info)
                     or _descriptor_mount_id(self.root, descriptor) != mount_id
                     or info.st_nlink != (1 if state['published'] else 0)):
                 raise FileAccessError('file_changed')
-            with verify_parent(key, 'prepare_file_upload') as opened:
+            with verify_parent(key, prepare_tool) as opened:
                 self._capacity(opened.fd, max(0, size - info.st_size))
                 if state['published']:
                     if _identity(descriptor) != state['final']:
@@ -175,7 +193,7 @@ class FileWriteExecutor:
                 raise FileAccessError('write_backend_unverified')
             descriptor = None
             try:
-                with verify_parent(key, 'prepare_file_upload') as opened:
+                with verify_parent(key, prepare_tool) as opened:
                     bridge.preflight(row, path, current=lambda: self._current(key))
                     try:
                         os.stat(name, dir_fd=opened.fd, follow_symlinks=False)
@@ -184,7 +202,7 @@ class FileWriteExecutor:
                     else:
                         raise FileAccessError('target_exists')
                     self._capacity(opened.fd, size)
-                    self._grant(key, 'prepare_file_upload', root_id, path)
+                    self._grant(key, prepare_tool, root_id, path)
                     descriptor = os.open('.', os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC
                                          | os.O_NOFOLLOW, 0o600, dir_fd=opened.fd)
                     state['staging'] = _stable(os.fstat(descriptor))
@@ -195,19 +213,41 @@ class FileWriteExecutor:
                     os.close(descriptor)
                 raise
 
-        def publish(key, descriptor, *, overwrite, expected_target_version):
+        def publish(key, descriptor, *, overwrite, expected_target_version,
+                    operation_id=None, idempotency_key=None,
+                    operation_deadline=None, operation_clock=None):
             if overwrite is not False or expected_target_version is not None:
                 raise FileAccessError('invalid_arguments')
+            state['operation_deadline'] = (operation_deadline if operation_deadline is not None
+                                           else time.monotonic() + 1800)
+            state['operation_clock'] = operation_clock or time.monotonic
             authorize_opened(key, descriptor, write=True)
-            with verify_parent(key, 'commit_file_upload') as opened:
+            with verify_parent(key, commit_tool) as opened:
                 bridge.preflight(row, path, current=lambda: self._current(key))
                 self._capacity(opened.fd, 0)
-                self._grant(key, 'commit_file_upload', root_id, path)
+                self._grant(key, commit_tool, root_id, path)
+                authorize_opened(key, descriptor, write=True)
                 _link_new(descriptor, opened.fd, name)
                 state['published'] = True
                 state['final'] = _identity(descriptor)
                 os.fsync(opened.fd)
                 authorize_opened(key, descriptor, write=True)
+                # Linking changes ctime, so metadata alone cannot prove that
+                # a concurrent writer did not change bytes in that interval.
+                # Bind the published inode back to the verified upload/copy.
+                if args.get('sha256') is not None:
+                    digest, offset = hashlib.sha256(), 0
+                    while offset < size:
+                        authorize_opened(key, descriptor, write=True)
+                        block = os.pread(descriptor, min(65536, size - offset), offset)
+                        if not block:
+                            raise FileAccessError('result_unconfirmed')
+                        authorize_opened(key, descriptor, write=True)
+                        digest.update(block)
+                        offset += len(block)
+                    authorize_opened(key, descriptor, write=True)
+                    if digest.hexdigest() != args['sha256']:
+                        raise FileAccessError('result_unconfirmed')
                 receipt = bridge.notify_new(row, path, descriptor, directory=False,
                                              current=lambda: self._current(key))
                 state['final'] = _identity(descriptor)
@@ -230,21 +270,38 @@ class FileWriteExecutor:
                     raise UnpublishedInstallError(error.code) from None
                 raise
 
-        return UploadTarget(root_id, path, name, create_staging, authorize_opened, install)
+        return UploadTarget(root_id, path, name, create_staging, authorize_opened, install,
+                            prepare_tool=prepare_tool, operation_context=prepare_tool == 'prepare_file_upload')
 
     def execute(self, tool, args, principal):
         try:
             if tool not in TOOLS or type(args) is not dict or not self._current(principal):
                 raise FileAccessError('invalid_key' if not self._current(principal) else 'invalid_arguments')
-            if tool == 'prepare_file_upload':
+            from api_file_mutations import TOOLS as MUTATION_TOOLS
+            if tool in MUTATION_TOOLS:
+                return self.mutations.execute(tool, args, principal)
+            if tool in ('prepare_file_upload', 'prepare_file_overwrite'):
                 required = {'root_id', 'path', 'size_bytes', 'sha256', 'idempotency_key'}
+                if tool == 'prepare_file_overwrite':
+                    required |= {'expected_target_version', 'confirmed'}
                 if (not required <= set(args) or set(args) - required - {'overwrite'}
                         or args.get('overwrite', False) is not False
+                        or tool == 'prepare_file_overwrite' and args['confirmed'] is not True
+                        or not isinstance(args['sha256'], str) or not _SHA.fullmatch(args['sha256'])
+                        or not isinstance(args['idempotency_key'], str)
+                        or not _IDEMPOTENCY.fullmatch(args['idempotency_key'])
+                        or tool == 'prepare_file_overwrite' and (
+                            not isinstance(args['expected_target_version'], str)
+                            or not _VERSION.fullmatch(args['expected_target_version']))
                         or type(args['size_bytes']) is not int or not 0 <= args['size_bytes'] <= 8 * 1024 ** 3):
                     raise FileAccessError('invalid_arguments')
-                target = self._target(principal, args)
+                target = (self.mutations.replacement_target(principal, args)
+                          if tool == 'prepare_file_overwrite' else self._target(principal, args))
                 return self.transfers.prepare_upload(principal, target, size_bytes=args['size_bytes'],
-                    sha256=args['sha256'], idempotency_key=args['idempotency_key'])
+                    sha256=args['sha256'], idempotency_key=args['idempotency_key'],
+                    overwrite=tool == 'prepare_file_overwrite',
+                    expected_target_version=args.get('expected_target_version'),
+                    confirmed=args.get('confirmed', False))
             if tool == 'commit_file_upload':
                 if set(args) != {'transfer_id', 'idempotency_key'}:
                     raise FileAccessError('invalid_arguments')
@@ -252,7 +309,9 @@ class FileWriteExecutor:
                                                      idempotency_key=args['idempotency_key'])
             if set(args) != {'operation_id'}:
                 raise FileAccessError('invalid_arguments')
-            return self.transfers.get_operation(args['operation_id'], principal)
+            if args['operation_id'] in self.transfers._operations:
+                return self.transfers.get_operation(args['operation_id'], principal)
+            return self.mutations.get_operation(args['operation_id'], principal)
         except FileAccessError as error:
             return error.result()
         except Exception:
@@ -260,3 +319,4 @@ class FileWriteExecutor:
 
     def close(self):
         self._closed = True
+        self.mutations.close()

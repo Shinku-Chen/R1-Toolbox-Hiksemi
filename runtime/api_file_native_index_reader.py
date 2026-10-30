@@ -39,9 +39,11 @@ _COLUMNS = ('mkey', 'path', 'name', 'ctime', 'mtime', 'atime', 'isdir', 'size',
             'RESERVE4', 'RESERVE5', 'RESERVE6')
 _TYPES = ('INTEGER', 'VARCHAR(4096)', 'VARCHAR(256)', 'INT64', 'INT64', 'INT64',
           'INT64', 'INT64', 'INT64') + ('VARCHAR(4096)',) * 8
-_FIELDS = ('path', 'ctime', 'mtime', 'isdir', 'size', 'disk_mnt')
+_FIELDS = ('path', 'ctime', 'mtime', 'isdir', 'size', 'disk_mnt', 'mkey')
 _SELECT = ('SELECT path,ctime,mtime,isdir,size,disk_mnt FROM tb_file_db_all '
            'INDEXED BY sqlite_autoindex_tb_file_db_all_1 WHERE path=? LIMIT 2')
+_SELECT_VERSION = ('SELECT path,ctime,mtime,isdir,size,disk_mnt,mkey FROM tb_file_db_all '
+                   'INDEXED BY sqlite_autoindex_tb_file_db_all_1 WHERE path=? LIMIT 2')
 _LOCK = threading.Lock()
 _TIMEOUT = 1.0
 _MAX_STEPS = 10000
@@ -122,6 +124,14 @@ class _Receipt:
     chain: tuple
     database: tuple
     absent: bool
+    generation: object = None
+
+
+@dataclass(frozen=True, repr=False)
+class _MutationReceipt:
+    operation: str
+    source: _Receipt
+    target: _Receipt
 
 
 class _OpenedIndex:
@@ -340,7 +350,7 @@ def _schema(connection):
         raise FileAccessError('write_backend_unverified')
 
 
-def _query(opened, key):
+def _query(opened, key, *, versioned=False):
     """One fixed exact-index lookup; never use search, attach, functions or raw SQL."""
     connection = None
     before = _fd_snapshot()
@@ -379,11 +389,12 @@ def _query(opened, key):
         _schema(connection)
         _gate(opened.current, opened.deadline)
         connection.set_authorizer(_data_authorizer)
-        rows = connection.execute(_SELECT, (key,)).fetchall()
-        if (len(rows) > 1 or any(type(row) is not tuple or len(row) != 6
+        rows = connection.execute(_SELECT_VERSION if versioned else _SELECT, (key,)).fetchall()
+        if (len(rows) > 1 or any(type(row) is not tuple or len(row) != (7 if versioned else 6)
                 or type(row[0]) is not str or type(row[5]) is not str
                 or any(type(value) is not int for value in row[1:5])
-                or row[3] not in (0, 1) or row[4] < 0 for row in rows)):
+                or row[3] not in (0, 1) or row[4] < 0
+                or versioned and (type(row[6]) is not int or row[6] <= 0) for row in rows)):
             raise FileAccessError('write_backend_unverified')
         opened.sqlite_proof(before, sidecars=opened.wal)
         return rows
@@ -409,12 +420,13 @@ class NativeFileIndexReader:
             raise FileAccessError('resource_busy')
         try:
             with _OpenedIndex(self.root, row, path, current, deadline) as opened:
-                rows = _query(opened, key)
+                rows = _query(opened, key, versioned=True)
                 if require_absent and rows:
                     raise FileAccessError('write_backend_unverified')
                 opened.check()
                 return _Receipt(self._identity, mount, key, row.get('id'), opened.mount_id,
-                                tuple(opened.components), opened.file_states[''], not rows)
+                                tuple(opened.components), opened.file_states[''], not rows,
+                                rows[0][6] if rows else None)
         except FileAccessError:
             raise
         except Exception:
@@ -423,7 +435,8 @@ class NativeFileIndexReader:
         finally:
             _LOCK.release()
 
-    def verify_new(self, receipt, row, path, descriptor, *, directory, current):
+    def verify_new(self, receipt, row, path, descriptor, *, directory, current,
+                   after_generation=None):
         mount, key = _arguments(row, path)
         if (type(receipt) is not _Receipt or receipt.reader != self._identity
                 or receipt.mount != mount or receipt.key != key or receipt.root_id != row.get('id')
@@ -447,11 +460,16 @@ class NativeFileIndexReader:
                 if (opened.mount_id != receipt.mount_id or tuple(opened.components) != receipt.chain
                         or opened.file_states[''] != receipt.database):
                     raise FileAccessError('write_backend_unverified')
-                rows = _query(opened, key)
+                rows = _query(opened, key, versioned=True)
                 expected = (key, before.st_ctime_ns // 1000000000,
                             before.st_mtime_ns // 1000000000, int(directory),
                             before.st_size, mount)
-                matched = rows == [expected]
+                # Native INSERT OR REPLACE supplies NULL for AUTOINCREMENT mkey.
+                # A replacement must advance that generation even when its
+                # second-resolution stat times and length equal the old file.
+                matched = (len(rows) == 1 and rows[0][:6] == expected
+                           and (after_generation is None or
+                                type(after_generation) is int and rows[0][6] > after_generation))
                 opened.check()
             with _Handle(self.root, row, path, directory=directory) as target:
                 if (_file_state(os.fstat(target.fd)) != _file_state(before)
@@ -466,3 +484,58 @@ class NativeFileIndexReader:
             raise FileAccessError('write_backend_unverified') from None
         finally:
             _LOCK.release()
+
+    def preflight_mutation(self, row, source_path, target_path, *, operation, current):
+        """Bind two exact keys before publication; never enumerate a directory."""
+        if (operation not in ('rename', 'move', 'replace')
+                or (source_path == target_path) != (operation == 'replace')):
+            raise FileAccessError('invalid_arguments')
+        source = self.preflight(row, source_path, current=current, require_absent=False)
+        if source.absent or type(source.generation) is not int:
+            raise FileAccessError('write_backend_unverified')
+        target = (source if operation == 'replace' else
+                  self.preflight(row, target_path, current=current, require_absent=True))
+        if (source.database != target.database or source.mount_id != target.mount_id
+                or source.chain != target.chain):
+            raise FileAccessError('write_backend_unverified')
+        return _MutationReceipt(operation, source, target)
+
+    def _verify_absent(self, receipt, row, path, *, current):
+        mount, key = _arguments(row, path)
+        if (type(receipt) is not _Receipt or receipt.reader != self._identity
+                or receipt.root_id != row.get('id') or receipt.mount != mount or receipt.key != key):
+            raise FileAccessError('write_backend_unverified')
+        deadline = time.monotonic() + _TIMEOUT
+        _gate(current, deadline)
+        if not _LOCK.acquire(blocking=False):
+            raise FileAccessError('resource_busy')
+        try:
+            with _OpenedIndex(self.root, row, path, current, deadline) as opened:
+                if (opened.mount_id != receipt.mount_id or tuple(opened.components) != receipt.chain
+                        or opened.file_states[''] != receipt.database):
+                    raise FileAccessError('write_backend_unverified')
+                absent = not _query(opened, key)
+                opened.check()
+            _gate(current, deadline)
+            return absent
+        except FileAccessError:
+            raise
+        except Exception:
+            _gate(current, deadline)
+            raise FileAccessError('write_backend_unverified') from None
+        finally:
+            _LOCK.release()
+
+    def verify_mutation(self, receipt, row, source_path, target_path, descriptor,
+                        *, operation, current):
+        if (type(receipt) is not _MutationReceipt or receipt.operation != operation
+                or receipt.source.key != '/Users/' + source_path
+                or receipt.target.key != '/Users/' + target_path):
+            raise FileAccessError('write_backend_unverified')
+        matched = self.verify_new(receipt.target, row, target_path, descriptor,
+                                  directory=False, current=current,
+                                  after_generation=receipt.source.generation)
+        if operation != 'replace':
+            matched = self._verify_absent(receipt.source, row, source_path, current=current) and matched
+        _gate(current, time.monotonic() + _TIMEOUT)
+        return matched

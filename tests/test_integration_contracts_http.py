@@ -32,7 +32,7 @@ class ApiContractHTTPTests(unittest.TestCase):
         status, _, value = self.browser(path=ROUTE)
         self.assertEqual(200, status)
         self.assertEqual({'ok': True, **contract_catalog()}, value)
-        self.assertEqual(20, len(value['tools']))
+        self.assertEqual(21, len(value['tools']))
         self.assertEqual({tool['name'] for tool in value['tools'] if tool['implemented']}, IMPLEMENTED_TOOLS)
         after = self.server.api_access.path.read_bytes() if self.server.api_access.path.exists() else None
         self.assertEqual(before, after)

@@ -23,6 +23,7 @@ class NativeFileIndexTests(unittest.TestCase):
         self.reader = mock.Mock()
         self.reader.preflight.return_value = 'private-reader-receipt'
         self.reader.verify_new.return_value = True
+        self.reader.verify_mutation.return_value = True
         self.connection = mock.Mock()
         self.connection.getsockopt.return_value = struct.pack('3i', 123, 0, 0)
         self.listener = mock.Mock(return_value=NATIVE)
@@ -131,14 +132,86 @@ class NativeFileIndexTests(unittest.TestCase):
             self.bridge.verify_new(receipt, ROOT, PATH, 7, directory=False, current=current)
         self.connection.sendall.assert_called_once()
 
-    def test_unknown_directory_and_revoked_preflight_cannot_send(self):
+    def test_directory_uses_one_mkdir_record_and_receipt_binds_kind(self):
+        current = self.make()
+        receipt = self.bridge.notify_new(ROOT, PATH, 7, directory=True, current=current)
+        payload = self.connection.sendall.call_args.args[0]
+        self.assertEqual(len(payload), index._RECORD.size)
+        row = index._RECORD.unpack(payload)
+        self.assertEqual(row[2], 0x10)
+        self.assertEqual(row[3].rstrip(b'\0'), (ROOT['mount'] + '/' + PATH).encode())
+        self.assertEqual(row[4].rstrip(b'\0'), b'')
+        self.assertTrue(self.bridge.verify_new(receipt, ROOT, PATH, 7,
+                                               directory=True, current=current))
+        with self.assertRaises(FileAccessError):
+            self.bridge.verify_new(receipt, ROOT, PATH, 7, directory=False, current=current)
+
+    def test_invalid_kind_and_revoked_preflight_cannot_send(self):
         current = self.make()
         with self.assertRaises(FileAccessError):
-            self.bridge.notify_new(ROOT, PATH, 7, directory=True, current=current)
+            self.bridge.notify_new(ROOT, PATH, 7, directory=1, current=current)
         self.current = False
         with self.assertRaises(FileAccessError):
             self.bridge.preflight(ROOT, PATH, current=current)
         self.factory.assert_not_called()
+
+    def test_rename_and_move_preserve_literal_real_paths_and_never_resend(self):
+        current = self.make()
+        target = 'admin/临时共享/renamed.bin'
+        for operation in ('rename', 'move'):
+            with self.subTest(operation=operation):
+                self.connection.reset_mock()
+                prepared = self.bridge.preflight_mutation(ROOT, PATH, target,
+                                                         operation=operation, current=current)
+                receipt = self.bridge.notify_mutation(ROOT, PATH, target, 7,
+                    operation=operation, prepared=prepared, current=current)
+                row = index._RECORD.unpack(self.connection.sendall.call_args.args[0])
+                self.assertEqual(row[2], 0x21)
+                self.assertEqual(row[3].rstrip(b'\0'), (ROOT['mount'] + '/' + PATH).encode())
+                self.assertEqual(row[4].rstrip(b'\0'), (ROOT['mount'] + '/' + target).encode())
+                self.reader.verify_mutation.return_value = False
+                self.assertFalse(self.bridge.verify_mutation(receipt, ROOT, PATH, target, 7,
+                    operation=operation, current=current))
+                self.reader.verify_mutation.return_value = True
+                self.assertTrue(self.bridge.verify_mutation(receipt, ROOT, PATH, target, 7,
+                    operation=operation, current=current))
+                self.connection.sendall.assert_called_once()
+
+    def test_replace_uses_create_close_but_private_prepublication_generation(self):
+        current = self.make()
+        prepared = self.bridge.preflight_mutation(ROOT, PATH, PATH,
+                                                  operation='replace', current=current)
+        receipt = self.bridge.notify_mutation(ROOT, PATH, PATH, 7,
+            operation='replace', prepared=prepared, current=current)
+        self.connection.sendall.assert_called_once_with(index._new_file_records(ROOT, PATH))
+        self.assertTrue(self.bridge.verify_mutation(receipt, ROOT, PATH, PATH, 7,
+                                                   operation='replace', current=current))
+        self.reader.verify_mutation.assert_called_once_with(self.reader.preflight_mutation.return_value,
+            ROOT, PATH, PATH, 7, operation='replace', current=current)
+
+    def test_prepared_receipt_cannot_change_root_paths_operation_or_service(self):
+        current = self.make()
+        target = 'admin/临时共享/renamed.bin'
+        prepared = self.bridge.preflight_mutation(ROOT, PATH, target,
+                                                  operation='rename', current=current)
+        for root, source, destination, operation in (
+                ({**ROOT, 'id': 'root_' + '2' * 24}, PATH, target, 'rename'),
+                (ROOT, 'admin/other', target, 'rename'), (ROOT, PATH, 'admin/other', 'rename'),
+                (ROOT, PATH, target, 'move')):
+            with self.assertRaises(FileAccessError):
+                self.bridge.notify_mutation(root, source, destination, 7,
+                    operation=operation, prepared=prepared, current=current)
+        self.listener.return_value = ('changed',)
+        with self.assertRaises(FileAccessError):
+            self.bridge.notify_mutation(ROOT, PATH, target, 7,
+                operation='rename', prepared=prepared, current=current)
+        self.connection.sendall.assert_not_called()
+
+    def test_no_arbitrary_event_or_cross_parent_rename_or_same_path_move(self):
+        for operation, target in (('delete', PATH), ('move', PATH), ('replace', 'admin/other'),
+                                  ('rename', 'admin/elsewhere/name')):
+            with self.assertRaises(FileAccessError):
+                index._mutation_records(ROOT, PATH, target, operation=operation)
 
 
 if __name__ == '__main__':

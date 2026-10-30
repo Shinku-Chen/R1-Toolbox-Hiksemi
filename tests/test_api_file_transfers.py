@@ -85,6 +85,21 @@ class FileTransferRuleTests(unittest.TestCase):
                                    sha256='0' * 64, idempotency_key='test')
         self.assertEqual(caught.exception.code, 'write_backend_unverified')
 
+    def test_overwrite_sessions_recheck_their_separate_exact_prepare_tool(self):
+        manager = FileTransfers(lambda unused: True)
+        self.addCleanup(manager.close)
+        key = principal(write=True)
+        key['tool_grants'].remove('prepare_file_upload')
+        key['tool_grants'].append('prepare_file_overwrite')
+        target = UploadTarget(ROOT, 'owner/a.bin', 'a.bin', None, None, None,
+                              prepare_tool='prepare_file_overwrite')
+        manager._authorize(key, target, write=True)
+        key['tool_grants'].remove('prepare_file_overwrite')
+        key['tool_grants'].append('prepare_file_upload')
+        with self.assertRaises(FileAccessError) as caught:
+            manager._authorize(key, target, write=True)
+        self.assertEqual(caught.exception.code, 'permission_denied')
+
     def test_new_session_expiry_marks_pending_unknown_without_renewing_terminal_age(self):
         # Pure lifecycle projection; the separate Linux writer regression
         # covers a genuinely published inode and closing its retained fd.

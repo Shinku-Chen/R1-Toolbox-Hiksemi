@@ -83,7 +83,7 @@ class IntegrationRoleHTTPTests(unittest.TestCase):
         status, _, value = self.capabilities(key)
         self.assertEqual(200, status)
         self.assertEqual({'ok', 'role', 'policy_version', 'scopes', 'file_roots',
-                          'tools', 'domains', 'tool_grants', 'docker_projects', 'docker_deployments'}, set(value))
+                          'tools', 'domains', 'tool_grants', 'docker_projects', 'docker_deployments', 'application_ids'}, set(value))
         self.assertIs(value['ok'], True)
         self.assertEqual('admin', value['role'])
         self.assertEqual(2, value['policy_version'])

@@ -37,7 +37,7 @@ SCOPE_CATALOG = (
     {'id': 'media', 'label': '媒体查询', 'implemented': True, 'min_role': 'readwrite',
      'description': '显式查询原厂媒体进度，可能写原厂完成状态，需要读写或管理员角色。'},
     {'id': 'files', 'label': '文件管理', 'implemented': True, 'min_role': 'readonly',
-     'description': '浏览已核验的管理员／公共目录并下载；读写授权可在管理员后代上传新文件，覆盖及其他文件变更待接入。'},
+     'description': '浏览并下载已核验的管理员／公共目录；读写工具可在管理员后代上传、独立覆盖、创建目录、复制、可恢复改名／移动和移入原厂回收站，仍须实际后端门槛。'},
     {'id': 'docker', 'label': 'Docker 管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取并控制已登记项目；管理员可使用所有者预先登记的独立资源部署、更新和移除容器。'},
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
@@ -93,6 +93,7 @@ MIN_ROLE_BY_TOOL = {
     'get_file_transfer': 'readonly',
     'cancel_file_transfer': 'readonly',
     'prepare_file_upload': 'readwrite',
+    'prepare_file_overwrite': 'readwrite',
     'commit_file_upload': 'readwrite',
     'create_directory': 'readwrite',
     'rename_file': 'readwrite',
@@ -141,7 +142,7 @@ SCOPE_BY_TOOL = {
     'request_power': 'power', 'cancel_power': 'power',
     'list_file_roots': 'files', 'list_directory': 'files', 'get_file_info': 'files',
     'prepare_file_download': 'files', 'get_file_transfer': 'files',
-    'cancel_file_transfer': 'files', 'prepare_file_upload': 'files',
+    'cancel_file_transfer': 'files', 'prepare_file_upload': 'files', 'prepare_file_overwrite': 'files',
     'commit_file_upload': 'files', 'create_directory': 'files',
     'rename_file': 'files', 'copy_file': 'files', 'move_file': 'files',
     'trash_file': 'files', 'get_file_operation': 'files',
@@ -153,14 +154,13 @@ MIN_ROLE_BY_TOOL.update({item['name']: item['min_role'] for item in _NATIVE_TOOL
 SCOPE_BY_TOOL.update({item['name']: item['scope'] for item in _NATIVE_TOOL_SPECS})
 
 _WRITE_FILE_TOOLS = frozenset((
-    'prepare_file_upload', 'commit_file_upload', 'create_directory',
+    'prepare_file_upload', 'prepare_file_overwrite', 'commit_file_upload', 'create_directory',
     'rename_file', 'copy_file', 'move_file', 'trash_file', 'get_file_operation',
 ))
 _UPDATE_PROJECT_TOOLS = frozenset((
     'plan_docker_project_update', 'execute_docker_project_update',
 ))
 _TOOL_DEPENDENCIES = {
-    'commit_file_upload': 'prepare_file_upload',
     'execute_docker_project_update': 'plan_docker_project_update',
     'execute_docker_deployment': 'plan_docker_deployment',
     'install_native_application': 'plan_native_application_install',
@@ -240,6 +240,7 @@ def valid_application_ids(value, role, scopes):
             and len(set(value)) == len(value)
             and (not value or role == 'admin' and 'apps' in scopes))
 
+
 def valid_docker_deployments(value, role, scopes):
     """Check explicit future-deployment grants; names never grant existing projects."""
     if (not isinstance(value, list) or len(value) > 32 or not _valid_scopes(scopes)
@@ -292,6 +293,8 @@ def valid_tool_grants(value, role, scopes, file_roots, docker_projects, docker_d
                    and name != 'control_docker_project' and name not in DEPLOYMENT_TOOLS
                    and 'inspect' not in project_operations
                 or name in _TOOL_DEPENDENCIES and _TOOL_DEPENDENCIES[name] not in value):
+            return False
+        if name == 'commit_file_upload' and not set(value).intersection(('prepare_file_upload', 'prepare_file_overwrite')):
             return False
     return True
 

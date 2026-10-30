@@ -164,12 +164,21 @@ _TOOLS = (
           '取消尚在 5 秒倒计时内的重启或关机请求。',
           'power', _object_schema()),
 )
+_FILE_WRITE_DESCRIPTIONS = {
+    'prepare_file_upload': '在授权 admin 后代准备新文件上传；匿名暂存、大小与 SHA-256 校验通过后仍须显式提交，不覆盖已有名称。',
+    'prepare_file_overwrite': '独立准备覆盖已有普通文件；须目标当前版本及确认、读写范围和所有者恢复区，旧上传授权不授覆盖。',
+    'commit_file_upload': '显式提交已校验上传，逐次恢复其原始准备工具与文件授权；覆盖保留旧对象，原厂索引确认后才完成，结果不明不重放。',
+    'create_directory': '在授权 admin 后代创建单层目录；先核验受信区出生对象，再无覆盖发布并确认原厂目录索引，不递归或自动改名。',
+    'copy_file': '复制已授权普通文件，源可读、目标及父目录可写；同对象逐块核验后匿名无覆盖发布，独立原厂索引确认，不修改来源。',
+    'rename_file': '按当前源版本在同父目录可恢复改名；先捕获并核验对象，冲突保留对象，不宣称单步源 CAS，不覆盖目标。',
+    'move_file': '按当前源版本在同一授权 Users 挂载可恢复移动普通文件；捕获后核验并无覆盖发布，不跨卷复制后删除，独立核验原厂索引。',
+    'trash_file': '按当前源版本及明确确认移入真实原厂回收站；核验同对象归档和固定回收记录、原索引消失，缺证据拒绝，不永久删除。',
+    'get_file_operation': '查询本键、当前代际和原始源／目标范围的真实文件写任务；未同时确认对象与原厂索引时保持未确认，不自动重放。',
+}
 _TOOLS += tuple(
     _tool(contract['name'], contract['title'],
-          ('查询本键、当前代际和原始资源的真实文件写任务；发布与原厂索引尚未同时确认时，不宣称completed，也不自动重放。'
-           if contract['name'] == 'get_file_operation' else
-           '在明确授权的Users/admin后代上传新文件；字节仅进入同键匿名暂存，显式提交后分别核验发布与原厂索引，不支持覆盖或任意宿主路径。'
-           if contract['scope'] == 'files' and contract['category'] == 'file_write' else
+          (_FILE_WRITE_DESCRIPTIONS[contract['name']]
+           if contract['name'] in _FILE_WRITE_DESCRIPTIONS else
            '在明确授权的Users/admin与public子树浏览、读取属性或建立同键下载句柄；每次操作核验原厂权限与最终对象，字节走独立Bearer通道。'
            if contract['scope'] == 'files' and contract['name'] != 'list_file_roots' else
            '查询明确授权的文件根元数据或固定 Docker 项目，不读取用户文件内容。'
@@ -177,7 +186,8 @@ _TOOLS += tuple(
            '按登记项目、服务和同仓库镜像 digest 规划或执行管理员更新；须具体工具与项目更新授权，不自动重试。'),
           contract['scope'], contract['inputSchema'],
           read_only=contract['idempotency']['mode'] == 'read_only',
-          destructive=contract['name'] == 'execute_docker_project_update',
+          destructive=contract['name'] in ('execute_docker_project_update', 'commit_file_upload',
+                                           'rename_file', 'move_file', 'trash_file'),
           idempotent=contract['idempotency']['mode'] == 'read_only')
     for contract in contract_catalog()['tools'] if contract['name'] in IMPLEMENTED_TOOLS
 )

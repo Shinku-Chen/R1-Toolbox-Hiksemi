@@ -17,6 +17,8 @@ from api_docker_deployment import DockerDeploymentRegistry, DockerDeploymentOper
 from api_file_readiness import collect_file_access_readiness
 from api_file_roots import collect_file_roots, validate_file_grants
 from api_file_executor import FileReadExecutor, TOOLS as FILE_EXECUTOR_TOOLS, WRITE_TOOLS as FILE_WRITE_TOOLS
+from api_file_mutation_authority import FileMutationAuthority
+from api_file_operations import FileAccessError
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
 from vendor_business import _result as project_business_category
@@ -24,7 +26,7 @@ from vendor_media_snapshot import collect_media_snapshot
 from download_operations import DownloadOperations, TOOLS as DOWNLOAD_TOOLS
 from vendor_media_operations import MediaOperations, TOOLS as MEDIA_OPERATION_TOOLS
 from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
-from native_capability_specs import TOOL_SPECS as NATIVE_TOOL_SPECS
+from native_capability_specs import TOOL_SPECS as NATIVE_TOOL_SPECS, APPLICATION_INSTALL_SPECS
 from vendor_native_capabilities import NativeCapabilities, _OPERATIONS as NATIVE_OPERATIONS
 import api_monitoring
 
@@ -67,6 +69,8 @@ class IntegrationApi:
         self._closed = False
         self._service_generation = 1
         self.access = ApiAccessStore(state_dir)
+        self._state_dir = state_dir
+        self.file_authority = FileMutationAuthority(web.panel, state_dir=state_dir)
         self.docker_projects = DockerProjectRegistry(state_dir)
         self.docker_operations = DockerProjectOperations(self.docker_projects, authorizer=self._is_current)
         self.docker_deployments = DockerDeploymentRegistry(state_dir)
@@ -75,7 +79,8 @@ class IntegrationApi:
         self.download_operations = DownloadOperations(authorizer=self._is_current)
         self.media_operations = MediaOperations()
         self.native_operations = NativeCapabilities()
-        self.file_operations = FileReadExecutor(web.panel, authorizer=self._is_current)
+        self.file_operations = FileReadExecutor(web.panel, authorizer=self._is_current,
+                                              mutation_authority=self.file_authority)
         self.mcp = McpService(self.execute, version=version)
 
     def _is_current(self, principal):
@@ -93,6 +98,7 @@ class IntegrationApi:
             closer()
         self.deployment_operations.close()
         self.file_operations.close()
+        self.file_authority.close()
 
     def open(self):
         if self._closed:
@@ -104,15 +110,21 @@ class IntegrationApi:
             self.download_operations = DownloadOperations(authorizer=self._is_current)
             self.media_operations = MediaOperations()
             self.native_operations = NativeCapabilities()
-            self.file_operations = FileReadExecutor(self.web.panel, authorizer=self._is_current)
+            self.file_authority = FileMutationAuthority(self.web.panel, state_dir=self._state_dir)
+            self.file_operations = FileReadExecutor(self.web.panel, authorizer=self._is_current,
+                                                  mutation_authority=self.file_authority)
             self._closed = False
 
-    def snapshot(self):
+    def snapshot(self, *, current=None):
+        current = current or (lambda: not self._closed)
+        denied = {'ok': False, 'error': {'code': 'invalid_key', 'message': '网页登录授权已失效。'}}
+        if current() is not True:
+            return denied
         state = self.access.snapshot()
         names = {row['id']: row['name'] for row in state['keys']}
         state['audit'] = [dict(row, key_name=names.get(row.get('key_id')))
                           for row in state['audit']]
-        return {'ok': True, **state,
+        result = {'ok': True, **state,
                 'scope_catalog': self.scope_catalog(),
                 'endpoints': {'mcp': '/mcp', 'status': '/api/integration/status',
                               'action': '/api/integration/action',
@@ -120,9 +132,15 @@ class IntegrationApi:
                               'contracts': '/api/access/contracts'},
                 'protocol_versions': list(SUPPORTED_VERSIONS),
                 'file_root_catalog': self.file_root_catalog(),
+                'file_mutation_authority': self.file_authority_catalog(current=current),
+                'application_install_catalog': [
+                    {field: copy.deepcopy(spec[field]) for field in
+                     ('application_id', 'label', 'effect_summary', 'resource_effects')}
+                    for spec in APPLICATION_INSTALL_SPECS.values()],
                 'docker_project_catalog': self.docker_projects.metadata(),
                 'docker_deployment_catalog': self.docker_deployments.metadata(),
                 'tools': self.mcp.tool_catalog()}
+        return result if current() is True else denied
 
     @staticmethod
     def scope_catalog():
@@ -131,9 +149,9 @@ class IntegrationApi:
         result = copy.deepcopy(list(SCOPE_CATALOG))
         for item in result:
             if item['id'] == 'files':
-                description = ('在逐次原厂权限核验的Users/admin与public范围浏览、读取属性和下载；'
-                    + ('可在admin后代上传新文件，发布后单独确认原厂索引；覆盖、新建目录、改名、复制、移动和回收站待接入。'
-                       if 'prepare_file_upload' in IMPLEMENTED_TOOLS else '上传与文件变更待接入。'))
+                description = ('在逐次原厂权限核验的 Users/admin 与 public 范围浏览和下载；'
+                    '已核验 admin 后代支持上传、独立覆盖、目录创建、复制、可恢复改名／移动和原厂回收站，'
+                    '仍须精确工具、源／目标授权、恢复区及原厂索引等实际门槛。')
                 item.update(implemented=True, description=description)
             elif item['id'] == 'docker':
                 item.update(implemented=True, description='读取并控制已登记项目；管理员还可在所有者预先登记的独立资源上部署、更新或移除容器，始终保留数据卷。')
@@ -152,6 +170,40 @@ class IntegrationApi:
         """Owner-only planning metadata; this never enumerates user files."""
         return collect_file_roots(self.web.panel)
 
+    def file_authority_catalog(self, *, current=None):
+        """Owner metadata only; no Users directories are opened by this GET."""
+        try:
+            return self.file_authority.catalog(current=current or (lambda: not self._closed))
+        except (FileAccessError, OSError, ValueError):
+            return {'ok': False, 'authorities': [], 'error': {'code': 'write_backend_unverified'}}
+
+    def file_authority_manage(self, route, body, *, current):
+        """Fixed owner actions; Bearer and developer peers cannot initialize custody."""
+        actions = {'/api/files/authority/initialize': 'initialize',
+                   '/api/files/authority/preflight': 'preflight',
+                   '/api/files/authority/inspect': 'snapshot',
+                   '/api/files/authority/revoke': 'revoke',
+                   '/api/files/authority/restore': 'restore'}
+        action = actions.get(route)
+        read_action = action in ('snapshot', 'preflight')
+        fields = {'root_id'} if read_action else {'root_id', 'confirmed'}
+        if action == 'restore':
+            fields.add('recovery_id')
+        if (action is None or not isinstance(body, dict) or set(body) != fields
+                or not isinstance(body.get('root_id'), str)
+                or not read_action and body.get('confirmed') is not True
+                or action == 'restore' and not isinstance(body.get('recovery_id'), str)):
+            raise ValueError('文件恢复管理参数无效')
+        kwargs = {'current': current}
+        if not read_action:
+            kwargs['confirmed'] = True
+        if action == 'restore':
+            kwargs['recovery_id'] = body['recovery_id']
+        try:
+            return getattr(self.file_authority, action)(body['root_id'], **kwargs)
+        except FileAccessError as error:
+            return {'ok': False, 'error': {'code': error.code}}
+
     def capabilities(self, principal):
         """Expose this key's effective tools and selected domains, not NAS data.
 
@@ -159,6 +211,9 @@ class IntegrationApi:
         scope. Future domain grants are explicitly pending; they create no tool
         callbacks and do not query native services or install dependencies.
         """
+        denied = {'ok': False, 'error': {'code': 'invalid_key', 'message': '读取能力期间授权已失效。', 'retryable': False}}
+        if not self._is_current(principal):
+            return denied
         tools = self.mcp.tool_catalog(principal)
         scopes = list(principal['scopes'])
         domains = []
@@ -191,13 +246,17 @@ class IntegrationApi:
                                'read_only': root['read_only'] if root else None,
                                'reason': '根目录当前无法确认。' if root is None
                                else '挂载已变为只读，原写入授权当前不可用。' if not can_use else None})
-        return {'ok': True, 'role': principal.get('role', 'legacy'),
+        result = {'ok': True, 'role': principal.get('role', 'legacy'),
                 'policy_version': principal.get('policy_version', 1),
                 'scopes': scopes, 'file_roots': grants,
                 'tool_grants': list(principal.get('tool_grants', [])),
                 'docker_projects': copy.deepcopy(principal.get('docker_projects', [])),
                 'docker_deployments': copy.deepcopy(principal.get('docker_deployments', [])),
+                'application_ids': list(principal.get('application_ids', [34] if set(
+                    principal.get('tool_grants', [])).intersection((
+                        'plan_native_application_install', 'install_native_application')) else [])),
                 'tools': tools, 'domains': domains}
+        return result if self._is_current(principal) else denied
 
     def _validate_new_grants(self, body):
         """Owner grants may select only registered callbacks and resources."""

@@ -106,3 +106,77 @@ class ApplicationAccessTests(unittest.TestCase):
         self.assertFalse(self.store.is_current(principal))
         self.assertEqual(self.store.authorize('Bearer ' + key['token'], '127.0.0.1')[1], 'invalid_key')
         self.assertEqual(self.principal(rotated)['application_ids'], [7, 35])
+
+
+class ApplicationProjectionReviewTests(CompletionHTTPBase):
+    def test_capabilities_drops_snapshot_on_resource_edit_or_rotation_during_projection(self):
+        original = self.server.integration.mcp.tool_catalog
+        for action in ('resources', 'rotation', 'revoke'):
+            with self.subTest(action=action):
+                key = self.key('admin', ['apps'], [PLAN, INSTALL])
+                self.server.api_access.update_key({'id': key['id'], 'application_ids': [7, 35]})
+
+                def collect(principal=None):
+                    result = original(principal)
+                    if action == 'resources':
+                        self.server.api_access.update_key({'id': key['id'], 'application_ids': []})
+                    elif action == 'rotation':
+                        self.server.api_access.rotate_key(key['id'])
+                    else:
+                        self.server.api_access.revoke_key(key['id'])
+                    return result
+
+                with mock.patch.object(self.server.integration.mcp, 'tool_catalog', side_effect=collect):
+                    status, _, value = self.request('GET', '/api/integration/capabilities',
+                        headers={'Authorization': 'Bearer ' + key['token']})
+                self.assertEqual(status, 403)
+                self.assertFalse(value['ok'])
+                for field in ('application_ids', 'tools', 'tool_grants', 'file_roots'):
+                    self.assertNotIn(field, value)
+
+    def test_capabilities_rechecks_after_audit_record_before_http_disclosure(self):
+        key = self.key('admin', ['apps'], [PLAN, INSTALL])
+        self.server.api_access.update_key({'id': key['id'], 'application_ids': [7, 35]})
+        original = self.server.integration.record
+
+        def record(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if len(args) > 1 and args[1] == 'integration/capabilities':
+                self.server.api_access.rotate_key(key['id'])
+            return result
+
+        with mock.patch.object(self.server.integration, 'record', side_effect=record):
+            status, _, value = self.request('GET', '/api/integration/capabilities',
+                headers={'Authorization': 'Bearer ' + key['token']})
+        self.assertEqual(status, 403)
+        self.assertFalse(value['ok'])
+        self.assertNotIn('application_ids', value)
+        self.assertNotIn('tools', value)
+
+    def _owner_catalog_revocation(self, path):
+        observed = []
+
+        def collect(*, current):
+            self.assertTrue(current())
+            self.server.auth.revoke(self.server.auth.cookie_sid(self.cookie))
+            observed.append(current())
+            if not observed[-1]:
+                raise FileAccessError('invalid_key')
+            return {'ok': True, 'authorities': [{'root_id': 'PRIVATE-STALE-OWNER'}]}
+
+        with mock.patch.object(self.server.integration.file_authority, 'catalog', side_effect=collect):
+            _, _, value = self.browser('GET', path)
+        self.assertEqual(observed, [False])
+        self.assertFalse(value['ok'])
+        self.assertNotIn('keys', value)
+        self.assertNotIn('PRIVATE-STALE-OWNER', json.dumps(value))
+
+    def test_owner_authority_get_revalidates_session_during_catalog_projection(self):
+        self._owner_catalog_revocation('/api/files/authority')
+
+    def test_owner_access_snapshot_revalidates_its_nested_authority_projection(self):
+        self._owner_catalog_revocation('/api/access')
+
+
+if __name__ == '__main__':
+    unittest.main()

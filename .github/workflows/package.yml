@@ -67,6 +67,10 @@ jobs:
         run: python tools/boot-once/test_runner.py
       - name: Check image delivery contracts
         run: python -m unittest discover -s tests -v
+      - name: Verify recoverable file mutations with real Linux root descriptors
+        run: |
+          sudo "$(command -v python)" -B -m unittest discover -s tests -p test_api_file_mutations.py -v
+          sudo "$(command -v python)" -B -m unittest discover -s tests -p test_api_file_native_recycle.py -v
       - name: Verify real read-only service mount on the disposable runner
         run: sudo python3 tests/check_mount_linux.py
 

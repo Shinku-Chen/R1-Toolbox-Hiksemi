@@ -119,6 +119,44 @@ class SchemaAndBoundaryTests(unittest.TestCase):
         self.error('write_backend_unverified', lambda: instance.verify_new(
             receipt, ROW, PATH, -1, directory=False, current=lambda: True))
 
+    def test_mutation_preflight_requires_an_existing_generation_and_absent_target(self):
+        instance = reader.NativeFileIndexReader()
+        source = reader._Receipt(instance._identity, '/drives/data', '/Users/' + PATH,
+                                  ROW['id'], '1', (), (1, 2), False, 7)
+        target = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/target',
+                                  ROW['id'], '1', (), (1, 2), True, None)
+        with mock.patch.object(instance, 'preflight', side_effect=[source, target]) as preflight:
+            result = instance.preflight_mutation(ROW, PATH, 'admin/target',
+                                                  operation='move', current=lambda: True)
+            self.assertIs(result.source, source)
+            self.assertIs(result.target, target)
+            self.assertFalse(preflight.call_args_list[0].kwargs['require_absent'])
+            self.assertTrue(preflight.call_args_list[1].kwargs['require_absent'])
+        with mock.patch.object(instance, 'preflight', return_value=target):
+            self.error('write_backend_unverified', lambda: instance.preflight_mutation(
+                ROW, PATH, 'admin/target', operation='move', current=lambda: True))
+
+    def test_mutation_requires_both_target_generation_and_source_disappearance(self):
+        instance = reader.NativeFileIndexReader()
+        source = reader._Receipt(instance._identity, '/drives/data', '/Users/' + PATH,
+                                  ROW['id'], '1', (), (1, 2), False, 7)
+        target = reader._Receipt(instance._identity, '/drives/data', '/Users/admin/target',
+                                  ROW['id'], '1', (), (1, 2), True, None)
+        receipt = reader._MutationReceipt('move', source, target)
+        current = lambda: True
+        with mock.patch.object(instance, 'verify_new', return_value=True) as verify, \
+                mock.patch.object(instance, '_verify_absent', return_value=False) as absent:
+            self.assertFalse(instance.verify_mutation(receipt, ROW, PATH, 'admin/target', 1,
+                                                      operation='move', current=current))
+            self.assertEqual(verify.call_args.kwargs['after_generation'], 7)
+            absent.assert_called_once()
+            absent.return_value = True
+            self.assertTrue(instance.verify_mutation(receipt, ROW, PATH, 'admin/target', 1,
+                                                     operation='move', current=current))
+            verify.return_value = False
+            self.assertFalse(instance.verify_mutation(receipt, ROW, PATH, 'admin/target', 1,
+                                                      operation='move', current=current))
+
     def test_unrelated_new_sqlite_fd_or_writable_sidecar_is_refused(self):
         opened = object.__new__(reader._OpenedIndex)
         opened.root, opened.mount_id = '/', '10'
@@ -222,6 +260,54 @@ class NativeIndexLinuxTests(unittest.TestCase):
         observed = self.preflight(require_absent=False)
         self.assertTrue(self.verify(observed, descriptor))
 
+    def test_mkdir_requires_real_directory_metadata_and_native_index_row(self):
+        receipt = self.preflight()
+        path = self.users / PATH
+        path.mkdir()
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        self.assertFalse(self.reader.verify_new(receipt, ROW, PATH, descriptor,
+                                               directory=True, current=lambda: True))
+        values = list(self.values(descriptor))
+        values[3] = 1
+        self.insert(values)
+        self.assertTrue(self.reader.verify_new(receipt, ROW, PATH, descriptor,
+                                              directory=True, current=lambda: True))
+
+    def test_replace_must_advance_native_generation_even_with_identical_stat_tuple(self):
+        descriptor = self.file()
+        self.insert(self.values(descriptor))
+        prepared = self.reader.preflight_mutation(ROW, PATH, PATH,
+                                                   operation='replace', current=lambda: True)
+        self.assertFalse(self.reader.verify_mutation(prepared, ROW, PATH, PATH, descriptor,
+                                                    operation='replace', current=lambda: True))
+        self.insert(self.values(descriptor))
+        self.assertTrue(self.reader.verify_mutation(prepared, ROW, PATH, PATH, descriptor,
+                                                   operation='replace', current=lambda: True))
+
+    def test_move_needs_new_generation_and_no_old_key_in_same_database(self):
+        descriptor = self.file()
+        self.insert(self.values(descriptor))
+        target = 'admin/uploads/moved.txt'
+        prepared = self.reader.preflight_mutation(ROW, PATH, target,
+                                                   operation='move', current=lambda: True)
+        os.rename(self.users / PATH, self.users / target)
+        info = os.fstat(descriptor)
+        values = ('/Users/' + target, info.st_ctime_ns // 10**9,
+                  info.st_mtime_ns // 10**9, 0, info.st_size, '/drives/data')
+        self.insert(values)
+        self.assertFalse(self.reader.verify_mutation(prepared, ROW, PATH, target, descriptor,
+                                                    operation='move', current=lambda: True))
+        with sqlite3.connect(self.database) as connection:
+            connection.execute('DELETE FROM tb_file_db_all WHERE path=?', ('/Users/' + PATH,))
+            connection.execute('UPDATE tb_file_db_all SET mkey=? WHERE path=?',
+                               (prepared.source.generation, '/Users/' + target))
+        self.assertFalse(self.reader.verify_mutation(prepared, ROW, PATH, target, descriptor,
+                                                    operation='move', current=lambda: True))
+        self.insert(values)
+        self.assertTrue(self.reader.verify_mutation(prepared, ROW, PATH, target, descriptor,
+                                                   operation='move', current=lambda: True))
+
     def test_stale_or_other_mount_or_noninteger_index_rows_never_confirm(self):
         receipt, descriptor = self.preflight(), self.file()
         expected = self.values(descriptor)
@@ -276,8 +362,8 @@ class NativeIndexLinuxTests(unittest.TestCase):
         self.insert(self.values(descriptor))
         original = reader._query
 
-        def revoke(*args):
-            rows = original(*args)
+        def revoke(*args, **kwargs):
+            rows = original(*args, **kwargs)
             self.current = False
             return rows
 
@@ -285,8 +371,8 @@ class NativeIndexLinuxTests(unittest.TestCase):
             self.error('invalid_key', lambda: self.verify(receipt, descriptor))
         self.current = True
 
-        def change(*args):
-            rows = original(*args)
+        def change(*args, **kwargs):
+            rows = original(*args, **kwargs)
             replacement = self.parent / 'fixture-new'
             replacement.write_bytes(b'replacement')
             os.replace(replacement, self.users / PATH)
