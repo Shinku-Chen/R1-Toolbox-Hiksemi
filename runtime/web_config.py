@@ -328,6 +328,7 @@ class WebConfigServer:
         self._business_cached, self._business_cached_at = None, 0
         self._business_epoch = self._business_cached_epoch = 0
         self.server = self.thread = None
+        self._stop_error = None
         self.reason = None
         self.pair_hash, self.pair_until = None, 0
         self.sessions, self.attempts = {}, {}
@@ -2065,6 +2066,7 @@ class WebConfigServer:
                 self.reason = '网页端口不可用，请检查监听配置或端口占用'
                 raise
             self.server, self.port, self.reason = server, server.server_port, None
+            self._stop_error = None
             self.thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.1}, name='r1-web-config', daemon=True)
             try:
                 self.thread.start()
@@ -2076,16 +2078,42 @@ class WebConfigServer:
             return self
 
     def stop(self):
-        self.integration.close()
+        first_error = None
+        try:
+            self.integration.close()
+        except Exception as error:
+            first_error = error
         with self.operation_lock:
             with self.lock:
                 server, thread = self.server, self.thread
                 self.server = self.thread = None
                 self.sessions.clear()
                 self.pair_hash, self.pair_until = None, 0
-        self.fan_diagnostics.stop()
+        try:
+            self.fan_diagnostics.stop()
+        except Exception as error:
+            if first_error is None:
+                first_error = error
         if server is not None:
-            server.shutdown()
-            server.server_close()
+            try:
+                server.shutdown()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            try:
+                server.server_close()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2)
+            try:
+                thread.join(timeout=2)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            # Keep the original exception private; resident cleanup logs its
+            # real type after all Web resources have had a chance to close.
+            self._stop_error = first_error
+            self.reason = '网页服务已停止，但资源收尾失败，请检查常驻服务日志'
+            raise first_error

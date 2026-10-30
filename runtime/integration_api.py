@@ -67,6 +67,7 @@ class IntegrationApi:
     def __init__(self, web, *, state_dir, version='dev'):
         self.web = web
         self._closed = False
+        self._close_error = None
         self._service_generation = 1
         self.access = ApiAccessStore(state_dir)
         self._state_dir = state_dir
@@ -90,15 +91,24 @@ class IntegrationApi:
                 and generation == self._service_generation and self.access.is_current(principal))
 
     def close(self):
+        if self._closed:
+            return
         self._closed = True
         # A later open must never revive the authorization of a blocked call.
         self._service_generation += 1
-        closer = getattr(self.docker_operations, 'close', None)
-        if callable(closer):
-            closer()
-        self.deployment_operations.close()
-        self.file_operations.close()
-        self.file_authority.close()
+        first_error = None
+        for resource in (self.docker_operations, self.deployment_operations,
+                         self.file_operations, self.file_authority):
+            closer = getattr(resource, 'close', None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+        self._close_error = first_error
+        if first_error is not None:
+            raise first_error
 
     def open(self):
         if self._closed:
@@ -113,6 +123,7 @@ class IntegrationApi:
             self.file_authority = FileMutationAuthority(self.web.panel, state_dir=self._state_dir)
             self.file_operations = FileReadExecutor(self.web.panel, authorizer=self._is_current,
                                                   mutation_authority=self.file_authority)
+            self._close_error = None
             self._closed = False
 
     def snapshot(self, *, current=None):

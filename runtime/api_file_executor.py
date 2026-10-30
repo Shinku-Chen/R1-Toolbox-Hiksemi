@@ -168,6 +168,7 @@ class FileReadExecutor:
         self._handle = handle_factory or _Handle
         self._clock = clock or time.monotonic
         self._closed = False
+        self._close_error = None
         self._lock = threading.RLock()
         self._cursors = {}
         self.transfers = FileTransfers(self._current)
@@ -352,8 +353,18 @@ class FileReadExecutor:
             return FileAccessError('secure_open_unavailable').result()
 
     def close(self):
-        self._closed = True
-        self.write_operations.close()
-        self.transfers.close()
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            first_error = None
+            for resource in (self.write_operations, self.transfers):
+                try:
+                    resource.close()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
             self._cursors.clear()
+            self._close_error = first_error
+            if first_error is not None:
+                raise first_error

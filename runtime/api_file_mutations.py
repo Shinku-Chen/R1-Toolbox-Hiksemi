@@ -151,9 +151,11 @@ class FileMutationExecutor:
         self._lock = threading.RLock()
         self._pending = {}
         self._recycle = recycle
+        self._closed = False
+        self._close_error = None
 
     def _current(self, principal):
-        if not self.writer._current(principal):
+        if self._closed or not self.writer._current(principal):
             raise FileAccessError('invalid_key')
         _binding(principal)
 
@@ -892,12 +894,30 @@ class FileMutationExecutor:
 
     def close(self):
         with self._lock:
-            for pending in self._pending.values():
-                os.close(pending['fd'])
+            if self._closed:
+                return
+            self._closed = True
+            pending_rows = list(self._pending.values())
             self._pending.clear()
+            # Detach owned descriptors before closing: a failed close must not
+            # later close an unrelated descriptor that reused the same number.
+            first_error = None
+            for pending in pending_rows:
+                try:
+                    os.close(pending['fd'])
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
             if self.ledger.rows is not None:
                 for row in self.ledger.rows.values():
                     if row['operation']['state'] in ('pending', 'running'):
                         row['operation'].update(state='result_unconfirmed', result_version=None,
                             error=FileAccessError('result_unconfirmed').result()['error'])
-                self.ledger.save()
+                try:
+                    self.ledger.save()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+            self._close_error = first_error
+            if first_error is not None:
+                raise first_error
