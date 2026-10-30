@@ -3,6 +3,7 @@
 from contextlib import ExitStack
 import ast
 import errno
+import itertools
 import os
 from pathlib import Path
 import sqlite3
@@ -188,6 +189,60 @@ class FixedObserverTests(unittest.TestCase):
         self.events.clear()
         self.assertEqual(self.listener()[1], '100')
         self.assertEqual(self.events[-1], ('index.listener.socket_stable', 'pass'))
+
+    def test_listener_allows_only_normal_pending_and_accepted_stream_children(self):
+        header = 'Num RefCount Protocol Flags Type St Inode Path\n'
+        listening = '0: 2 0 00010000 0001 01 100 /tmp/UNIX.domain\n'
+        pending = '1: 3 0 00000000 0001 02 0 /tmp/UNIX.domain\n'
+        accepted = '2: 3 0 00000000 0001 03 200 /tmp/UNIX.domain\n'
+        arrangements = list(itertools.permutations((listening, pending, accepted)))
+        arrangements += [(listening, child) for child in (pending, accepted)]
+        arrangements += [(child, listening) for child in (pending, accepted)]
+        for rows in arrangements:
+            with self.subTest(rows=rows):
+                self.events.clear()
+                self.assertEqual(self.listener(table=header + ''.join(rows))[1], '100')
+                self.assertEqual(self.events[-1], ('index.listener.socket_stable', 'pass'))
+
+    def test_stream_children_never_replace_or_hide_duplicate_listeners(self):
+        header = 'Num RefCount Protocol Flags Type St Inode Path\n'
+        listening = '0: 2 0 00010000 0001 01 100 /tmp/UNIX.domain\n'
+        pending = '1: 3 0 00000000 0001 02 0 /tmp/UNIX.domain\n'
+        accepted = '2: 3 0 00000000 0001 03 200 /tmp/UNIX.domain\n'
+        for rows in (pending, accepted, pending + accepted,
+                     listening + pending + accepted + listening):
+            with self.subTest(rows=rows):
+                self.events.clear()
+                with self.assertRaises(FileAccessError) as error:
+                    self.listener(table=header + rows)
+                self.assertEqual(error.exception.code, 'native_unavailable')
+                self.assertEqual(self.events[-1], ('index.listener.unix_table', 'start'))
+
+    def test_same_path_nonlistener_malformed_or_unconfirmed_states_are_refused(self):
+        header = ('Num RefCount Protocol Flags Type St Inode Path\n'
+                  '0: 2 0 00010000 0001 01 100 /tmp/UNIX.domain\n')
+        # Only kernel pending inode 0 and accepted positive inode are admitted.
+        # Other transient states remain unconfirmed, not listener candidates.
+        for flags, kind, state, inode in (
+                ('00000000', '0001', '02', '200'),
+                ('00000000', '0001', '03', '0'),
+                ('00000000', '0001', '03', '-1'),
+                ('00000000', '0001', '03', '12x'),
+                ('00000000', '0001', '03', '1' * 25),
+                ('00000000', '0001', '04', '200'),
+                ('00000000', '0002', '03', '200'),
+                ('00010000', '0001', '03', '200'),
+                ('00020000', '0001', '03', '200'),
+                ('00010000', '0001', '01', '0'),
+                ('00010000', '0001', '01', '12x'),
+                ('00010000', '0002', '01', '200')):
+            with self.subTest(flags=flags, kind=kind, state=state, inode=inode):
+                self.events.clear()
+                row = f'1: 3 0 {flags} {kind} {state} {inode} /tmp/UNIX.domain\n'
+                with self.assertRaises(FileAccessError) as error:
+                    self.listener(table=header + row)
+                self.assertEqual(error.exception.code, 'native_unavailable')
+                self.assertEqual(self.events[-1], ('index.listener.unix_table', 'start'))
 
     def connection(self, create=CREATE):
         connection = sqlite3.connect(':memory:', isolation_level=None)

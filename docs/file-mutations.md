@@ -86,3 +86,11 @@ Linux 不提供按 inode 比较后原子改名的系统调用；`stat` 后直接
 代码检查确认此处曾用普通 `_read_fixed(...,64)` 读取 `sys/block/<磁盘>/<分区>/dev`，既拒绝声明 `st_size>64`，又要求非零声明长度等于实际内容长度。Linux 的 sysfs 文本属性按 `PAGE_SIZE` 声明容量，实际由属性的 `show()` 返回内容长度，二者不能等同；见 [Linux sysfs 实现](https://github.com/torvalds/linux/blob/v4.14/fs/sysfs/file.c)。这证明读取器存在独立缺陷，并与实机失败阶段吻合；本次诊断未输出 NAS 的实际 `st_size` 或 errno，不能把推断写成实测，也不能据此宣称其他后续门都已通过。
 
 修复仅新增严格构造的 `sys/block/sdX/sdXN/dev` 专用读取器，以实际 EOF 为准，上限 64 字节，持续处理短读，并保留 no-follow、普通属性类型、打开前后设备／inode／模式／声明大小／mtime／ctime 稳定性。普通 `_read_fixed` 原有长度检查保持不变；读取成功后仍必须与挂载设备号、真实块设备 `rdev` 和内置 ATA 传输路径相符。定向回归包含声明 4096 字节而实际只有短文本、超限、短读、身份变化及 Linux 真实 sysfs 属性；修复后须部署并重新跑固定预检，通过后才继续新随机目录的写入验收，不重放旧操作。
+
+### 2026-10-31：0fa458b 的 Unix 监听预检
+
+实机已核对运行精确 `0fa458b386bf4167019a150e35f82a62045f3851`，只发起一次固定 `write-preflight`，HTTP 200。此前的 `index.sata.sysfs_device`、块设备节点、设备号匹配和内置 ATA 传输检查均已通过；原厂进程、二进制、挂载命名空间及固定套接字路径也已通过。新的 `ready:false/error_code:native_unavailable/failure_stage:index.listener.unix_table` 停止了后续 FD 归属及索引数据库检查；这些依赖阶段保持 `not_run`。本轮没有创建 Token、测试文件或上传暂存，也没有发送原厂索引通知。
+
+代码与可信 fixture 复现了一项独立解析缺陷：原实现要求 `/proc/net/unix` 中每条同名 `/tmp/UNIX.domain` 记录都是监听条目；正常 Unix stream 连接也会继承监听者的路径，因而可能把已连接条目误判为第二个非法监听者。[Linux v4.14 的连接实现](https://github.com/torvalds/linux/blob/v4.14/net/unix/af_unix.c#L1264)复制监听地址，表输出则分别标记监听、待接收和已连接状态。该证据不是 NAS 本轮原始套接字行：现有阶段回执没有返回其行内容，读取异常、超限及实际监听状态仍须与现场区分，不能据此声称唯一根因已确认。
+
+修复只调整同名表项的分类，监听者仍须唯一、为 stream 监听状态且有合法正 inode；其他条目不能成为监听候选。原厂 ELF／PID 与真实 FD 归属、完整 FD 枚举、root 属主套接字身份、命名空间、`SO_PEERCRED` 和通知前后的持续核验保持不变。回归使用合成混排行及 Linux 临时随机路径上的真实连接，不连接 NAS 或原厂 `/tmp/UNIX.domain`。仍须部署后通过固定预检，才能开始新一轮独立文件写入验收。

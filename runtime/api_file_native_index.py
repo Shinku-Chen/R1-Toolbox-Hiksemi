@@ -199,8 +199,16 @@ def _listener_signature(root, deadline, *, observer=None):
     for line in _read_fixed(root, 'proc/net/unix').splitlines()[1:]:
         fields = line.split()
         if len(fields) == 8 and fields[7] == _SOCKET:
+            positive_inode = re.fullmatch(r'[1-9][0-9]{0,23}', fields[6]) is not None
+            # Stream children inherit the listener's pathname. A pending child
+            # has no socket inode yet; an accepted child has a positive inode.
+            # Neither is another listener or evidence of its owning process.
+            if (fields[3] == '00000000' and fields[4] == '0001'
+                    and (fields[5] == '02' and fields[6] == '0'
+                         or fields[5] == '03' and positive_inode)):
+                continue
             if (fields[3] != '00010000' or fields[4] != '0001' or fields[5] != '01'
-                    or re.fullmatch(r'[1-9][0-9]{0,23}', fields[6]) is None):
+                    or not positive_inode):
                 raise FileAccessError('native_unavailable')
             listeners.append(fields[6])
     if len(listeners) != 1:

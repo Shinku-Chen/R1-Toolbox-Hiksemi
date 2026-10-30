@@ -206,6 +206,42 @@ class NativeUnixListenerIdentityTests(unittest.TestCase):
         self.factory.assert_called_once_with(root=self.root, port=20443)
         self.binary.assert_called_once_with(self.root, result[0])
 
+    def test_live_kernel_pending_and_accepted_stream_children_share_listener_path(self):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(client.close)
+        client.connect(str(self.target))
+
+        def sample_kernel_table():
+            # Use only this test's random temporary endpoint. The original
+            # firmware pathname is never opened or contacted on the host.
+            text = index._read_fixed('/', 'proc/net/unix')
+            rows = [line.split() for line in text.splitlines()[1:]]
+            rows = [fields for fields in rows
+                    if len(fields) == 8 and fields[7] == str(self.target)]
+            self.assertTrue(any(fields[3:7] == ['00010000', '0001', '01', self.inode]
+                                for fields in rows))
+            # Only the final path spelling is translated into the trusted
+            # fixed-path fixture; flags, type, state and kernel inode stay real.
+            projected = [' '.join(fields[:7] + [index._SOCKET]) for fields in rows]
+            (self.root / 'proc/net/unix').write_text(
+                'Num RefCount Protocol Flags Type St Inode Path\n'
+                + '\n'.join(projected) + '\n')
+            return rows
+
+        pending = sample_kernel_table()
+        self.assertTrue(any(fields[3:7] == ['00000000', '0001', '02', '0']
+                            for fields in pending))
+        self.assertEqual(self.probe()[1], self.inode)
+
+        accepted, _address = self.server.accept()
+        self.addCleanup(accepted.close)
+        accepted_inode = str(os.fstat(accepted.fileno()).st_ino)
+        self.assertNotEqual(accepted_inode, self.inode)
+        connected = sample_kernel_table()
+        self.assertTrue(any(fields[3:7] == ['00000000', '0001', '03', accepted_inode]
+                            for fields in connected))
+        self.assertEqual(self.probe()[1], self.inode)
+
     def test_exact_native_elf_is_mandatory_before_socket_proof(self):
         self.binary.return_value = False
         self.refused()
