@@ -5,11 +5,13 @@ tb_file_db_all rows contain mount-relative path, type, size and second-resolutio
 stat times, not inode numbers or hashes. A match is index visibility evidence;
 the caller must separately retain and verify the submitted file descriptor.
 
-Only existing ordinary SQLite files are opened. WAL is read in place with the
-Unix VFS's readonly_shm flag; an unavailable WAL/SHM state is rejected instead of
-creating sidecars, recovering journals, copying a stale main DB or using
-immutable=1. SQLite may fchown an existing SHM to its current DB ownership when
-running as root; this is not advertised as zero filesystem-metadata activity.
+Existing ordinary SQLite files are prechecked. The main DB and SHM must have
+actual read-only SQLite descriptors. SQLite itself opens WAL as read/write,
+even for mode=ro: readonly_shm makes its WAL transactions and checkpointing
+read-only. A rotation race may let that internal open create an empty WAL;
+changed identity is rejected, never accepted as index proof. Root may also
+fchown existing SHM. This is an explicit write-task observation, not a promise
+of zero filesystem-metadata activity; no SQL writes or journal recovery run.
 """
 
 from dataclasses import dataclass
@@ -90,13 +92,24 @@ def _fd_snapshot():
     return values
 
 
-def _readonly_fd(descriptor):
+def _fd_flags(descriptor):
     try:
         raw = Path('/proc/self/fdinfo/' + str(descriptor)).read_text(encoding='ascii')
         matches = re.findall(r'^flags:\s*([0-7]+)\s*$', raw, re.MULTILINE)
-        return len(matches) == 1 and int(matches[0], 8) & os.O_ACCMODE == os.O_RDONLY
+        return int(matches[0], 8) if len(matches) == 1 else None
     except (OSError, ValueError):
-        return False
+        return None
+
+
+def _readonly_fd(descriptor):
+    flags = _fd_flags(descriptor)
+    return flags is not None and flags & os.O_ACCMODE == os.O_RDONLY
+
+
+def _wal_fd_allowed(descriptor):
+    flags = _fd_flags(descriptor)
+    return (flags is not None and not flags & os.O_APPEND
+            and flags & os.O_ACCMODE in (os.O_RDONLY, os.O_RDWR))
 
 
 @dataclass(frozen=True)
@@ -238,6 +251,7 @@ class _OpenedIndex:
         expected = {identity for suffix, identity in self.file_states.items()
                     if identity is not None and (sidecars or suffix == '')}
         admitted = {identity for identity in self.file_states.values() if identity is not None}
+        wal = self.file_states.get('-wal') if sidecars and getattr(self, 'wal', False) else None
         seen = set()
         for descriptor, identity in after.items():
             changed = before.get(descriptor) != identity
@@ -248,7 +262,12 @@ class _OpenedIndex:
             if changed and stat.S_ISREG(identity[2]) and identity not in admitted:
                 raise FileAccessError('write_backend_unverified')
             if changed and identity in admitted:
-                if not _readonly_fd(descriptor):
+                # SQLite wal.c opens WAL with READWRITE|CREATE regardless of
+                # mode=ro. Only this exact existing inode may use that mode;
+                # main and SHM still require actual O_RDONLY. WAL_SHM_RDONLY
+                # blocks write transactions, recovery and checkpoint/delete.
+                if not (_wal_fd_allowed(descriptor) if wal is not None and identity == wal
+                        else _readonly_fd(descriptor)):
                     raise FileAccessError('write_backend_unverified')
                 if _descriptor_mount_id(self.root, descriptor) != self.mount_id:
                     raise FileAccessError('write_backend_unverified')

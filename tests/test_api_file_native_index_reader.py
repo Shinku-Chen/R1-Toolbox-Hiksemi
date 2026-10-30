@@ -133,6 +133,22 @@ class SchemaAndBoundaryTests(unittest.TestCase):
                 mock.patch.object(reader, '_readonly_fd', return_value=False):
             self.error('write_backend_unverified', lambda: opened.sqlite_proof({}))
 
+    def test_only_exact_wal_may_use_sqlite_internal_readwrite_descriptor(self):
+        opened = object.__new__(reader._OpenedIndex)
+        opened.root, opened.mount_id, opened.wal = '/', '10', True
+        main, wal, shm = [(1, i, stat.S_IFREG, 1) for i in (2, 3, 4)]
+        opened.file_states = {'': main, '-wal': wal, '-shm': shm, '-journal': None}
+        opened.check = lambda: None
+        with mock.patch.object(reader, '_fd_snapshot', return_value={20: main, 21: wal, 22: shm}), \
+                mock.patch.object(reader, '_readonly_fd', side_effect=lambda fd: fd != 21), \
+                mock.patch.object(reader, '_wal_fd_allowed', return_value=True), \
+                mock.patch.object(reader, '_descriptor_mount_id', return_value='10'):
+            opened.sqlite_proof({}, sidecars=True)
+            with mock.patch.object(reader, '_readonly_fd', side_effect=lambda fd: fd == 20):
+                self.error('write_backend_unverified', lambda: opened.sqlite_proof({}, sidecars=True))
+            with mock.patch.object(reader, '_wal_fd_allowed', return_value=False):
+                self.error('write_backend_unverified', lambda: opened.sqlite_proof({}, sidecars=True))
+
 
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'O_PATH') and hasattr(os, 'pread'),
                      'Linux O_PATH, proc fd identity and Unix SQLite VFS required')
@@ -340,6 +356,33 @@ class NativeIndexLinuxTests(unittest.TestCase):
             self.assertFalse(shm.exists())
         finally:
             saved.rename(shm)
+
+    def test_wal_rotation_race_never_confirms_or_writes_database_content(self):
+        self.wal_writer()
+        wal = self.cache / 'FILE_DB_V102-wal'
+        saved = self.cache / 'fixture-rotated-wal'
+        before = {p.name: hashlib.sha256(p.read_bytes()).digest()
+                  for p in (self.database, wal)}
+        rotated = []
+
+        class RotatingConnection(sqlite3.Connection):
+            def execute(connection, sql, *args):
+                if sql == 'PRAGMA schema_version' and not rotated:
+                    wal.rename(saved)
+                    rotated.append(True)
+                return super().execute(sql, *args)
+
+        connect = sqlite3.connect
+        with mock.patch.object(reader.sqlite3, 'connect',
+                               side_effect=lambda *a, **kw: connect(*a, factory=RotatingConnection, **kw)):
+            self.error('write_backend_unverified', self.preflight)
+        self.assertTrue(rotated)
+        self.assertEqual(hashlib.sha256(self.database.read_bytes()).digest(), before[self.database.name])
+        self.assertEqual(hashlib.sha256(saved.read_bytes()).digest(), before[wal.name])
+        # SQLite's internal READWRITE|CREATE open can create an empty new WAL
+        # after the precheck. Identity failure must reject it, not claim a row.
+        if wal.exists():
+            self.assertEqual(wal.stat().st_size, 0)
 
 
 if __name__ == '__main__':

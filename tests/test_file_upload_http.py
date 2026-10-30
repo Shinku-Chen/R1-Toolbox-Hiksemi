@@ -185,7 +185,7 @@ class FileUploadHTTPStaging(UploadHTTPBase):
         key = self.key if key is None else key
         principal, reason = self.server.api_access.authorize('Bearer ' + key['token'], peer,
                                                             required_scope='files')
-        self.assertIsNone(reason)
+        self.assertEqual(reason, 'ok')
         principal['_peer'] = peer
         principal['_service_generation'] = self.server.integration._service_generation
         return principal

@@ -29,7 +29,7 @@ Content-Length: <准备时的完整字节数>
 
 原厂通知只面向已核验内置 SATA，并拒绝路径中的字面量 `|` 与隐藏片段，避免原厂分隔协议或索引过滤造成歧义。独立索引读取固定管理员的既有 `FILE_DB_V102/tb_file_db_all`；索引只提供路径、类型、大小和秒级 stat 时间证据，同对象证明仍来自保留的真实文件句柄，不能把索引记录当 inode 或哈希证明。
 
-SQLite 采用 `mode=ro` 与 `readonly_shm=1` 读取既有 WAL／SHM；必要状态缺失即拒绝，不创建侧文件、不恢复日志、不复制主库后加 `immutable=1`。2026-10-30 核对 [SQLite 官方 Unix VFS 源码](https://raw.githubusercontent.com/sqlite/sqlite/master/src/os_unix.c) 中 `unixOpenSharedMemory` 的既有 SHM 只读分支及 `robustFchown`：即使只读打开，root 仍可能对既有 SHM 执行与数据库相同 UID／GID 的 fchown；因此不承诺零文件系统元数据活动。
+SQLite 采用 `mode=ro`、`query_only`、固定 SELECT 授权器及 `readonly_shm=1`；主库与 SHM 的 SQLite 实际句柄必须只读。必要 WAL／SHM 缺失先拒绝，不复制主库后加 `immutable=1`。SQLite 内部仍以 `READWRITE|CREATE` 打开 WAL，因此仅允许该已核验 WAL inode 使用此模式，不将所有句柄都误要求为只读。[SQLite 3.40.1 的 WAL 源码](https://raw.githubusercontent.com/sqlite/sqlite/version-3.40.1/src/wal.c) 表明只读 SHM 设置 `WAL_SHM_RDONLY`，写事务、恢复及 checkpoint 被拒绝，关闭不会成功 checkpoint 后删除 WAL。原厂轮转若恰在预检与 SQLite 打开之间发生，可能初始化空 WAL；身份变化立即拒绝该结果，不清理或重放，也不声称绝无侧文件创建。[Unix VFS 源码](https://raw.githubusercontent.com/sqlite/sqlite/version-3.40.1/src/os_unix.c) 还表明 root 可能对既有 SHM 执行与数据库相同 UID／GID 的 fchown。这是显式读写任务核对，不是零文件系统元数据活动的查询承诺。
 
 ## 状态与验证
 
