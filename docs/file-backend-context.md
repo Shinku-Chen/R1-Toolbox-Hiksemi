@@ -1,12 +1,12 @@
 # 文件后端上下文与字节传输
 
-本批增加真实目录句柄诊断与有界文件传输状态机。**尚未有生产文件后端证明 NAS 主体、Unix 身份、原厂 ACL 与同一实际对象，因此不注册文件浏览、下载、上传或文件变更工具。** 下面的传输组件可以接受可信后端的句柄，并不意味着目前可以读取 NAS 文件。
+本项目已有真实目录句柄诊断与有界文件传输状态机。现已增加固定管理员／`public` 子树的五项真实只读执行器，逐操作核验精确固件、原厂逻辑读许可和同一实际对象；详见 [native-file-readonly.md](native-file-readonly.md)。上传与文件变更仍没有已核验生产后端。下面的元数据诊断本身不授予文件访问。
 
 ## 已确认的原厂约束
 
 固定固件 `V6.3.3_Build_260907` 的 `emhistor` 样本 SHA-256 为 `402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26`。
 
-`rest_check_path_auth@0x281dc9` 使用路径、NAS 用户名、逻辑 user ID 和访问类别；调用 `rest_get_path_info@0x281689` 与管理员类别判断 `0x281280`，再按路径类别处理 `public`、用户名和外部盘权限。它不能等同为 POSIX uid／gid 的访问检查。文件下载调用者先按路径执行该检查，随后才进入另一个按路径打开的 handler；现有静态证据没有把原厂判权与最后的文件句柄闭合为同一对象。
+`rest_check_path_auth@0x281dc9` 使用路径、NAS 用户名、逻辑 user ID 和访问类别；调用 `rest_get_path_info@0x281689` 与管理员类别判断 `0x281280`，再按路径类别处理 `public`、用户名和外部盘权限。它不能等同为 POSIX uid／gid 的访问检查。文件下载调用者先按路径执行该检查，随后才进入另一个按路径打开的 handler；新的只读后端不复用这个分离的原厂下载 handler，而是对完整原厂正子集判权后，自行核验同一真实句柄；其他用户和写入仍不据此开放。
 
 因此，下列做法均不能启用文件功能：把管理员逻辑 ID `100000` 当成 Unix uid、使用宿主 root 直接读写、把根规划或目录 O_PATH 句柄当 ACL、用布尔 `acl_verified` 请求字段自证权限、根据固定动作名称猜测 HTTP／Range／上传协议。
 
@@ -19,7 +19,7 @@ from api_file_operations import collect_file_backend_context
 context = collect_file_backend_context(panel)
 ```
 
-内部签名为 `collect_file_backend_context(panel, *, root='/', root_collector=None, owner_reader=None, runtime_reader=None)`。后四项只用于固定宿主／测试依赖，不能成为 HTTP 参数、任意路径、SQL、账号或原厂动作代理。建议固定开发项目名 `file_backend_context`；主线仍须执行真实来源 IP 白名单、非空开发窗口、同源／JSON／CSRF，采集结束重新核验授权。该项目不得自动加入默认检测或定时轮询。
+内部签名为 `collect_file_backend_context(panel, *, root='/', root_collector=None, owner_reader=None, runtime_reader=None)`。后四项只用于固定宿主／测试依赖，不能成为 HTTP 参数、任意路径、SQL、账号或原厂动作代理。已通过固定 `file_backend_context` 主线接入实际来源白名单、非空开发窗口、同源／JSON／CSRF，结束重新核验授权；不加入默认检测或轮询。
 
 一次检查包括：
 
@@ -29,6 +29,14 @@ context = collect_file_backend_context(panel)
 - 当前固定 `emhistor` TLS 监听身份是否符合已有进程／唯一 socket 核验，以及原厂文件路由、分类链的静态参考范围。不会签名或发送原厂请求，静态参考仍为 `runtime_verified:false`。
 
 目录 O_PATH 路径查找和元数据访问**可能唤醒数据盘**，因此返回 `effects.may_wake_disks:true`；不能宣传全程不唤盘。该检查不运行 SMART、空间扫描、文件内容读取、下载器或原厂业务动作。`complete` 只表示本次固定项目是否采够，不表示文件访问可用；`file_access_available` 始终为 `false`。
+
+### 新增固定文件协议现场
+
+显式 `POST /api/dev/diagnostics` 正文 `{"action":"snapshot","checks":["file_protocol"]}` 调用 `collect_file_protocol_probe`，是目录第十项，默认 `device/storage/business/fan` 四项不变。与只看元数据的 `file_backend_context` 不同，它在精确固件和真实根句柄验证后，固定核对最多八根的 Users／admin／public 协议；共享十二秒总窗口、最多四十八次，不接受外部路径或动作。
+
+该检测一次返回 host root、drives、实际挂载、Users 四阶段打开 errno、预期／实际 mount ID 与设备号，以及 self／PID1／emhistor namespace 和前后拓扑稳定性；还返回固定原厂响应白名单的形状／类型，不导出目录名、路径或内容。可能唤盘或初始化原厂资源，结束开发窗口失效即丢弃。诊断自身保持 `file_access_available:false`，执行工具另按逐次 ACL 与同句柄门判断。
+
+此前 `d5075ed` 实机七根均未通过挂载门，未证明文件浏览或样本字节可读。本版结构化现场用于先闭合该实际门槛；不能用本地 fd fixture、根规划或已有管理员会话代替实机许可与对象证据。其他用户和八项文件写合同仍未开放，详见[真实只读后端](native-file-readonly.md)及[完成矩阵](mcp-completion-matrix.md)。
 
 ## 可信后端与传输组件的连接
 
@@ -51,7 +59,7 @@ response.send(writer)
 response.close()
 ```
 
-内容通道仍待主线有真实后端后接入。它只能使用 Bearer Token，拒绝 Cookie／开发窗口替代授权；HTTP 层还须拒绝重复 Range、条件请求、额外查询参数和片段，并保留连接名额与 socket 超时，不能仅因组件存在就开放内容路径。
+生产只读后端已通过固定 Toolbox 内容通道接入。它只能使用 Bearer Token，拒绝 Cookie／开发窗口替代授权；HTTP 层还须拒绝重复 Range、条件请求、额外查询参数和片段，并保留连接名额与 socket 超时，内容路径必须经过真实后端的逐次许可和对象核验。
 
 组件已实现：固定随机 128 位传输 ID；每键两个、全局四个活动句柄；HEAD 不开始或延长窗口；单个完整／开放／后缀 Range；416 精确范围；安全附件名编码；不返回强 ETag；五分钟首次 GET、首次 GET 起固定三十分钟窗口；同句柄只允许一个活动 GET；每块前后复验当前授权与精确对象；断开、取消、到期和关闭释放活动 fd。完成只表示服务器按长度发送，不能替代客户端落盘或 SHA-256 验证。
 
@@ -67,7 +75,7 @@ response.close()
 
 ACL 回调、落盘同步与原厂安装返回后仍重新核验当前授权和传输期限。期间撤权、轮换、改权限或到期时丢弃请求结果；已执行安装的内部任务保留 `result_unconfirmed`，不向失效请求回传文件版本，也不尝试删除可能已经安装的对象。
 
-这些流程仅是可测试的组件能力，**不是现有 NAS 上传后端的实现证明**。在主体／ACL／安全打开／索引／配额／原子安装未闭合前，`UploadTarget` 没有生产构造器，不得注册上传或变更工具。目录创建、改名、复制、移动及原厂回收站也保持未接入。
+上传流程仍仅是可测试的组件能力，**不是现有 NAS 上传后端的实现证明**。在主体／ACL／安全打开／索引／配额／原子安装未闭合前，`UploadTarget` 没有生产构造器，不得注册上传或变更工具。目录创建、改名、复制、移动及原厂回收站也保持未接入。
 
 ## 验证边界
 

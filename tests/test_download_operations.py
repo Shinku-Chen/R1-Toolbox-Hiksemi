@@ -24,8 +24,10 @@ ARIA_ROW = {'gid': ARIA, 'status': 'active', 'totalLength': '100', 'completedLen
 
 
 def principal(role='readwrite'):
+    tools = ops.READ_TOOLS if role == 'readonly' else {
+        name for name in ops.TOOLS if role == 'admin' or ops.MIN_ROLE_BY_TOOL[name] != 'admin'}
     return {'key_id': 'key_' + '1' * 24, 'policy_version': 3, 'role': role,
-            'scopes': ['downloads'], 'tool_grants': sorted(ops.TOOLS if role != 'readonly' else ops.READ_TOOLS),
+            'scopes': ['downloads'], 'tool_grants': sorted(tools),
             'file_roots': [], 'docker_projects': [], 'grant_revision': 1, 'credential_generation': 1}
 
 

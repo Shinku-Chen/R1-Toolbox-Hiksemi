@@ -33,6 +33,18 @@ OPERATIONS = MappingProxyType({
     'movie_library_rename': ('/rest/1.1/scraper', 'lib_modify', 'POST', True),
     'share_revoke': ('/rest/1.1/file', 'delete_share_link', 'POST', True),
     'apply_list': ('/rest/1.1/applycenter', 'get_apply_list', 'GET', False),
+    'application_progress': ('/rest/1.1/applycenter', 'get_install_progress', 'POST', True),
+    'backup_tasks_list': ('/rest/1.1/task', 'get_backup_task_list', 'GET', False),
+    'auto_backup_get': ('/rest/1.1/config', 'get_auto_backup', 'GET', False),
+    'nas_users_list': ('/rest/1.1/login', 'look_all_user', 'GET', False),
+    'device_name_get': ('/rest/1.1/login', 'get_dev_name', 'GET', False),
+    'device_name_set': ('/rest/1.1/login', 'set_dev_name', 'GET', True),
+    'nas_ai_get': ('/rest/1.1/config', 'get_ai_switch', 'GET', False),
+    'nas_ai_set': ('/rest/1.1/config', 'set_ai_switch', 'GET', True),
+    'movie_scan_status': ('/rest/1.1/scraper', 'lib_scan_status', 'POST', False),
+    'album_delete': ('/rest/1.1/album', 'delete_custom_album', 'GET', True),
+    'backup_task_halt': ('/rest/1.1/task', 'set_task_status', 'GET', True),
+    'auto_backup_disable': ('/rest/1.1/config', 'set_auto_backup', 'GET', True),
 })
 _REASONS = frozenset((
     'unsupported_operation', 'invalid_parameters', 'authorization_denied',
@@ -92,7 +104,9 @@ def _validate(operation, parameters, body):
     if type(parameters) is not dict or type(body) is not dict:
         raise BusinessTransportError('invalid_parameters')
     params, payload = dict(parameters), dict(body)
-    if operation in ('albums_list', 'shared_albums_list', 'movie_libraries_list'):
+    if operation in ('albums_list', 'shared_albums_list', 'movie_libraries_list',
+                     'backup_tasks_list', 'auto_backup_get', 'nas_users_list',
+                     'device_name_get', 'nas_ai_get'):
         valid = not params and not payload
     elif operation == 'albums_create':
         valid = set(params) == {'album_name'} and not payload
@@ -119,6 +133,36 @@ def _validate(operation, parameters, body):
         valid = set(params) <= {'opttype'} and not payload
         if valid:
             params = {'opttype': _integer(params.get('opttype', 0), 0, 0)}
+    elif operation == 'application_progress':
+        valid = not params and set(payload) == {'apply_id'}
+        if valid:
+            payload = {'apply_id': _integer(payload['apply_id'], 1, 2 ** 31 - 1)}
+    elif operation == 'device_name_set':
+        valid = set(params) == {'name'} and not payload
+        if valid:
+            params = {'name': safe_text(params['name'], 63)}
+    elif operation == 'nas_ai_set':
+        valid = set(params) == {'mode'} and not payload
+        if valid:
+            params = {'mode': _integer(params['mode'], 0, 1)}
+    elif operation == 'movie_scan_status':
+        valid = not params and set(payload) == {'lid'}
+        if valid:
+            payload = {'lid': _integer(payload['lid'], 1)}
+    elif operation == 'album_delete':
+        valid = set(params) == {'album_id'} and not payload
+        if valid:
+            params = {'album_id': _album_id(params['album_id'])}
+    elif operation == 'backup_task_halt':
+        valid = set(params) == {'task_id', 'task_status'} and not payload
+        if valid:
+            params = {'task_id': _integer(params['task_id'], 1),
+                      'task_status': _integer(params['task_status'], 1, 2)}
+    elif operation == 'auto_backup_disable':
+        valid = set(params) == {'disk_type', 'status'} and not payload
+        if valid:
+            valid = type(params['disk_type']) is str and params['disk_type'] in ('udisk_a', 'sd')
+            params = {'disk_type': params['disk_type'], 'status': _integer(params['status'], 0, 0)}
     else:
         # Application mutations stay unavailable until their audited contract.
         raise BusinessTransportError('unsupported_application_contract')

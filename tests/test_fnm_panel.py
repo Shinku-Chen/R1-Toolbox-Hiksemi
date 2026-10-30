@@ -812,6 +812,7 @@ class HttpTests(unittest.TestCase):
         handler.connection = Connection()
         handler.wfile = io.BytesIO()
         handler.path = '/'
+        handler.command = 'GET'
         handler.close_connection = False
         handler.send_response = lambda code: None
         handler.send_header = lambda key, value: None

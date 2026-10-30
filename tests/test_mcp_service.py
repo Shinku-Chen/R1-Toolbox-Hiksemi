@@ -60,8 +60,8 @@ class McpServiceTests(unittest.TestCase):
 
     def test_catalog_is_detached_public_metadata_and_has_no_source_calls(self):
         public = tool_catalog()
-        self.assertEqual(36, len(public))
-        self.assertEqual(36, len({item['name'] for item in public}))
+        self.assertEqual(65, len(public))
+        self.assertEqual(65, len({item['name'] for item in public}))
         self.assertTrue(all(item['name'].replace('_', '').isalnum() for item in public))
         self.assertTrue(all(item['inputSchema']['additionalProperties'] is False
                             for item in public))
@@ -284,7 +284,7 @@ class McpServiceTests(unittest.TestCase):
         self.assertEqual('readwrite', metadata['get_media_status'])
         self.assertEqual('admin', metadata['request_power'])
         self.assertEqual('admin', metadata['cancel_power'])
-        self.assertEqual(36, len(metadata))
+        self.assertEqual(65, len(metadata))
 
     def test_catalog_combines_roles_with_explicit_domains(self):
         expected = {

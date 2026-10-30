@@ -7,6 +7,8 @@ belong to the storage provider, after this policy check.
 
 import re
 
+from native_capability_specs import TOOL_SPECS as _NATIVE_TOOL_SPECS
+
 
 LEGACY_SCOPES = ('read', 'fan', 'light', 'screen', 'power', 'media')
 SCOPES = LEGACY_SCOPES + (
@@ -34,10 +36,10 @@ SCOPE_CATALOG = (
      'description': '请求或取消带延时的重启与关机，需要管理员角色。'},
     {'id': 'media', 'label': '媒体查询', 'implemented': True, 'min_role': 'readwrite',
      'description': '显式查询原厂媒体进度，可能写原厂完成状态，需要读写或管理员角色。'},
-    {'id': 'files', 'label': '文件管理', 'implemented': False, 'min_role': 'readonly',
-     'description': '待接入；可预授权所选文件范围，目前没有文件操作工具。'},
-    {'id': 'docker', 'label': 'Docker 管理', 'implemented': False, 'min_role': 'readonly',
-     'description': '待接入；可预授权容器管理与服务部署，目前没有对应操作工具。'},
+    {'id': 'files', 'label': '文件管理', 'implemented': True, 'min_role': 'readonly',
+     'description': '在已核验的管理员／公共目录内浏览、读取属性和下载；上传与文件变更待接入。'},
+    {'id': 'docker', 'label': 'Docker 管理', 'implemented': True, 'min_role': 'readonly',
+     'description': '读取并控制已登记项目；管理员可使用所有者预先登记的独立资源部署、更新和移除容器。'},
     {'id': 'apps', 'label': '应用管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取脱敏应用目录缓存；安装、卸载与应用市场操作待接入。'},
     {'id': 'downloads', 'label': '下载管理', 'implemented': True, 'min_role': 'readonly',
@@ -48,10 +50,10 @@ SCOPE_CATALOG = (
      'description': '读取处理缓存、列出相册、创建和重命名普通相册；照片浏览和文件操作待接入。'},
     {'id': 'sharing', 'label': '分享管理', 'implemented': True, 'min_role': 'readonly',
      'description': '读取共享相册处理缓存并撤销当前管理员的既有单个分享；新建外链待接入。'},
-    {'id': 'backup', 'label': '备份管理', 'implemented': False, 'min_role': 'readonly',
-     'description': '待接入；可预授权备份任务管理，目前没有对应操作工具。'},
-    {'id': 'system', 'label': '系统管理', 'implemented': False, 'min_role': 'admin',
-     'description': '待接入；可预授权系统管理，目前没有对应操作工具。'},
+    {'id': 'backup', 'label': '备份管理', 'implemented': True, 'min_role': 'readwrite',
+     'description': '显式读取原厂备份任务和自动备份配置；目录、任务创建与调度写入须文件后端证明。'},
+    {'id': 'system', 'label': '系统管理', 'implemented': True, 'min_role': 'admin',
+     'description': '管理员读取用户目录、设备名称和AI开关，并可明确修改名称及识别开关；账户和存储变更仍待接入。'},
 )
 MIN_ROLE_BY_TOOL = {
     'get_nas_status': 'readonly',
@@ -63,10 +65,15 @@ MIN_ROLE_BY_TOOL = {
     'list_download_tasks': 'readonly', 'get_download_task': 'readonly',
     'pause_download_task': 'readwrite', 'resume_download_task': 'readwrite',
     'remove_download_task': 'readwrite', 'set_download_task_limits': 'readwrite',
+    'get_download_limits': 'readonly', 'set_download_limits': 'admin',
+    'recheck_download_task': 'readwrite', 'rename_download_task': 'readwrite',
+    'set_download_task_force_start': 'readwrite', 'set_download_task_queue_position': 'readwrite',
     'list_albums': 'readwrite', 'list_shared_albums': 'readwrite',
     'create_album': 'readwrite', 'rename_album': 'readwrite',
     'list_movie_libraries': 'readwrite', 'rename_movie_library': 'readwrite',
     'revoke_share': 'readwrite', 'control_docker_project': 'admin',
+    'list_docker_deployments': 'readonly', 'get_docker_deployment_task': 'readonly',
+    'plan_docker_deployment': 'admin', 'execute_docker_deployment': 'admin',
     'get_media_status': 'readwrite',
     'set_fan_policy': 'readwrite',
     'release_fan': 'readwrite',
@@ -113,10 +120,15 @@ SCOPE_BY_TOOL = {
     'list_download_tasks': 'downloads', 'get_download_task': 'downloads',
     'pause_download_task': 'downloads', 'resume_download_task': 'downloads',
     'remove_download_task': 'downloads', 'set_download_task_limits': 'downloads',
+    'get_download_limits': 'downloads', 'set_download_limits': 'downloads',
+    'recheck_download_task': 'downloads', 'rename_download_task': 'downloads',
+    'set_download_task_force_start': 'downloads', 'set_download_task_queue_position': 'downloads',
     'list_albums': 'albums', 'list_shared_albums': 'albums',
     'create_album': 'albums', 'rename_album': 'albums',
     'list_movie_libraries': 'movie', 'rename_movie_library': 'movie',
     'revoke_share': 'sharing', 'control_docker_project': 'docker',
+    'list_docker_deployments': 'docker', 'get_docker_deployment_task': 'docker',
+    'plan_docker_deployment': 'docker', 'execute_docker_deployment': 'docker',
     'set_fan_policy': 'fan', 'release_fan': 'fan',
     'set_light_policy': 'light', 'set_rgb': 'light',
     'set_screen': 'screen', 'update_screen_settings': 'screen',
@@ -131,6 +143,9 @@ SCOPE_BY_TOOL = {
     'get_docker_project_summary': 'docker', 'plan_docker_project_update': 'docker',
     'execute_docker_project_update': 'docker', 'get_docker_project_task': 'docker',
 }
+MIN_ROLE_BY_TOOL.update({item['name']: item['min_role'] for item in _NATIVE_TOOL_SPECS})
+SCOPE_BY_TOOL.update({item['name']: item['scope'] for item in _NATIVE_TOOL_SPECS})
+
 _WRITE_FILE_TOOLS = frozenset((
     'prepare_file_upload', 'commit_file_upload', 'create_directory',
     'rename_file', 'copy_file', 'move_file', 'trash_file', 'get_file_operation',
@@ -141,6 +156,7 @@ _UPDATE_PROJECT_TOOLS = frozenset((
 _TOOL_DEPENDENCIES = {
     'commit_file_upload': 'prepare_file_upload',
     'execute_docker_project_update': 'plan_docker_project_update',
+    'execute_docker_deployment': 'plan_docker_deployment',
 }
 
 
@@ -176,7 +192,7 @@ def valid_file_roots(value, role, scopes):
     return bool(value) == ('files' in scopes)
 
 
-def valid_docker_projects(value, role, scopes):
+def valid_docker_projects(value, role, scopes, *, has_deployments=False):
     """Validate configured project grants, without trusting names or a registry.
 
     Readwrite may pre-authorize update resources, but only admin can select an
@@ -198,33 +214,66 @@ def valid_docker_projects(value, role, scopes):
                 or role == 'readwrite' and 'control' in row['operations']):
             return False
         identities.add(row['id'])
-    return bool(value) == ('docker' in scopes)
+    return (bool(value) or has_deployments) == ('docker' in scopes)
 
 
-def valid_tool_grants(value, role, scopes, file_roots, docker_projects):
+_DEPLOYMENT_ID_RE = re.compile(r'deployment_[0-9a-f]{24}\Z', re.ASCII)
+_DEPLOYMENT_READ_TOOLS = frozenset(('list_docker_deployments', 'get_docker_deployment_task'))
+_DEPLOYMENT_WRITE_TOOLS = frozenset(('plan_docker_deployment', 'execute_docker_deployment'))
+DEPLOYMENT_TOOLS = _DEPLOYMENT_READ_TOOLS | _DEPLOYMENT_WRITE_TOOLS
+_DEPLOYMENTS_OMITTED = object()
+
+
+def valid_docker_deployments(value, role, scopes):
+    """Check explicit future-deployment grants; names never grant existing projects."""
+    if (not isinstance(value, list) or len(value) > 32 or not _valid_scopes(scopes)
+            or not isinstance(role, str) or role not in _ROLE_LEVELS
+            or value and 'docker' not in scopes):
+        return False
+    identities = set()
+    for row in value:
+        if (not isinstance(row, dict) or set(row) != {'id', 'operations'}
+                or not isinstance(row['id'], str) or not _DEPLOYMENT_ID_RE.fullmatch(row['id'])
+                or row['id'] in identities or not isinstance(row['operations'], list)
+                or not 1 <= len(row['operations']) <= 4
+                or any(not isinstance(operation, str) or operation not in ('inspect', 'deploy', 'control', 'remove')
+                       for operation in row['operations'])
+                or len(set(row['operations'])) != len(row['operations'])
+                or role != 'admin' and any(operation != 'inspect' for operation in row['operations'])):
+            return False
+        identities.add(row['id'])
+    return True
+
+
+def valid_tool_grants(value, role, scopes, file_roots, docker_projects, docker_deployments=_DEPLOYMENTS_OMITTED):
     """Check the exact known tool set and structural resource dependencies.
 
     This confers no filesystem, task ownership or native ACL proof. In
     particular transfer queries/cancel still restore their original permissions
     from a trusted runtime record before inspecting an upload or download.
     """
+    docker_deployments = [] if docker_deployments is _DEPLOYMENTS_OMITTED else docker_deployments
     if (not isinstance(role, str) or role not in _ROLE_LEVELS
             or not isinstance(value, list) or len(value) > len(SCOPE_BY_TOOL)
             or not valid_file_roots(file_roots, role, scopes)
-            or not valid_docker_projects(docker_projects, role, scopes)
+            or not valid_docker_deployments(docker_deployments, role, scopes)
+            or not valid_docker_projects(docker_projects, role, scopes, has_deployments=bool(docker_deployments))
             or any(not isinstance(name, str) or name not in SCOPE_BY_TOOL for name in value)
             or len(set(value)) != len(value)):
         return False
     writable = any(root['access'] == 'readwrite' for root in file_roots)
     project_operations = {operation for project in docker_projects for operation in project['operations']}
+    deployment_operations = {operation for deployment in docker_deployments for operation in deployment['operations']}
     for name in value:
         if (SCOPE_BY_TOOL[name] not in scopes
                 or _ROLE_LEVELS[role] < _ROLE_LEVELS[MIN_ROLE_BY_TOOL[name]]
                 or name in _WRITE_FILE_TOOLS and not writable
                 or name in _UPDATE_PROJECT_TOOLS and 'update_image' not in project_operations
                 or name == 'control_docker_project' and 'control' not in project_operations
+                or name in _DEPLOYMENT_READ_TOOLS and 'inspect' not in deployment_operations
+                or name in _DEPLOYMENT_WRITE_TOOLS and not deployment_operations.intersection(('deploy', 'control', 'remove'))
                 or SCOPE_BY_TOOL[name] == 'docker' and name not in _UPDATE_PROJECT_TOOLS
-                   and name != 'control_docker_project'
+                   and name != 'control_docker_project' and name not in DEPLOYMENT_TOOLS
                    and 'inspect' not in project_operations
                 or name in _TOOL_DEPENDENCIES and _TOOL_DEPENDENCIES[name] not in value):
             return False
@@ -250,7 +299,8 @@ def permission_allows(principal, scope, minimum_role, *, tool_name=None):
             or len(set(scopes)) != len(scopes) or scope not in scopes):
         return False
     if 'role' not in principal and 'policy_version' not in principal:
-        if principal.get('tool_grants', []) != [] or principal.get('docker_projects', []) != []:
+        if (principal.get('tool_grants', []) != [] or principal.get('docker_projects', []) != []
+                or principal.get('docker_deployments', []) != []):
             return False
         legacy = True
     else:
@@ -259,18 +309,20 @@ def permission_allows(principal, scope, minimum_role, *, tool_name=None):
             return False
         if version == 1 and role == 'legacy':
             if (principal.get('file_roots') != [] or principal.get('tool_grants', []) != []
-                    or principal.get('docker_projects', []) != []):
+                    or principal.get('docker_projects', []) != [] or principal.get('docker_deployments', []) != []):
                 return False
             legacy = True
         elif version == 2 and isinstance(role, str) and role in _ROLE_LEVELS:
             return (tool_name in LEGACY_TOOLS
                     and principal.get('tool_grants', []) == []
                     and principal.get('docker_projects', []) == []
+                    and principal.get('docker_deployments', []) == []
                     and valid_file_roots(principal.get('file_roots'), role, scopes)
                     and _ROLE_LEVELS[role] >= _ROLE_LEVELS[minimum_role])
         elif version == 3 and isinstance(role, str) and role in _ROLE_LEVELS:
             return (valid_tool_grants(principal.get('tool_grants'), role, scopes,
-                                      principal.get('file_roots'), principal.get('docker_projects'))
+                                      principal.get('file_roots'), principal.get('docker_projects'),
+                                      principal.get('docker_deployments', []))
                     and tool_name in principal['tool_grants']
                     and _ROLE_LEVELS[role] >= _ROLE_LEVELS[minimum_role])
         else:

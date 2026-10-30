@@ -26,7 +26,7 @@ _STATIC_REFERENCE = {
     'unverified': ['http_method_and_encoding', 'virtual_path_to_root_mapping',
                    'nas_subject_to_unix_identity', 'native_acl_to_opened_object',
                    'namespace_race_safety', 'complete_range_response_contract'],
-    'reason': '仅有固定固件静态参考；路径授权返回值与后续打开流未形成同一对象证明。',
+    'reason': '已实现精确固件的管理员／public 只读后端；本诊断不主动执行其原厂和真实句柄核验。',
 }
 
 
@@ -133,19 +133,19 @@ def collect_file_access_readiness(panel, *, grants=None, root_collector=None):
         _check('native_path_protocol', 'unverified', 'runtime_native_contract',
                '静态动作存在，但当前方法、编解码、虚拟路径映射及分页合同未核实。'),
         _check('nas_subject_mapping', 'unverified', 'runtime_account_identity',
-               '尚无当前 Token 委托主体的可信映射，不把管理员会话当作文件授权。'),
+               '生产只读后端逐操作核验固定管理员逻辑身份；本元数据诊断没有主动读账号或会话。'),
         _check('uid_gid_groups_mapping', 'unverified', 'runtime_unix_identity',
-               '未核验 NAS 逻辑身份到实际 uid、gid 与附加组的映射。'),
+               '不采用 NAS ID 到 Unix UID 的等值映射；只读后端按原厂逻辑 ACL 对同一真实对象判权。'),
         _check('native_acl_semantics', 'unverified', 'effective_acl_for_same_object',
-               '未闭合原厂共享或虚拟 ACL 与最终对象的有效权限。'),
+               '生产后端限已审计的管理员／public 子树，每次以原厂根读取许可和同对象拓扑重验；此处尚未执行。'),
         _check('live_root_object_identity', 'unverified' if selected else 'not_selected',
                'runtime_opened_object',
                '根规划不是实际打开时的挂载、父目录与目标对象证明。' if selected
                else '未选择目标，未打开或检查用户目录。'),
         _check('safe_open_same_object', 'unverified', 'acl_to_opened_handle',
-               '未证明权限检查与实际打开为同一对象；不使用 root 或路径重开回退。'),
+               '生产后端已实现同挂载 O_NOFOLLOW 句柄遍历与身份复核；本规划结果不替代逐操作核验。'),
         _check('download_range_and_stream', 'unverified', 'runtime_binary_transport',
-               '未核验完整 Range、正文、对象变化和传输续验语义。'),
+               '已实现真实 fd、Range 和逐块撤权检查；实机样本字节验收尚未完成。'),
         _check('read_only_device_acceptance', 'unverified', 'real_backend_and_device',
                '元数据诊断和静态参考不代替目录、ACL 与样本字节验收。'),
     ]
@@ -157,6 +157,14 @@ def collect_file_access_readiness(panel, *, grants=None, root_collector=None):
                      'status': 'authorization_plan' if planning_available else 'unavailable',
                      'roots': roots, 'selection': selection},
         'checks': checks, 'blockers': blockers,
+        'execution_backend': {
+            'status': 'requires_per_operation_verification',
+            'implemented_tools': ['list_directory', 'get_file_info', 'prepare_file_download',
+                                  'get_file_transfer', 'cancel_file_transfer'],
+            'supported_path_classes': ['owner_admin', 'public'],
+            'authorization_model': 'native_logical_owner_acl_for_same_opened_object',
+            'runtime_verified': None, 'write_implemented': False,
+            'reason': '本入口只检查规划；实际访问须重新核验原厂许可、精确固件和同一文件句柄。'},
         'account_mapping': {'verified': False, 'nas_user_id': None, 'unix_uid': None,
                             'unix_gid': None, 'supplementary_groups': None},
         'capabilities': {

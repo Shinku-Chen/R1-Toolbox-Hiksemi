@@ -1455,6 +1455,8 @@ dd .diag-link{margin:0;height:24px}
 .r1-api-permission-note{margin:0;line-height:1.6}
 .r1-api-file-roots>div{display:grid;gap:12px}
 .r1-api-project-operations{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin:0 0 12px 24px}
+.r1-api-deployment-create{display:grid;gap:14px;min-width:0;margin:16px 0}
+.r1-api-deployment-limits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
 .r1-api-file-root{padding-top:12px;min-width:0;border-top:1px solid var(--line)}
 .r1-api-file-root p,.r1-api-meta dd p{margin:6px 0;overflow-wrap:anywhere}
 .r1-api-root-choice{display:flex;align-items:flex-start;gap:10px;min-height:40px;font-size:14px;cursor:pointer}
@@ -1502,6 +1504,7 @@ dd .diag-link{margin:0;height:24px}
 .r1-api-intro{flex-direction:column;align-items:stretch}
 .r1-api-dialog.fm-card{padding:20px 16px;max-height:calc(100dvh - 20px)}
 .r1-api-scopes>div{grid-template-columns:minmax(0,1fr)}
+.r1-api-deployment-limits{grid-template-columns:minmax(0,1fr)}
 .r1-api-meta{grid-template-columns:minmax(0,1fr);gap:3px}
 .r1-api-meta dd + dt{margin-top:7px}
 .r1-api-actions>.btn{flex:1 1 auto}
@@ -6090,6 +6093,20 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <div class="r1-api-state-line"><span class="pill" data-ref="serviceStatus"></span><button class="btn" type="button" data-ref="refresh">刷新当前数据</button></div>
 <section data-api-page="operations" hidden><h3>连接地址</h3><p class="sub">使用创建或轮换时保存的 Token 连接客户端。此页不代替 Token 发起 NAS 操作，也不接收旧 Token。</p>
 <div class="r1-api-endpoints"><label>MCP<input class="textfield mono" data-ref="mcp" readonly aria-label="MCP 地址"></label><label>REST 状态<input class="textfield mono" data-ref="restStatus" readonly aria-label="REST 状态地址"></label><label>REST 操作<input class="textfield mono" data-ref="restAction" readonly aria-label="REST 操作地址"></label><label>功能能力目录<input class="textfield mono" data-ref="restCapabilities" readonly aria-label="功能能力目录地址"></label></div>
+<details data-ref="deploymentManager"><summary>部署资源管理</summary><p class="sub">所有者先登记未来服务的固定资源，Token 再单独获权。这里不拉取镜像或创建、启停、删除容器；登记只委托固定仓库、卷、网络与端口。</p>
+<button class="btn" type="button" data-ref="loadDeployments">读取可用卷、网络与部署登记</button><p class="sub" data-ref="deploymentStatus" role="status">尚未探测本机资源；打开页面不会自动查询 Docker。</p>
+<form class="r1-api-deployment-create" data-ref="deploymentForm">
+<label class="r1-api-input">登记标签<input class="textfield" data-ref="deploymentLabel" maxlength="128" required autocomplete="off" placeholder="例如：局域网测试服务"></label>
+<label class="r1-api-input">固定服务名称<input class="textfield mono" data-ref="deploymentName" maxlength="64" pattern="[a-z0-9][a-z0-9_-]{0,63}" required autocomplete="off" placeholder="test-service"></label>
+<label class="r1-api-input">允许的镜像仓库<input class="textfield mono" data-ref="deploymentRepository" maxlength="256" required autocomplete="off" placeholder="registry.example/service"><span class="sub">只填写仓库，不含 tag 或 digest。部署由已授权 AI 另行规划并指定同仓库的 sha256 digest。</span></label>
+<label class="r1-api-input">已有网络<select class="textfield" data-ref="deploymentNetwork" required aria-label="部署网络"><option value="">请先读取可用网络</option></select><span class="sub">仅已有受限 bridge 网络或 none；none 不能发布端口。</span></label>
+<label class="r1-api-input">容器用户 UID:GID<input class="textfield mono" data-ref="deploymentUser" value="1000:1000" required pattern="[1-9][0-9]{0,9}:[1-9][0-9]{0,9}" aria-label="部署容器用户"><span class="sub">两个值均须非零，容器固定使用非 root 和只读根文件系统。</span></label>
+<div class="r1-api-deployment-limits"><label class="r1-api-input">内存上限（MiB）<input class="textfield" type="number" min="16" max="16384" step="1" value="64" data-ref="deploymentMemory" required></label><label class="r1-api-input">CPU 上限（核）<input class="textfield" type="number" min="0.01" max="8" step="0.01" value="0.5" data-ref="deploymentCpu" required></label></div>
+<fieldset class="r1-api-file-roots"><legend>已有具名卷（可选）</legend><p class="sub">不会创建卷，不接受宿主路径。卷是独立容器授权，请只委托服务确实需要的数据。</p><div data-ref="deploymentVolumes"></div><button class="btn" type="button" data-ref="addDeploymentVolume" disabled>增加具名卷</button></fieldset>
+<fieldset class="r1-api-file-roots"><legend>固定端口（可选）</legend><p class="sub">只允许具体局域网或回环 IP；不接受 0.0.0.0、:: 或公网地址。</p><div data-ref="deploymentPorts"></div><button class="btn" type="button" data-ref="addDeploymentPort">增加端口</button></fieldset>
+<button class="btn primary" type="submit" data-ref="registerDeployment" disabled>登记部署资源</button>
+</form><h3>已登记的部署资源</h3><div class="r1-api-list" data-ref="registeredDeployments"></div>
+</details>
 <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
 <p class="sub">只读、读写、管理员按工具和资源分别授权。定义分别标明已接入与待接入；查看定义不会启用工具或修改密钥。</p>
 <button class="btn" type="button" data-ref="loadContracts">读取接口定义</button>
@@ -6108,7 +6125,8 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
 <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/ 下的已核验目录；下面只保存明确勾选的根与相对子目录授权。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
-<fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许读取的已登记 Docker 项目</legend><p class="sub">仅授权读取身份已核验的项目；不会部署、更新或启停容器。角色不替代具体工具和项目范围。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
+<fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许访问的已登记 Docker 项目</legend><p class="sub">现有项目按读取、启停重启、镜像更新分别授权；写操作需要管理员及对应工具。未来新服务使用下面独立的部署资源。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
+<fieldset class="r1-api-file-roots" data-ref="dockerDeployments" hidden><legend>允许访问的未来部署资源</legend><p class="sub">先在「Token 操作 → 部署资源管理」登记固定资源。默认只选读取，部署／更新、启停重启和删除须管理员明确勾选，且仍须对应工具授权。</p><p class="sub" data-ref="dockerDeploymentsStatus"></p><div data-ref="dockerDeploymentOptions"></div></fieldset>
 <label class="r1-api-input">允许的来源 IP／网段（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="192.168.31.0/24&#10;fd00::/64"></textarea><span class="sub">支持 IPv4／IPv6、CIDR 与 IPv4 点分掩码。留空允许持密钥的局域网客户端；不接受域名、通配符或公网全放行。</span></label>
 <label class="r1-api-input">有效期<select class="textfield" data-ref="expiry" aria-label="密钥有效期"><option value="keep" data-ref="keepExpiry" hidden>保持当前有效期</option><option value="7">7 天</option><option value="30">30 天</option><option value="90" selected>90 天</option><option value="365">365 天</option><option value="0">长期</option></select></label>
 <div class="r1-api-actions"><button class="btn primary" type="submit" data-ref="create">创建密钥</button><button class="btn" type="button" data-ref="cancelEdit" hidden>取消编辑</button></div>
@@ -6120,7 +6138,7 @@ const x = collect(el), allowedScopes = ['read', 'fan', 'light', 'screen', 'power
 const roleLevel = { readonly: 0, readwrite: 1, admin: 2 }, roleLabels = { readonly: '只读', readwrite: '读写', admin: '管理员' };
 const defaultMinRole = { read: 'readonly', fan: 'readwrite', light: 'readwrite', screen: 'readwrite', power: 'admin', media: 'readwrite' };
 const legacyTools = new Set(['get_nas_status', 'get_media_status', 'set_fan_policy', 'release_fan', 'set_light_policy', 'set_rgb', 'set_screen', 'update_screen_settings', 'request_power', 'cancel_power']);
-let state = null, busy = false, closed = false, editing = null, contractsBusy = false, projectsBusy = false, activePage = '';
+let state = null, busy = false, closed = false, editing = null, contractsBusy = false, projectsBusy = false, deploymentsBusy = false, deploymentCandidates = null, activePage = '';
 const showPage = page => {
 if (!['create', 'manage', 'operations'].includes(page)) page = 'manage';
 activePage = page;
@@ -6131,12 +6149,14 @@ setText(x.pageDescription, ({ create: '选择角色、功能、具体工具与�
 x.error.hidden = true;
 };
 el.querySelectorAll('[data-api-nav]').forEach(button => { button.onclick = () => { if (!busy) showPage(button.dataset.apiNav); }; });
-let dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
+let dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false };
 const policyDirty = () => Object.values(dirty).some(Boolean);
 const exactPolicy = () => !editing || editing.policy_version === 3 || x.upgradePolicy.checked;
 const selectedScopes = () => [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
 const projectRows = () => Array.isArray(state && state.docker_project_catalog && state.docker_project_catalog.projects)
 ? state.docker_project_catalog.projects.filter(row => row && /^project_[0-9a-f]{24}$/.test(row.id) && typeof row.label === 'string') : [];
+const deploymentRows = () => Array.isArray(state && state.docker_deployment_catalog && state.docker_deployment_catalog.deployments)
+? state.docker_deployment_catalog.deployments.filter(row => row && /^deployment_[0-9a-f]{24}$/.test(row.id) && typeof row.label === 'string') : [];
 const currentTools = () => (Array.isArray(state && state.tools) ? state.tools : []).map(tool => ({ ...tool,
 scope: tool.scope || (tool._meta || {})['io.github.shinku-chen.r1-toolbox/requiredScope'],
 min_role: tool.min_role || (tool._meta || {})['io.github.shinku-chen.r1-toolbox/minimumRole'],
@@ -6158,6 +6178,11 @@ x.create.disabled = value || !state || state.storage_ok !== true || (filesSelect
 x.cancelEdit.disabled = value;
 x.refresh.disabled = value;
 x.keys.querySelectorAll('button').forEach(button => { button.disabled = value || !state || state.storage_ok !== true; });
+x.loadDeployments.disabled = value || deploymentsBusy;
+x.deploymentForm.querySelectorAll('input,select,button').forEach(input => { input.disabled = value || deploymentsBusy || !state || state.storage_ok !== true; });
+x.registerDeployment.disabled = value || deploymentsBusy || !deploymentCandidates || !state || state.storage_ok !== true;
+x.addDeploymentVolume.disabled = value || deploymentsBusy || !deploymentCandidates || !deploymentCandidates.volumes.length;
+x.registeredDeployments.querySelectorAll('button').forEach(button => { button.disabled = value || deploymentsBusy || button.dataset.revoked === 'true'; });
 };
 const names = () => new Map((Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []).map(scope => [scope.id, scope.label || scope.id]));
 const filesSelected = () => !!x.scopes.querySelector('input[value="files"]:checked');
@@ -6226,6 +6251,19 @@ if (writable && role !== 'admin' && input.checked) { input.checked = false; if (
 }
 setText(x.dockerProjectsStatus, projectRows().some(row => row.available === true && row.revoked !== true)
 ? '逐项目选择读取、启停重启和镜像更新；后两项需要管理员及对应具体工具，默认不选。' : '暂无可用的已登记项目；请在下方读取候选并登记，不能凭名称创建授权。');
+x.dockerDeployments.hidden = !selected.has('docker');
+for (const row of x.dockerDeploymentOptions.querySelectorAll('[data-deployment-row]')) {
+const selectedDeployment = row.querySelector('[data-deployment-check]');
+selectedDeployment.disabled = !exactPolicy() || selectedDeployment.dataset.available !== 'true';
+for (const input of row.querySelectorAll('[data-deployment-operation]')) {
+const writable = input.value !== 'inspect';
+input.disabled = selectedDeployment.disabled || !selectedDeployment.checked || (writable && role !== 'admin');
+if (writable && role !== 'admin' && input.checked) { input.checked = false; if (editing) dirty.deployments = true; }
+}
+}
+setText(x.dockerDeploymentsStatus, deploymentRows().some(row => row.revoked !== true)
+? '登记不代表当前已通过实机核验；每次执行还会检查实际 Engine、资源和容器身份。写范围默认不选。'
+: '暂无未来部署资源；可先只授权现有项目，或在「Token 操作」中登记资源。');
 pending(busy);
 };
 const appendRange = (item, draft = {}) => {
@@ -6301,6 +6339,32 @@ input.onchange = () => { dirty.projects = true; updatePermissions(); };
 x.dockerProjectOptions.append(row);
 }
 };
+const drawDeployments = (chosen = null) => {
+const drafts = new Map([...x.dockerDeploymentOptions.querySelectorAll('[data-deployment-row]')].map(row =>
+[row.querySelector('[data-deployment-check]').value, [...row.querySelectorAll('[data-deployment-operation]:checked')].map(input => input.value)]));
+const selected = chosen || new Set([...x.dockerDeploymentOptions.querySelectorAll('[data-deployment-check]:checked')].map(input => input.value));
+const resources = [...deploymentRows()];
+if (editing) for (const grant of editing.docker_deployments || []) if (!resources.some(row => row.id === grant.id)) resources.push({ id: grant.id, label: '当前未确认的原部署资源', revoked: true });
+x.dockerDeploymentOptions.replaceChildren();
+for (const resource of resources) {
+const row = mount('<div data-deployment-row><label class="r1-api-scope"><input type="checkbox" data-deployment-check><span><b></b><span class="sub" data-deployment-note></span></span></label><div class="r1-api-project-operations" data-deployment-operations></div></div>');
+const input = row.querySelector('[data-deployment-check]'); input.value = resource.id; input.checked = selected.has(resource.id);
+input.dataset.available = String(resource.revoked !== true);
+setText(row.querySelector('b'), resource.label);
+setText(row.querySelector('[data-deployment-note]'), resource.revoked ? '登记已撤销或当前无法确认；只改密钥元数据仍保留原授权。' : '固定资源合同；不会把同名现有容器自动收编。');
+const saved = chosen !== null ? (editing && (editing.docker_deployments || []).find(grant => grant.id === resource.id) || {}).operations : drafts.get(resource.id);
+for (const [operation, label] of [['inspect', '读取登记与本键任务'], ['deploy', '新建／同仓库镜像更新（管理员）'], ['control', '启停／重启（管理员）'], ['remove', '删除已停止容器，保留卷（管理员）']]) {
+const option = mount('<label class="r1-api-scope"><input type="checkbox" data-deployment-operation><span></span></label>');
+const check = option.querySelector('input'); check.value = operation;
+check.checked = Array.isArray(saved) ? saved.includes(operation) : operation === 'inspect';
+option.querySelector('span').textContent = label;
+check.onchange = () => { dirty.deployments = true; };
+row.querySelector('[data-deployment-operations]').append(option);
+}
+input.onchange = () => { dirty.deployments = true; updatePermissions(); };
+x.dockerDeploymentOptions.append(row);
+}
+};
 const draw = () => {
 const labels = names();
 x.content.hidden = false; r1SyncMcpService(state.enabled);
@@ -6325,9 +6389,9 @@ label.querySelector('[data-scope-description]').textContent = String(scope.descr
 input.onchange = () => {
 dirty.scopes = true;
 if (scope.id === 'files') dirty.files = true;
-if (scope.id === 'docker') dirty.projects = true;
+if (scope.id === 'docker') { dirty.projects = true; dirty.deployments = true; }
 if (!input.checked && scope.id === 'files') { dirty.files = true; x.fileRootOptions.querySelectorAll('[data-root-check]').forEach(check => { check.checked = false; }); }
-if (!input.checked && scope.id === 'docker') { dirty.projects = true; x.dockerProjectOptions.querySelectorAll('input').forEach(check => { check.checked = false; }); }
+if (!input.checked && scope.id === 'docker') { dirty.projects = true; dirty.deployments = true; x.dockerProjectOptions.querySelectorAll('input').forEach(check => { check.checked = false; }); x.dockerDeploymentOptions.querySelectorAll('input').forEach(check => { check.checked = false; }); }
 updatePermissions();
 };
 x.scopes.append(label);
@@ -6337,13 +6401,14 @@ setText(x.keySummary, `${keys.length} 个 Token；${keys.filter(key => key.statu
 x.keys.replaceChildren();
 if (!keys.length) x.keys.append(mount('<p class="sub">尚未创建访问密钥。</p>'));
 for (const key of keys) {
-const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>具体工具</dt><dd data-ref="tools"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>Docker 项目</dt><dd data-ref="projects"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><div class="r1-api-actions"><button class="btn" type="button" data-ref="edit">编辑权限</button><button class="btn" type="button" data-ref="toggle"></button><button class="btn" type="button" data-ref="rotate">轮换 Token</button><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></div></article>`);
+const item = mount(`<article class="r1-api-item"><div class="r1-api-head"><strong data-ref="name"></strong><span class="pill" data-ref="status"></span></div><dl class="r1-api-meta"><dt>操作角色</dt><dd data-ref="role"></dd><dt>功能权限</dt><dd data-ref="scopes"></dd><dt>具体工具</dt><dd data-ref="tools"></dd><dt>文件范围</dt><dd data-ref="files"></dd><dt>Docker 项目</dt><dd data-ref="projects"></dd><dt>未来部署资源</dt><dd data-ref="deployments"></dd><dt>允许来源</dt><dd data-ref="ips"></dd><dt>创建时间</dt><dd data-ref="created"></dd><dt>到期时间</dt><dd data-ref="expires"></dd><dt>最后使用</dt><dd data-ref="used"></dd></dl><div class="r1-api-actions"><button class="btn" type="button" data-ref="edit">编辑权限</button><button class="btn" type="button" data-ref="toggle"></button><button class="btn" type="button" data-ref="rotate">轮换 Token</button><button class="btn danger" type="button" data-ref="revoke">撤销密钥</button></div></article>`);
 const k = collect(item);
 setText(k.name, String(key.name || '未命名密钥')); setText(k.status, ({ active: '有效', disabled: '已停用', expired: '已到期', revoked: '已撤销' })[key.status] || '状态未知');
 setText(k.role, !key.role || key.role === 'legacy' ? '原有精确权限' : (roles().find(role => role.id === key.role) || {}).label || roleLabels[key.role] || '角色未知');
 setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => scopeName(id, labels)).join('、') || '未授予权限');
 setText(k.tools, key.policy_version === 3 ? (Array.isArray(key.tool_grants) ? key.tool_grants : []).map(name => (currentTools().find(tool => tool.name === name) || {}).title || name).join('、') || '未选择具体工具' : '原有十工具按原角色和功能授权；新增工具未启用。');
 setText(k.projects, (Array.isArray(key.docker_projects) ? key.docker_projects : []).map(grant => `${(projectRows().find(project => project.id === grant.id) || {}).label || grant.id}（${(grant.operations || []).join('、')}）`).join('；') || '未授予项目范围');
+setText(k.deployments, (Array.isArray(key.docker_deployments) ? key.docker_deployments : []).map(grant => `${(deploymentRows().find(resource => resource.id === grant.id) || {}).label || grant.id}（${(grant.operations || []).join('、')}）`).join('；') || '未授予未来部署资源');
 const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
 if (!grants.length) setText(k.files, '未授予文件范围');
 else k.files.append(mount('<p class="sub">仅限已核验的 Users 目录；具体操作以已授权的接入工具为准。</p>'));
@@ -6390,10 +6455,10 @@ setText(a.source, [record.key_name || record.key_id, record.peer || record.sourc
 setText(a.result, String(record.outcome || record.result || record.status || '结果未知'));
 x.audit.append(item);
 }
-drawFileRoots(); drawTools(); drawProjects(); updatePermissions();
+drawFileRoots(); drawTools(); drawProjects(); drawDeployments(); drawDeploymentRegistry(); updatePermissions();
 };
 const endEdit = () => {
-editing = null; dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
+editing = null; dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false };
 x.upgradePolicy.checked = false; x.upgradePolicyLabel.hidden = true;
 setText(x.formTitle, '创建访问密钥'); setText(x.create, '创建密钥');
 x.cancelEdit.hidden = true; x.keepExpiry.hidden = true; x.expiry.value = '90';
@@ -6401,7 +6466,7 @@ x.name.value = ''; x.ips.value = ''; x.role.value = 'readonly';
 x.scopes.querySelectorAll('input').forEach(input => { input.checked = input.value === 'read'; });
 x.fileRootOptions.querySelectorAll('[data-root-check]').forEach(input => { input.checked = false; });
 drawFileRoots([]);
-drawTools(new Set(['get_nas_status'])); drawProjects(new Set());
+drawTools(new Set(['get_nas_status'])); drawProjects(new Set()); drawDeployments(new Set());
 if (state) draw();
 };
 const beginEdit = key => {
@@ -6417,7 +6482,8 @@ drawFileRoots(Array.isArray(key.file_roots) ? key.file_roots : []);
 const keyLevel = x.role.value === 'legacy' ? Infinity : roleLevel[x.role.value];
 drawTools(new Set(key.policy_version === 3 ? key.tool_grants || [] : currentTools().filter(tool => legacyTools.has(tool.name) && chosen.has(tool.scope) && keyLevel >= roleLevel[tool.min_role]).map(tool => tool.name)));
 drawProjects(new Set((key.docker_projects || []).map(project => project.id)));
-updatePermissions(); dirty = { role: false, scopes: false, tools: false, files: false, projects: false };
+drawDeployments(new Set((key.docker_deployments || []).map(resource => resource.id)));
+updatePermissions(); dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false };
 x.formTitle.scrollIntoView({ block: 'start', behavior: 'smooth' }); x.name.focus();
 };
 const refresh = async () => {
@@ -6448,6 +6514,100 @@ finally { if (!closed) pending(false); }
 };
 const projectError = value => typeof (value && value.error) === 'string' ? value.error
 : value && value.error && typeof value.error.message === 'string' ? value.error.message : '项目登记读取失败，请重试。';
+const deploymentError = value => typeof (value && value.error) === 'string' ? value.error
+: value && value.error && typeof value.error.message === 'string' ? value.error.message : '部署资源操作未完成，请重试。';
+const deploymentMutation = async (path, body) => {
+if (closed || deploymentsBusy || busy) return;
+deploymentsBusy = true; pending(busy); setText(x.deploymentStatus, '正在保存部署资源登记…');
+try {
+const result = await R1.post(path, body);
+if (!result || result.ok !== true) throw new Error(deploymentError(result));
+await refresh();
+if (!closed) setText(x.deploymentStatus, path.endsWith('/refresh') ? '已重新核验生命周期，旧计划已失效；Token 权限保持不变。'
+: path.endsWith('/revoke') ? '已撤销登记；已有容器和卷保留，后续操作会检查授权。' : '已登记固定资源，未拉取镜像或创建容器。现在可在添加／编辑 Token 中明确授权。');
+} catch (error) { if (!closed) setText(x.deploymentStatus, error && error.body ? deploymentError(error.body) : String(error && error.message || '部署资源操作未完成。')); }
+finally { deploymentsBusy = false; if (!closed) pending(busy); }
+};
+const drawDeploymentRegistry = () => {
+x.registeredDeployments.replaceChildren();
+for (const resource of deploymentRows()) {
+const item = mount('<article class="r1-api-project"><strong></strong><p class="sub mono" data-deployment-name></p><p class="sub" data-deployment-state></p><div class="r1-api-actions"><button class="btn" type="button" data-refresh-deployment>重新核验</button><button class="btn danger" type="button" data-revoke-deployment>撤销登记</button></div></article>');
+setText(item.querySelector('strong'), resource.label);
+setText(item.querySelector('[data-deployment-name]'), [resource.name, resource.image_repository].filter(value => typeof value === 'string').join(' · '));
+setText(item.querySelector('[data-deployment-state]'), resource.revoked ? '登记已撤销；已有容器和卷保留。'
+: resource.deployed ? '已有记录容器；此处不证明服务正在运行，实际状态以执行任务核对为准。'
+: '已登记未来资源；尚未记录部署容器。调用前仍会核验实际资源。');
+for (const button of item.querySelectorAll('button')) { button.dataset.revoked = String(resource.revoked === true); button.disabled = resource.revoked === true; }
+item.querySelector('[data-refresh-deployment]').onclick = async () => {
+if (busy || deploymentsBusy || !(await R1.ask('重新核验部署资源？', `核对「${esc(resource.label)}」原有固定资源和既有容器。更新重启后的生命周期证据，使旧计划失效；不扩大 Token 权限，不启动或重建容器。`))) return;
+await deploymentMutation('/api/docker/deployments/refresh', { deployment_id: resource.id, confirm: true });
+};
+item.querySelector('[data-revoke-deployment]').onclick = async () => {
+if (busy || deploymentsBusy || !(await R1.ask('撤销部署资源登记？', `「${esc(resource.label)}」将停止接受后续授权操作。已有容器和具名卷保留，不停止或删除服务。`, true))) return;
+await deploymentMutation('/api/docker/deployments/revoke', { deployment_id: resource.id });
+};
+x.registeredDeployments.append(item);
+}
+if (!x.registeredDeployments.children.length) x.registeredDeployments.append(mount('<p class="sub">尚未登记未来部署资源。</p>'));
+};
+const volumeOptions = (select, previous = '') => {
+select.replaceChildren();
+const empty = document.createElement('option'); empty.value = ''; empty.textContent = '选择已有具名卷'; select.append(empty);
+for (const volume of deploymentCandidates ? deploymentCandidates.volumes : []) {
+const option = document.createElement('option'); option.value = volume.name; option.textContent = volume.name; select.append(option);
+}
+select.value = previous;
+};
+x.loadDeployments.onclick = async () => {
+if (closed || deploymentsBusy || busy) return;
+deploymentsBusy = true; deploymentCandidates = null; pending(busy); setText(x.deploymentStatus, '正在显式读取本机卷、网络与登记元数据…');
+try {
+const [catalog, registered] = await Promise.all([API.req('/api/docker/deployments/catalog', { method: 'GET' }), API.req('/api/docker/deployments', { method: 'GET' })]);
+if (closed) return;
+if (!catalog || catalog.ok !== true || !Array.isArray(catalog.volumes) || !Array.isArray(catalog.networks)) throw new Error(deploymentError(catalog));
+if (!registered || registered.ok !== true || !Array.isArray(registered.deployments)) throw new Error(deploymentError(registered));
+const validName = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value);
+deploymentCandidates = { volumes: catalog.volumes.filter(row => row && validName(row.name) && row.name !== 'r1-toolbox-data').slice(0, 128),
+networks: catalog.networks.filter(row => row && validName(row.name) && !['host', 'container'].includes(row.name)).slice(0, 128) };
+const selected = x.deploymentNetwork.value; x.deploymentNetwork.replaceChildren();
+const empty = document.createElement('option'); empty.value = ''; empty.textContent = '选择已有网络'; x.deploymentNetwork.append(empty);
+for (const network of deploymentCandidates.networks) { const option = document.createElement('option'); option.value = network.name; option.textContent = network.name; x.deploymentNetwork.append(option); }
+x.deploymentNetwork.value = selected;
+for (const select of x.deploymentVolumes.querySelectorAll('[data-volume-name]')) volumeOptions(select, select.value);
+state.docker_deployment_catalog = registered; drawDeployments(); drawDeploymentRegistry(); updatePermissions();
+setText(x.deploymentStatus, `已读取 ${deploymentCandidates.volumes.length} 个可用卷、${deploymentCandidates.networks.length} 个网络候选。登记时会重新核验，不会创建资源或容器。`);
+} catch (error) { if (!closed) setText(x.deploymentStatus, error && error.body ? deploymentError(error.body) : String(error && error.message || '本机资源读取失败，请重试。')); }
+finally { deploymentsBusy = false; if (!closed) pending(busy); }
+};
+x.addDeploymentVolume.onclick = () => {
+if (busy || deploymentsBusy || !deploymentCandidates || x.deploymentVolumes.children.length >= 8) return;
+const row = mount('<div class="r1-api-file-range" data-deployment-volume><label class="r1-api-input">已有具名卷<select class="textfield" data-volume-name required></select></label><label class="r1-api-input">容器内目录<input class="textfield mono" data-volume-target placeholder="/data" maxlength="256" required></label><label class="r1-api-scope"><input type="checkbox" data-volume-readonly checked><span>只读挂载</span></label><button class="btn" type="button" data-remove-volume>移除此卷</button></div>');
+volumeOptions(row.querySelector('[data-volume-name]'));
+row.querySelector('[data-remove-volume]').onclick = () => row.remove(); x.deploymentVolumes.append(row);
+};
+x.addDeploymentPort.onclick = () => {
+if (busy || deploymentsBusy || x.deploymentPorts.children.length >= 16) return;
+const row = mount('<div class="r1-api-file-range" data-deployment-port><label class="r1-api-input">宿主具体 IP<input class="textfield mono" data-port-ip value="127.0.0.1" maxlength="64" required></label><label class="r1-api-input">宿主端口<input class="textfield" type="number" data-port-published min="1" max="65535" step="1" required></label><label class="r1-api-input">容器端口<input class="textfield" type="number" data-port-target min="1" max="65535" step="1" required></label><label class="r1-api-input">协议<select class="textfield" data-port-protocol><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><button class="btn" type="button" data-remove-port>移除此端口</button></div>');
+row.querySelector('[data-remove-port]').onclick = () => row.remove(); x.deploymentPorts.append(row);
+};
+x.deploymentForm.onsubmit = async event => {
+event.preventDefault(); if (busy || deploymentsBusy || !deploymentCandidates) return;
+const spec = { name: x.deploymentName.value.trim(), image_repository: x.deploymentRepository.value.trim(),
+network: x.deploymentNetwork.value, volumes: [], ports: [], user: x.deploymentUser.value.trim(),
+memory_bytes: Number(x.deploymentMemory.value) * 1024 * 1024, nano_cpus: Math.round(Number(x.deploymentCpu.value) * 1e9) };
+const label = x.deploymentLabel.value.trim();
+for (const row of x.deploymentVolumes.querySelectorAll('[data-deployment-volume]')) spec.volumes.push({ name: row.querySelector('[data-volume-name]').value, target: row.querySelector('[data-volume-target]').value.trim(), readonly: row.querySelector('[data-volume-readonly]').checked });
+for (const row of x.deploymentPorts.querySelectorAll('[data-deployment-port]')) spec.ports.push({ host_ip: row.querySelector('[data-port-ip]').value.trim(), published: Number(row.querySelector('[data-port-published]').value), target: Number(row.querySelector('[data-port-target]').value), protocol: row.querySelector('[data-port-protocol]').value });
+if (!label || !spec.network || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(spec.name)
+|| /[@\s]/.test(spec.image_repository) || !spec.image_repository || spec.image_repository.split('/').at(-1).includes(':')
+|| !/^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(spec.user)
+|| !Number.isInteger(spec.memory_bytes) || !Number.isInteger(spec.nano_cpus)) { setText(x.deploymentStatus, '请填写固定名称、无 tag 的镜像仓库、已有网络及有效的非 root 用户和资源上限。'); return; }
+if (spec.network === 'none' && spec.ports.length) { setText(x.deploymentStatus, 'none 网络不能发布端口，请移除端口或选择已核验的 bridge 网络。'); return; }
+const volumeNote = spec.volumes.map(row => `${row.name} → ${row.target}（${row.readonly ? '只读' : '读写'}）`).join('；') || '无卷';
+const portNote = spec.ports.map(row => `${row.host_ip}:${row.published} → ${row.target}/${row.protocol}`).join('；') || '无发布端口';
+if (!(await R1.ask('登记未来部署资源？', `标签：${esc(label)}；服务：${esc(spec.name)}；允许仓库：${esc(spec.image_repository)}；网络：${esc(spec.network)}；用户：${esc(spec.user)}；内存：${spec.memory_bytes / 1048576} MiB；CPU：${spec.nano_cpus / 1e9} 核。卷：${esc(volumeNote)}。端口：${esc(portNote)}。固定只读根文件系统与最低权限；这里只保存授权合同，不部署容器。`))) return;
+await deploymentMutation('/api/docker/deployments/register', { label, spec });
+};
 const projectMutation = async (path, body) => {
 if (closed || projectsBusy || busy) return;
 projectsBusy = true; x.loadProjects.disabled = true;
@@ -6570,6 +6730,7 @@ if (!file_roots.length) { fail(new Error('请至少勾选一个已确认的文�
 if (file_roots.length > 32) { fail(new Error('文件范围最多 32 条。')); return; }
 }
 const changeProjects = !editing || dirty.projects || upgrade;
+const changeDeployments = !editing || dirty.deployments || upgrade;
 const docker_projects = changeProjects ? [] : (Array.isArray(editing.docker_projects) ? editing.docker_projects : []);
 if (exactPolicy() && changeProjects && scopes.includes('docker')) {
 for (const input of x.dockerProjectOptions.querySelectorAll('[data-project-check]:checked')) {
@@ -6578,8 +6739,17 @@ const operations = [...input.closest('[data-project-row]').querySelectorAll('[da
 if (!operations.length || (role !== 'admin' && operations.some(operation => operation !== 'inspect'))) { fail(new Error('请为项目选择当前角色允许的具体操作。')); return; }
 docker_projects.push({ id: input.value, operations });
 }
-if (!docker_projects.length) { fail(new Error('请至少选择一个可用的已登记 Docker 项目。')); return; }
 }
+const docker_deployments = changeDeployments ? [] : (Array.isArray(editing.docker_deployments) ? editing.docker_deployments : []);
+if (exactPolicy() && changeDeployments && scopes.includes('docker')) {
+for (const input of x.dockerDeploymentOptions.querySelectorAll('[data-deployment-check]:checked')) {
+if (input.dataset.available !== 'true') { fail(new Error('所选部署资源已失效，请明确移除后重新选择所有者登记的资源。')); return; }
+const operations = [...input.closest('[data-deployment-row]').querySelectorAll('[data-deployment-operation]:checked')].map(option => option.value);
+if (!operations.length || (role !== 'admin' && operations.some(operation => operation !== 'inspect'))) { fail(new Error('请为部署资源选择当前角色允许的具体操作。')); return; }
+docker_deployments.push({ id: input.value, operations });
+}
+}
+if (exactPolicy() && (changeProjects || changeDeployments) && scopes.includes('docker') && !docker_projects.length && !docker_deployments.length) { fail(new Error('请至少选择一个可用的已登记 Docker 项目或未来部署资源。')); return; }
 const tool_grants = [...x.toolOptions.querySelectorAll('input:checked')].map(input => input.value);
 if (exactPolicy()) for (const name of tool_grants) {
 const tool = currentTools().find(item => item.name === name);
@@ -6593,6 +6763,7 @@ if (!editing || dirty.scopes || upgrade) body.scopes = scopes;
 if (changeFiles) body.file_roots = scopes.includes('files') ? file_roots : [];
 if (exactPolicy() && (!editing || dirty.tools || upgrade)) body.tool_grants = tool_grants;
 if (exactPolicy() && changeProjects) body.docker_projects = scopes.includes('docker') ? docker_projects : [];
+if (exactPolicy() && changeDeployments) body.docker_deployments = scopes.includes('docker') ? docker_deployments : [];
 if (!editing || x.expiry.value !== 'keep') body.expires_days = Number(x.expiry.value);
 if (editing) {
 body.id = editing.id;

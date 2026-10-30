@@ -27,9 +27,9 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
                                'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py',
                                'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
                                'vendor_media_snapshot.py', 'vendor_app_probe.py', 'vendor_storage_probe.py',
-                               'api_access.py', 'api_permissions.py', 'api_contracts.py', 'api_docker_projects.py', 'api_docker_operations.py', 'api_file_operations.py', 'api_file_transfers.py', 'api_file_readiness.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py',
+                               'api_access.py', 'api_permissions.py', 'api_contracts.py', 'api_docker_projects.py', 'api_docker_operations.py', 'api_docker_deployment.py', 'api_file_operations.py', 'api_file_provider.py', 'api_file_executor.py', 'api_file_transfers.py', 'api_file_readiness.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py',
                                'network_access.py', 'service_settings.py', 'screen_manager.py',
-                               'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py', 'download_operations.py', 'vendor_media_operations.py', 'vendor_business_transport.py',
+                               'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py', 'download_operations.py', 'vendor_media_operations.py', 'vendor_business_transport.py', 'native_capability_specs.py', 'vendor_native_capabilities.py',
                                'fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
                                'light_policy.py', 'monitoring.py')}}
     if native_guard is not None:

@@ -2,8 +2,8 @@
 
 This module never resolves or opens a pathname. Trusted backend objects supply
 already authorized handles and must revalidate the native subject, ACL and root
-against each exact descriptor. No such production backend is currently wired;
-the existence of this state machine must not register unavailable file tools.
+against each exact descriptor. FileReadExecutor wires the verified read-only
+provider; uploads remain unavailable until their native write protocol is proven.
 """
 
 from dataclasses import dataclass

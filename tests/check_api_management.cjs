@@ -46,7 +46,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
   const rotatedSecret = 'r1-fixture-rotated-ONLY-ONCE-<svg onload=x>';
   const unsafeName = '<img src=x onerror="window.apiNameInjected=1">客厅 AI';
   const calls = [];
-  let reads = 0, contractReads = 0, projectReads = 0, serviceReads = 0, failServiceRead = true, failServiceWrite = false, releaseServiceWrite = null, holdServiceWrite = false, failContracts = false, failCreate = false, failRead = false, failManage = false;
+  let reads = 0, contractReads = 0, projectReads = 0, deploymentReads = 0, failDeploymentRead = false, failDeploymentWrite = false, serviceReads = 0, failServiceRead = true, failServiceWrite = false, releaseServiceWrite = null, holdServiceWrite = false, failContracts = false, failCreate = false, failRead = false, failManage = false;
   const fixtureTools = [
     ['get_nas_status', 'read', 'readonly'], ['get_media_status', 'media', 'readwrite'],
     ['set_fan_policy', 'fan', 'readwrite'], ['release_fan', 'fan', 'readwrite'],
@@ -57,11 +57,14 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     ['get_docker_project_status', 'docker', 'readonly'], ['get_docker_project_summary', 'docker', 'readonly'],
     ['control_docker_project', 'docker', 'admin'], ['plan_docker_project_update', 'docker', 'admin'],
     ['execute_docker_project_update', 'docker', 'admin'], ['get_docker_project_task', 'docker', 'readonly'],
+    ['list_docker_deployments', 'docker', 'readonly'], ['plan_docker_deployment', 'docker', 'admin'],
+    ['execute_docker_deployment', 'docker', 'admin'], ['get_docker_deployment_task', 'docker', 'readonly'],
     ['get_app_status', 'apps', 'readonly'], ['get_download_status', 'downloads', 'readonly'],
     ['get_movie_status', 'movie', 'readonly'], ['get_album_status', 'albums', 'readonly'], ['get_share_status', 'sharing', 'readonly'],
   ].map(([name, scope, min_role]) => ({ name, title: name, scope, min_role }));
   const projectId = 'project_' + '3'.repeat(24), candidateId = 'candidate_' + '4'.repeat(24);
   const unsafeProject = '<svg onload="window.apiProjectInjected=1">片库';
+  const deploymentId = 'deployment_' + '5'.repeat(24), unsafeDeployment = '<svg onload="window.apiDeploymentInjected=1">未来服务';
   const state = {
     ok: true, enabled: false, storage_ok: true, keys: [],
     role_catalog: [
@@ -87,6 +90,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     ] },
     tools: fixtureTools,
     docker_project_catalog: { ok: true, projects: [] },
+    docker_deployment_catalog: { ok: true, deployments: [] },
     audit: [{ timestamp: 1793240000, key_id: 'fixture-key-1', key_name: unsafeName,
       operation: 'get_status', peer: '192.168.31.100', outcome: 'ok', duration_ms: 12 }],
     endpoints: { mcp: '/mcp', status: '/api/integration/status', action: '/api/integration/action', capabilities: '/api/integration/capabilities' },
@@ -137,6 +141,31 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
           assert.deepEqual(Object.keys(body), ['project_id']);
           Object.assign(state.docker_project_catalog.projects.find(row => row.id === body.project_id), { revoked: true, available: false, reason: 'fixture：登记已撤销' });
         } else throw new Error('unexpected project mutation');
+        return reply(200, { ok: true });
+      }
+      if (url.pathname.startsWith('/api/docker/deployments')) {
+        if (request.method() === 'GET') {
+          deploymentReads += 1;
+          if (failDeploymentRead) return reply(503, { error: { message: 'fixture：部署资源读取失败' } });
+          return reply(200, url.pathname.endsWith('/catalog') ? { ok: true,
+            volumes: [{ name: 'fixture-data' }, { name: 'r1-toolbox-data' }],
+            networks: [{ name: 'fixture-net' }, { name: 'none' }, { name: 'host' }] } : state.docker_deployment_catalog);
+        }
+        const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
+        if (failDeploymentWrite) return reply(503, { error: { message: 'fixture：部署资源保存失败' } });
+        if (url.pathname.endsWith('/register')) {
+          assert.deepEqual(Object.keys(body).sort(), ['label', 'spec']);
+          assert.deepEqual(Object.keys(body.spec).sort(), ['image_repository','memory_bytes','name','nano_cpus','network','ports','user','volumes']);
+          state.docker_deployment_catalog.deployments.push({ id: deploymentId, label: body.label,
+            name: body.spec.name, image_repository: body.spec.image_repository, revision: 1,
+            operations: ['inspect','deploy','control','remove'], revoked: false, deployed: false, verification: 'not_checked' });
+        } else if (url.pathname.endsWith('/refresh')) {
+          assert.deepEqual(body, { deployment_id: deploymentId, confirm: true });
+          state.docker_deployment_catalog.deployments[0].revision += 1;
+        } else if (url.pathname.endsWith('/revoke')) {
+          assert.deepEqual(body, { deployment_id: deploymentId });
+          state.docker_deployment_catalog.deployments[0].revoked = true;
+        } else throw new Error('unexpected deployment action');
         return reply(200, { ok: true });
       }
       if (url.pathname !== '/api/access' && !url.pathname.startsWith('/api/access/')) return route.continue();
@@ -239,7 +268,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('select[data-ref="role"]').selectOption('readonly');
     check('默认有效期 90 天', await manager.locator('[data-ref="expiry"]').inputValue() === '90');
     await view('operations');
-    check('Token操作页隔离表单列表且没有机器调用代理', await manager.locator('[data-ref="form"]').isHidden() && await manager.locator('[data-ref="keys"]').isHidden() && await manager.locator('[data-ref="audit"]').isVisible() && await manager.locator('[data-ref="capabilities"] .r1-api-capability').count() === fixtureTools.length && await manager.locator('[data-api-page="operations"] input:not([readonly]), [data-api-page="operations"] button[data-call]').count() === 0);
+    check('Token操作页隔离凭据表单且没有机器调用代理', await manager.locator('[data-ref="form"]').isHidden() && await manager.locator('[data-ref="keys"]').isHidden() && await manager.locator('[data-ref="audit"]').isVisible() && await manager.locator('[data-ref="capabilities"] .r1-api-capability').count() === fixtureTools.length && await manager.locator('.r1-api-endpoints input:not([readonly]), [data-api-page="operations"] button[data-call]').count() === 0);
     check('MCP 地址与当前设备一致', await manager.locator('[data-ref="mcp"]').inputValue() === origin + '/mcp');
     check('能力目录地址与当前设备一致', await manager.locator('[data-ref="restCapabilities"]').inputValue() === origin + '/api/integration/capabilities');
     check('安全调用记录可见', (await manager.locator('[data-ref="audit"]').innerText()).includes('192.168.31.100') && (await manager.locator('[data-ref="audit"]').innerText()).includes('get_status'));
@@ -260,7 +289,9 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="loadContracts"]').click();
     await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 20);
     const definition = JSON.parse(await manager.locator('[data-ref="contractDefinition"]').inputValue());
-    check('真实服务返回20项定义并区分7项已接入与13项待接入', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.filter(tool => tool.implemented === true).length === 7 && definition.tools.filter(tool => tool.implemented === false).length === 13 && definition.tools.every(tool => tool.inputSchema && tool.outputSchema));
+    const implementedContracts = definition.tools.filter(tool => tool.implemented === true).length;
+    check('真实服务返回20项定义并按实际实现分类', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.every(tool => typeof tool.implemented === 'boolean' && tool.inputSchema && tool.outputSchema)
+      && (await manager.locator('[data-ref="contractStatus"]').innerText()).includes(`已接入 ${implementedContracts} 项`));
     check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === serviceWrites);
     await page.setViewportSize({ width: 320, height: 960 });
     check('320宽度接口定义无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
@@ -565,6 +596,93 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('.r1-api-item').last().waitFor();
     check('长期有效期明确提交零值', calls.filter(call => call.path === '/api/access/keys').at(-1).body.expires_days === 0 && (await manager.locator('.r1-api-item').last().innerText()).includes('长期'));
     check('管理员创建仍只携带明确勾选功能且不带未选文件授权', calls.filter(call => call.path === '/api/access/keys').at(-1).body.role === 'admin' && JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.scopes) === '["read","fan","power"]' && JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.file_roots) === '[]');
+
+    await manager.locator('[data-ref="close"]').click();
+    await home.locator('[data-ref="operations"]').click();
+    await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
+    check('部署候选不会随打开API管理自动查询', deploymentReads === 0);
+    await manager.locator('[data-ref="deploymentManager"] summary').click();
+    failDeploymentRead = true;
+    await manager.locator('[data-ref="loadDeployments"]').click();
+    await manager.locator('[data-ref="deploymentStatus"]').filter({ hasText: '部署资源读取失败' }).waitFor();
+    check('资源读取失败禁止登记并显示真实原因', await manager.locator('[data-ref="registerDeployment"]').isDisabled());
+    failDeploymentRead = false;
+    await manager.locator('[data-ref="loadDeployments"]').click();
+    await manager.locator('[data-ref="deploymentStatus"]').filter({ hasText: '已读取 1 个可用卷、2 个网络' }).waitFor();
+    await manager.locator('[data-ref="deploymentLabel"]').fill(unsafeDeployment);
+    await manager.locator('[data-ref="deploymentName"]').fill('fixture-service');
+    await manager.locator('[data-ref="deploymentRepository"]').fill('example/service');
+    await manager.locator('[data-ref="deploymentNetwork"]').selectOption('fixture-net');
+    await manager.locator('[data-ref="addDeploymentVolume"]').click();
+    await manager.locator('[data-volume-name]').selectOption('fixture-data');
+    await manager.locator('[data-volume-target]').fill('/data');
+    check('卷默认只读且不提供Toolbox保护卷', await manager.locator('[data-volume-readonly]').isChecked() && await manager.locator('[data-volume-name] option[value="r1-toolbox-data"]').count() === 0);
+    await manager.locator('[data-ref="addDeploymentPort"]').click();
+    await manager.locator('[data-port-published]').fill('18080');
+    await manager.locator('[data-port-target]').fill('8080');
+    await manager.locator('[data-ref="deploymentNetwork"]').selectOption('none');
+    await manager.locator('[data-ref="registerDeployment"]').click();
+    await manager.locator('[data-ref="deploymentStatus"]').filter({ hasText: 'none 网络不能发布端口' }).waitFor();
+    check('none网络与端口冲突在本地阻止', calls.filter(call => call.path === '/api/docker/deployments/register').length === 0);
+    await manager.locator('[data-ref="deploymentNetwork"]').selectOption('fixture-net');
+    failDeploymentWrite = true;
+    await manager.locator('[data-ref="registerDeployment"]').click();
+    check('登记确认展示完整资源委托且明确不部署', (await page.locator('.fullmask').last().innerText()).includes('fixture-data → /data（只读）') && (await page.locator('.fullmask').last().innerText()).includes('127.0.0.1:18080 → 8080/tcp') && (await page.locator('.fullmask').last().innerText()).includes('不部署容器'));
+    await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="deploymentStatus"]').filter({ hasText: '部署资源保存失败' }).waitFor();
+    check('登记失败保留输入可重试', await manager.locator('[data-ref="deploymentLabel"]').inputValue() === unsafeDeployment && state.docker_deployment_catalog.deployments.length === 0);
+    failDeploymentWrite = false;
+    await manager.locator('[data-ref="registerDeployment"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="registeredDeployments"] [data-refresh-deployment]').waitFor();
+    const futureRegistration = calls.filter(call => call.path === '/api/docker/deployments/register').at(-1);
+    check('登记发送严格固定资源且沿用CSRF', JSON.stringify(futureRegistration.body.spec) === JSON.stringify({ name: 'fixture-service', image_repository: 'example/service', network: 'fixture-net', volumes: [{ name: 'fixture-data', target: '/data', readonly: true }], ports: [{ host_ip: '127.0.0.1', published: 18080, target: 8080, protocol: 'tcp' }], user: '1000:1000', memory_bytes: 67108864, nano_cpus: 500000000 }) && futureRegistration.headers['x-fnm-request'] === '1');
+    check('动态部署标签使用纯文本且无伪造运行状态', await manager.locator('[data-ref="registeredDeployments"] svg').count() === 0 && (await manager.locator('[data-ref="registeredDeployments"]').innerText()).includes('尚未记录部署容器'));
+    await manager.locator('[data-ref="registeredDeployments"] [data-refresh-deployment]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="deploymentStatus"]').filter({ hasText: '旧计划已失效' }).waitFor();
+    check('重新核验只调用所有者固定登记接口', calls.filter(call => call.path === '/api/docker/deployments/refresh').length === 1 && state.docker_deployment_catalog.deployments[0].revision === 2);
+    await page.setViewportSize({ width: 320, height: 960 });
+    check('320px部署资源表单和多资源字段不横滚', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
+    await page.setViewportSize({ width: 1280, height: 1000 });
+
+    await view('create');
+    await manager.locator('input[data-ref="name"]').fill('未来部署 AI');
+    await manager.locator('[data-ref="scopes"] input[value="docker"]').check();
+    await manager.locator('[data-deployment-check]').check();
+    check('未来资源默认仅读取且写操作需管理员', await manager.locator('[data-deployment-operation][value="inspect"]').isChecked() && await manager.locator('[data-deployment-operation][value="deploy"]').isDisabled() && !(await manager.locator('[data-deployment-operation][value="deploy"]').isChecked()));
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    for (const operation of ['deploy', 'control', 'remove']) await manager.locator(`[data-deployment-operation][value="${operation}"]`).check();
+    await manager.locator('select[data-ref="role"]').selectOption('readwrite');
+    check('未来资源降级清除写权限', (await manager.locator('[data-deployment-operation]:checked').evaluateAll(inputs => inputs.map(input => input.value))).join(',') === 'inspect');
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    check('未来资源提高角色不恢复写权限', !(await manager.locator('[data-deployment-operation][value="deploy"]').isChecked()));
+    await manager.locator('select[data-ref="role"]').selectOption('readonly');
+    await manager.locator('[data-ref="toolOptions"] input[value="list_docker_deployments"]').check();
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await page.locator('#r1ApiSecret').waitFor(); await page.locator('#r1ApiSecret [data-ref="close"]').click();
+    const futureRead = calls.filter(call => call.path === '/api/access/keys').at(-1).body;
+    check('Docker仅选未来资源即可授权无需虚构现有项目', JSON.stringify(futureRead.docker_projects) === '[]' && JSON.stringify(futureRead.docker_deployments) === JSON.stringify([{ id: deploymentId, operations: ['inspect'] }]));
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    await manager.locator('input[data-ref="name"]').fill('未来部署元数据编辑');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('.r1-api-item').last().locator('[data-ref="name"]').filter({ hasText: '未来部署元数据编辑' }).waitFor();
+    const futureMetadata = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('只改元数据省略未来资源不覆盖授权', !Object.hasOwn(futureMetadata, 'docker_deployments') && !Object.hasOwn(futureMetadata, 'docker_projects') && state.keys.at(-1).docker_deployments[0].id === deploymentId);
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    for (const operation of ['deploy', 'control', 'remove']) await manager.locator(`[data-deployment-operation][value="${operation}"]`).check();
+    for (const tool of ['plan_docker_deployment', 'execute_docker_deployment', 'get_docker_deployment_task']) await manager.locator(`[data-ref="toolOptions"] input[value="${tool}"]`).check();
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('.r1-api-item').last().locator('[data-ref="role"]').filter({ hasText: '管理员' }).waitFor();
+    const futureWrite = calls.filter(call => call.path === '/api/access/keys/update').at(-1).body;
+    check('未来资源管理员写权限精确保存', JSON.stringify(futureWrite.docker_deployments) === JSON.stringify([{ id: deploymentId, operations: ['inspect','deploy','control','remove'] }]) && futureWrite.tool_grants.includes('execute_docker_deployment') && !Object.hasOwn(futureWrite, 'docker_projects'));
+    await view('operations');
+    await manager.locator('[data-ref="registeredDeployments"] [data-revoke-deployment]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="registeredDeployments"] [data-deployment-state]').filter({ hasText: '登记已撤销' }).waitFor();
+    await view('create'); await manager.locator('[data-ref="scopes"] input[value="docker"]').check();
+    check('撤销未来资源后禁用勾选且不触发部署或删除', await manager.locator('[data-deployment-check]').isDisabled() && calls.filter(call => call.path.startsWith('/api/docker/deployments')).every(call => ['/api/docker/deployments/register','/api/docker/deployments/refresh','/api/docker/deployments/revoke'].includes(call.path)));
+    check('部署动态标签未执行脚本', await page.evaluate(() => !window.apiDeploymentInjected));
+    await manager.locator('[data-ref="close"]').click(); await home.locator('[data-ref="add"]').click();
+    await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
 
     await page.setViewportSize({ width: 320, height: 740 });
     await view('create');

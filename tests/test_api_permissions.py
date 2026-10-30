@@ -13,6 +13,7 @@ import api_permissions as permissions
 
 ROOT_ID = 'root_' + 'a' * 24
 PROJECT_ID = 'project_' + 'b' * 24
+DEPLOYMENT_ID = 'deployment_' + 'c' * 24
 ROLES = ('readonly', 'readwrite', 'admin')
 TOOL_SCOPES = {
     'get_nas_status': 'read', 'get_media_status': 'media',
@@ -37,13 +38,16 @@ def explicit_principal(role, tools, scopes=None):
         {'id': PROJECT_ID, 'operations': ['inspect'] if role == 'readonly' else
          ['inspect', 'update_image', 'control'] if role == 'admin' else ['inspect', 'update_image']}
     ] if 'docker' in scopes else [])
+    value['docker_deployments'] = ([{'id': DEPLOYMENT_ID,
+        'operations': ['inspect', 'deploy', 'control', 'remove'] if role == 'admin' else ['inspect']}]
+        if 'docker' in scopes else [])
     if role != 'readonly' and value['file_roots']:
         value['file_roots'][0]['access'] = 'readwrite'
     return value
 
 
 class ApiPermissionTests(unittest.TestCase):
-    def test_catalog_is_exact_and_future_domains_are_not_advertised_as_implemented(self):
+    def test_catalog_is_exact_and_implemented_domains_retain_their_role_ceiling(self):
         expected = ('read', 'fan', 'light', 'screen', 'power', 'media', 'files',
                     'docker', 'apps', 'downloads', 'movie', 'albums', 'sharing',
                     'backup', 'system')
@@ -53,8 +57,7 @@ class ApiPermissionTests(unittest.TestCase):
         self.assertEqual(permissions.LEGACY_TOOLS, frozenset(TOOL_SCOPES))
         for row in permissions.SCOPE_CATALOG:
             with self.subTest(scope=row['id']):
-                self.assertEqual(row['implemented'], row['id'] in permissions.LEGACY_SCOPES
-                                 + ('apps', 'downloads', 'movie', 'albums', 'sharing'))
+                self.assertIs(row['implemented'], True)
                 self.assertIn(row['min_role'], ROLES)
                 if not row['implemented']:
                     self.assertIn('待接入', row['description'])
@@ -168,7 +171,11 @@ class ApiPermissionTests(unittest.TestCase):
         operations = {'list_download_tasks', 'get_download_task', 'pause_download_task',
             'resume_download_task', 'remove_download_task', 'set_download_task_limits',
             'list_albums', 'list_shared_albums', 'create_album', 'rename_album',
-            'list_movie_libraries', 'rename_movie_library', 'revoke_share', 'control_docker_project'}
+            'list_movie_libraries', 'rename_movie_library', 'revoke_share', 'control_docker_project',
+            'get_download_limits', 'set_download_limits', 'recheck_download_task', 'rename_download_task',
+            'set_download_task_force_start', 'set_download_task_queue_position',
+            'list_docker_deployments', 'plan_docker_deployment', 'execute_docker_deployment', 'get_docker_deployment_task'}
+        operations |= {item['name'] for item in permissions._NATIVE_TOOL_SPECS}
         self.assertEqual(set(permissions.MIN_ROLE_BY_TOOL), set(TOOL_SCOPES) | set(declared) | set(business) | operations)
         self.assertEqual(set(permissions.SCOPE_BY_TOOL), set(permissions.MIN_ROLE_BY_TOOL))
         for name, scope in business.items():
@@ -185,6 +192,8 @@ class ApiPermissionTests(unittest.TestCase):
                 tools.append('prepare_file_upload')
             if name == 'execute_docker_project_update':
                 tools.append('plan_docker_project_update')
+            if name == 'execute_docker_deployment':
+                tools.append('plan_docker_deployment')
             for level, role in enumerate(ROLES):
                 for domain_granted in (False, True):
                     for tool_granted in (False, True):

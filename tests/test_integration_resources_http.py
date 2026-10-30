@@ -227,15 +227,9 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
             self.assertEqual(root['backend']['status'], 'resource_unavailable')
             self.assertIsNone(root['label'])
             arguments = {'root_id': old_root, 'path': ''}
-            if transport == 'mcp':
-                status, _, result = self.rpc(key, self.message('tools/call',
-                    {'name': 'list_directory', 'arguments': arguments}))
-                self.assertEqual(status, 400)
-                self.assertEqual(result['error']['code'], -32602)
-            else:
-                result = self.call(key, 'list_directory', arguments, transport=transport)
-                # A pending tool is not dispatched to its future contract.
-                self.assert_tool_error(result, 'unknown_tool')
+            # Registering file reads must not grant them to an existing key.
+            result = self.call(key, 'list_directory', arguments, transport=transport)
+            self.denied('list_directory', result, 'scope_denied')
         status, _, _ = self.browser('POST', '/api/access/keys/update',
             {'id': key['id'], 'file_roots': old_grants})
         self.assertEqual(status, 400)
@@ -277,8 +271,8 @@ class IntegrationResourcesHTTPTests(unittest.TestCase):
         no_role.pop('role')
         cases = [no_role,
                  self.key_body(project, tool_grants=['plan_docker_project_update'], role='admin'),
-                 self.key_body(scopes=['files'], tool_grants=['list_directory'],
-                               file_roots=[{'id': ROOT, 'path': '', 'access': 'readonly'}]),
+                 self.key_body(scopes=['files'], role='readwrite', tool_grants=['prepare_file_upload'],
+                               file_roots=[{'id': ROOT, 'path': '', 'access': 'readwrite'}]),
                  self.key_body('project_' + 'f' * 24),
                  self.key_body(project, role='admin', docker_projects=[{'id': project, 'operations': ['inspect', 'arbitrary_exec']}])]
         for body in cases:

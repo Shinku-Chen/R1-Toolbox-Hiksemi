@@ -135,7 +135,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertEqual(value['catalog']['schema_version'], 1)
         self.assertIs(value['catalog']['read_only'], True)
         self.assertEqual({row['id'] for row in value['catalog']['checks']},
-                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context'})
+                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context', 'file_protocol'})
         self.assertNotIn('set-cookie', headers)
         self.assert_no_sources()
 

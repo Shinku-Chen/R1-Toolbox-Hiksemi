@@ -55,9 +55,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"snapshot","checks":["file_access_readiness","docker_project_readiness"]}
 {"action":"snapshot","checks":["disk_activity"]}
 {"action":"snapshot","checks":["file_backend_context"]}
+{"action":"snapshot","checks":["file_protocol"]}
 ```
 
-不指定 `checks` 时仍只采集 `device`／`storage`／`business`／`fan` 原四项，不包含完整硬盘序列号、新增就绪检查、文件上下文或磁盘活动采样。目录共列九项，额外五项只有在 `checks` 中明确选择才采集；独立媒体 `probe_business` 不属于这个目录。列表必须非空，项目必须已知且不重复；按请求顺序返回。接口不接受其他字段、URL 查询参数、命令、路径、端口、序列号覆盖、令牌、用户或任务标识。没有公开 GET 或 CORS 访问，也不会建立 Toolbox 网页登录会话；业务 qB 的固定认证边界另见[业务状态](business-diagnostics.md)。
+不指定 `checks` 时仍只采 `device/storage/business/fan` 原四项。目录共十项，额外六项须在 `checks` 明确选择；媒体 `probe_business` 和独立原厂 `probe/packages` 不属于目录。列表非空、已知且不重复，按请求顺序返回；不接受其他字段、查询参数、命令、路径、端口、凭据、用户或任务 ID。没有公开 GET／CORS，也不建立网页登录会话；固定业务认证边界见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
 
@@ -68,14 +69,30 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `storage_identity` | 仅显式选择：复用同一固定查询、身份缓存和 IPC 锁，核验当前设备生命周期及唯一映射后返回完整序列号；默认快照与原 `storage` 仍只含序列号哈希 |
 | `business` | 原厂应用已有缓存或 Toolbox 上次显式查询、身份确认的 aria2／qB 有界任务队列、上次显式媒体脱敏结果及真实服务现场；与原业务诊断共用采集锁，具体限制见[业务状态](business-diagnostics.md) |
 | `fan` | `FanDiagnostics.snapshot` 的被动预检与现场；不发送温控信号、不启动时间线、不应用策略、不重试接管 |
-| `file_access_readiness` | 只读可信根规划与固定安全证明清单；与存储诊断共用锁，不读用户文件或凭据、不执行 SMART。文件 ACL、安全打开未闭合时明确返回文件访问不可用，根规划不算内容读取通过 |
+| `file_access_readiness` | 仅读可信根规划与固定证明清单，不读内容、凭据或执行 SMART。只读执行器标记 `requires_per_operation_verification`，诊断不授执行权；根规划不算内容读取通过 |
 | `file_backend_context` | 仅显式选择：核对固定管理员逻辑身份、Unix 映射候选、受限 Users 根的句柄／生命周期元数据及固定 emhistor 监听证据。`effects.may_wake_disks:true`；不列用户目录、不读内容或凭据、不签原厂请求、不发原厂文件动作。`file_access_available:false`，上下文证据不证明 ACL 与最终安全对象已经绑定 |
+| `file_protocol` | 仅显式选择：固定精确固件与所有者，核对最多八个规划根的 Users／admin／public `get_info` 与最多两项 `get_list`，共享十二秒窗口、最多四十八次。先验证真实同挂载句柄，失败不发原厂请求；返回四阶段 errno、预期／实际 mount ID、设备号、self／PID1／emhistor namespace 和脱敏协议形状，不返回目录名称、路径、内容、令牌或任意原厂参数。可能唤盘／更新原厂状态，诊断自身 `file_access_available:false` |
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
 | `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
 
-Docker 候选核验和文件后端上下文会访问文件系统元数据，可能唤醒休眠磁盘，不能把它们说成纯缓存或无磁盘访问；因此只允许显式选择，不加入默认采集或后台轮询。文件边界仍为 `/drives/*/Users/`；元数据句柄或映射候选不能用作注册十三项文件内容工具的依据。Docker 的 peer、引擎、配置身份和读取限额见[固定项目读取](docker-projects.md)。检测期间开发窗口到期或被关闭时，整次结果丢弃并返回 `403`，不续期，也不输出已采到的现场。
+Docker 候选、文件上下文和协议检查会访问元数据，部分原厂查询可能初始化状态并唤盘，只能显式选择，不加入默认采集或轮询。文件边界仍为 `/drives/*/Users/`；元数据或映射候选不代替完整原厂 ACL 和最终句柄。五项文件只读执行器另有逐次运行门槛，八项写合同仍未接入。Docker 证据见[固定项目读取](docker-projects.md)。检测结束时开发窗口失效，丢弃整次结果并返回 `403`，不续期。
 
 读取到的应用缓存不等于完整实时安装列表；下载来源不可用或需要授权时数据保持未知；媒体读取上次显式采集结果和逐项时间，不自动发起原厂媒体查询。白名单授权并不改变这些数据来源的限制。
+
+## 文件协议与原厂业务显式取证
+
+此前 `d5075ed` 实机七个规划根均未通过挂载门，不能宣称浏览／下载已经可用。部署带 `file_protocol` 的镜像后，用上面的固定项目一次收集完整挂载和 namespace 现场；门槛通过后，文件执行器仍须精确固件、完整原厂 ACL 的 `admin/public` 正子集与真实对象句柄同时通过。见[只读后端](native-file-readonly.md)。不要反复追加少量字段再要求部署试探。
+
+独立 `POST /api/dev/native` 只接受两种严格正文：
+
+```json
+{"action":"probe","confirm":true}
+{"action":"packages","confirm":true}
+```
+
+仍须实际来源白名单、非空开发窗口、同源 JSON／CSRF；布尔 `true` 不能用整数 1 替代。`probe` 固定读取应用目录、备份目录、自动备份设置、用户目录、设备名称和 AI 设置，逐项保留失败；`packages` 固定读取一次应用目录，只投影包字段是否存在、类型与长度。均不调用安装进度、setter、任务控制或相册删除，不接受应用 ID、账号、包 URL 或原厂 action。认证可能初始化资源或唤盘，不标为无副作用，也不加入默认四项。
+
+包字段出现 URL／hash／signature 不代表可信来源、完整签名或安装链已验证；响应始终 `trusted_package_manifest_verified:false/package_execution_available:false`。完整证据与未闭合能力见[原厂业务第二批](native-capability-completion.md)。
 
 ## 显式核对硬盘完整序列号
 

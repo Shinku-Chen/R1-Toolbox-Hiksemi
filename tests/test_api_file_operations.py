@@ -70,7 +70,9 @@ class FileContextTests(unittest.TestCase):
         self.assertEqual(result['unix_mapping'], {'status': 'unverified',
                          'reason': 'same_numeric_uid_is_only_a_candidate'})
         self.assertFalse(result['file_access_available'])
-        self.assertIn('nas_subject_to_unix_mapping', result['blockers'])
+        self.assertNotIn('nas_subject_to_unix_mapping', result['blockers'])
+        self.assertFalse(result['unix_identity_mapping_required'])
+        self.assertIn('native_root_read_permission', result['blockers'])
         self.assertNotIn(PRIVATE, json.dumps(result))
 
     def test_owner_view_indirection_to_credential_columns_is_refused(self):

@@ -40,6 +40,7 @@
               "transfer_unavailable",
               "unsupported_range",
               "unsupported_precondition",
+              "unsupported_path_class",
               "target_exists",
               "target_changed",
               "checksum_mismatch",
@@ -272,6 +273,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -491,7 +493,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "cursor": {
@@ -610,6 +612,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -847,19 +850,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "浏览已授权目录",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "read_only_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -901,7 +894,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "path": {
@@ -963,6 +956,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -1184,19 +1178,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "读取文件属性",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "read_only_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -1245,7 +1229,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "path": {
@@ -1313,6 +1297,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -1450,19 +1435,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "准备文件下载",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_path_mapping",
-          "nas_subject_uid_gid_and_acl",
-          "safe_open_same_object",
-          "namespace_race_proof",
-          "read_only_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -1519,7 +1494,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "transfer_id": {
@@ -1569,6 +1544,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -1879,18 +1855,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "查询文件传输",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_contract",
-          "live_resource_identity",
-          "runtime_authorization",
-          "automated_and_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -1947,7 +1914,7 @@
         "same_key_changed_arguments": null,
         "same_key_same_arguments_returns_original": false
       },
-      "implemented": false,
+      "implemented": true,
       "inputSchema": {
         "$defs": {
           "transfer_id": {
@@ -1997,6 +1964,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -2307,18 +2275,9 @@
         ]
       },
       "scope": "files",
-      "status": "definitions_only",
+      "status": "registered_requires_authorization",
       "title": "取消本键文件传输",
-      "unimplemented_reason": {
-        "code": "not_implemented",
-        "message": "仅有接口定义，尚未注册执行器；不证明原厂后端或实机能力。",
-        "required_gates": [
-          "native_contract",
-          "live_resource_identity",
-          "runtime_authorization",
-          "automated_and_device_acceptance"
-        ]
-      }
+      "unimplemented_reason": null
     },
     {
       "authorization": {
@@ -2394,6 +2353,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -2616,6 +2576,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -2901,6 +2862,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -3426,6 +3388,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -3674,6 +3637,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -3997,6 +3961,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -4349,6 +4314,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -4711,6 +4677,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -5073,6 +5040,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -5416,6 +5384,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -5712,6 +5681,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -6030,6 +6000,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -6313,6 +6284,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",
@@ -6619,6 +6591,7 @@
                   "transfer_unavailable",
                   "unsupported_range",
                   "unsupported_precondition",
+                  "unsupported_path_class",
                   "target_exists",
                   "target_changed",
                   "checksum_mismatch",

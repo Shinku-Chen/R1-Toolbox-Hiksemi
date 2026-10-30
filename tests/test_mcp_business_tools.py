@@ -58,7 +58,7 @@ class BusinessToolTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix='r1-mcp-business-')
         self.addCleanup(directory.cleanup)
         self.directory = Path(directory.name)
-        self.web = SimpleNamespace(state_dir=self.directory, business_state_lock=threading.Lock(),
+        self.web = SimpleNamespace(panel=mock.Mock(), state_dir=self.directory, business_state_lock=threading.Lock(),
                                    _business_cached=None, _business_epoch=0, _business_cached_epoch=0)
         self.api = integration_api.IntegrationApi(self.web, state_dir=self.directory)
         self.api.access.configure({'enabled': True})

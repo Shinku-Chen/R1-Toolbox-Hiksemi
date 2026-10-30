@@ -166,6 +166,8 @@ class Engine:
         if method == 'GET' and path == '/containers/json?all=1&limit=129':
             return 200, [{'Id': identity, 'Labels': detail['Config']['Labels']}
                          for identity, detail in self.containers.items()]
+        if method == 'GET' and parsed.path.startswith('/volumes/'):
+            return 200, {'Name': parsed.path[len('/volumes/'):], 'Labels': {}}
         if method == 'GET' and parsed.path.startswith('/images/'):
             if not self.present_image:
                 return 404, {'message': SECRET}

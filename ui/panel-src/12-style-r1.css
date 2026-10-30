@@ -180,6 +180,8 @@
 .r1-api-permission-note { margin: 0; line-height: 1.6; }
 .r1-api-file-roots > div { display: grid; gap: 12px; }
 .r1-api-project-operations { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0 0 12px 24px; }
+.r1-api-deployment-create { display: grid; gap: 14px; min-width: 0; margin: 16px 0; }
+.r1-api-deployment-limits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; }
 .r1-api-file-root { padding-top: 12px; min-width: 0; border-top: 1px solid var(--line); }
 .r1-api-file-root p, .r1-api-meta dd p { margin: 6px 0; overflow-wrap: anywhere; }
 .r1-api-root-choice { display: flex; align-items: flex-start; gap: 10px; min-height: 40px; font-size: 14px; cursor: pointer; }
@@ -227,6 +229,7 @@
   .r1-api-intro { flex-direction: column; align-items: stretch; }
   .r1-api-dialog.fm-card { padding: 20px 16px; max-height: calc(100dvh - 20px); }
   .r1-api-scopes > div { grid-template-columns: minmax(0, 1fr); }
+  .r1-api-deployment-limits { grid-template-columns: minmax(0, 1fr); }
   .r1-api-meta { grid-template-columns: minmax(0, 1fr); gap: 3px; }
   .r1-api-meta dd + dt { margin-top: 7px; }
   .r1-api-actions > .btn { flex: 1 1 auto; }

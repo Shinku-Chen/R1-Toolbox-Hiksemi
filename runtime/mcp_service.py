@@ -13,6 +13,7 @@ import re
 
 from api_permissions import LEGACY_TOOLS, MIN_ROLE_BY_TOOL, permission_allows
 from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
+from native_capability_specs import TOOL_SPECS as NATIVE_TOOL_SPECS
 
 
 MODERN_VERSION = '2026-07-28'
@@ -142,7 +143,9 @@ _TOOLS = (
 )
 _TOOLS += tuple(
     _tool(contract['name'], contract['title'],
-          ('查询明确授权的文件根元数据或固定 Docker 项目，不读取用户文件内容。'
+          ('在明确授权的Users/admin与public子树浏览、读取属性或建立同键下载句柄；每次操作核验原厂权限与最终对象，字节走独立Bearer通道。'
+           if contract['scope'] == 'files' and contract['name'] != 'list_file_roots' else
+           '查询明确授权的文件根元数据或固定 Docker 项目，不读取用户文件内容。'
            if contract['idempotency']['mode'] == 'read_only' else
            '按登记项目、服务和同仓库镜像 digest 规划或执行管理员更新；须具体工具与项目更新授权，不自动重试。'),
           contract['scope'], contract['inputSchema'],
@@ -201,6 +204,32 @@ _TOOLS += tuple(
           for field in ('download_limit_bps', 'upload_limit_bps')}),
     )
 )
+_LIMIT_FIELDS = {field: {'type': 'integer', 'minimum': 0, 'maximum': 2 ** 40}
+                 for field in ('download_limit_bps', 'upload_limit_bps')}
+_TOOLS += (
+    _tool('get_download_limits', '读取下载器全局限速',
+          '显式读取固定本机下载器的两个已配置限速和版本；不返回偏好设置、目录或凭据。',
+          'downloads', _object_schema({'engine': _DOWNLOAD_ENGINE}, ('engine',)), read_only=True),
+    _tool('set_download_limits', '设置下载器全局限速',
+          '管理员确认后仅设置全局下载／上传字节每秒上限，0为不限速。须先读取版本；影响该引擎全部任务，不修改目标目录。',
+          'downloads', _object_schema({'engine': _DOWNLOAD_ENGINE, **_MUTATION, **_LIMIT_FIELDS,
+              'expected_version': {'type': 'string', 'pattern': r'^download_limits_[0-9a-f]{32}$'}},
+              ('engine', 'confirmed', 'idempotency_key', 'expected_version')), idempotent=False),
+)
+_TOOLS += tuple(
+    _tool(name, title, description + '仅支持qB的单个既有任务；须确认、当前版本和本键幂等标识，接受回执不表示异步完成。',
+          'downloads', _object_schema({**_TASK_MUTATION, 'engine': {'type': 'string', 'enum': ['qbittorrent']}, **extra},
+              tuple(_TASK_MUTATION) + tuple(extra)), idempotent=False)
+    for name, title, description, extra in (
+        ('recheck_download_task', '重新校验下载任务', '请求原生引擎重新校验原有数据，可能唤盘并改变任务状态。', {}),
+        ('rename_download_task', '修改下载任务显示名称', '仅修改任务显示名，不调用文件或目录改名接口。',
+         {'name': {'type': 'string', 'minLength': 1, 'maxLength': 255}}),
+        ('set_download_task_force_start', '设置任务强制运行', '开启或关闭单任务强制运行标记；开启会按原目标运行。',
+         {'enabled': {'type': 'boolean'}}),
+        ('set_download_task_queue_position', '调整下载队列位置', '仅调整该任务的队列优先级，需要下载器启用排队。',
+         {'position': {'type': 'string', 'enum': ['increase', 'decrease', 'top', 'bottom']}}),
+    )
+)
 _TOOLS += tuple(
     _tool(name, title, description + '使用已有原厂管理员会话和固定接口，签名不离开宿主。',
           scope, _object_schema(props, tuple(props)), read_only=False,
@@ -221,6 +250,34 @@ _TOOLS += tuple(
          {**_MUTATION, 'share_id': {'type': 'string', 'minLength': 1, 'maxLength': 127, 'pattern': r'^[A-Za-z0-9_-]+$'}}, True, '确认后撤销当前管理员拥有的单个分享。'),
     )
 )
+_DEPLOYMENT_LOCATION = {'deployment_id': {'type': 'string', 'pattern': r'^deployment_[0-9a-f]{24}$'}}
+_TOOLS += (
+    _tool('list_docker_deployments', '读取已授权的 Docker 部署',
+          '只读取本键获授的独立部署资源及实际容器状态；登记未来资源不表示已部署。',
+          'docker', _object_schema(), read_only=True),
+    _tool('plan_docker_deployment', '规划受控 Docker 部署或操作',
+          '管理员选择所有者预先登记的未来资源，规划部署、同仓库digest更新、启停重启或移除；不能提交Compose、命令、目录或新网络参数。',
+          'docker', dict(_object_schema({**_DEPLOYMENT_LOCATION,
+              'operation': {'type': 'string', 'enum': ['deploy', 'update', 'start', 'stop', 'restart', 'remove']},
+              'image_reference': {'type': 'string', 'minLength': 73, 'maxLength': 512,
+                                  'pattern': r'^[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}$'}},
+              ('deployment_id', 'operation')),
+              allOf=[{'if': {'properties': {'operation': {'enum': ['deploy', 'update']}}},
+                      'then': {'required': ['image_reference']}, 'else': {'not': {'required': ['image_reference']}}}]),
+          read_only=True, idempotent=False),
+    _tool('execute_docker_deployment', '执行受控 Docker 计划',
+          '管理员确认后消费本键有效计划，返回真实任务；按固定资源和当前身份执行，移除保留全部数据卷，未知结果不重放。',
+          'docker', _object_schema({'plan_id': {'type': 'string', 'pattern': r'^plan_[0-9a-f]{32}$'},
+              **_MUTATION}, ('plan_id', 'confirmed', 'idempotency_key')), destructive=True, idempotent=False),
+    _tool('get_docker_deployment_task', '查询受控部署任务',
+          '仅查询本键、当前授权修订和凭据代际在已授权部署资源上提交的真实任务。',
+          'docker', _object_schema({**_DEPLOYMENT_LOCATION,
+              'task_id': {'type': 'string', 'pattern': r'^task_[0-9a-f]{32}$'}}, ('deployment_id', 'task_id')), read_only=True),
+)
+_TOOLS += tuple(_tool(item['name'], item['title'], item['description'], item['scope'], item['inputSchema'],
+                    read_only=item['annotations']['readOnlyHint'],
+                    destructive=item['annotations']['destructiveHint'],
+                    idempotent=item['annotations']['idempotentHint']) for item in NATIVE_TOOL_SPECS)
 _TOOLS_BY_NAME = {tool['name']: tool for tool in _TOOLS}
 
 

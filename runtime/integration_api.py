@@ -13,8 +13,10 @@ from api_access import ApiAccessStore, AUDIT_OPERATIONS
 from api_contracts import IMPLEMENTED_TOOLS, contract_catalog
 from api_docker_projects import DockerProjectRegistry
 from api_docker_operations import DockerProjectOperations
+from api_docker_deployment import DockerDeploymentRegistry, DockerDeploymentOperations
 from api_file_readiness import collect_file_access_readiness
 from api_file_roots import collect_file_roots, validate_file_grants
+from api_file_executor import FileReadExecutor, TOOLS as FILE_READ_TOOLS
 from mcp_service import McpService, SUPPORTED_VERSIONS, META_REQUIRED_SCOPE
 from vendor_app_diagnostics import collect as collect_applications
 from vendor_business import _result as project_business_category
@@ -22,6 +24,8 @@ from vendor_media_snapshot import collect_media_snapshot
 from download_operations import DownloadOperations, TOOLS as DOWNLOAD_TOOLS
 from vendor_media_operations import MediaOperations, TOOLS as MEDIA_OPERATION_TOOLS
 from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
+from native_capability_specs import TOOL_SPECS as NATIVE_TOOL_SPECS
+from vendor_native_capabilities import NativeCapabilities, _OPERATIONS as NATIVE_OPERATIONS
 
 
 # Each media domain receives only its own rows, never the whole media cache.
@@ -64,8 +68,13 @@ class IntegrationApi:
         self.access = ApiAccessStore(state_dir)
         self.docker_projects = DockerProjectRegistry(state_dir)
         self.docker_operations = DockerProjectOperations(self.docker_projects, authorizer=self._is_current)
+        self.docker_deployments = DockerDeploymentRegistry(state_dir)
+        self.deployment_operations = DockerDeploymentOperations(self.docker_deployments, authorizer=self._is_current,
+                                                                shared_operations=self.docker_operations)
         self.download_operations = DownloadOperations(authorizer=self._is_current)
         self.media_operations = MediaOperations()
+        self.native_operations = NativeCapabilities()
+        self.file_operations = FileReadExecutor(web.panel, authorizer=self._is_current)
         self.mcp = McpService(self.execute, version=version)
 
     def _is_current(self, principal):
@@ -81,14 +90,20 @@ class IntegrationApi:
         closer = getattr(self.docker_operations, 'close', None)
         if callable(closer):
             closer()
+        self.deployment_operations.close()
+        self.file_operations.close()
 
     def open(self):
         if self._closed:
             # Closed workers and their plans never become active again when a
             # test or embedder restarts this Web object in the same process.
             self.docker_operations = DockerProjectOperations(self.docker_projects, authorizer=self._is_current)
+            self.deployment_operations = DockerDeploymentOperations(self.docker_deployments, authorizer=self._is_current,
+                                                                    shared_operations=self.docker_operations)
             self.download_operations = DownloadOperations(authorizer=self._is_current)
             self.media_operations = MediaOperations()
+            self.native_operations = NativeCapabilities()
+            self.file_operations = FileReadExecutor(self.web.panel, authorizer=self._is_current)
             self._closed = False
 
     def snapshot(self):
@@ -105,6 +120,7 @@ class IntegrationApi:
                 'protocol_versions': list(SUPPORTED_VERSIONS),
                 'file_root_catalog': self.file_root_catalog(),
                 'docker_project_catalog': self.docker_projects.metadata(),
+                'docker_deployment_catalog': self.docker_deployments.metadata(),
                 'tools': self.mcp.tool_catalog()}
 
     @staticmethod
@@ -114,9 +130,9 @@ class IntegrationApi:
         result = copy.deepcopy(list(SCOPE_CATALOG))
         for item in result:
             if item['id'] == 'files':
-                item.update(implemented=True, description='仅提供已授权根的绑定元数据；浏览、上传和下载待接入。')
+                item.update(implemented=True, description='在逐次原厂权限核验的Users/admin与public范围浏览、读取属性和下载；上传与文件变更待接入。')
             elif item['id'] == 'docker':
-                item.update(implemented=True, description='读取已登记项目；管理员可在逐项目授权后启停、重启及执行同仓库 digest 镜像更新。新建部署待接入。')
+                item.update(implemented=True, description='读取并控制已登记项目；管理员还可在所有者预先登记的独立资源上部署、更新或移除容器，始终保留数据卷。')
         return result
 
     def file_readiness(self):
@@ -176,6 +192,7 @@ class IntegrationApi:
                 'scopes': scopes, 'file_roots': grants,
                 'tool_grants': list(principal.get('tool_grants', [])),
                 'docker_projects': copy.deepcopy(principal.get('docker_projects', [])),
+                'docker_deployments': copy.deepcopy(principal.get('docker_deployments', [])),
                 'tools': tools, 'domains': domains}
 
     def _validate_new_grants(self, body):
@@ -195,6 +212,13 @@ class IntegrationApi:
                     or any(operation not in ('inspect', 'control', 'update_image') for operation in row['operations'])
                     for row in projects)):
                 raise ValueError('Docker 范围只能选择已登记项目及其明确操作。')
+        if 'docker_deployments' in body:
+            registered = {row['id'] for row in self.docker_deployments.metadata().get('deployments', [])
+                          if row.get('revoked') is not True}
+            grants = body['docker_deployments']
+            if (not isinstance(grants, list) or any(not isinstance(row, dict)
+                    or not isinstance(row.get('id'), str) or row['id'] not in registered for row in grants)):
+                raise ValueError('新部署范围只能选择所有者已登记且未撤销的资源。')
 
     def manage(self, route, body):
         """Called only after the browser's existing session and CSRF gates."""
@@ -204,6 +228,9 @@ class IntegrationApi:
             '/api/docker/projects/register': self.docker_projects.register,
             '/api/docker/projects/update': self.docker_projects.update,
             '/api/docker/projects/revoke': self.docker_projects.revoke,
+            '/api/docker/deployments/register': self.docker_deployments.register,
+            '/api/docker/deployments/revoke': self.docker_deployments.revoke,
+            '/api/docker/deployments/refresh': self.docker_deployments.refresh,
         }
         if route in project_operations:
             return project_operations[route](body)
@@ -407,6 +434,39 @@ class IntegrationApi:
         if (self._closed or type(principal['_service_generation']) is not int
                 or principal['_service_generation'] != self._service_generation):
             return {'ok': False, 'error': {'code': 'invalid_key', 'message': 'MCP 服务已停止。', 'retryable': False}}
+        if name in FILE_READ_TOOLS:
+            return self.file_operations.execute(name, arguments, principal)
+        if name == 'list_docker_deployments':
+            return self.deployment_operations.list_deployments(principal)
+        if name == 'plan_docker_deployment':
+            return self.deployment_operations.plan(principal, arguments['deployment_id'], arguments['operation'],
+                                                   arguments.get('image_reference'))
+        if name == 'execute_docker_deployment':
+            return self.deployment_operations.execute(principal, arguments['plan_id'], arguments['confirmed'],
+                                                      arguments['idempotency_key'])
+        if name == 'get_docker_deployment_task':
+            return self.deployment_operations.get_task(principal, arguments['deployment_id'], arguments['task_id'])
+        if name in NATIVE_OPERATIONS:
+            scope = next(item['scope'] for item in NATIVE_TOOL_SPECS if item['name'] == name)
+            def authorize_native(operation, parameters, body):
+                return (operation == NATIVE_OPERATIONS[name]
+                        and permission_allows(principal, scope, MIN_ROLE_BY_TOOL[name], tool_name=name)
+                        and self._is_current(principal))
+            if not authorize_native(NATIVE_OPERATIONS[name], {}, {}):
+                return {'ok': False, 'error': {'code': 'invalid_key', 'message': '当前授权不允许此原厂操作。', 'retryable': False}}
+            if not self.web.media_probe_lock.acquire(blocking=False):
+                return {'ok': False, 'error': {'code': 'operation_busy', 'message': '已有原厂查询或操作正在进行。', 'retryable': True}}
+            try:
+                result = self.native_operations.execute(name, arguments, principal=principal, authorizer=authorize_native)
+                result['ok'] = result.get('available') is True
+                if not result['ok']:
+                    result['error'] = {'code': result.get('reason') or 'native_unavailable',
+                                       'message': '原厂操作未完成，请查看具体原因。', 'retryable': False}
+                if not self._is_current(principal):
+                    return {'ok': False, 'error': {'code': 'invalid_key', 'message': '操作期间授权已失效。', 'retryable': False}}
+                return result
+            finally:
+                self.web.media_probe_lock.release()
         if name == 'control_docker_project':
             return self.docker_operations.control(principal, arguments['project_id'], arguments['operation'],
                                                   arguments['confirmed'], arguments['idempotency_key'])

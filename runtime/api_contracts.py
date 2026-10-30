@@ -18,6 +18,7 @@ IMPLEMENTED_TOOLS = frozenset((
     'list_file_roots', 'list_docker_projects',
     'get_docker_project_status', 'get_docker_project_summary',
     'plan_docker_project_update', 'execute_docker_project_update', 'get_docker_project_task',
+    'list_directory', 'get_file_info', 'prepare_file_download', 'get_file_transfer', 'cancel_file_transfer',
 ))
 _ERROR_CODES = (
     'not_implemented', 'invalid_arguments', 'invalid_key', 'scope_denied',
@@ -25,7 +26,7 @@ _ERROR_CODES = (
     'acl_unverified', 'secure_open_unavailable', 'unsupported_file_type',
     'not_found', 'directory_changed', 'file_changed', 'transfer_expired',
     'transfer_busy', 'transfer_unavailable', 'unsupported_range',
-    'unsupported_precondition', 'target_exists', 'target_changed',
+    'unsupported_precondition', 'unsupported_path_class', 'target_exists', 'target_changed',
     'checksum_mismatch', 'recycle_unavailable', 'write_backend_unverified',
     'idempotency_conflict', 'project_unavailable', 'project_binding_changed',
     'native_unavailable', 'plan_expired', 'plan_conflict', 'task_unavailable',

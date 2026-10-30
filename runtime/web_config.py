@@ -65,6 +65,7 @@ PANEL_GET_ROUTES = frozenset((
     '/api/idrac', '/api/daily', '/api/monthly_summary', '/api/weather', '/api/update/check',
     '/api/config', '/api/ui', '/api/report', '/api/export', '/api/r1', '/api/access', '/api/access/contracts', '/api/services',
     '/api/access/file-readiness', '/api/docker/projects', '/api/docker/projects/catalog',
+    '/api/docker/deployments', '/api/docker/deployments/catalog',
     '/api/business',
 )) | PANEL_QUERY_ROUTES
 
@@ -76,20 +77,30 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/fan', '/api/r1/fan/release', '/api/r1/light', '/api/r1/rgb', '/api/r1/screen',
     '/api/r1/settings', '/api/r1/monitor', '/api/r1/power', '/api/r1/power/cancel', '/api/r1/auth',
     '/api/dev/exec', '/api/dev/fan', '/api/dev/storage', '/api/dev/business', '/api/dev/diagnostics',
-    '/api/dev/media', '/api/dev/storage/probe', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
+    '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
     '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate',
     '/api/services/screen', '/api/services/mcp', '/api/services/developer', '/api/r1/business/refresh',
     '/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke',
+    '/api/docker/deployments/register', '/api/docker/deployments/revoke', '/api/docker/deployments/refresh',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
 ACCESS_POST_ROUTES = frozenset(('/api/access/settings', '/api/access/keys', '/api/access/keys/revoke',
                               '/api/access/keys/update', '/api/access/keys/enable', '/api/access/keys/rotate'))
 SERVICE_POST_ROUTES = frozenset(('/api/services/screen', '/api/services/mcp', '/api/services/developer'))
-PROJECT_POST_ROUTES = frozenset(('/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke'))
+PROJECT_POST_ROUTES = frozenset(('/api/docker/projects/register', '/api/docker/projects/update', '/api/docker/projects/revoke',
+                                  '/api/docker/deployments/register', '/api/docker/deployments/revoke', '/api/docker/deployments/refresh'))
 MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES
 OWNER_READ_ROUTES = frozenset(('/api/access', '/api/access/contracts', '/api/access/file-readiness',
-                               '/api/services', '/api/docker/projects', '/api/docker/projects/catalog'))
+                               '/api/services', '/api/docker/projects', '/api/docker/projects/catalog',
+                               '/api/docker/deployments', '/api/docker/deployments/catalog'))
+FILE_CONTENT_PREFIX = '/api/integration/files/transfers/'
+FILE_CONTENT_PATH = re.compile(r'/api/integration/files/transfers/(transfer_[0-9a-f]{32})/content\Z', re.ASCII)
+
+
+def _machine_route(path):
+    """Keep binary transfer requests inside Bearer authorization for every verb."""
+    return path in MACHINE_ROUTES or path.startswith(FILE_CONTENT_PREFIX)
 
 
 def _mcp_accepts(values):
@@ -754,6 +765,10 @@ class WebConfigServer:
                 value = (self.integration.docker_projects.catalog() if route.endswith('/catalog')
                          else self.integration.docker_projects.snapshot())
                 return (200 if value.get('ok') is True else 503), value, 'application/json; charset=utf-8'
+            if route in ('/api/docker/deployments', '/api/docker/deployments/catalog'):
+                value = (self.integration.docker_deployments.catalog() if route.endswith('/catalog')
+                         else self.integration.docker_deployments.metadata())
+                return (200 if value.get('ok') is True else 503), value, 'application/json; charset=utf-8'
             return 200, (self.integration.snapshot() if route == '/api/access' else self.services_snapshot()), 'application/json; charset=utf-8'
         if route == '/api/auth/config':
             return 200, self.auth.auth_config(), 'application/json; charset=utf-8'
@@ -864,6 +879,8 @@ class WebConfigServer:
             return self._diagnostic_post(body, ip)
         if route == '/api/dev/media':
             return self._media_debug_post(body, ip)
+        if route == '/api/dev/native':
+            return self._native_debug_post(body, ip)
         if route == '/api/dev/storage/probe':
             return self._storage_probe_post(body, ip)
         if route == '/api/dev/business':
@@ -956,6 +973,27 @@ class WebConfigServer:
             return status, payload, None
         finally:
             self.operation_lock.release()
+
+    def _native_debug_post(self, body, ip):
+        """Explicit fixed native reads; never a package install or action proxy."""
+        if not self._dev_authorized(ip):
+            return 403, {'ok': False, 'error': '原厂检测未启用、已过期或来源不在白名单'}, None
+        if (not isinstance(body, dict) or set(body) != {'action', 'confirm'}
+                or body.get('action') not in ('probe', 'packages') or body.get('confirm') is not True):
+            return 400, {'ok': False, 'error': '仅接受明确确认的固定 probe 或 packages 检测'}, None
+        if not self.media_probe_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有原厂查询或操作正在进行'}, None
+        try:
+            from vendor_native_capabilities import collect_native_capabilities_probe, collect_application_package_context
+            collector = collect_native_capabilities_probe if body['action'] == 'probe' else collect_application_package_context
+            value = collector(authorizer=lambda operation, parameters, native_body: self._dev_authorized(ip))
+            if not self._dev_authorized(ip):
+                return 403, {'ok': False, 'error': '开发窗口已失效，未返回原厂检测结果'}, None
+            return 200, {'ok': True, 'probe': value}, None
+        except Exception:
+            return 503, {'ok': False, 'error': '原厂固定检测暂不可确认'}, None
+        finally:
+            self.media_probe_lock.release()
 
     def _media_debug_post(self, body, ip):
         """Explicit media probe; credentials stay on the host, never in the API.
@@ -1106,6 +1144,7 @@ class WebConfigServer:
                 'fan': lambda: (200, {'ok': True, 'snapshot': self.fan_diagnostics.snapshot()}),
                 'file_access_readiness': self._file_readiness_snapshot,
                 'file_backend_context': self._file_backend_context_snapshot,
+                'file_protocol': lambda: self._file_protocol_snapshot(ip),
                 'disk_activity': self._disk_activity_snapshot,
                 'docker_project_readiness': lambda: (200, {'ok': True,
                     'discovery': self.integration.docker_projects.catalog(),
@@ -1118,6 +1157,17 @@ class WebConfigServer:
                          'snapshot': snapshot}, None
         finally:
             self.diagnostic_lock.release()
+
+    def _file_protocol_snapshot(self, ip):
+        """One opt-in native/root topology probe, sharing the storage lock."""
+        if not self.storage_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False, 'error': '已有存储检测正在进行'}
+        try:
+            from api_file_provider import collect_file_protocol_probe
+            value = collect_file_protocol_probe(self.panel, authorizer=lambda: self._dev_authorized(ip))
+            return 200, {'ok': True, 'protocol': value}
+        finally:
+            self.storage_diagnostic_lock.release()
 
     def _disk_activity_snapshot(self):
         """Explicit passive counters, separate from storage RPC and SMART."""
@@ -1538,7 +1588,8 @@ class WebConfigServer:
                         self.send_header('Content-Disposition', 'attachment; filename="r1-report.html"')
                     self.end_headers()
                     try:
-                        self.wfile.write(data)
+                        if self.command != 'HEAD':
+                            self.wfile.write(data)
                     except OSError:
                         pass
                     self.close_connection = True
@@ -1595,10 +1646,57 @@ class WebConfigServer:
                         return None, None
                     return key, session
 
+                def file_content(self, parsed, principal, peer, started):
+                    """One authorized fd stream; never a browser-cookie download proxy."""
+                    from api_file_operations import FileAccessError
+                    match = FILE_CONTENT_PATH.fullmatch(parsed.path)
+                    if match is None:
+                        self.send(404, {'ok': False, 'error': '传输接口不存在'})
+                        return
+                    if (self.headers.get('Content-Length', '0') != '0'
+                            or any(name.lower().startswith('if-') for name in self.headers)):
+                        self.send(400, {'ok': False, 'error': '下载不接受请求体或条件请求头'})
+                        return
+                    response, sent_headers, outcome = None, False, {'ok': False}
+                    try:
+                        response = outer.integration.file_operations.transfers.open_download(
+                            match[1], principal, head=self.command == 'HEAD', range_header=self.headers.get('Range'))
+                        if not outer.integration._is_current(principal):
+                            raise FileAccessError('invalid_key')
+                        self.connection.settimeout(self.RESPONSE_TIMEOUT)
+                        self.send_response(response.status)
+                        for name, value in response.headers.items():
+                            self.send_header(name, value)
+                        self.send_header('Connection', 'close')
+                        self.send_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; sandbox")
+                        self.end_headers()
+                        sent_headers = True
+                        if self.command == 'GET' and response.status != 416:
+                            response.send(self.wfile.write)
+                        outcome = {'ok': response.status in (200, 206)}
+                    except FileAccessError as error:
+                        outcome = error.result()
+                        if not sent_headers:
+                            status = {'invalid_key': 401, 'permission_denied': 403, 'acl_unverified': 403,
+                                      'transfer_unavailable': 404, 'transfer_expired': 410,
+                                      'transfer_busy': 409, 'file_changed': 409, 'unsupported_range': 400}.get(error.code, 503)
+                            self.send(status, outcome)
+                    except (OSError, ValueError, TypeError):
+                        if not sent_headers:
+                            self.send(503, {'ok': False, 'error': '文件传输暂不可用'})
+                    except Exception:
+                        if not sent_headers:
+                            self.send(503, {'ok': False, 'error': '文件后端尚未完成验证'})
+                    finally:
+                        if response is not None:
+                            response.close()
+                        self.close_connection = True
+                        outer.integration.record(principal, 'integration/file.content', peer, outcome, started=started)
+
                 def machine(self, parsed):
                     """Bearer-only machine routes; browser cookies grant nothing here."""
                     duplicates = {'authorization', 'content-type', 'mcp-protocol-version',
-                                  'mcp-method', 'mcp-name'}
+                                  'mcp-method', 'mcp-name', 'range', 'content-length'}
                     for name in self.headers:
                         if (name.lower() in duplicates or name.lower().startswith('mcp-')) and len(self.headers.get_all(name, [])) > 1:
                             self.send(400, {'error': '重复机器接口请求头'})
@@ -1608,12 +1706,13 @@ class WebConfigServer:
                     if not self.valid(panel=True):
                         return
                     route, peer = parsed.path, self.client_address[0]
+                    binary = route.startswith(FILE_CONTENT_PREFIX)
                     if parsed.fragment or (parsed.query and route != '/api/integration/status'):
                         self.send(400, {'error': '该机器接口不接受 URL 参数'})
                         return
                     principal, reason = outer.api_access.authorize(
                         self.headers.get('Authorization'), peer,
-                        required_scope='read' if route == '/api/integration/status' else None)
+                        required_scope='files' if binary else 'read' if route == '/api/integration/status' else None)
                     if principal is None:
                         status = 503 if reason == 'storage_unavailable' else 403 if reason in (
                             'disabled', 'key_disabled', 'peer_not_lan', 'peer_not_allowed', 'scope_denied') else 401
@@ -1624,11 +1723,14 @@ class WebConfigServer:
                     # never populated from JSON, Origin or forwarding headers.
                     principal['_peer'] = peer
                     principal['_service_generation'] = outer.integration._service_generation
-                    allowed = 'GET' if route in ('/api/integration/status', '/api/integration/capabilities') else 'POST'
-                    if self.command != allowed:
+                    allowed = 'GET, HEAD' if binary else 'GET' if route in ('/api/integration/status', '/api/integration/capabilities') else 'POST'
+                    if self.command not in allowed.split(', '):
                         self.send(405, {'error': '请求方法不支持'}, extra_headers={'Allow': allowed})
                         return
                     started = time.monotonic()
+                    if binary:
+                        self.file_content(parsed, principal, peer, started)
+                        return
                     if route == '/api/integration/capabilities':
                         try:
                             payload = outer.integration.capabilities(principal)
@@ -1695,7 +1797,7 @@ class WebConfigServer:
                 def do_GET(self):
                     parsed = urllib.parse.urlsplit(self.path)
                     route = parsed.path
-                    if route in MACHINE_ROUTES:
+                    if _machine_route(route):
                         self.machine(parsed)
                         return
                     if route in OWNER_READ_ROUTES and parsed.fragment:
@@ -1758,13 +1860,13 @@ class WebConfigServer:
                 def do_POST(self):
                     parsed = urllib.parse.urlsplit(self.path)
                     route = parsed.path
-                    if route in MACHINE_ROUTES:
+                    if _machine_route(route):
                         self.machine(parsed)
                         return
                     panel = route in PANEL_POST_ROUTES
                     if not self.valid(post=True, panel=panel):
                         return
-                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/storage/probe', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (parsed.query or parsed.fragment):
+                    if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (parsed.query or parsed.fragment):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
                     try:
@@ -1833,7 +1935,7 @@ class WebConfigServer:
 
                 def unsupported(self):
                     parsed = urllib.parse.urlsplit(self.path)
-                    if parsed.path in MACHINE_ROUTES:
+                    if _machine_route(parsed.path):
                         self.machine(parsed)
                         return
                     self.send(405, {'error': '请求方法不支持'})
@@ -1844,7 +1946,14 @@ class WebConfigServer:
                     elif self.valid(public=True):
                         self.send(200, {'read_only': True}, public=True)
 
-                do_PUT = do_PATCH = do_DELETE = do_HEAD = unsupported
+                def do_HEAD(self):
+                    parsed = urllib.parse.urlsplit(self.path)
+                    if parsed.path.startswith(FILE_CONTENT_PREFIX):
+                        self.machine(parsed)
+                        return
+                    self.unsupported()
+
+                do_PUT = do_PATCH = do_DELETE = unsupported
 
             try:
                 server = _Server((self.host, self.port), Handler)

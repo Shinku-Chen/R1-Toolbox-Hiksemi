@@ -68,6 +68,10 @@ class FileReadinessTests(unittest.TestCase):
         self.assertFalse(result['available'])
         self.assertFalse(result['file_access_available'])
         self.assertEqual(result['status'], 'metadata_only')
+        self.assertEqual(result['execution_backend']['status'], 'requires_per_operation_verification')
+        self.assertIsNone(result['execution_backend']['runtime_verified'])
+        self.assertIn('prepare_file_download', result['execution_backend']['implemented_tools'])
+        self.assertFalse(result['execution_backend']['write_implemented'])
         for capability in ('list_directory', 'get_file_info', 'download', 'upload', 'file_write'):
             self.assertIs(result['capabilities'][capability], False)
         self.assertFalse(result['effects']['grants_authorization'])

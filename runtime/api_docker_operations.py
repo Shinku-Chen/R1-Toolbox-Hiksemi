@@ -104,6 +104,56 @@ def _repository(reference):
     return name
 
 
+def _toolbox_container(detail):
+    """Identify Toolbox by exact image basename or its fixed OCI title."""
+    config = detail.get('Config') if isinstance(detail, dict) else None
+    if not isinstance(config, dict):
+        return False
+    image = str(config.get('Image') or '').split('@', 1)[0].rsplit('/', 1)[-1].split(':', 1)[0]
+    labels = config.get('Labels')
+    return (image in ('r1-toolbox', 'r1-boot-once') or isinstance(labels, dict)
+            and labels.get('org.opencontainers.image.title') == 'R1 Toolbox')
+
+
+def _toolbox_volume(metadata):
+    """Compose's logical volume label survives project-prefixed real names."""
+    labels = metadata.get('Labels') if isinstance(metadata, dict) else None
+    return (isinstance(metadata, dict) and metadata.get('Name') == 'r1-toolbox-data'
+            or isinstance(labels, dict) and labels.get('com.docker.compose.volume') == 'r1-toolbox-data')
+
+
+def _toolbox_data_volumes(backend, context):
+    """Resolve exact mounted volume names; never return daemon JSON publicly."""
+    rows = backend.request('GET', '/containers/json?all=1&limit=129', context)
+    if not isinstance(rows, list) or len(rows) > projects.MAX_CONTAINERS:
+        raise OperationError('limit_exceeded')
+    names = {'r1-toolbox-data'}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('Id'), str) or not _CID.fullmatch(row['Id']):
+            raise OperationError('native_unavailable')
+        # A complete daemon summary excludes ordinary images without reading
+        # their full inspect payload. Fixtures/older daemons may omit fields;
+        # absence is not proof, so inspect those bounded candidates.
+        summary = {'Config': {'Image': row.get('Image'), 'Labels': row.get('Labels')}}
+        if isinstance(row.get('Image'), str) and isinstance(row.get('Labels'), dict) and not _toolbox_container(summary):
+            continue
+        detail = backend.request('GET', '/containers/' + row['Id'] + '/json', context)
+        if not isinstance(detail, dict) or detail.get('Id') != row['Id']:
+            raise OperationError('project_binding_changed')
+        if not _toolbox_container(detail):
+            continue
+        mounts = detail.get('Mounts')
+        if not isinstance(mounts, list) or len(mounts) > 128:
+            raise OperationError('native_unavailable')
+        for mount in mounts:
+            if isinstance(mount, dict) and mount.get('Type') == 'volume':
+                name = mount.get('Name')
+                if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', name):
+                    raise OperationError('native_unavailable')
+                names.add(name)
+    return names
+
+
 class LocalDockerWriter(projects.LocalDockerReader):
     """Use the reader's fixed socket/peer proof for allowlisted Engine writes."""
 
@@ -112,6 +162,9 @@ class LocalDockerWriter(projects.LocalDockerReader):
 
     @staticmethod
     def _allowed(method, path):
+        if method == 'GET' and (path == '/containers/json?all=1&limit=129'
+                or re.fullmatch(r'/volumes/[A-Za-z0-9_.-]{1,255}', path)):
+            return True
         if method == 'GET' and (path == '/info' or re.fullmatch(r'/containers/[0-9a-f]{64}/json', path)):
             return True
         if method == 'GET' and path.startswith('/images/') and path.endswith('/json'):
@@ -312,6 +365,23 @@ class DockerProjectOperations:
                 or any(isinstance(row, dict) and row.get('Name') == 'r1-toolbox-data'
                        for row in detail.get('Mounts') or []))
 
+    def _protected_resources(self, detail, context):
+        if self._protected(detail):
+            return True
+        mounts = detail.get('Mounts')
+        if not isinstance(mounts, list):
+            raise OperationError('write_backend_unverified')
+        named = [mount.get('Name') for mount in mounts if isinstance(mount, dict) and mount.get('Type') == 'volume']
+        if not named:
+            return False
+        protected = _toolbox_data_volumes(self.backend, context)
+        for name in named:
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', name):
+                raise OperationError('write_backend_unverified')
+            if name in protected or _toolbox_volume(self.backend.request('GET', '/volumes/' + name, context)):
+                return True
+        return False
+
     def _project(self, project_id, deadline=None):
         with self.registry._lock:
             rows = [row for row in self.registry._read()['projects'] if row['id'] == project_id and not row['revoked']]
@@ -411,7 +481,7 @@ class DockerProjectOperations:
                     raise OperationError('project_binding_changed')
                 self._engine(context, registered['identity']['engine'])
                 detail = self.backend.request('GET', '/containers/' + service['container'] + '/json', context)
-                if self._protected(detail):
+                if self._protected_resources(detail, context):
                     raise OperationError('permission_denied')
                 path = '/containers/' + service['container'] + '/' + operation + ('?t=10' if operation != 'start' else '')
                 mutated = True  # An ambiguous transport failure may follow acceptance.
@@ -603,7 +673,7 @@ class DockerProjectOperations:
         config, host = detail.get('Config'), detail.get('HostConfig')
         if not isinstance(config, dict) or not isinstance(host, dict):
             raise OperationError('write_backend_unverified')
-        if (self._protected(detail) or host.get('Privileged') is True or host.get('Devices') or host.get('DeviceRequests') or host.get('CapAdd')
+        if (self._protected_resources(detail, context) or host.get('Privileged') is True or host.get('Devices') or host.get('DeviceRequests') or host.get('CapAdd')
                 or host.get('ContainerIDFile') or host.get('VolumesFrom') or host.get('Links')
                 or any(host.get(key) == 'host' or isinstance(host.get(key), str) and host[key].startswith('container:')
                        for key in ('NetworkMode', 'PidMode', 'IpcMode', 'UTSMode', 'CgroupnsMode'))
@@ -702,6 +772,8 @@ class DockerProjectOperations:
         self._engine(context, registered['identity']['engine'])
         old = registered['identity']['services'][0]['container']
         detail = self.backend.request('GET', '/containers/' + old + '/json', context)
+        if self._protected_resources(detail, context):
+            raise OperationError('permission_denied')
         expected_running = False if plan.get('_old_stopped') else plan['prepared']['detail'].get('State', {}).get('Running')
         if detail.get('State', {}).get('Running') is not expected_running:
             raise OperationError('project_binding_changed')
@@ -725,6 +797,8 @@ class DockerProjectOperations:
             raise OperationError('project_binding_changed')
         if new_id is not None:
             new = self.backend.request('GET', '/containers/' + new_id + '/json', context)
+            if self._protected_resources(new, context):
+                raise OperationError('permission_denied')
             if (new.get('Image') != plan.get('_target_image_id')
                     or new.get('Config', {}).get('Image') != plan['public']['target_image']
                     or new.get('Name') != plan.get('_new_name')

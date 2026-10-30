@@ -1,6 +1,6 @@
 # MCP 显式业务操作
 
-更新于 2026-10-30。工具目录当前共三十六项：原十项监控与硬件工具、文件根元数据、六项固定 Docker 项目工具及一个项目控制工具、五项业务缓存工具、六项下载任务工具、七项原厂媒体业务工具。工具可调用不代表当前 NAS 的后端可用或已通过实机验收。
+更新于 2026-10-30。工具目录当前六十五项：原三十六，加五项文件只读／传输、六项下载器扩展、四项未来 Docker 部署和十四项原厂业务。完整领域对照见[完成矩阵](mcp-completion-matrix.md)。有真实回调不表示当前 NAS 门槛已通过，更不表示替代全部 APP 功能。
 
 所有新增工具只面向 policy v3、独立 Bearer Token、实际局域网来源，以及明确选择的角色、功能域、工具和资源。policy v1／v2 保留原十项，不自动升级。文件范围不会转换为 Docker 或下载器授权，管理员也不绕过项目范围。
 
@@ -16,10 +16,16 @@
 | `resume_download_task` | 读写 | 按原下载器目标继续一个现有任务 |
 | `remove_download_task` | 读写 | 移除任务，始终保留下载数据 |
 | `set_download_task_limits` | 读写 | 以字节／秒设置单任务下载或上传限速，0 表示不限速 |
+| `get_download_limits` | 只读 | 固定引擎全局下载／上传限速及独立配置版本 |
+| `set_download_limits` | 管理员 | 确认、配置版本及幂等后设置全局限速，0 表示不限速，影响全部任务 |
+| `recheck_download_task` | 读写 | 仅 qB 既有任务，重新校验数据，可能唤盘和改变状态 |
+| `rename_download_task` | 读写 | 仅 qB 任务显示名，不调用文件／目录改名 |
+| `set_download_task_force_start` | 读写 | 仅 qB 既有任务的强制运行开关，按原目标执行 |
+| `set_download_task_queue_position` | 读写 | 仅 qB，调整单任务排队位置，要求引擎启用队列 |
 
 使用 `downloads` 域，不改变原 `get_download_status` 的缓存语义。读取不包含绝对目录、Tracker、磁力链接、Cookie、凭据或原生 JSON。qB 的已配置限速由任务返回值投影；其明确的 -1 不限速标记统一为 0，未提供的值仍为 `null`。aria2 当前未额外查询配置限速，保持未知。
 
-修改须提供 `engine`、`task_id`、`expected_version`、`confirmed:true` 和 `idempotency_key`。不支持 `all`、批量 ID、任意 RPC、全局设置或目录参数。任务版本绑定引擎 PID／启动时刻／监听 inode、任务身份与既有目标；读取后任务替换或目标变化会拒绝操作。
+任务修改须提供 `engine`、`task_id`、`expected_version`、`confirmed:true` 和 `idempotency_key`。不支持 `all`、批量 ID、任意 RPC 或目录参数。任务版本绑定引擎 PID／启动时刻／监听 inode、任务身份与既有目标，变化时拒绝。管理员全局限速另使用 `get_download_limits` 返回的 `download_limits_*` 版本，不能拿任务版本替代；该授权影响整个引擎，不扩大为任意偏好设置。
 
 继续任务会让原下载器在它原先配置的位置工作。此授权是对现有下载器任务的委托，**不能宣称将原生下载器的所有文件写入限制在 Toolbox 的 Users 文件范围内**。需要限制此类副作用时，不授予继续工具。新增链接／种子、设置保存目录、删除数据仍待文件后端权限闭合；不通过下载器接口提供任意文件访问。
 
@@ -37,13 +43,21 @@ qB 固定端口 8181，aria2 固定 6800；每次复核唯一服务监听和进�
 
 显式开发验证沿用 `POST /api/dev/media`，严格请求 `{"action":"probe_business","confirm":true}`，一次读取三类固定目录。可能更新原厂内部状态并唤盘，不加入被动采集。依旧要求非空实际来源白名单、有效开发窗口、同源 JSON／CSRF，结束时再核对授权。不能传路径、账号、令牌、相册 ID 或原厂动作。
 
-## Docker 与文件后续
+## 原厂业务第二批
 
-固定项目有独立 `inspect/control/update_image` 授权；启停重启和镜像更新还需管理员与精确工具。项目登记自身不运行 Docker。更新限定经审查的单服务项目和同仓库固定 digest，真实任务与并发冲突处理见[固定项目操作](docker-project-operations.md)。通用新建部署尚未接入。
+新增十四项：应用目录和安装进度；备份目录／自动导入设置、关闭导入、暂停／取消任务；最小用户目录、设备名称读取／修改、AI 开关读取／修改；影视库扫描状态；普通自建相册删除。精确工具、最低角色、固件地址和投影见[原厂能力说明](native-capability-completion.md)。全部原厂请求都可能通过共同认证初始化资源，不能标为只读或幂等查询；原五个缓存工具不改变语义。
 
-文件边界保持 `/drives/*/Users/`。本批补真实句柄传输基础和固定 `file_backend_context` 开发诊断，但当前没有可证明原厂虚拟 ACL 的生产 provider；目录浏览、内容下载、上传、改名／复制／移动／删除等十三项文件合同继续不注册。诊断只是证据，不授予访问权；目录元数据可能唤盘，只能显式选择。见[文件后端上下文](file-backend-context.md)。
+安装进度本身会同步插件和写完成状态，需管理员、确认与幂等，不能后台自动轮询换键。备份只收紧现有导入／任务，不创建、恢复或接受目标路径；相册删除只接受当前所有者普通自建类型，不等于读取／删除照片内容。七个写入口的 ACK 仅表示接受，未知结果保留并禁止重放。
 
-应用安装／卸载的原厂处理函数仍缺可托付的市场 ID、来源、版本及参数枚举。影视来源和成员配置、照片内容访问、分享外链创建、备份同步及账户／存储管理仍未接入；不将动作表存在或管理员角色视为完成。
+显式 `POST /api/dev/native` 仅接受 `{"action":"probe","confirm":true}` 或 `{"action":"packages","confirm":true}`。前者固定查询六类目录／设置，后者只采应用包字段存在性、类型与长度；不返回包 URL／签名原文，不安装或执行 setter，不把有摘要／签名字段当作可信包证明。均需真实来源开发白名单和绝对窗口，不加入被动诊断。
+
+## Docker 与文件
+
+固定项目有 `inspect/control/update_image` 授权；启停重启和镜像更新需管理员与精确工具。更新限定单服务和同仓库固定 digest，见[固定项目操作](docker-project-operations.md)。另有四项未来部署工具，使用独立 `deployment_*` 和 `docker_deployments` 的 `inspect/deploy/control/remove`；所有者网页先登记已有卷／网络、固定仓库／端口／非 root 用户和配额，再规划／执行 `deploy/update/start/stop/restart/remove`。不支持任意 Compose／命令／bind，删除保留卷，失败保留实际现场；见[受控部署](docker-deployments.md)。
+
+文件边界保持 `/drives/*/Users/`。五项文件只读／下载执行器已接入精确固件、固定原厂所有者和 `admin/public` 正子集；完整 ACL、同挂载和最终句柄均须实时通过，不以 root 权限或根规划代替。二十合同中十二项已实现，八项文件写合同仍不注册。此前 `d5075ed` 实机七根未通过挂载门，未有样本读取证明；新增 `file_protocol` 一次返回阶段 errno、mount／device 和 namespace，需新镜像显式取证。见[真实只读后端](native-file-readonly.md)与[上下文](file-backend-context.md)。
+
+应用安装／卸载／更新仍缺可信包、来源、版本、签名、依赖及恢复合同。影视来源／成员、照片内容、分享创建、备份新建／恢复、账户权限与凭据、网络／存储变更仍待接入；不能将部分设置／停用工具、原厂动作表或管理员角色宣传为全功能完成。
 
 ## 验证范围
 

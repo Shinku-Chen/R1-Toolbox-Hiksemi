@@ -17,16 +17,19 @@ import time
 from urllib.parse import urlencode
 
 import vendor_download_diagnostics as wire
-from api_permissions import permission_allows
+from api_permissions import MIN_ROLE_BY_TOOL, permission_allows
 
 
-READ_TOOLS = frozenset(('list_download_tasks', 'get_download_task'))
+READ_TOOLS = frozenset(('list_download_tasks', 'get_download_task', 'get_download_limits'))
 WRITE_TOOLS = frozenset(('pause_download_task', 'resume_download_task',
-                         'remove_download_task', 'set_download_task_limits'))
+                         'remove_download_task', 'set_download_task_limits', 'set_download_limits',
+                         'recheck_download_task', 'rename_download_task',
+                         'set_download_task_force_start', 'set_download_task_queue_position'))
 TOOLS = READ_TOOLS | WRITE_TOOLS
 _QB_ID = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z', re.ASCII)
 _ARIA_ID = re.compile(r'[0-9a-f]{16}\Z', re.ASCII)
 _VERSION = re.compile(r'download_[0-9a-f]{32}\Z', re.ASCII)
+_LIMIT_VERSION = re.compile(r'download_limits_[0-9a-f]{32}\Z', re.ASCII)
 _IDEMPOTENCY = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z', re.ASCII)
 _MAX_TASKS = 128
 _MAX_RESPONSE = 512 * 1024
@@ -40,6 +43,7 @@ def _error(code, *, uncertain=False):
         'invalid_key': '操作期间授权已失效。',
         'task_not_found': '当前引擎中没有该任务。',
         'task_changed': '任务身份已变化，请重新读取后操作。',
+        'settings_changed': '下载器限速配置已变化，请重新读取后操作。',
         'idempotency_conflict': '此幂等标识已用于另一项操作。',
         'limit_exceeded': '任务响应或本进程操作记录达到上限。',
         'operation_busy': '该下载器正在处理另一项采集或操作。',
@@ -85,19 +89,38 @@ def valid_arguments(tool, arguments):
         return (not set(arguments) - {'engine', 'offset', 'limit'}
                 and type(arguments.get('offset', 0)) is int and 0 <= arguments.get('offset', 0) <= 300
                 and type(arguments.get('limit', 50)) is int and 1 <= arguments.get('limit', 50) <= 100)
+    if tool == 'get_download_limits':
+        return set(arguments) == {'engine'}
+    global_limits = tool == 'set_download_limits'
+    qb_only = tool in ('recheck_download_task', 'rename_download_task',
+                      'set_download_task_force_start', 'set_download_task_queue_position')
+    if qb_only and engine != 'qbittorrent':
+        return False
     task = arguments.get('task_id')
-    if not isinstance(task, str) or not (_QB_ID if engine == 'qbittorrent' else _ARIA_ID).fullmatch(task):
+    if not global_limits and (not isinstance(task, str) or not (_QB_ID if engine == 'qbittorrent' else _ARIA_ID).fullmatch(task)):
         return False
     if tool == 'get_download_task':
         return set(arguments) == {'engine', 'task_id'}
-    required = {'engine', 'task_id', 'expected_version', 'confirmed', 'idempotency_key'}
-    extra = {'download_limit_bps', 'upload_limit_bps'} if tool == 'set_download_task_limits' else set()
+    required = {'engine', 'expected_version', 'confirmed', 'idempotency_key'}
+    if not global_limits:
+        required.add('task_id')
+    extra = {'download_limit_bps', 'upload_limit_bps'} if tool in ('set_download_task_limits', 'set_download_limits') else set()
+    extra |= {'rename_download_task': {'name'}, 'set_download_task_force_start': {'enabled'},
+              'set_download_task_queue_position': {'position'}}.get(tool, set())
     if (set(arguments) - (required | extra) or required - set(arguments)
             or arguments['confirmed'] is not True
-            or not isinstance(arguments['expected_version'], str) or not _VERSION.fullmatch(arguments['expected_version'])
+            or not isinstance(arguments['expected_version'], str)
+            or not (_LIMIT_VERSION if global_limits else _VERSION).fullmatch(arguments['expected_version'])
             or not isinstance(arguments['idempotency_key'], str) or not _IDEMPOTENCY.fullmatch(arguments['idempotency_key'])):
         return False
-    if extra:
+    if tool == 'rename_download_task':
+        return (set(arguments) == required | extra and _text(arguments.get('name'), 255) is not None
+                and not any(char in arguments['name'] for char in ('/', '\\')))
+    if tool == 'set_download_task_force_start':
+        return set(arguments) == required | extra and type(arguments.get('enabled')) is bool
+    if tool == 'set_download_task_queue_position':
+        return set(arguments) == required | extra and arguments.get('position') in ('increase', 'decrease', 'top', 'bottom')
+    if tool in ('set_download_task_limits', 'set_download_limits'):
         chosen = extra & set(arguments)
         return bool(chosen) and all(type(arguments[key]) is int and 0 <= arguments[key] <= 2 ** 40 for key in chosen)
     return True
@@ -179,12 +202,14 @@ class DownloadOperations:
             raise _OperationError('identity_changed')
         self._gate(principal)
 
-    def _qb(self, method, endpoint, values, deadline, identity, principal):
+    def _qb(self, method, endpoint, values, deadline, identity, principal, *, category='torrents'):
         self._verify('qbittorrent', identity, principal)
         host, sid = identity[3], self.auth_state._sid
         authority = ('[::1]' if host == '::1' else host) + ':' + str(wire.QB_PORT)
         encoded = urlencode(values).encode('ascii')
-        path = '/api/v2/torrents/' + endpoint
+        if category not in ('torrents', 'transfer'):
+            raise _OperationError('invalid_arguments')
+        path = '/api/v2/' + category + '/' + endpoint
         if method == 'GET' and values:
             path += '?' + encoded.decode('ascii')
         body = encoded if method == 'POST' else b''
@@ -294,10 +319,25 @@ class DownloadOperations:
                 'offset': offset, 'limit': limit, 'has_more': truncated,
                 'next_offset': offset + len(projected) if truncated else None}
 
+    def _limits(self, engine, deadline, identity, principal):
+        """Project configured engine limits only, never preferences or secrets."""
+        if engine == 'qbittorrent':
+            values = []
+            for endpoint in ('downloadLimit', 'uploadLimit'):
+                values.append(_int(wire._json(self._qb('GET', endpoint, {}, deadline, identity, principal, category='transfer'))))
+        else:
+            native = self._aria('aria2.getGlobalOption', [], deadline, identity, principal)
+            if not isinstance(native, dict):
+                raise _OperationError('invalid_response')
+            values = [_int(native.get(name)) for name in ('max-overall-download-limit', 'max-overall-upload-limit')]
+        version = hashlib.sha256(json.dumps([engine, identity, values], sort_keys=True).encode()).hexdigest()[:32]
+        return {'engine': engine, 'download_limit_bps': values[0], 'upload_limit_bps': values[1],
+                'version': 'download_limits_' + version}
+
     def execute(self, tool, arguments, principal):
         if not valid_arguments(tool, arguments):
             return _error('invalid_arguments')
-        if not permission_allows(principal, 'downloads', 'readonly' if tool in READ_TOOLS else 'readwrite', tool_name=tool):
+        if not permission_allows(principal, 'downloads', MIN_ROLE_BY_TOOL[tool], tool_name=tool):
             return _error('permission_denied')
         try:
             self._gate(principal)
@@ -335,6 +375,32 @@ class DownloadOperations:
             major = self._qb_session(identity, deadline, principal) if engine == 'qbittorrent' else None
             if tool == 'list_download_tasks':
                 result = self._list(arguments, deadline, identity, principal)
+            elif tool in ('get_download_limits', 'set_download_limits'):
+                limits = self._limits(engine, deadline, identity, principal)
+                result = {'ok': True, 'cached': False, 'limits': limits}
+                if writing:
+                    if limits['version'] != arguments['expected_version']:
+                        raise _OperationError('settings_changed')
+                    selected = [name for name in ('download_limit_bps', 'upload_limit_bps') if name in arguments]
+                    if any(limits[name] is None for name in selected):
+                        raise _OperationError('invalid_response')
+                    self._verify(engine, identity, principal)
+                    sent = True
+                    if engine == 'qbittorrent':
+                        for name, endpoint in (('download_limit_bps', 'setDownloadLimit'), ('upload_limit_bps', 'setUploadLimit')):
+                            if name in arguments:
+                                response = self._qb('POST', endpoint, {'limit': arguments[name]}, deadline,
+                                                    identity, principal, category='transfer')
+                                if response.strip() not in (b'', b'Ok.'):
+                                    raise _OperationError('invalid_response')
+                    else:
+                        changes = {native: str(arguments[name]) for name, native in
+                                   (('download_limit_bps', 'max-overall-download-limit'),
+                                    ('upload_limit_bps', 'max-overall-upload-limit')) if name in arguments}
+                        if self._aria('aria2.changeGlobalOption', [changes], deadline, identity, principal) != 'OK':
+                            raise _OperationError('invalid_response')
+                    result = {'ok': True, 'engine': engine, 'accepted': True, 'effect_confirmed': False,
+                              'next_step': 'get_download_limits'}
             else:
                 task = arguments['task_id']
                 current = self._one(engine, task, deadline, identity, principal)
@@ -354,10 +420,19 @@ class DownloadOperations:
                             for field, endpoint in (('download_limit_bps', 'setDownloadLimit'), ('upload_limit_bps', 'setUploadLimit')):
                                 if field in arguments:
                                     changes.append((endpoint, {'hashes': task, 'limit': arguments[field]}))
+                        elif tool in ('rename_download_task', 'set_download_task_force_start', 'set_download_task_queue_position'):
+                            if tool == 'rename_download_task':
+                                changes = [('rename', {'hash': task, 'name': arguments['name']})]
+                            elif tool == 'set_download_task_force_start':
+                                changes = [('setForceStart', {'hashes': task, 'value': str(arguments['enabled']).lower()})]
+                            else:
+                                endpoint = {'increase': 'increasePrio', 'decrease': 'decreasePrio',
+                                            'top': 'topPrio', 'bottom': 'bottomPrio'}[arguments['position']]
+                                changes = [(endpoint, {'hashes': task})]
                         else:
                             endpoint = {'pause_download_task': 'stop' if major == 5 else 'pause',
                                         'resume_download_task': 'start' if major == 5 else 'resume',
-                                        'remove_download_task': 'delete'}[tool]
+                                        'remove_download_task': 'delete', 'recheck_download_task': 'recheck'}[tool]
                             changes = [(endpoint, {'hashes': task, **({'deleteFiles': 'false'} if tool == 'remove_download_task' else {})})]
                         for endpoint, values in changes:
                             response = self._qb('POST', endpoint, values, deadline, identity, principal)
