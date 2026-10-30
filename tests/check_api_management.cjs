@@ -59,7 +59,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     ['execute_docker_project_update', 'docker', 'admin'], ['get_docker_project_task', 'docker', 'readonly'],
     ['list_docker_deployments', 'docker', 'readonly'], ['plan_docker_deployment', 'docker', 'admin'],
     ['execute_docker_deployment', 'docker', 'admin'], ['get_docker_deployment_task', 'docker', 'readonly'],
-    ['get_app_status', 'apps', 'readonly'], ['get_download_status', 'downloads', 'readonly'],
+    ['get_app_status', 'apps', 'readonly'], ['plan_native_application_install', 'apps', 'admin'], ['install_native_application', 'apps', 'admin'], ['get_download_status', 'downloads', 'readonly'],
     ['get_movie_status', 'movie', 'readonly'], ['get_album_status', 'albums', 'readonly'], ['get_share_status', 'sharing', 'readonly'],
   ].map(([name, scope, min_role]) => ({ name, title: name, scope, min_role }));
   const projectId = 'project_' + '3'.repeat(24), candidateId = 'candidate_' + '4'.repeat(24);
@@ -89,6 +89,9 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
       { id: 'root_' + '2'.repeat(24), label: '备份磁盘', mount: '/drives/space_2', read_only: true },
     ] },
     tools: fixtureTools,
+    application_install_catalog: [{ application_id: 34, label: '百度网盘 v2', effect_summary: '安装并启动原厂进程。' },
+      { application_id: 35, label: '<img src=x onerror="window.apiAppInjected=1">66 打印', effect_summary: '仅原厂模块状态；受理不等于打印服务启动。' }],
+    file_mutation_authority: { ok: true, authorities: [] },
     docker_project_catalog: { ok: true, projects: [] },
     docker_deployment_catalog: { ok: true, deployments: [] },
     audit: [{ timestamp: 1793240000, key_id: 'fixture-key-1', key_name: unsafeName,
@@ -167,6 +170,28 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
           state.docker_deployment_catalog.deployments[0].revoked = true;
         } else throw new Error('unexpected deployment action');
         return reply(200, { ok: true });
+      }
+      if (url.pathname.startsWith('/api/files/authority/')) {
+        const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
+        assert.equal(body.root_id, 'root_' + '1'.repeat(24));
+        if (url.pathname.endsWith('/preflight')) return reply(200, { ok: true, ready: false, blockers: ['parent_writable'],
+          checks: [{ component: 'Users', uid: 0, mode: '0777', access_acl: 'absent' }], source_binding: { native_owner: true, same_mount: true }, existing_directory: 'absent' });
+        if (url.pathname.endsWith('/initialize')) {
+          assert.equal(body.confirmed, true);
+          state.file_mutation_authority.authorities = [{ root_id: body.root_id, enabled: true, status: 'registered', revision: 1 }];
+          return reply(200, { ok: true });
+        }
+        if (url.pathname.endsWith('/inspect')) return reply(200, { ok: true,
+          recoveries: [{ recovery_id: 'operation_' + 'a'.repeat(32), path: 'admin/接口验收/源.txt', tool: 'rename_file', state: 'result_unconfirmed', objects: ['source'] }] });
+        if (url.pathname.endsWith('/restore')) {
+          assert.deepEqual(body, { root_id: 'root_' + '1'.repeat(24), recovery_id: 'operation_' + 'a'.repeat(32), confirmed: true });
+          return reply(200, { ok: true, recovery: { state: 'restored', index_verified: false } });
+        }
+        if (url.pathname.endsWith('/revoke')) {
+          state.file_mutation_authority.authorities[0].enabled = false;
+          return reply(200, { ok: true });
+        }
+        throw new Error('unexpected owner file authority action');
       }
       if (url.pathname !== '/api/access' && !url.pathname.startsWith('/api/access/')) return route.continue();
       if (url.pathname === '/api/access/contracts') {
@@ -256,6 +281,26 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('文件边界明确Users且按真实工具能力授权', (await manager.locator('[data-ref="fileRoots"]').innerText()).includes('/drives/*/Users/') && (await manager.locator('[data-ref="scopes"] label').filter({ hasText: 'Docker 部署' }).innerText()).includes('已接入'));
     check('具体工具按真实目录展示且默认仅状态读取', await manager.locator('[data-ref="toolOptions"] input').count() === fixtureTools.length && JSON.stringify(await manager.locator('[data-ref="toolOptions"] input:checked').evaluateAll(inputs => inputs.map(input => input.value))) === '["get_nas_status"]');
     check('角色不足或未选功能的工具不可选', await manager.locator('[data-ref="toolOptions"] input[value="set_fan_policy"]').isDisabled() && await manager.locator('[data-ref="toolOptions"] input[value="list_file_roots"]').isDisabled());
+    await view('operations');
+    await manager.locator('[data-ref="fileAuthorityManager"] summary').click();
+    check('打开恢复管理不触盘或自动初始化', calls.filter(call => call.path.startsWith('/api/files/authority')).length === 0);
+    await manager.locator('[data-authority-preflight]').first().click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: 'parent_writable' }).waitFor();
+    check('恢复预检显示阻断和完整元数据', (await manager.locator('[data-ref="fileRecoveries"]').innerText()).includes('0777') && calls.filter(call => call.path.endsWith('/initialize')).length === 0);
+    await manager.locator('[data-authority-init]').first().click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-authority-init]').first().waitFor();
+    await page.waitForFunction(() => document.querySelector('#r1ApiManager [data-authority-init]').disabled);
+    check('恢复区写沿用CSRF与明确确认', calls.filter(call => call.path.endsWith('/initialize')).at(-1).headers['x-fnm-request'] === '1' && calls.filter(call => call.path.endsWith('/initialize')).at(-1).body.confirmed === true);
+    await manager.locator('[data-authority-inspect]').first().click();
+    await manager.locator('.r1-api-recovery button').click();
+    check('恢复确认包含具体原路径', (await page.locator('.fullmask').last().innerText()).includes('admin/接口验收/源.txt'));
+    await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-ref="fileAuthorityStatus"]').filter({ hasText: '原厂索引尚未确认' }).waitFor();
+    check('对象恢复成功不冒充索引已确认', !(await manager.locator('[data-ref="fileAuthorityStatus"]').innerText()).includes('原厂索引已核对'));
+    await manager.locator('[data-authority-revoke]').first().click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('[data-authority-init]').first().filter({ hasText: '重新启用' }).waitFor();
+    check('撤销保留恢复入口且可以显式重新启用', await manager.locator('[data-authority-inspect]').first().isEnabled() && await manager.locator('[data-authority-init]').first().isEnabled());
+    await view('create');
     await manager.locator('[data-ref="scopes"] input[value="apps"]').check();
     check('新增只读业务工具按功能启用而不自动勾选', !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isDisabled()) && !(await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').isChecked()));
     await manager.locator('[data-ref="toolOptions"] input[value="get_app_status"]').check();
@@ -287,12 +332,12 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('接口定义失败可重试且不保留旧JSON', await manager.locator('[data-ref="contractJson"]').isHidden() && !(await manager.locator('[data-ref="loadContracts"]').isDisabled()));
     failContracts = false;
     await manager.locator('[data-ref="loadContracts"]').click();
-    await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 20);
+    await page.waitForFunction(() => document.querySelectorAll('#r1ApiManager .r1-api-contract').length === 21);
     const definition = JSON.parse(await manager.locator('[data-ref="contractDefinition"]').inputValue());
     const implementedContracts = definition.tools.filter(tool => tool.implemented === true).length;
-    check('真实服务返回20项定义并按实际实现分类', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 20 && definition.tools.every(tool => typeof tool.implemented === 'boolean' && tool.inputSchema && tool.outputSchema)
+    check('真实服务返回21项定义并按实际实现分类', definition.status === 'definitions_only' && definition.execution_allowed === false && definition.tools.length === 21 && definition.tools.every(tool => typeof tool.implemented === 'boolean' && tool.inputSchema && tool.outputSchema)
       && (await manager.locator('[data-ref="contractStatus"]').innerText()).includes(`已接入 ${implementedContracts} 项`));
-    check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.length === serviceWrites);
+    check('接口显示三级权限且不改变表单授权', (await manager.locator('[data-ref="contractList"]').innerText()).includes('管理员') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('读写') && (await manager.locator('[data-ref="contractList"]').innerText()).includes('只读') && await manager.locator('select[data-ref="role"]').inputValue() === 'readonly' && calls.filter(call => !call.path.startsWith('/api/files/authority')).length === serviceWrites);
     await page.setViewportSize({ width: 320, height: 960 });
     check('320宽度接口定义无需横向滚动', await manager.evaluate(node => node.scrollWidth <= node.clientWidth + 2));
     await page.setViewportSize({ width: 1280, height: 1000 });
@@ -681,6 +726,28 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await view('create'); await manager.locator('[data-ref="scopes"] input[value="docker"]').check();
     check('撤销未来资源后禁用勾选且不触发部署或删除', await manager.locator('[data-deployment-check]').isDisabled() && calls.filter(call => call.path.startsWith('/api/docker/deployments')).every(call => ['/api/docker/deployments/register','/api/docker/deployments/refresh','/api/docker/deployments/revoke'].includes(call.path)));
     check('部署动态标签未执行脚本', await page.evaluate(() => !window.apiDeploymentInjected));
+    await manager.locator('[data-ref="close"]').click(); await home.locator('[data-ref="add"]').click();
+    await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
+
+    await manager.locator('[data-ref="scopes"] input[value="apps"]').check();
+    check('安装资源新键默认空且只读不可选', await manager.locator('[data-application-id]:checked').count() === 0 && await manager.locator('[data-application-id]').first().isDisabled());
+    await manager.locator('select[data-ref="role"]').selectOption('admin');
+    check('提升管理员不自动授应用', await manager.locator('[data-application-id]:checked').count() === 0);
+    await manager.locator('[data-application-id][value="35"]').check();
+    for (const tool of ['plan_native_application_install', 'install_native_application']) await manager.locator(`[data-ref="toolOptions"] input[value="${tool}"]`).check();
+    await manager.locator('input[data-ref="name"]').fill('应用授权 AI');
+    await manager.locator('[data-ref="create"]').click();
+    check('安装资源确认显示名称与原生委托影响', (await page.locator('.fullmask').last().innerText()).includes('允许新装应用') && await page.locator('.fullmask').last().locator('img').count() === 0);
+    await page.locator('.fullmask [data-yes]').click();
+    await page.locator('#r1ApiSecret').waitFor(); await page.locator('#r1ApiSecret [data-ref="close"]').click();
+    check('应用资源精确保存且未自动授ID34', JSON.stringify(calls.filter(call => call.path === '/api/access/keys').at(-1).body.application_ids) === '[35]');
+    await manager.locator('.r1-api-item').last().locator('[data-ref="edit"]').click();
+    check('编辑还原原应用且不扩权', await manager.locator('[data-application-id][value="35"]').isChecked() && !(await manager.locator('[data-application-id][value="34"]').isChecked()));
+    await manager.locator('input[data-ref="name"]').fill('应用授权改名');
+    await manager.locator('[data-ref="create"]').click(); await page.locator('.fullmask [data-yes]').click();
+    await manager.locator('.r1-api-item').last().locator('[data-ref="name"]').filter({ hasText: '应用授权改名' }).waitFor();
+    check('应用键元数据编辑保持原资源', !Object.hasOwn(calls.filter(call => call.path === '/api/access/keys/update').at(-1).body, 'application_ids') && JSON.stringify(state.keys.at(-1).application_ids) === '[35]');
+    check('应用标签不注入脚本', await page.evaluate(() => !window.apiAppInjected));
     await manager.locator('[data-ref="close"]').click(); await home.locator('[data-ref="add"]').click();
     await manager.locator('[data-ref="content"]:not([hidden])').waitFor();
 

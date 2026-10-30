@@ -6107,6 +6107,10 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <button class="btn primary" type="submit" data-ref="registerDeployment" disabled>登记部署资源</button>
 </form><h3>已登记的部署资源</h3><div class="r1-api-list" data-ref="registeredDeployments"></div>
 </details>
+<details data-ref="fileAuthorityManager"><summary>文件变更与恢复</summary>
+<p class="sub">覆盖、改名、移动和新建目录使用所选磁盘的专用恢复区。首次初始化需要所有者确认并检查目录权限；此操作可能唤醒磁盘。打开页面只读 Toolbox 登记，不扫描文件。撤销后停止新操作，已保留对象仍可检查和恢复。</p>
+<div data-ref="fileAuthorityRoots" class="r1-api-list"></div><p class="sub" data-ref="fileAuthorityStatus" role="status"></p><div data-ref="fileRecoveries" class="r1-api-list"></div>
+</details>
 <details data-ref="contracts"><summary>文件与 Docker 接口定义</summary>
 <p class="sub">只读、读写、管理员按工具和资源分别授权。定义分别标明已接入与待接入；查看定义不会启用工具或修改密钥。</p>
 <button class="btn" type="button" data-ref="loadContracts">读取接口定义</button>
@@ -6125,6 +6129,7 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ApiManager" role="dial
 <p class="sub r1-api-permission-note" data-ref="roleStatus" role="status"></p>
 <fieldset class="r1-api-scopes r1-api-tools"><legend>允许的具体工具</legend><p class="sub" data-ref="toolsStatus"></p><div data-ref="toolOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="fileRoots" hidden><legend>允许访问的文件范围</legend><p class="sub">文件边界固定为 /drives/*/Users/ 下的已核验目录；下面只保存明确勾选的根与相对子目录授权。各项工具是否可调用以当前能力目录为准。多个范围按并集生效；下级只读范围不会收窄上级读写授权。</p><p class="sub" data-ref="fileRootsStatus" role="status"></p><div data-ref="fileRootOptions"></div></fieldset>
+<fieldset class="r1-api-file-roots" data-ref="applicationInstalls" hidden><legend>允许新装的原厂应用</legend><p class="sub">安装需要管理员、应用功能和安装工具，以及这里明确选择的应用。只支持未安装的审计模块，不会自动卸载或更新已有应用；新应用默认不授权。原厂安装可能启动后台服务并访问其自身数据目录。</p><div data-ref="applicationInstallOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="dockerProjects" hidden><legend>允许访问的已登记 Docker 项目</legend><p class="sub">现有项目按读取、启停重启、镜像更新分别授权；写操作需要管理员及对应工具。未来新服务使用下面独立的部署资源。</p><p class="sub" data-ref="dockerProjectsStatus"></p><div data-ref="dockerProjectOptions"></div></fieldset>
 <fieldset class="r1-api-file-roots" data-ref="dockerDeployments" hidden><legend>允许访问的未来部署资源</legend><p class="sub">先在「Token 操作 → 部署资源管理」登记固定资源。默认只选读取，部署／更新、启停重启和删除须管理员明确勾选，且仍须对应工具授权。</p><p class="sub" data-ref="dockerDeploymentsStatus"></p><div data-ref="dockerDeploymentOptions"></div></fieldset>
 <label class="r1-api-input">允许的来源 IP／网段（可选）<textarea class="textfield mono" data-ref="ips" rows="2" aria-label="允许的来源 IP" placeholder="192.168.31.0/24&#10;fd00::/64"></textarea><span class="sub">支持 IPv4／IPv6、CIDR 与 IPv4 点分掩码。留空允许持密钥的局域网客户端；不接受域名、通配符或公网全放行。</span></label>
@@ -6149,7 +6154,7 @@ setText(x.pageDescription, ({ create: '选择角色、功能、具体工具与�
 x.error.hidden = true;
 };
 el.querySelectorAll('[data-api-nav]').forEach(button => { button.onclick = () => { if (!busy) showPage(button.dataset.apiNav); }; });
-let dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false };
+let dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false, applications: false };
 const policyDirty = () => Object.values(dirty).some(Boolean);
 const exactPolicy = () => !editing || editing.policy_version === 3 || x.upgradePolicy.checked;
 const selectedScopes = () => [...x.scopes.querySelectorAll('input:checked')].map(input => input.value);
@@ -6157,6 +6162,8 @@ const projectRows = () => Array.isArray(state && state.docker_project_catalog &&
 ? state.docker_project_catalog.projects.filter(row => row && /^project_[0-9a-f]{24}$/.test(row.id) && typeof row.label === 'string') : [];
 const deploymentRows = () => Array.isArray(state && state.docker_deployment_catalog && state.docker_deployment_catalog.deployments)
 ? state.docker_deployment_catalog.deployments.filter(row => row && /^deployment_[0-9a-f]{24}$/.test(row.id) && typeof row.label === 'string') : [];
+const applicationRows = () => Array.isArray(state && state.application_install_catalog)
+? state.application_install_catalog.filter(row => row && Number.isSafeInteger(row.application_id) && typeof row.label === 'string' && typeof row.effect_summary === 'string') : [];
 const currentTools = () => (Array.isArray(state && state.tools) ? state.tools : []).map(tool => ({ ...tool,
 scope: tool.scope || (tool._meta || {})['io.github.shinku-chen.r1-toolbox/requiredScope'],
 min_role: tool.min_role || (tool._meta || {})['io.github.shinku-chen.r1-toolbox/minimumRole'],
@@ -6183,6 +6190,13 @@ x.deploymentForm.querySelectorAll('input,select,button').forEach(input => { inpu
 x.registerDeployment.disabled = value || deploymentsBusy || !deploymentCandidates || !state || state.storage_ok !== true;
 x.addDeploymentVolume.disabled = value || deploymentsBusy || !deploymentCandidates || !deploymentCandidates.volumes.length;
 x.registeredDeployments.querySelectorAll('button').forEach(button => { button.disabled = value || deploymentsBusy || button.dataset.revoked === 'true'; });
+for (const row of x.fileAuthorityRoots.querySelectorAll('[data-authority-root]')) {
+row.querySelector('[data-authority-preflight]').disabled = value;
+row.querySelector('[data-authority-init]').disabled = value || row.dataset.readOnly === 'true' || row.dataset.enabled === 'true';
+row.querySelector('[data-authority-inspect]').disabled = value || row.dataset.registered !== 'true';
+row.querySelector('[data-authority-revoke]').disabled = value || row.dataset.enabled !== 'true';
+}
+x.fileRecoveries.querySelectorAll('button').forEach(button => { button.disabled = value || button.dataset.available !== 'true' || button.dataset.completed === 'true'; });
 };
 const names = () => new Map((Array.isArray(state && state.scope_catalog) ? state.scope_catalog : []).map(scope => [scope.id, scope.label || scope.id]));
 const filesSelected = () => !!x.scopes.querySelector('input[value="files"]:checked');
@@ -6223,6 +6237,11 @@ input.disabled = !exactPolicy() || !allowed;
 if (exactPolicy() && !allowed && input.checked) { input.checked = false; if (editing) dirty.tools = true; }
 }
 x.fileRoots.hidden = !filesSelected();
+x.applicationInstalls.hidden = !selected.has('apps');
+for (const input of x.applicationInstallOptions.querySelectorAll('input')) {
+input.disabled = !exactPolicy() || !selected.has('apps') || role !== 'admin';
+if (input.checked && (role !== 'admin' || !selected.has('apps'))) { input.checked = false; if (editing) dirty.applications = true; }
+}
 for (const item of x.fileRootOptions.querySelectorAll('.r1-api-file-root')) {
 const checked = item.querySelector('[data-root-check]').checked;
 const writable = role !== 'readonly' && item.dataset.readOnly !== 'true' && item.dataset.available !== 'false';
@@ -6365,6 +6384,77 @@ input.onchange = () => { dirty.deployments = true; updatePermissions(); };
 x.dockerDeploymentOptions.append(row);
 }
 };
+const drawApplications = (chosen = null) => {
+const selected = chosen || new Set([...x.applicationInstallOptions.querySelectorAll('input:checked')].map(input => Number(input.value)));
+x.applicationInstallOptions.replaceChildren();
+for (const app of applicationRows()) {
+const row = mount('<label class="r1-api-scope"><input type="checkbox" data-application-id><span><b></b><span class="sub"></span></span></label>');
+const input = row.querySelector('input'); input.value = String(app.application_id); input.checked = selected.has(app.application_id);
+setText(row.querySelector('b'), `${app.label}（${app.application_id}）`); setText(row.querySelector('.sub'), app.effect_summary);
+input.onchange = () => { dirty.applications = true; }; x.applicationInstallOptions.append(row);
+}
+if (!x.applicationInstallOptions.children.length) x.applicationInstallOptions.append(mount('<p class="sub">当前版本没有可授权的新装应用。</p>'));
+};
+const drawFileAuthorities = () => {
+x.fileAuthorityRoots.replaceChildren();
+const registry = state.file_mutation_authority || {}, entries = Array.isArray(registry.authorities) ? registry.authorities : [];
+setText(x.fileAuthorityStatus, registry.ok === false ? '文件恢复登记暂不可用。初始化必须在 NAS 上通过权限检查。' : '尚未读取磁盘恢复清单。');
+for (const root of fileRoots()) {
+const registration = entries.find(entry => entry.root_id === root.id);
+const row = mount('<article class="r1-api-audit r1-api-authority"><strong></strong><p class="sub" data-authority-state></p><div class="r1-api-actions"><button class="btn" type="button" data-authority-preflight>检查初始化条件</button><button class="btn" type="button" data-authority-init>初始化恢复区</button><button class="btn" type="button" data-authority-inspect>检查保留对象</button><button class="btn" type="button" data-authority-revoke>停止新变更</button></div></article>');
+setText(row.querySelector('strong'), root.label); setText(row.querySelector('[data-authority-state]'), registration ? registration.enabled ? '已登记；每次操作仍核验实际身份与权限。' : '已撤销；保留对象未删除。' : '未初始化。');
+row.dataset.authorityRoot = root.id; row.dataset.readOnly = String(root.read_only); row.dataset.registered = String(!!registration); row.dataset.enabled = String(!!(registration && registration.enabled));
+const init = row.querySelector('[data-authority-init]'), inspect = row.querySelector('[data-authority-inspect]'), revoke = row.querySelector('[data-authority-revoke]');
+init.disabled = busy || root.read_only || !!(registration && registration.enabled); inspect.disabled = busy || !registration; revoke.disabled = busy || !registration || !registration.enabled;
+if (registration && !registration.enabled) setText(init, '重新启用恢复区');
+const perform = async action => {
+if (busy) return;
+const reading = ['inspect', 'preflight'].includes(action);
+if (!reading && !(await R1.ask(action === 'initialize' ? '初始化文件恢复区？' : '停止新的文件变更？', action === 'initialize' ? `将在「${esc(root.label)}」的 Users 目录创建专用恢复区，可能唤醒磁盘。只有完整权限和挂载检查通过才启用；已有同名目录不会被接管。` : '停止新的文件变更授权。保留的对象和恢复记录不会删除。'))) return;
+pending(true);
+try {
+const result = await R1.post('/api/files/authority/' + action, { root_id: root.id, ...(reading ? {} : { confirmed: true }) });
+if (!result || result.ok !== true) throw new Error(result && result.error && result.error.code || '操作结果未确认');
+if (action === 'preflight') {
+setText(x.fileAuthorityStatus, result.ready === true ? '初始化条件已通过；仍需明确初始化后才能执行文件变更。'
+: `初始化条件未通过：${(result.blockers || []).join('、') || '身份或权限无法核验'}。`);
+x.fileRecoveries.replaceChildren();
+const evidence = document.createElement('pre'); evidence.className = 'sub mono'; evidence.style.whiteSpace = 'pre-wrap'; evidence.style.overflowWrap = 'anywhere';
+evidence.textContent = JSON.stringify({ checks: result.checks, source_binding: result.source_binding, existing_directory: result.existing_directory }, null, 2);
+x.fileRecoveries.append(evidence);
+} else if (action === 'inspect') {
+x.fileRecoveries.replaceChildren();
+for (const recovery of Array.isArray(result.recoveries) ? result.recoveries : []) {
+if (!/^operation_[0-9a-f]{32}$/.test(recovery.recovery_id)) continue;
+const item = mount('<article class="r1-api-audit r1-api-recovery"><strong class="mono"></strong><p class="sub"></p><button class="btn" type="button">恢复到原路径</button></article>');
+const restorePath = validSubpath(recovery.path) && recovery.path.startsWith('admin/') ? recovery.path : null;
+setText(item.querySelector('strong'), restorePath || recovery.recovery_id);
+setText(item.querySelector('.sub'), `${recovery.recovery_id}；${recovery.state || 'result_unconfirmed'}；保留对象：${(recovery.objects || []).join('、') || '无'}${restorePath ? '' : '；原路径无法核验，暂不能恢复。'}`);
+const canRestore = !!(recovery.objects || []).length && !!restorePath && recovery.state !== 'restored';
+const button = item.querySelector('button'); button.disabled = !canRestore;
+button.dataset.available = String(canRestore);
+button.onclick = async () => {
+if (busy || !restorePath || !(await R1.ask('恢复保留对象？', `恢复「${esc(root.label)}／${esc(restorePath)}」。仅使用该记录绑定的原路径；目标存在时保留双方并拒绝覆盖。可能唤醒磁盘。`))) return;
+pending(true);
+try {
+const restored = await R1.post('/api/files/authority/restore', { root_id: root.id, recovery_id: recovery.recovery_id, confirmed: true });
+if (!restored || restored.ok !== true) throw new Error(restored && restored.error && restored.error.code || '恢复结果未确认');
+setText(x.fileAuthorityStatus, restored.recovery && restored.recovery.state === 'restored'
+? restored.recovery.index_verified === true ? '对象已恢复；原厂索引已核对。' : '对象已恢复；原厂索引尚未确认，请检查原厂文件列表。'
+: '恢复结果尚未确认，请重新检查保留对象。');
+button.dataset.completed = 'true'; button.disabled = true;
+} catch (error) { fail(error); } finally { pending(false); }
+};
+x.fileRecoveries.append(item);
+}
+setText(x.fileAuthorityStatus, result.recoveries && result.recoveries.length ? '已读取此根的保留记录；恢复只使用记录中的固定原路径。' : '此根没有保留记录。');
+} else await refresh();
+} catch (error) { fail(error); } finally { pending(false); }
+};
+row.querySelector('[data-authority-preflight]').onclick = () => perform('preflight');
+init.onclick = () => perform('initialize'); inspect.onclick = () => perform('inspect'); revoke.onclick = () => perform('revoke'); x.fileAuthorityRoots.append(row);
+}
+};
 const draw = () => {
 const labels = names();
 x.content.hidden = false; r1SyncMcpService(state.enabled);
@@ -6409,6 +6499,9 @@ setText(k.scopes, (Array.isArray(key.scopes) ? key.scopes : []).map(id => scopeN
 setText(k.tools, key.policy_version === 3 ? (Array.isArray(key.tool_grants) ? key.tool_grants : []).map(name => (currentTools().find(tool => tool.name === name) || {}).title || name).join('、') || '未选择具体工具' : '原有十工具按原角色和功能授权；新增工具未启用。');
 setText(k.projects, (Array.isArray(key.docker_projects) ? key.docker_projects : []).map(grant => `${(projectRows().find(project => project.id === grant.id) || {}).label || grant.id}（${(grant.operations || []).join('、')}）`).join('；') || '未授予项目范围');
 setText(k.deployments, (Array.isArray(key.docker_deployments) ? key.docker_deployments : []).map(grant => `${(deploymentRows().find(resource => resource.id === grant.id) || {}).label || grant.id}（${(grant.operations || []).join('、')}）`).join('；') || '未授予未来部署资源');
+const applications = document.createElement('dd');
+setText(applications, (key.application_ids || []).map(id => (applicationRows().find(app => app.application_id === id) || {}).label || String(id)).join('、') || '未授予应用新装资源');
+k.deployments.after(mount('<dt>允许新装应用</dt>'), applications);
 const grants = Array.isArray(key.file_roots) ? key.file_roots : [];
 if (!grants.length) setText(k.files, '未授予文件范围');
 else k.files.append(mount('<p class="sub">仅限已核验的 Users 目录；具体操作以已授权的接入工具为准。</p>'));
@@ -6455,10 +6548,10 @@ setText(a.source, [record.key_name || record.key_id, record.peer || record.sourc
 setText(a.result, String(record.outcome || record.result || record.status || '结果未知'));
 x.audit.append(item);
 }
-drawFileRoots(); drawTools(); drawProjects(); drawDeployments(); drawDeploymentRegistry(); updatePermissions();
+drawFileRoots(); drawTools(); drawProjects(); drawDeployments(); drawApplications(); drawFileAuthorities(); drawDeploymentRegistry(); updatePermissions();
 };
 const endEdit = () => {
-editing = null; dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false };
+editing = null; dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false, applications: false };
 x.upgradePolicy.checked = false; x.upgradePolicyLabel.hidden = true;
 setText(x.formTitle, '创建访问密钥'); setText(x.create, '创建密钥');
 x.cancelEdit.hidden = true; x.keepExpiry.hidden = true; x.expiry.value = '90';
@@ -6466,7 +6559,7 @@ x.name.value = ''; x.ips.value = ''; x.role.value = 'readonly';
 x.scopes.querySelectorAll('input').forEach(input => { input.checked = input.value === 'read'; });
 x.fileRootOptions.querySelectorAll('[data-root-check]').forEach(input => { input.checked = false; });
 drawFileRoots([]);
-drawTools(new Set(['get_nas_status'])); drawProjects(new Set()); drawDeployments(new Set());
+drawTools(new Set(['get_nas_status'])); drawProjects(new Set()); drawDeployments(new Set()); drawApplications(new Set());
 if (state) draw();
 };
 const beginEdit = key => {
@@ -6483,7 +6576,8 @@ const keyLevel = x.role.value === 'legacy' ? Infinity : roleLevel[x.role.value];
 drawTools(new Set(key.policy_version === 3 ? key.tool_grants || [] : currentTools().filter(tool => legacyTools.has(tool.name) && chosen.has(tool.scope) && keyLevel >= roleLevel[tool.min_role]).map(tool => tool.name)));
 drawProjects(new Set((key.docker_projects || []).map(project => project.id)));
 drawDeployments(new Set((key.docker_deployments || []).map(resource => resource.id)));
-updatePermissions(); dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false };
+drawApplications(new Set(key.application_ids || []));
+updatePermissions(); dirty = { role: false, scopes: false, tools: false, files: false, projects: false, deployments: false, applications: false };
 x.formTitle.scrollIntoView({ block: 'start', behavior: 'smooth' }); x.name.focus();
 };
 const refresh = async () => {
@@ -6764,14 +6858,18 @@ if (changeFiles) body.file_roots = scopes.includes('files') ? file_roots : [];
 if (exactPolicy() && (!editing || dirty.tools || upgrade)) body.tool_grants = tool_grants;
 if (exactPolicy() && changeProjects) body.docker_projects = scopes.includes('docker') ? docker_projects : [];
 if (exactPolicy() && changeDeployments) body.docker_deployments = scopes.includes('docker') ? docker_deployments : [];
+if (exactPolicy() && (!editing || dirty.applications || upgrade)) body.application_ids = scopes.includes('apps') && role === 'admin'
+? [...x.applicationInstallOptions.querySelectorAll('input:checked')].map(input => Number(input.value)) : [];
+const applicationNote = Array.isArray(body.application_ids) && body.application_ids.length
+? `允许新装应用：${body.application_ids.map(id => esc((applicationRows().find(app => app.application_id === id) || {}).label || String(id))).join('、')}。原生应用安装影响不受文件工具的 Users 子目录授权限制，执行前还须预览实际影响。` : '';
 if (!editing || x.expiry.value !== 'keep') body.expires_days = Number(x.expiry.value);
 if (editing) {
 body.id = editing.id;
-const note = changePolicy ? `角色：${roleLabels[role]}；功能：${esc(grant)}。${rangeNote}${exactPolicy() ? '具体工具：' + esc(tool_grants.join('、') || '未授予') + '。' : '旧策略保持原有十工具范围。'}` : '原有角色、功能、具体工具、文件与项目范围保持不变。';
+const note = changePolicy ? `角色：${roleLabels[role]}；功能：${esc(grant)}。${rangeNote}${applicationNote}${exactPolicy() ? '具体工具：' + esc(tool_grants.join('、') || '未授予') + '。' : '旧策略保持原有十工具范围。'}` : '原有角色、功能、具体工具、文件与项目范围保持不变。';
 if (!(await R1.ask('保存访问密钥修改？', `保存「${esc(name)}」的设置。${note}${x.expiry.value === 'keep' ? '到期时间保持不变。' : '有效期从本次保存重新计算。'}Token 不会变化。`))) return;
 await mutate('/api/access/keys/update', body);
 } else {
-if (!(await R1.ask('创建访问密钥？', `角色：${roleLabels[role]}。将向「${esc(name)}」授予：${esc(grant)}。具体工具：${esc(tool_grants.join('、') || '未授予')}。${scopes.includes('power') ? '电源权限可安排关机或重启，需要管理员角色。' : ''}${rangeNote}`))) return;
+if (!(await R1.ask('创建访问密钥？', `角色：${roleLabels[role]}。将向「${esc(name)}」授予：${esc(grant)}。具体工具：${esc(tool_grants.join('、') || '未授予')}。${scopes.includes('power') ? '电源权限可安排关机或重启，需要管理员角色。' : ''}${rangeNote}${applicationNote}`))) return;
 await mutate('/api/access/keys', body);
 }
 };

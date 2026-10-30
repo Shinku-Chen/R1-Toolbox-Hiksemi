@@ -2,7 +2,7 @@
 
 本批接入 `prepare_file_upload`、`commit_file_upload`、`get_file_operation` 三个真实写入／任务工具，字节通过固定的 `PUT /api/integration/files/transfers/<transfer_id>/content` 接收。它只消费文件后端已经建立的私有上传会话，不能凭 JSON 中的权限声明或任意 URL 创建目标。实时工具目录与 [接口合同](api/file-docker-contracts.json) 分别标明执行器和传输层状态；原厂写 ACL、容量保留、同对象发布、原厂通知和独立索引读取缺少任一运行时证明，都在相应阶段拒绝操作。
 
-生产上传仅允许逻辑所有者 `admin` 目录内的新文件，不改 `admin` 根本身，不支持 `public` 或其他用户写入。API Token 最低为“读写”，还须明确选择 `files`、具体工具及读写根／相对目录；NAS 的逻辑管理员身份不等于机器 Token 角色必须为管理员。目标和父目录均须在授权范围内，给单个叶子文件的范围不能授予其父目录创建权。覆盖、新建目录、改名、复制、移动和回收站仍未接入。
+`prepare_file_upload` 仍只允许逻辑所有者 admin 后代新文件，不改 admin 根，不写 public 或其他用户。覆盖使用单独的 prepare_file_overwrite，不扩大旧上传 Token；目录、复制、改名、移动及原厂回收等详见[文件变更与恢复](file-mutations.md)。最低机器角色为读写，并须 files、精确工具、目标和父目录范围；逻辑管理员身份不等于机器管理员角色。
 
 ## 请求与阶段
 

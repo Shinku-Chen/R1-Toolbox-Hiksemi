@@ -18,12 +18,12 @@ Docker 项目逐项选择 `inspect`、`control`、`update_image`：读取可授�
 
 Token 对未来资源分别授予 `inspect/deploy/control/remove`，写操作仅管理员、默认不选。Docker 域可只选择现有项目或未来资源其中一类；无需虚构另一类。只修改名称、来源或有效期时省略未改动的资源字段，保留原授权；角色降级会明确清除写操作，提高角色不恢复。固定卷是独立委托，不将文件 Users 边界宣传为容器沙箱。部署、更新、删除的边界见[受控新服务部署](docker-deployments.md)。
 
-界面按实际后端目录、角色、功能域和已选资源呈现工具，不硬编码工具总数，也不把全量目录当成每个 Token 的权限。文件／Docker 二十项合同逐项显示实际接入标记，待接入定义本身不授予执行权。业务缓存工具继续只读；原厂显式媒体目录可能初始化资源或更新原厂状态，按服务真实角色与副作用标记显示。未核实契约继续显示待接入。
+界面按实际工具、角色、域和资源展示，文件／Docker 二十一合同逐项标记；应用新装额外选择审计 application_ids，新键默认空，旧键不因安装白名单扩大而扩权。Token 操作提供 owner 固定恢复区预检／初始化／撤销／检查／恢复，打开页面不扫描用户文件。
 
 下载工具委托固定本机下载器的既有任务，不接收新目标路径、内容或任意选项；它们不等于给整个下载器建立 `/drives/*/Users/` 沙箱。该 Users 边界仍是 Toolbox 文件接口的硬限制，不能据此宣称已约束原生引擎全部任务。
 
 界面复用 fnMonitor 设置卡片、弹层、输入控件和按钮。三个页面不同时展开；手机使用单列入口、单列工具与 Token 元数据，长地址、范围和记录可换行，在 320px 宽度无需横向滚动。
 
-验证：`node tests/check_api_management.cjs` 覆盖直接开关读取／保存失败、状态回滚、防重复提交、三个入口隔离、创建／编辑／停用／启用／轮换／撤销、逐工具授权、部署登记失败／重试／撤销／重核、未来资源三级权限及元数据保留、秘密清理和 320px 窄屏布局；`node tests/check_service_settings.cjs` 覆盖服务入口与 API 卡片之间的状态同步。
+验证：`node tests/check_api_management.cjs` 覆盖服务开关、三页隔离、Token 生命周期、逐工具和资源授权、应用对象初值／编辑保留／不注入 HTML，以及 owner 恢复区的显式预检／初始化／撤销／恢复与 `index_verified:false` 的准确显示，保留部署资源、秘密清理和 320px 检查。`node tests/check_service_settings.cjs` 继续核对设置同步。固定入口与实际权限条件见[file-mutations.md](file-mutations.md)。
 
 真实 HTTP 权限／派发回归另见 `tests/test_mcp_business_operations_http.py`；原厂响应和下载连接使用固定 fixture。这些结果不表示新增功能已完成 NAS 实机验收。

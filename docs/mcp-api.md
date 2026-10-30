@@ -2,7 +2,7 @@
 
 Toolbox 在常驻 Web 的 `18732` 端口提供 MCP 与固定 REST 接口，供局域网 AI／自动化客户端读取 NAS 状态和执行明确授权的操作。小屏可独立关闭，MCP 默认关闭；开启后仍需独立 Token。配置与 Token 摘要随原 `r1-toolbox-data` 数据卷保存，重建服务后继续有效。
 
-当前七十五工具中包括三项缓存只读查询：`get_monitoring_history/get_health_events/get_network_traffic_totals`，均要求 `read` 域和精确工具；详见[监控历史与事件](mcp-monitoring-tools.md)。固定项目另有 `get_docker_project_resource_usage`，要求 `docker`、具体工具和已登记项目 `inspect`，只投影一次原厂 Docker stats，见[固定项目读取](docker-projects.md)。原厂模块目录 `list_native_modules` 需读写及 `apps`，独立返回可用／已安装列表，不能据此安装或卸载。
+当前八十一工具包括缓存监控、文件读取／上传／变更、下载器、受控 Docker 和固定原厂业务能力。目录、列表与执行共用精确工具及资源授权；原厂目录与包字段不授安装资格。文件变更及 owner 恢复区见[文件变更与恢复](file-mutations.md)。
 
 ## 网页配置
 
@@ -39,7 +39,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 工具列表和实际调用使用同一个权限判断；缺少域、具体工具或所需资源时拒绝，角色等级不足也不能调用。HTTP 200 或工具出现在客户端缓存中均不代表操作已获授权。policy v1／v2 固定保留原十工具，再受其原角色与域限制；以前勾选过 `files/docker` 的预授权也不会自动激活新能力。所有者须明确选择升级并勾选具体工具，提交 `tool_grants` 后才进入 policy v3。
 
-当前共七十五个真实 MCP／REST 工具：原三十六项，加五项文件读取／传输、三项上传／任务、六项下载器扩展、四项未来部署、十七项原厂业务、三项缓存监控和一项项目资源读数。目录与调用均以真实回调为准；已注册仍须通过当前来源、逐项授权和后端运行门槛。具体工具如下：
+当前共八十一个真实 MCP／REST 工具，上一批新增独立覆盖与五项文件变更；目录按角色、功能、精确工具与资源过滤。工具有回调仍须通过实际生产门槛，不等于实机验收。
 
 | 权限 | 新密钥最低角色 | 工具 | 行为 |
 |---|---|---|---|
@@ -52,6 +52,8 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 | `files` | 只读 | `list_file_roots` | 仅投影本键已授权根和子目录的绑定元数据，不列盘内文件或传输内容 |
 | `files` | 只读 | `list_directory`、`get_file_info`、`prepare_file_download`、`get_file_transfer`、`cancel_file_transfer` | 精确固件下固定原厂所有者的 `admin/public` 只读子集；每次原厂 ACL、同挂载／同句柄核验，实机门槛未通过时拒绝 |
 | `files` | 读写 | `prepare_file_upload`、`commit_file_upload`、`get_file_operation` | 仅已核验内置 SATA 的 admin 后代新文件；准备／固定 PUT／显式提交分开，无覆盖发布，独立原厂索引确认后才完成，目标及父目录均须读写授权 |
+| `files` | 读写 | `prepare_file_overwrite` | 独立覆盖准备，必须目标版本和确认；commit 使用可信记录恢复精确准备权限，旧对象保留 |
+| `files` | 读写 | `create_directory`、`copy_file`、`rename_file`、`move_file`、`trash_file` | 单层目录、普通文件复制／可恢复改名／同盘移动／原厂回收；源目标独立授权，恢复区和原厂记录另行核验，缺证据拒绝 |
 | `docker` | 只读 | `list_docker_projects`、`get_docker_project_status`、`get_docker_project_summary` | 仅读取本键获授且已登记项目的状态及脱敏摘要，要求项目 `inspect` |
 | `apps` | 只读 | `get_app_status` | 已有原厂应用脱敏列表缓存及最近失败，不发起安装或原厂刷新 |
 | `downloads` | 只读 | `get_download_status` | 既有下载业务快照，不为 MCP 查询或登录下载器 |
@@ -72,7 +74,7 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 | `docker` | 管理员 | `plan_docker_deployment`、`execute_docker_deployment` | 独立 `deployment_*` 固定资源的部署、同仓库 digest 更新、启停重启和停止后删除；需对应资源操作和有效确认计划 |
 | `apps` | 读写／管理员 | `list_native_applications`、`get_application_install_progress` | 目录需读写；安装进度会同步插件并写完成状态，需管理员、确认与幂等，不等于允许安装 |
 | `apps` | 读写 | `list_native_modules` | 显式读取原厂可用／已安装模块两表，可能更新支持状态并联系厂商；不推断运行状态、不授安装和卸载权 |
-| `apps` | 管理员 | `plan_native_application_install`、`install_native_application` | 仅白名单 ID34/netdisk_bd2 未安装新装；计划不执行安装，执行另须当前版本、确认、本键幂等及计划工具授权；受理不表示完成，不明结果不重放 |
+| `apps` | 管理员 | `plan_native_application_install`、`install_native_application` | 只新装明确 application_ids 授权的 ID7／8／34／35；实时双目录、当前计划、确认与幂等分别核验，不更新或卸载，不以受理冒充完成 |
 | `backup` | 读写 | `list_backup_tasks`、`get_auto_backup_settings` | 当前管理员备份目录与原始自动导入设置，未知枚举保持未知 |
 | `backup` | 管理员 | `disable_auto_backup`、`pause_backup_task`、`cancel_backup_task` | 只关闭自动导入、暂停／取消既有任务；不创建或恢复备份，不接受新目的地 |
 | `system` | 管理员 | `list_nas_users`、`get_nas_name`、`set_nas_name`、`get_nas_ai_settings`、`set_nas_ai_enabled` | 最小用户目录、设备名和原厂 AI 开关；不管理账号凭据或读取照片 |
@@ -87,15 +89,15 @@ API 管理只在主动打开和操作后读取列表，不参加十秒监控轮�
 
 五项业务缓存工具均为空参数只读工具，返回真实观察时间、缓存年龄、来源及最近失败，未知值保持 `null`。它们按独立功能域和精确工具授权，不沿用 `media` 的主动查询权限；缺少缓存时不会自动采集。下载缓存在首次启动或业务快照尚未发布时报告未采集，不为填数据联网。细节见[业务只读工具](mcp-business-tools.md)。
 
-新增十七项原厂业务请求的共同认证也可能初始化资源，均不承诺无副作用或幂等查询；读写／管理员等级以真实工具定义为准。八个写入口另需确认和本键幂等，原厂 `code=0` 只说明接受，不能冒充异步完成。模块目录查询会更新原厂支持状态且可能联系厂商，只能显式调用；应用安装进度会同步插件并写缓存；备份工具只收紧既有任务，不恢复或开启新目标。包字段形状不是通用安装授权；新增安装只对白名单 ID34/netdisk_bd2 交叉核对两个实时目录，不更新或卸载，不接收包 URL、脚本或任意路径。计划查询可能更新支持状态，实际安装可能联网下载、写原厂独立目录和启动进程，尚未实机写验收。详情见[原厂能力第二批](native-capability-completion.md)。
+原厂业务查询可能初始化或更新资源，不用于被动轮询。应用新装仅审计 ID7／8／34／35，需具体安装资源；可能联网、写原厂应用数据、加载既有任务、监督后台进程，部分原生恢复分支还可能调整宿主页缓存。安装预览明确具体影响，不宣称原生进程受文件子目录沙箱限制。本批未实机安装，见[原厂能力](native-capability-completion.md)。
 
 ### 文件根元数据、受限读取与新文件上传
 
-文件与固定项目合同见[接口方案](file-docker-api-plan.md)。文件根元数据、五项文件读取／传输及三项上传／任务已有实际回调；新建目录、覆盖、改名、复制、移动及回收站仍待接入。文件读取仅覆盖当前固定原厂管理员和 `admin/public` 逻辑正子集，不等于全用户文件访问。
+文件与固定项目合同见[接口方案](file-docker-api-plan.md)。读取支持固定原厂管理员的 admin/public 正子集，写入仅已核验 admin 后代，上传、独立覆盖、目录、复制、可恢复改名／移动及原厂回收均有适配，真实调用仍须逐项生产门槛。
 
-二十项接口的[机器可读定义](api/file-docker-contracts.json)中，十五项已有执行适配，另外五项文件变更合同仍待接入；覆盖也未开放。所有者可在 API 管理中按需查看，或读取 `GET /api/access/contracts`。该入口不接受机器 Token 或单独开发窗口；读取定义本身不授予执行权限，也不迁移旧键。单项 `implemented` 不替代当前授权、后端门槛或实机验收。
+二十一项接口的[机器定义](api/file-docker-contracts.json)均有实际适配；定义入口继续为所有者查阅，不授执行权、不迁移旧键，也不替代 NAS 验收。
 
-`files/docker/apps/downloads/movie/albums/sharing/backup/system` 均已部分接入，新增工具与资源默认不选。通用应用安装／更新／卸载、分享创建、完整影视／相册／备份管理和任意 Compose 仍未完成。详细差异见[完成矩阵](mcp-completion-matrix.md)；不能把七十五工具当作 NAS APP 全功能覆盖率。
+`files/docker/apps/downloads/movie/albums/sharing/backup/system` 均部分接入，新增工具与资源默认不选。任意应用安装、更新／卸载、分享创建、完整媒体／备份管理和任意 Compose 仍未完成，八十一工具不是 APP 覆盖率。见[完成矩阵](mcp-completion-matrix.md)。
 
 勾选文件管理时，必须选择当前可信的 `/drives/<disk>/Users` 根，可填写其内相对 POSIX 子目录，并为每个范围选择只读或读写。文件总边界固定为 `/drives/*/Users/`，不授予整个数据盘、兄弟目录或系统目录。只读角色不能授予读写范围；只读挂载不能授予写入。规划来自已有物理盘身份缓存、sysfs／udev 生命周期核验与 `/proc/self/mountinfo`，不检查 Users 是否存在，也不访问用户文件。缺少身份、歧义挂载、Users 内额外挂载、无法核对的 RAID／虚拟源等不会生成可选目录。详见[Users 文件边界](file-users-boundary.md)。
 
@@ -109,7 +111,7 @@ Users 边界使用独立 v2 摘要。旧整盘根不会自动改为 Users 根；
 
 `364b858` 的 NAS 验收已确认视频资源、备份磁盘和主磁盘的三个实际 `Users` 根均通过挂载校验，并用当前来源限定的临时只读 Token 成功浏览各自的 `admin` 目录。视频资源和主磁盘的目录属性读取也成功；备份磁盘的一次属性读取返回 `acl_unverified`，随后浏览成功，不能据此宣称已经解释该次拒绝或保证所有操作稳定通过。四个不存在 `Users` 的分区候选继续拒绝。尚未取得用户指定小文件的下载、HEAD 和 Range 比对证据；`GET /api/access/file-readiness` 和开发诊断自身均不发执行授权。
 
-上传最低机器角色为读写，限定已核验内置 SATA 的 admin 后代；public、admin 根和覆盖都拒绝。prepare 只接受根 ID、相对路径、完整大小、SHA-256、本键幂等标识及可选 false 覆盖字段。字节通过独立 Bearer 的固定 PUT 接收，最多 8 GiB、每块 64 KiB，当前授权／peer／代际／同句柄逐块复验；验证成功只暂存，不自动提交。显式 commit 以匿名 inode 在已核验父目录无覆盖发布，原厂创建／关闭通知后由独立索引 reader 确认，pending／result_unconfirmed 不冒充 completed，不明结果不重放。任务查询固定 may_wake_disks:true。本批尚未进行 NAS 文件写入验收，详见[上传通道](file-upload-transport.md)。
+上传仍最低读写，只新建文件的旧工具保持原语义；覆盖新增 prepare_file_overwrite 精确授权、目标版本与确认。固定 Bearer PUT 仅暂存，显式 commit 后独立索引确认；其他文件变更、冲突恢复和 owner 固定入口见[文件变更与恢复](file-mutations.md)。GET／网页监控不打开恢复区，不自动初始化或重放未确认写入。
 
 ### 固定 Docker 项目读取
 
@@ -140,7 +142,7 @@ Users 边界使用独立 v2 摘要。旧整盘根不会自动改为 Users 根；
 | 接口 | 请求与含义 |
 |---|---|
 | `GET /api/access` | 安全元数据、角色／功能／文件根目录与有界审计，不含摘要或 Token |
-| `GET /api/access/contracts` | 二十项接口定义与当前适配标记；不以定义授予执行权限 |
+| `GET /api/access/contracts` | 二十一项定义与实际适配标记；不以查定义授执行权 |
 | `GET /api/access/file-readiness` | 文件访问就绪证据与未通过门槛；不打开用户文件 |
 | `POST /api/access/settings` | `{"enabled":true}`；与“服务与开发”的 MCP 总开关共用状态 |
 | `POST /api/access/keys` | 创建具名 Token；成功响应只在本次含明文 |
@@ -167,7 +169,7 @@ Users 边界使用独立 v2 摘要。旧整盘根不会自动改为 Users 根；
 
 每个密钥包含三十二字节随机熵，持久化文件 `web/api-access.json` 只保存 SHA-256 摘要和元数据，以原子替换和 `0600` 权限写入。最多三十二个有效密钥、六十四条历史记录。文件损坏或权限异常时拒绝授权；持久写入失败会锁定当前服务实例的访问能力，修复存储并重启后恢复，避免继续使用没有成功保存的授权状态。
 
-状态文件当前为 v5，读取兼容 v1～v4；权限策略仍为 policy v1／v2／v3，两者分开。v5 增加 `docker_deployments`，旧键缺省为空；只读旧 v4 或校验凭据不改原文件字节。真正配置、编辑、轮换或审计写入才在原子替换中迁移，保留旧键角色、精确工具、资源、摘要、到期、撤销和来源。policy v1／v2 仍只原十工具，v3 不因格式升级自动获授新工具或未来资源；不重建数据卷。超过有界存储上限时拒绝并保留旧状态。
+状态文件 v6 独立保存 application_ids，兼容读取 v1～v5；读取和校验旧键不改字节，真实配置或审计写才原子迁移。新键默认空，旧安装键缺省仅保留原 ID34；省略编辑字段保持原值，资源修改推进 grant_revision，撤权／轮换后丢弃未发送结果。policy v1／v2 仍冻结原十工具。
 
 键保存 `grant_revision` 和 `credential_generation`。权限、来源、到期、启停及首次撤销的实际变化推进授权修订，轮换推进凭据代际；纯改名、审计、最近使用时间或没有实际变化的保存不推进。`is_current()` 只续验已经由 `authorize()` 认证的内部 principal，不是初始认证入口，不接受 HTTP 提交 principal，也不返回摘要。自然到期独立比较当前时间，不能因修订号未变而继续放行。
 
