@@ -189,15 +189,49 @@ class ApiFileRootsTests(unittest.TestCase):
                        '102 100 0:5 / /drives/data/Applications rw - tmpfs tmpfs rw\n')
         self.assertEqual([row['mount'] for row in self.catalog()['roots']], ['/drives/data/Users'])
 
-    def test_alias_mounts_with_same_source_or_device_are_ambiguous(self):
+    def test_canonical_alias_mounts_with_same_source_or_device_are_ambiguous(self):
         base = self.mountinfo.read_text()
         for child in (
-            '101 1 8:1 / /mnt/alias rw - ext4 /dev/sda1 rw\n',
-            '101 1 8:1 / /mnt/alias rw - ext4 /dev/disk/by-uuid/alias rw\n',
             '101 1 8:1 / /drives/alias rw - ext4 /dev/sda1 rw\n',
+            '101 1 8:1 / /drives/alias rw - ext4 /dev/disk/by-uuid/alias rw\n',
+            '101 1 8:2 / /drives/alias rw - ext4 /dev/sda1 rw\n',
         ):
             with self.subTest(child=child):
                 self.set_mounts(base + child)
+                self.assertFalse(self.catalog()['available'])
+
+    def test_external_full_filesystem_alias_keeps_only_canonical_grant_and_id(self):
+        original = self.catalog()['roots'][0]['id']
+        base = self.mountinfo.read_text()
+        self.disk['mounts'].extend(['/home/openclaw', '/mnt/alias'])
+        for child in (
+            '101 1 8:1 / /home/openclaw rw - ext4 /dev/sda1 rw\n',
+            '101 1 8:1 / /mnt/alias rw - ext4 /dev/disk/by-uuid/alias rw\n',
+        ):
+            with self.subTest(child=child):
+                self.set_mounts(base + child)
+                rows = self.catalog()['roots']
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]['id'], original)
+                self.assertEqual(rows[0]['mount'], '/drives/data/Users')
+
+    def test_external_full_alias_cannot_replace_absent_or_stacked_canonical(self):
+        external = '101 1 8:1 / /home/openclaw rw - ext4 /dev/sda1 rw\n'
+        self.disk['mounts'].append('/home/openclaw')
+        self.set_mounts(external)
+        self.assertFalse(self.catalog()['available'])
+        self.set_mounts(external +
+                        '100 1 8:1 / /drives/data rw - ext4 /dev/sda1 rw\n' +
+                        '102 1 8:17 / /drives/data rw - ext4 /dev/sdb1 rw\n')
+        self.assertFalse(self.catalog()['available'])
+
+    def test_external_full_alias_does_not_hide_users_mount_rejection(self):
+        base = self.mountinfo.read_text()
+        for target in ('/drives/data/Users', '/drives/data/Users/admin/app'):
+            with self.subTest(target=target):
+                self.set_mounts(base +
+                    '101 1 8:1 / /home/openclaw rw - ext4 /dev/sda1 rw\n' +
+                    '102 100 0:4 / ' + target + ' rw - tmpfs tmpfs rw\n')
                 self.assertFalse(self.catalog()['available'])
 
     def test_two_data_partitions_on_same_disk_have_independent_users_roots(self):

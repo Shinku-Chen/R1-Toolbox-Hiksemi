@@ -116,10 +116,11 @@ def collect_file_roots(panel):
             return _empty(reason='挂载信息格式无效；未确认文件范围。')
         mounts.setdefault(mount, []).append((before, after))
         source = _unescape(after[1])
-        # A filesystem can expose subdirectory binds outside Users without
-        # changing the one canonical full /drives mount. Only duplicate complete
-        # filesystem roots are ambiguous; separate partitions remain distinct.
-        if before[3] == '/':
+        # Only full /drives/<disk> mounts can be selectable Users roots. An
+        # alias at /home or /mnt cannot become a second grant or a fallback for
+        # a missing canonical root. Count both source and device identities so
+        # an alternate source spelling under /drives still fails closed.
+        if before[3] == '/' and _data_path(mount):
             full_sources.setdefault(source, []).append(mount)
             full_devices.setdefault(before[2], []).append(mount)
 
@@ -164,7 +165,7 @@ def collect_file_roots(panel):
         return _empty()
     return {'available': True, 'status': 'authorization_plan', 'roots': roots,
             'boundary_version': _BOUNDARY_VERSION,
-            'reason': '仅规划数据盘 Users 子目录；未确认目录存在、原厂 ACL 或安全打开，文件传输尚未接入。'}
+            'reason': '仅规划数据盘 Users 子目录；实际操作仍须重新核验原厂权限、挂载身份与真实句柄。'}
 
 
 def validate_file_grants(grants, catalog):
