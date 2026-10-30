@@ -99,6 +99,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 原厂文件写入索引排障使用显式 `POST /api/dev/files/write-preflight`，精确 `action:preflight/confirm:true/root_id`；复用生产 SATA、监听、索引 DB 和 SQLite 句柄门的固定阶段观察，不能为诊断跳过安全失败或继续依赖步骤。仅有效开发白名单与绝对窗口授权，拒绝 Bearer、路径、SQL 和原厂 action，不进入默认诊断、MCP 或轮询。服务端仅生成 admin 根下未发布的随机目标，不通知、暂存或发布文件；SQLite 元数据副作用和唤盘须如实说明。该预检不证明子目录、恢复区或真实写入验收，见 `docs/file-mutations.md`。
 
 - 影视追更排序是内置所有者 Web 可选插件，固定 `/api/plugins/media-sort` 的缓存 GET 与显式 probe／apply／revert；不授予 MCP、Bearer 或开发白名单，不接收路径／SQL，不在启动、GET 或轮询中扫描原厂库。数据库只由匹配原厂 scraper 生命周期和 `-d` 自动发现，多候选明确选择；写前私有一致性备份，事务内处理严格识别的规则。规则沿用用户原始 `metadata_path_guard` + `AFTER INSERT` 触发器：同一 `(id,lid,type)` 的路径数组变长时更新时间，无 TV 类型过滤、无 `UPDATE` 触发器、无去重或跨类型基线；已有精确对象直接 `enabled`，不重装／重 seed／升级，未知、部分或增强版残留报告冲突且不接管。撤销只删自身表与触发器，不恢复整库或清除已调整时间，容器停止不撤销原厂库内已提交规则。坏 JSON 由原 SQL 的 `json_array_length` 报错，不静默跳过，也不承诺不阻断原厂写入。详见 `docs/media-sort-plugin.md`。
+- 影视追更排序的固定只读诊断仅复用严格 `{}` 的所有者 `POST /api/plugins/media-sort/probe`，在原锁与 12 秒绝对窗口内缓存 `plugin.diagnostics` schema 1；构造／启动／GET／轮询不采集，初始与关闭清为空 `unknown`。固定阶段覆盖扫描完整性、最多 16 个 scraper 的内核身份／exe／受限参数／末次代次、全部进程门通过后的 no-follow 数据库／辅助文件／真实 SQLite FD／schema／JSON1／自有对象，以及发布前来源与 owner epoch。独立安全内核观测可继续，但不替代生产放行；hash 和参数各自保留前置门，依赖未满足标 `not_run`，身份变化不拼代，超时／撤权丢弃本轮私有结果。只输出白名单阶段／原因／观测，不输出异常原文、argv、环境、`-d`／cwd 值或凭据，不接受 PID／路径／命令／SQL，也不授予开发窗口、机器 Token 或 MCP。d9 实机只定位到发现／进程门拒绝，不能据此断言 UID／namespace／DB／原 INSERT 根因；规则文件与全部生产身份／FD／结构门不因诊断放宽。
 
 ## 提交规范
 
