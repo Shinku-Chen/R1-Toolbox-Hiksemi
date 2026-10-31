@@ -280,10 +280,22 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.equal(await page.locator('.app-card').count(), 8, 'the application page directly lists every container');
     assert.equal(await page.locator('[data-view="containers"]').count(), 0, 'there is no second-level all-containers entry');
     await shot('apps');
-    await page.locator('.app-card').last().scrollIntoViewIfNeeded();
-    const appsOffset = await page.locator('#screen-body').evaluate(node => node.scrollTop);
+    // 小屏每 2 秒 softRender 整体重建 #device，ElementHandle 在等待稳定时会脱离 DOM。
+    // 在单个 browser 任务里同步定位当前最后的卡片并滚动，避免旧句柄失效；
+    // 这仍是程序化滚动用户列表，不是 force click 跳过流程。
+    const appsOffset = await page.evaluate(() => {
+      const body = document.querySelector('#screen-body');
+      const cards = document.querySelectorAll('.app-card');
+      const last = cards[cards.length - 1];
+      last.scrollIntoView({ block: 'nearest' });
+      return body ? body.scrollTop : 0;
+    });
     assert.ok(appsOffset > 0, 'the complete list scrolls vertically');
-    assert.match(await page.locator('.app-card').last().textContent(), /extra-container-5/);
+    const lastApp = await page.evaluate(() => {
+      const nodes = document.querySelectorAll('.app-card');
+      return nodes.length ? nodes[nodes.length - 1].textContent : '';
+    });
+    assert.match(lastApp, /extra-container-5/);
     await page.locator('.app-card').last().click();
     assert.equal(await title(), '容器详情');
     await back();
