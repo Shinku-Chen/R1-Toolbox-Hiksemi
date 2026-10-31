@@ -7470,6 +7470,7 @@ event.target.checked ? '已勾选强制：刷新时会唤醒休眠硬盘，点�
 }
 r1SmartSync(host);
 r1SmartUpdateSnapshot(host);
+r1DiskPatchDetail();
 }
 (function r1SmartWatch() {
 const body = document.querySelector('#sheetBody');
@@ -7850,6 +7851,112 @@ Poll.add('r1RefreshWatch', async () => { r1RefreshWatch(); }, 1000);
 if (typeof Poll !== 'undefined' && Poll.add) {
 Poll.add('r1FillWatch', async () => { r1FillWatch(); }, 1000);
 }
+const R1_DISK_TTL = 30, R1_DISK_CLOCKS = new WeakMap();
+const r1DiskNumber = value => typeof value === 'number' && Number.isFinite(value);
+const r1DiskStamp = value => r1DiskNumber(value) && value > 0 ? value : null;
+function r1DiskNow(o = S.o) {
+if (!o || typeof o !== 'object') return Date.now() / 1000;
+if (!R1_DISK_CLOCKS.has(o)) R1_DISK_CLOCKS.set(o, {
+server: r1DiskStamp(o.ts) || Date.now() / 1000, client: Date.now() / 1000,
+});
+const clock = R1_DISK_CLOCKS.get(o);
+return clock.server + Math.max(0, Date.now() / 1000 - clock.client);
+}
+const r1DiskRender = renderNow;
+renderNow = function () { if (S.o) r1DiskNow(S.o); return r1DiskRender(); };
+function r1DiskFresh(d, o = S.o) {
+const stamp = r1DiskStamp(d && d.smart_sampled_at), age = r1DiskNow(o) - stamp;
+return !!d && d.smart_fresh === true && stamp !== null
+&& stamp <= R1_DISK_CLOCKS.get(o).server && age >= 0 && age < R1_DISK_TTL;
+}
+function r1DiskHasCapacity(d) {
+return !!d && r1DiskNumber(d.total) && d.total > 0
+&& r1DiskNumber(d.used) && d.used >= 0 && d.used <= d.total;
+}
+function r1DiskCapacityMissing(d) {
+if (!Array.isArray(d && d.mounts)) return '挂载状态未知 · 容量未采集';
+return d.mounts.length ? `已挂载 ${d.mounts.length} 个分区 · 容量未采集` : '未挂载';
+}
+bayState = function (d) {
+if (d.standby === true) return { lv: 'standby', text: '休眠中', detail: '' };
+if (!r1DiskFresh(d)) return { lv: 'unknown', text: 'SMART 未知', detail: '观测缺失或已过期' };
+const sm = smartState(d);
+if (sm.lv === 'crit' || sm.lv === 'warn') return { lv: sm.lv, text: sm.text, detail: '' };
+if (sm.lv === '') {
+if (r1DiskNumber(d.temp) && r1DiskNumber(d.temperature_critical_c) && d.temp >= d.temperature_critical_c - 5)
+return { lv: 'warn', text: '温度接近临界值', detail: '' };
+return { lv: 'ok', text: '正常', detail: '' };
+}
+return { lv: 'unknown', text: 'SMART 未知', detail: '' };
+};
+function r1DiskObservedText(disks, o) {
+const stamps = disks.map(d => r1DiskStamp(d.smart_sampled_at)).filter(v => v !== null);
+if (!stamps.length) return 'SMART 尚无有效观测';
+const latest = Math.max(...stamps), fresh = disks.filter(d => r1DiskFresh(d, o)).length;
+return `SMART 最近观测于 ${r1SmartStamp(latest)} · ${fresh ? `有效 ${fresh}/${disks.length} 块盘` : '已过期或无有效测量'}`;
+}
+function r1DiskDisplay(o) {
+return { ...o, disks_detail: disksOf(o).map(d => {
+const fresh = r1DiskFresh(d, o), cap = r1DiskHasCapacity(d);
+return { ...d, ...(cap ? {} : { total: null, used: null, percent: null }),
+...(fresh ? {} : { temp: null, health: null }) };
+}) };
+}
+function r1DiskPatchDetail() {
+if (!sheetCtx || sheetCtx.type !== 'disk' || !S.o) return;
+const disk = disksOf(S.o).find(d => d.name === r1SmartVisibleDisk());
+if (!disk) return;
+const body = document.querySelector('#sheetBody'), fresh = r1DiskFresh(disk);
+if (!fresh) setHTML(body.querySelector('[data-ref="pill"]'),
+pillFor(disk.standby === true ? 'sleep' : 'none', disk.standby === true ? '休眠中' : 'SMART 未知'));
+body.querySelectorAll('[data-ref="smart"] tr').forEach(row => {
+if ((!fresh && row.cells[0]?.textContent === '整体评估')
+|| ((!fresh || !r1DiskNumber(disk.temp)) && row.cells[0]?.textContent === '温度')) {
+setText(row.cells[1], '—'); setText(row.cells[2], '—');
+}
+});
+}
+const r1StorageUpdate = MODS.storage.update;
+MODS.storage.update = function (o, m) {
+if (!o) return;
+r1StorageUpdate.call(this, r1DiskDisplay(o), m);
+const disks = disksOf(o), measured = disks.filter(r1DiskHasCapacity).length;
+disks.forEach(d => {
+const bay = m.bays[d.name];
+if (bay && !r1DiskHasCapacity(d)) setText(bay._r.cap, `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
+if (bay) bay.title = `${d.name} · ${bayState(d).text}（${r1DiskObservedText([d], o)}）`;
+});
+setText(m.x.scanAgo, r1DiskObservedText(disks, o));
+setHTML(m.x.poolLeg, o.disk_size > 0
+? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>`
++ (o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : '')
++ (measured < disks.length ? `<span>仅统计已有容量快照 · 已覆盖 ${measured}/${disks.length} 块盘</span>` : '')
+: '<span>R1 尚无可用容量快照；已挂载分区的容量尚未采集或不可用。</span>');
+};
+for (const type of ['storage', 'disk']) {
+const build = SHEETS[type].build;
+SHEETS[type].build = function (body, arg, context) {
+const update = build.call(this, body, arg, context);
+if (!update) return update;
+return o => {
+update(r1DiskDisplay(o));
+if (type === 'storage') {
+disksOf(o).forEach(d => {
+if (!r1DiskHasCapacity(d)) setText(body.querySelector(`[data-p="${CSS.escape(d.name)}"]`), `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
+});
+} else {
+const disk = disksOf(o).find(d => d.name === arg);
+if (disk && !r1DiskHasCapacity(disk)) setText(body.querySelector('[data-ref="leg"]'), `${r1DiskCapacityMissing(disk)} · 硬盘容量 ${F.dsizeStr(disk.size)}`);
+r1DiskPatchDetail();
+}
+};
+};
+}
+let r1DiskAgeSignature = '';
+Poll.add('r1DiskDisplayAge', async () => {
+const signature = disksOf(S.o).map(d => `${d.name}:${r1DiskFresh(d)}:${d.standby}`).join('|');
+if (signature !== r1DiskAgeSignature) { r1DiskAgeSignature = signature; renderNow(); }
+}, 1000, () => !!S.o && (S.page === 'storage' || (sheetCtx && ['storage', 'disk'].includes(sheetCtx.type))));
 let uiBootReady = false, uiPending = false, uiTimer = 0;
 const uiPayload = () => ({ theme: UI.theme, accent: UI.accent, dotMatrix: UI.dotMatrix, motion: UI.motion, fontScale: UI.fontScale, range: UI.range, layoutVersion: LAYOUT_VERSION, layout: UI.layout, hidden: UI.hidden, thresholds: TH, ignored: UI.ignored || [] });
 function saveUI() {

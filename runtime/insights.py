@@ -55,6 +55,60 @@ class SmartRefreshError(ValueError):
         super().__init__(self.reason)
 
 
+_SMART_POWER_ATA_VALUES = {
+    'SLEEP': -1, 'STANDBY': 0, 'STANDBY_Y': 1,
+    'IDLE': 128, 'IDLE_A': 129, 'IDLE_B': 130, 'IDLE_C': 131,
+    'ACTIVE_NV_DOWN': 64, 'ACTIVE_NV_UP': 65, 'ACTIVE OR IDLE': 255,
+}
+_SMART_NON_STANDBY = frozenset(('ACTIVE', 'IDLE', 'IDLE_A', 'IDLE_B', 'IDLE_C', 'ACTIVE OR IDLE'))
+_SMART_STANDBY = frozenset(('SLEEP', 'STANDBY', 'STANDBY_Y'))
+
+
+def _smart_power_mode(value):
+    """Read official name/ATA fields or legacy string, rejecting contradictions.
+
+    smartmontools 7.5 ataprint.cpp emits name and ata_value. Missing power
+    evidence does not invalidate an otherwise valid temperature, but never
+    authorizes capacity. Obsolete NV modes stay outside the capacity allowlist.
+    """
+    if not isinstance(value, dict):
+        return None, True
+    # A lone empty legacy field was the old representation of no evidence.
+    # It must not become a fallback that conceals another field or ATA value.
+    if (set(value) == {'string'} and isinstance(value['string'], str)
+            and len(value['string']) <= 64 and not value['string'].strip()):
+        return None, False
+    modes = []
+    for key in ('name', 'string'):
+        if key not in value:
+            continue
+        text = value[key]
+        if (not isinstance(text, str) or not 0 < len(text) <= 64
+                or any(not 32 <= ord(char) <= 126 and char not in '\t\n\r\f\v' for char in text)):
+            return None, True
+        mode = ' '.join(text.upper().split())
+        if mode.endswith(' MODE'):
+            mode = mode[:-5]
+        modes.append(mode)
+    if not modes:
+        return None, bool(value)
+    if len(set(modes)) != 1:
+        return None, True
+    mode = modes[0]
+    if mode != 'ACTIVE' and mode not in _SMART_POWER_ATA_VALUES:
+        # An unrecognized label never proves power state, but does not itself
+        # invalidate an independently valid temperature/health measurement.
+        # Explicit check failures retain the existing unsafe -n rejection.
+        unsafe = re.search(r'\b(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|failed|unavailable)\b', mode, re.I)
+        return None, bool(unsafe or 'ata_value' in value)
+    if 'ata_value' in value:
+        number = value['ata_value']
+        if (type(number) is not int or mode not in _SMART_POWER_ATA_VALUES
+                or number != _SMART_POWER_ATA_VALUES[mode]):
+            return None, True
+    return mode, False
+
+
 def _text(path, limit=262144):
     try:
         with Path(path).open("r", encoding="utf-8", errors="replace") as stream:
@@ -915,15 +969,15 @@ class InsightsCollector:
                     result["smart_data"] = copy.deepcopy(data)
                 messages = data.get("smartctl", {}).get("messages", [])
                 notes = " ".join(str(entry.get("string", "")) for entry in messages if isinstance(entry, dict))
-                power = str(data.get("power_mode", {}).get("string", ""))
-                standby = bool(re.fullmatch(r'(?:standby|sleep)(?:\s+mode)?', power.strip(), re.I)
+                power, invalid_power = _smart_power_mode(data.get("power_mode", {}))
+                standby = bool(power in _SMART_STANDBY
                                or re.search(r'\b(?:device|disk)\s+is\s+in\s+(?:standby|sleep)\s+mode\b', notes, re.I))
-                unsafe_power = not force and bool(re.search(
-                    r'\b(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|failed|unavailable)\b', power, re.I) or re.search(
+                unsafe_power = not force and bool(invalid_power or re.search(
+                    r'\b(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|failed|unavailable)\b', power or '', re.I) or re.search(
                     r'(?:failed|unable|unsupported|unknown|not[\s_-]+supported|not[\s_-]+implemented).*?(?:power|standby|sleep)'
                     r'|(?:power|standby|sleep).*?(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|cannot|failed|ignoring|ignored)'
                     r'|\bignor(?:ing|ed)\s+(?:the\s+)?-n\b',
-                    notes + ' ' + power, re.I))
+                    notes + ' ' + (power or ''), re.I))
                 result["standby"] = True if standby else None
                 if standby:
                     status, reason = 'skipped_standby', 'standby'
@@ -977,10 +1031,9 @@ class InsightsCollector:
                     status, reason = 'unavailable', 'power_mode_unverified'
                     result = self._unknown_smart()
                 if require_power_state and not standby:
-                    active = re.fullmatch(r'(?:active(?:\s+or\s+idle)?|idle)(?:\s+mode)?', power.strip(), re.I)
-                    if active and status == 'refreshed':
+                    if power in _SMART_NON_STANDBY and status == 'refreshed':
                         # This explicit parser proof, never bool(None), is the
-                        # new visible batch's non-standby capacity prerequisite.
+                        # ordinary batch's non-standby capacity prerequisite.
                         result['standby'] = False
             except (ValueError, TypeError, AttributeError):
                 result["health"]["reason"] = "SMART 返回了无效数据"
@@ -1354,7 +1407,7 @@ class InsightsCollector:
                     row.update(status='failed', reason='timeout')
                     continue
                 value, status, reason = self._probe_smart(name, force=force, timeout=min(3.0, remaining),
-                                                        measurement_only=missing_only, require_power_state=visible)
+                                                        measurement_only=missing_only, require_power_state=not force)
                 authorized()
                 if self._smart_context(name) != identity:
                     row.update(status='identity_changed', reason='identity_changed')
@@ -1366,7 +1419,7 @@ class InsightsCollector:
                 if not force:
                     attempts[name] = {'identity': identity, 'stamp': value['smart_sampled_monotonic'],
                                       'row': copy.deepcopy(row),
-                                      'nonstandby': status == 'refreshed' and (not visible or value.get('standby') is False),
+                                      'nonstandby': status == 'refreshed' and value.get('standby') is False,
                                       'sequence': sequence}
                 if status in ('refreshed', 'skipped_standby'):
                     if missing_only:

@@ -109,7 +109,7 @@ function model() {
     + part(sheets, 'const ICO_OF', "$('#sheetClose').addEventListener")
     + part(layout, 'const PAGES =', "$$('#pageSeg button, #bottomNav button').forEach(b => b.addEventListener")
     + part(r1, 'function r1SmartVisibleDisk()', 'async function r1SmartRun(')
-    + part(r1, 'const R1_FILL =')
+    + part(r1, 'const R1_FILL =', '/* R1 展示兼容：')
     + '\nglobalThis.controller={go,openSheet,closeSheet,r1StorageWatch,r1FillReceipt,R1_FILL,R1_REFRESH,Poll,getContext:()=>sheetCtx};';
   vm.runInNewContext(script, context, { filename: 'real-storage-refresh-controller.js', timeout: 1000 });
   const controller = context.controller;

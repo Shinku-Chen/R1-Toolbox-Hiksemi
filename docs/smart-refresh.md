@@ -88,6 +88,16 @@ HTTP `200` 表示这批操作已处理，不代表每块盘都已取得 SMART �
 - `unavailable`：当前工具、设备或保护能力不可用，不自动提升为强制访问。
 - `identity_changed`：前后设备身份不一致，结果拒绝发布。
 
+## SMART 电源状态格式
+
+非待机资格读取 smartmontools 官方 `power_mode.name`，并兼容旧 `power_mode.string`。官方 7.5 的 [JSON 写入与 ATA 对照表](https://github.com/smartmontools/smartmontools/blob/f276b249fdc84019403491303479485030ac7c80/smartmontools/ataprint.cpp#L3400-L3449) 同时输出 `ata_value`；该数值是 ATA 电源枚举，不是命令退出码。两个文本字段同时存在时必须表示同一规范化状态；存在数值时也必须与文本精确对应，不能选择一个字段掩盖另一个字段的矛盾。
+
+- `IDLE`／`IDLE_A`／`IDLE_B`／`IDLE_C` 分别对应 `128`／`129`／`130`／`131`，`ACTIVE or IDLE` 对应 `255`。这些状态在固定 `-n standby` 下允许继续；原有 `ACTIVE` 文本也保留，但不为它猜测 ATA 数值。
+- `SLEEP`／`STANDBY`／`STANDBY_Y` 分别对应 `-1`／`0`／`1`，只作跳过依据，不授予容量采集权。数值单独出现不足以确定状态；特别是 `-1` 不能单独证明睡眠。
+- 过时的 `ACTIVE_NV_DOWN`／`ACTIVE_NV_UP` 不在容量白名单内。缺字段、未知、畸形、冲突或任何其它数值均不获得容量资格；不能把 `standby:null` 或普通 `refreshed` 当成非待机。合法温度／健康与容量资格独立，缺少电源状态不自动抹掉有效测量。
+
+同样的明确证据约束用于普通手动采样后供缺测补齐消费的资格，不以旧记录的成功状态代替本次解析。显式强制采样仍不产生普通待机保护证明。根据官方 [低功耗选项说明](https://github.com/smartmontools/smartmontools/blob/f276b249fdc84019403491303479485030ac7c80/smartmontools/smartctl.8.in#L901-L936)，检查不支持或状态未知时 smartctl 默认可能忽略 `-n` 并继续；本地保留对 unsupported／ignored 等消息的拒绝，不自动强制或重试，也不能因为解析后拒绝就倒称原命令没有读盘。退出码 `2` 同样可能来自打开／识别失败，不能单凭退出码判待机。
+
 ## 新鲜度与使用范围
 
 SMART 测量值、健康和温度只在采样后至多三十秒且设备生命周期仍有效时使用。GET、缓存命中、库存刷新或健康评估不会更新时间戳；只有新的合法采集才产生新样本时刻。过期后可保留历史采样记录，但当前测量／健康仍为未知，不能把历史值重新包装成新样本。Web 进入刷新失败时，也不能继续把此前仍新鲜的成功测量冒充本次状态。

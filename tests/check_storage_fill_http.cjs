@@ -48,13 +48,16 @@ socket.create_connection = reject_io
 if hasattr(os, 'statvfs'):
     os.statvfs = reject_io
 
-OLD, STEP = 1793416300.0, 60.0
+OLD, STEP = time.time() - 5, 1.0
 class MemoryState:
     def __init__(self, valid):
         self.lock = threading.RLock()
         self.smart_valid = self.capacity_valid = valid
         self.stamp = OLD
         self.round = 0
+        self.scenario = None
+        self.review_stamp = self.review_now = None
+        self.review_age = 0
         self.released = threading.Event()
         self.entered = threading.Event()
         self.released.set()
@@ -76,12 +79,13 @@ class Insights:
     def snapshot(self):
         with self.state.lock:
             valid, stamp = self.state.smart_valid, self.state.stamp
+            fresh = valid and 0 <= time.time() - stamp < 30
             disk = {'id': 'sda', 'device': '/dev/sda', 'model': 'Memory fixture drive',
                     'user_name': '内存测试盘', 'size_bytes': 4e12,
-                    'standby': False, 'smart_available': valid, 'smart_fresh': valid,
+                    'standby': False if fresh else None, 'smart_available': valid, 'smart_fresh': fresh,
                     'smart_sampled_at': stamp if valid else None,
-                    'temp_c': (39 + self.state.round * 2) if valid else None,
-                    'health': {'passed': True if valid else None}}
+                    'temp_c': (39 + self.state.round * 2) if fresh else None,
+                    'health': {'passed': True if fresh else None}}
             return {'system': {'model': 'HIKSEMI R1', 'memory': {}},
                     'device': {'identity': {'hostname': 'Storage-Fill-Fixture'}, 'storage': {}},
                     'disks': {'available': True, 'items': [disk]}}
@@ -89,8 +93,9 @@ class Insights:
         assert device == 'sda'
         with self.state.lock:
             valid, stamp = self.state.smart_valid, self.state.stamp
-            return {'smart_sampled_at': stamp if valid else None, 'smart_fresh': valid,
-                    'smart_data': {'power_on_time': {'hours': 100 + self.state.round * 50}} if valid else {}}
+            fresh = valid and 0 <= time.time() - stamp < 30
+            return {'smart_sampled_at': stamp if valid else None, 'smart_fresh': fresh,
+                    'smart_data': {'power_on_time': {'hours': 100 + self.state.round * 50}} if fresh else {}}
     def storage_identity_cached(self):
         return {'items': []}
     def fill_smart_missing(self, *, authorizer):
@@ -154,6 +159,108 @@ class MemoryMonitor:
         return {'ok': True, 'status': 'complete', 'started_at': sampled + 1, 'finished_at': sampled + 2,
                 'results': [{'mount_id': 101, 'status': 'refreshed', 'reason': None, 'sampled_at': sampled}]}
 
+
+# The added DOM regressions keep the production server and projection. Only
+# hardware inputs, device identity and cache clocks are fixed memory values.
+from insights import InsightsCollector
+
+class ScenarioInsights(Insights):
+    def _measurement(self, name):
+        state = self.state
+        identity = ('fixture-generation', name)
+        collector = object.__new__(InsightsCollector)
+        collector._lock = threading.RLock()
+        collector.clock = lambda: 1000.0 + state.review_age
+        collector._smart_context = lambda device: identity if device == name else None
+        sleeping = name == 'sda' and state.scenario in ('missing', 'old')
+        temp = None if sleeping or state.scenario == 'no_temp' else 36 if name == 'sda' else 34
+        value = {'standby': sleeping, 'temp_c': temp, 'smart_available': True,
+                 'smart_sampled_at': state.review_stamp,
+                 'health': {'passed': None if sleeping else not (state.scenario == 'failed' and name == 'sdb')}}
+        collector._smart_cache = {name: (1000.0, value, identity)}
+        collector._smart_measurements = {}
+        collector._smart_visible_observations = {}
+        result = collector._smart(name, identity)
+        # Deliberately inconsistent legacy dates must not appear fresh in UI.
+        if state.scenario == 'future':
+            result['smart_sampled_at'] = state.review_now + 1
+        elif state.scenario == 'boundary':
+            result['smart_sampled_at'] = state.review_now - 30
+        return result
+    def snapshot(self):
+        if not self.state.scenario:
+            return super().snapshot()
+        with self.state.lock:
+            rows = [{'id': name, 'device': '/dev/' + name, 'model': 'Memory review ' + name,
+                     'user_name': 'Review-' + name, 'size_bytes': size * 1e12,
+                     **self._measurement(name)} for name, size in [('sda', 2), ('sdb', 4), ('sdc', 8)]]
+            return {'system': {'model': 'HIKSEMI R1', 'memory': {}},
+                    'device': {'identity': {'hostname': 'Storage-Review'}, 'storage': {}},
+                    'disks': {'available': True, 'items': rows}}
+    def smart_cached(self, device):
+        if not self.state.scenario:
+            return super().smart_cached(device)
+        return {**self._measurement(device), 'smart_data': {}}
+    def refresh_smart_visible(self, *, authorizer):
+        if not self.state.scenario:
+            return super().refresh_smart_visible(authorizer=authorizer)
+        assert authorizer() is True
+        with self.state.lock:
+            self.state.calls.append({'phase': 'smart', 'mode': 'review', 'scenario': self.state.scenario})
+            self.visible_receipt = {'ok': True, 'force': False, 'status': 'partial',
+                'started_at': self.state.review_now, 'finished_at': self.state.review_now,
+                'results': [{'device': name, 'status': 'skipped_standby' if name == 'sda' else 'refreshed',
+                             'reason': 'standby' if name == 'sda' else None,
+                             'sampled_at': None if name == 'sda' else self.state.review_stamp}
+                            for name in ('sda', 'sdb', 'sdc')]}
+            return self.visible_receipt
+    def capacity_visible_eligibility(self, receipt):
+        if not self.state.scenario:
+            return super().capacity_visible_eligibility(receipt)
+        assert receipt is self.visible_receipt
+        return lambda device: 'standby' if device == 'sda' else None
+
+class ScenarioMonitor(MemoryMonitor):
+    def snapshot(self):
+        if not self.state.scenario:
+            return super().snapshot()
+        with self.state.lock:
+            scenario, stamp = self.state.scenario, self.state.review_stamp
+            rows = []
+            for index, name in enumerate(('sda', 'sdb', 'sdc')):
+                valid = scenario not in ('fresh_missing', 'stale') and (name != 'sda' or scenario == 'old')
+                rows.append({'mount': '/drives/fixture' if name == 'sda' else '/drives/' + name,
+                             'total_bytes': (2, 4, 8)[index] * 1e12 if valid else None,
+                             'used_bytes': (1, 1, 4)[index] * 1e12 if valid else None,
+                             'capacity_status': 'cached' if valid else 'skipped_standby',
+                             'capacity_sampled_at': stamp - (86400 if name == 'sda' else 0) if valid else None})
+            return {'cpu': {}, 'memory': {}, 'network': {}, 'uptime_seconds': 10, 'disks': rows}
+    def refresh_capacity_visible(self, *, authorizer, eligibility):
+        if not self.state.scenario:
+            return super().refresh_capacity_visible(authorizer=authorizer, eligibility=eligibility)
+        assert authorizer() is True
+        assert eligibility('sda') == 'standby' and eligibility('sdb') is None and eligibility('sdc') is None
+        with self.state.lock:
+            self.state.calls.append({'phase': 'capacity', 'mode': 'review', 'scenario': self.state.scenario})
+            return {'ok': True, 'status': 'partial', 'started_at': self.state.review_now,
+                    'finished_at': self.state.review_now,
+                    'results': [{'mount_id': 101 + i, 'status': 'skipped_standby' if i == 0 else 'refreshed',
+                                 'reason': 'standby' if i == 0 else None,
+                                 'sampled_at': None if i == 0 else self.state.review_stamp}
+                                for i in range(3)]}
+
+class ScenarioPanel(FnmonitorPanel):
+    def _disks(self, **kwargs):
+        rows = super()._disks(**kwargs)
+        scenario = self.insights.state.scenario
+        # Simulate an older server lacking mount metadata, not an empty list.
+        if scenario == 'mount_unknown':
+            for row in rows:
+                if row['name'] == 'sda':
+                    row.pop('mounts', None)
+        return rows
+
+
 servers, states = [], []
 try:
     for label, auth_mode, valid in [('owner', 'password', True), ('nonowner', 'pair', False)]:
@@ -163,18 +270,19 @@ try:
         (folder / 'proc/self/mountinfo').write_text(
             '101 1 8:1 / /drives/fixture rw - ext4 /dev/sda1 rw\n', encoding='ascii')
         state = MemoryState(valid)
-        insights = Insights(state)
-        monitor = MemoryMonitor(state, insights)
+        insights = ScenarioInsights(state)
+        monitor = ScenarioMonitor(state, insights)
         controller = Controller(folder / 'data')
         os.environ['R1_WEB_AUTH_MODE'] = auth_mode
         os.environ['R1_DEV_NO_PAIRING'] = '0'
         server = WebConfigServer(controller, insights=insights, monitor=monitor,
                                  host='127.0.0.1', port=0, asset_dir=repo / 'ui/web')
         # Replace only FnmonitorPanel's filesystem roots, keeping its real projection.
-        server.panel = FnmonitorPanel(controller, insights, None, None, None, monitor,
+        server.panel = ScenarioPanel(controller, insights, None, None, None, monitor,
             state_dir=server.state_dir, web=server, proc_root=folder / 'proc',
             sys_root=folder / 'sys', dev_root=folder / 'dev', udev_root=folder / 'run/udev',
-            weather_fetcher=lambda city: {'ok': False, 'error': 'fixture_weather_unavailable'})
+            weather_fetcher=lambda city: {'ok': False, 'error': 'fixture_weather_unavailable'},
+            wall_clock=lambda state=state: state.review_now if state.scenario else time.time())
         # Some Windows hosts allocate unsafe low ports for port=0. Bind a high
         # loopback port through the real server, retrying only unavailable ports.
         for attempt in range(20):
@@ -193,7 +301,24 @@ try:
     for line in sys.stdin:
         request = json.loads(line)
         operation = request['operation']
-        if operation in ('missing', 'hold'):
+        if operation.startswith('scenario_'):
+            with states[0].lock:
+                state = states[0]
+                state.scenario = operation[len('scenario_'):]
+                if state.scenario == 'stale':
+                    state.review_age = 30.0
+                    state.review_now = state.review_stamp + state.review_age
+                else:
+                    state.review_age = 0.0
+                    state.review_stamp = state.review_now = time.time()
+                folder = fixture / 'owner'
+                mounts = ('101 1 8:1 / /drives/fixture rw - ext4 /dev/sda1 rw\n'
+                          if state.scenario != 'unmounted' else '')
+                mounts += ('102 1 8:17 / /drives/sdb rw - ext4 /dev/sdb1 rw\n'
+                           '103 1 8:33 / /drives/sdc rw - ext4 /dev/sdc1 rw\n')
+                (folder / 'proc/self/mountinfo').write_text(mounts, encoding='ascii')
+                servers[0].panel._mount_cache = (float('-inf'), {})
+        elif operation in ('missing', 'hold'):
             with states[0].lock:
                 if operation == 'missing':
                     states[0].smart_valid = states[0].capacity_valid = False
@@ -400,6 +525,151 @@ finally:
       fillHTTP.status() === 200 && completeReceipt(fillReceipt)
       && fillRequests('owner').length === 1 && refreshRequests('owner').length === 2
       && JSON.stringify(calls(await fixtureCall('stats'))[0].slice(4)) === JSON.stringify(expectedRound('fill', false)), fillReceipt);
+
+    // Permanent screenshot regressions use the actual HTTP server, projection,
+    // original module renderer and real click/hash navigation, not route.fulfill.
+    await page.context().close();
+    const review = await makePage('owner'); activePage = review;
+    await review.clock.install();
+    const dom = () => review.evaluate(() => ({
+      pool: document.querySelector('#layout-storage [data-ref="poolV"]')?.getAttribute('aria-label'),
+      free: document.querySelector('#layout-storage [data-ref="poolFree"]')?.getAttribute('aria-label'),
+      legend: document.querySelector('#layout-storage [data-ref="poolLeg"]')?.textContent,
+      observed: document.querySelector('#layout-storage [data-ref="scanAgo"]')?.textContent,
+      bays: [...document.querySelectorAll('#layout-storage .bay')].map(bay => ({
+        name: bay.querySelector('.bay-name').textContent, capacity: bay.querySelector('[data-ref="cap"]').textContent,
+        temp: bay.querySelector('[data-ref="t"]').textContent, unit: bay.querySelector('.bay-temp small').textContent,
+        state: bay.dataset.st, title: bay.title, led: getComputedStyle(bay.querySelector('.bay-led')).backgroundColor,
+      })),
+    }));
+    const enter = async scenario => {
+      await review.goto('about:blank');
+      await fixtureCall('scenario_' + scenario);
+      const before = calls(await fixtureCall('stats'))[0].length;
+      const pending = foregroundResponse(review, fixture.owner, 'refresh');
+      await review.goto(fixture.owner + '/#/storage', { waitUntil: 'domcontentloaded' });
+      const receipt = await (await pending).json();
+      await review.waitForFunction(() => document.querySelectorAll('#layout-storage .bay').length === 3);
+      await review.clock.fastForward(2100);
+      check(scenario + '：一次进入恰好两阶段，无轮询追加采集', calls(await fixtureCall('stats'))[0].length === before + 2);
+      return { receipt, overview: (await api(review, '/api/overview')).body, ui: await dom() };
+    };
+    const closeToStorage = async () => {
+      const pending = foregroundResponse(review, fixture.owner, 'refresh');
+      await review.keyboard.press('Escape');
+      await pending;
+      await review.waitForSelector('#sheet.on', { state: 'hidden' });
+    };
+    for (const scenario of ['missing', 'old']) {
+      const { receipt, overview, ui } = await enter(scenario);
+      const a = overview.disks_detail.find(d => d.name === 'sda');
+      check(scenario + '：生产 partial/standby 回执不清除 B/C 独立容量',
+        receipt.smart.results[0].status === 'skipped_standby' && receipt.capacity.status === 'partial'
+        && receipt.capacity.results[0].status === 'skipped_standby'
+        && overview.disks_detail.find(d => d.name === 'sdb').percent === 25
+        && overview.disks_detail.find(d => d.name === 'sdc').percent === 50
+        && ui.bays.find(d => d.name === 'sdb').capacity.startsWith('25%')
+        && ui.bays.find(d => d.name === 'sdc').capacity.startsWith('50%'), { receipt, ui });
+      check(scenario + '：池只聚合有效容量并明确子集覆盖，文案不冒称 fnOS',
+        overview.disk_size === (scenario === 'old' ? 14e12 : 12e12)
+        && overview.disk_used === (scenario === 'old' ? 6e12 : 5e12)
+        && ui.pool === (scenario === 'old' ? '43' : '42') && ui.free === (scenario === 'old' ? '8.00' : '7.00')
+        && (scenario === 'old' ? !ui.legend.includes('已覆盖 2/3') : ui.legend.includes('已覆盖 2/3'))
+        && !/fnOS|\/vol\*/.test(ui.legend)
+        && (ui.legend.match(/已覆盖/g) || []).length <= 1, ui);
+      check(scenario + '：休眠 A 单独缺测或保留同代历史容量', a.standby === true
+        && a.total === (scenario === 'old' ? 2e12 : null) && a.mounts.length === 1
+        && ui.bays.find(d => d.name === 'sda').state === 'standby'
+        && (scenario === 'old' ? ui.bays[0].capacity.startsWith('50%')
+          : ui.bays[0].capacity.includes('已挂载 1 个分区') && !ui.bays[0].capacity.includes('未挂载')), ui);
+      for (const [name, expected] of [['sda', scenario === 'old' ? '50' : '--'], ['sdb', '25'], ['sdc', '50']]) {
+        const pending = foregroundResponse(review, fixture.owner, 'refresh');
+        await review.locator('#layout-storage .bay[data-sheet="disk/' + name + '"]').click();
+        await pending;
+        await review.waitForFunction(value => document.querySelector('#sheet.on .sheet-hero [data-ref="v"]')?.getAttribute('aria-label') === value, expected);
+        const note = await review.locator('#sheetBody [data-ref="r1CapNote"]').textContent();
+        const row = overview.disks_detail.find(d => d.name === name);
+        const sampledText = row.capacity_sampled_at ? await review.evaluate(stamp => new Date(stamp * 1000).toLocaleString('zh-CN', { hour12: false }), row.capacity_sampled_at) : null;
+        check(scenario + '：磁盘详情 ' + name + ' 显示独立用量与原容量采样日期',
+          await review.locator('#sheetBody .sheet-hero [data-ref="v"]').getAttribute('aria-label') === expected
+          && (sampledText ? note.includes(sampledText) : note.includes('尚未采集容量')), { note, sampledText });
+        if (name === 'sda' && scenario === 'missing') check('已挂载缺测 A 的详情不再显示未挂载',
+          (await review.locator('#sheetBody [data-ref="leg"]').textContent()).includes('已挂载 1 个分区'));
+        await closeToStorage();
+      }
+      await review.locator('#layout-storage [data-sheet="storage"]').first().click();
+      await review.waitForSelector('#sheet.on [data-p="sdb"]');
+      const rowB = await review.locator('#sheetBody [data-p="sdb"]').textContent();
+      const rowC = await review.locator('#sheetBody [data-p="sdc"]').textContent();
+      const rowA = await review.locator('#sheetBody [data-p="sda"]').textContent();
+      check(scenario + '：全部硬盘抽屉保留 B25/C50，并区别 A 容量缺测和未挂载',
+        rowB.includes('25%') && rowC.includes('50%')
+        && (scenario === 'old' ? rowA.includes('50%') : rowA.includes('容量未采集') && !rowA.includes('未挂载')), { rowA, rowB, rowC });
+    }
+    for (const [scenario, expected] of [['unmounted', '未挂载'], ['mount_unknown', '挂载状态未知']]) {
+      const { overview, ui } = await enter(scenario);
+      const a = overview.disks_detail.find(d => d.name === 'sda');
+      check(scenario + '：缺测容量与挂载事实分开显示', ui.bays.find(d => d.name === 'sda').capacity.includes(expected)
+        && (scenario === 'unmounted' ? a.mounts.length === 0 : !Object.hasOwn(a, 'mounts')), { a, ui });
+      const pending = foregroundResponse(review, fixture.owner, 'refresh');
+      await review.locator('#layout-storage .bay[data-sheet="disk/sda"]').click(); await pending;
+      check(scenario + '：磁盘详情保留挂载状态的明确性', (await review.locator('#sheetBody [data-ref="leg"]').textContent()).includes(expected));
+      await closeToStorage();
+      await review.locator('#layout-storage [data-sheet="storage"]').first().click();
+      check(scenario + '：全部硬盘抽屉不把未知挂载误推为空', (await review.locator('#sheetBody [data-p="sda"]').textContent()).includes(expected));
+    }
+    const healthy = await enter('no_temp');
+    check('新鲜健康且温度缺失仍正常，数值 -- 且单位 ℃ 不被替换', healthy.ui.bays.every(d => d.state === 'ok' && d.temp === '--' && d.unit === '℃'), healthy.ui);
+    const noTempPending = foregroundResponse(review, fixture.owner, 'refresh');
+    await review.locator('#layout-storage .bay[data-sheet="disk/sdb"]').click(); await noTempPending;
+    await review.waitForFunction(() => document.querySelector('#sheetBody [data-ref="pill"]')?.textContent === '健康');
+    check('新鲜健康但缺温度的详情不误判未知，也不借旧温度填零',
+      await review.locator('#sheetBody [data-ref="pill"]').textContent() === '健康'
+      && await review.locator('#sheetBody [data-ref="smart"] tr').filter({ has: review.locator('td:first-child', { hasText: '温度' }) }).locator('td').nth(1).textContent() === '—');
+    await closeToStorage();
+    // Keep the same live page and its old /api/disk_health PASS cache.
+    await fixtureCall('scenario_failed');
+    const failedGET = review.waitForResponse(response => response.url() === fixture.owner + '/api/overview');
+    await review.clock.fastForward(15010); await failedGET;
+    await review.waitForFunction(() => document.querySelector('#layout-storage .bay[data-sheet="disk/sdb"]')?.dataset.st === 'crit');
+    check('当前新鲜 FAIL 立即覆盖独立旧 PASS 分级与标题', (await dom()).bays.find(d => d.name === 'sdb').title.includes('SMART 未通过'));
+    await enter('missing');
+    await fixtureCall('scenario_active');
+    const activeGET = review.waitForResponse(response => response.url() === fixture.owner + '/api/overview');
+    await review.clock.fastForward(15010); await activeGET;
+    await review.waitForFunction(() => document.querySelector('#layout-storage .bay[data-sheet="disk/sda"]')?.dataset.st === 'ok');
+    check('休眠→活动不锁住旧 standby DOM', (await dom()).bays.find(d => d.name === 'sda').temp === '36');
+    await fixtureCall('scenario_stale');
+    const activeExpiredGET = review.waitForResponse(response => response.url() === fixture.owner + '/api/overview');
+    await review.clock.fastForward(15010); await activeExpiredGET;
+    await review.waitForFunction(() => document.querySelector('#layout-storage .bay[data-sheet="disk/sda"]')?.dataset.st === 'unknown');
+    check('同一 DOM 休眠→活动→过期后不保留 standby 或健康', (await dom()).bays.find(d => d.name === 'sda').temp === '--');
+    for (const scenario of ['boundary', 'future']) {
+      const { ui } = await enter(scenario);
+      check(scenario + '：严格三十秒及未来日期都不显示健康绿灯或旧温度', ui.bays.every(d => d.state === 'unknown' && d.temp === '--'), ui);
+    }
+    const fresh = await enter('fresh_missing');
+    check('容量全缺测显示 R1 说明，不编造未挂载或厂商路径', fresh.ui.pool === '--' && fresh.ui.free === '--'
+      && fresh.ui.legend.includes('R1') && !/fnOS|\/vol\*/.test(fresh.ui.legend)
+      && fresh.ui.bays.every(d => d.capacity.includes('已挂载') && !d.capacity.includes('未挂载')), fresh.ui);
+    const beforeAge = calls(await fixtureCall('stats'))[0].length;
+    const originalDates = fresh.overview.disks_detail.map(d => d.smart_sampled_at);
+    await fixtureCall('scenario_stale');
+    const staleGET = review.waitForResponse(response => response.url() === fixture.owner + '/api/overview');
+    await review.clock.fastForward(31000); await staleGET;
+    await review.waitForFunction(() => [...document.querySelectorAll('#layout-storage .bay')].every(b => b.dataset.st === 'unknown' && b.querySelector('[data-ref="t"]').textContent === '--'));
+    await review.waitForTimeout(100);
+    const stale = await dom(), expired = (await api(review, '/api/overview')).body;
+    check('真实三十秒投影已 false/null，31 秒页面立即 unknown 灰灯，单位不丢',
+      expired.disks_detail.every(d => d.smart_fresh === false && d.temp === null && d.health === null)
+      && stale.bays.every(d => d.state === 'unknown' && d.temp === '--' && d.unit === '℃' && d.led !== 'rgb(18, 138, 78)'), stale);
+    check('过期显示真实 SMART 观测日期且不因 GET 续期', stale.observed.includes('已过期')
+      && !stale.observed.includes('巡检于 刚刚')
+      && JSON.stringify(expired.disks_detail.map(d => d.smart_sampled_at)) === JSON.stringify(originalDates), stale);
+    await review.clock.fastForward(31000);
+    check('62 秒独立健康轮询后仍不返绿，停留未增加任何采集', (await dom()).bays.every(d => d.state === 'unknown')
+      && calls(await fixtureCall('stats'))[0].length === beforeAge);
+
 
     const final = await fixtureCall('stats');
     check('无页面异常、外网请求、真实硬件／statvfs／子进程访问',

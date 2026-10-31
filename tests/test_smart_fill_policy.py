@@ -456,6 +456,9 @@ class SmartFillPolicyTests(unittest.TestCase):
         self.assertEqual(self.collector.capacity_fill_eligibility('sda'), 'power_state_unverified')
 
     def test_capacity_eligibility_requires_ordinary_current_lifetime_success(self):
+        # Success alone is not power proof: this positive fixture supplies the
+        # official name/value pair while force and lifecycle checks stay exact.
+        self.behavior = (0, dict(self.good_response(), power_mode={'name': 'ACTIVE or IDLE', 'ata_value': 255}))
         self.assertEqual(self.collector.capacity_fill_eligibility('sda'), 'power_state_unverified')
         self.refresh(force=True)
         self.assertEqual(self.collector.capacity_fill_eligibility('sda'), 'power_state_unverified')
@@ -713,6 +716,7 @@ class SmartFillPolicyTests(unittest.TestCase):
 
     def test_freshness_near_32bit_uptime_still_expires_at_thirty_seconds(self):
         self.now = float(2 ** 32 + 100)
+        self.behavior = (0, dict(self.good_response(), power_mode={'name': 'ACTIVE or IDLE', 'ata_value': 255}))
         self.fill()
         self.now += 29.5
         self.assertIsNone(self.collector.capacity_fill_eligibility('sda'))

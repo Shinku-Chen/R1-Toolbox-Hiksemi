@@ -31,16 +31,16 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
 
 const checks = [];
 const check = (name, condition) => { assert.ok(condition, name); checks.push(name); };
-const NOW = 1_760_000_000;
+const NOW = Date.now() / 1000;
 const OLD = 8, NEW = 12;
 
-function receipt({ force = false, status = 'complete', started = NOW - 2, finished = NOW, results }) {
+function receipt({ force = false, status = 'complete', started = Date.now() / 1000 - 2, finished = Date.now() / 1000, results }) {
   return { ok: true, force, status, started_at: started, finished_at: finished,
            results: results || [
              { device: 'sda', status: 'refreshed', reason: null, sampled_at: finished },
              { device: 'sdb', status: 'refreshed', reason: null, sampled_at: finished }] };
 }
-function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
+function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
   return { ok: true, dev: 'sda', model: 'Fixture NAS Drive', size: 4e12, temp: 39,
            sampled_at: sampledAt, fresh,
            health: { passed: true }, standby: null, reason: null, source: 'fixture',
@@ -68,8 +68,8 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
   const posts = [];
   const detailReads = [];
   const smartValue = { sda: OLD, sdb: OLD };
-  const smartMeta = { sda: { sampledAt: NOW - 3600, fresh: true },
-                      sdb: { sampledAt: NOW - 3600, fresh: true } };
+  const smartMeta = { sda: { sampledAt: NOW - 5, fresh: true },
+                      sdb: { sampledAt: NOW - 5, fresh: true } };
   let cacheOverride = null;
   let releaseFillGate = null;
   let releaseAuthGate = null;
@@ -102,9 +102,11 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
       const url = new URL(route.request().url());
       const device = (url.searchParams.get('dev') || 'sda').replace(/[^A-Za-z0-9_.:-]/g, '');
       detailReads.push(device);
+      const meta = cacheOverride || smartMeta[device] || {};
+      const age = Date.now() / 1000 - meta.sampledAt;
       return route.fulfill({ status: 200, contentType: 'application/json',
                              body: JSON.stringify({ ...smartDetail(smartValue[device] || OLD,
-                               cacheOverride || smartMeta[device] || {}), dev: device }) });
+                               cacheOverride || { ...meta, fresh: meta.fresh && age >= 0 && age < 30 }), dev: device }) });
     });
     const capPosts = [];
     let capMode = 'normal';
@@ -121,8 +123,12 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
         row.total = meta.total == null ? meta.total : meta.total * 1e9;
         row.used = meta.used == null ? meta.used : meta.used * 1e9;
         row.capacity_sampled_at = meta.stamp; row.capacity_status = meta.status;
-        row.smart_sampled_at = meta.smartStamp === undefined ? NOW - 3600 : meta.smartStamp;
-        row.smart_fresh = meta.smartFresh === undefined ? true : meta.smartFresh;
+        // Each declared fixture phase starts one dated cache sample. GETs reuse
+        // that same timestamp, rather than declaring an hour-old sample fresh.
+        if (meta.smartStamp === undefined) meta.smartStamp = Date.now() / 1000;
+        row.smart_sampled_at = meta.smartStamp;
+        const age = Date.now() / 1000 - meta.smartStamp;
+        row.smart_fresh = (meta.smartFresh === undefined ? true : meta.smartFresh) && age >= 0 && age < 30;
         row.smart_available = meta.smartAvailable === undefined ? true : meta.smartAvailable;
         row.temp = meta.temp === undefined ? 39 : meta.temp;
         row.temp_c = row.temp;
@@ -176,8 +182,8 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
       if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 700));
       smartValue.sda = NEW; smartValue.sdb = NEW;   // 桩：批处理已更新服务端被动缓存
       if (!cacheOverride) {
-        smartMeta.sda = { sampledAt: NOW, fresh: true };
-        smartMeta.sdb = { sampledAt: NOW, fresh: true };
+        smartMeta.sda = { sampledAt: Date.now() / 1000, fresh: true };
+        smartMeta.sdb = { sampledAt: Date.now() / 1000, fresh: true };
       }
       return reply(receipt({ force }));
     });
@@ -223,12 +229,17 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
                    results: [{ device: 'sda', status: 'skipped_standby', reason: 'standby', sampled_at: null }] },
           capacity: { ok: true, status: 'complete', started_at: NOW - 2, finished_at: NOW,
                       results: [{ mount_id: 101, status: 'skipped_standby', reason: 'standby', sampled_at: null }] } }) });
+      const sampled = Date.now() / 1000;
+      for (const device of ['sda', 'sdb']) {
+        smartMeta[device] = { sampledAt: sampled, fresh: true };
+        capState[device].smartStamp = sampled;
+      }
       return await route.fulfill({ status: 200, contentType: 'application/json',
-        body: JSON.stringify({ ok: true, force: false, status: 'complete', started_at: NOW - 2, finished_at: NOW,
-          smart: { ok: true, force: false, status: 'complete', started_at: NOW - 2, finished_at: NOW,
-                   results: [{ device: 'sda', status: 'refreshed', reason: null, sampled_at: NOW }] },
-          capacity: { ok: true, status: 'complete', started_at: NOW - 2, finished_at: NOW,
-                      results: [{ mount_id: 101, status: 'refreshed', reason: null, sampled_at: NOW }] } }) });
+        body: JSON.stringify({ ok: true, force: false, status: 'complete', started_at: sampled - 2, finished_at: sampled,
+          smart: { ok: true, force: false, status: 'complete', started_at: sampled - 2, finished_at: sampled,
+                   results: [{ device: 'sda', status: 'refreshed', reason: null, sampled_at: sampled }] },
+          capacity: { ok: true, status: 'complete', started_at: sampled - 2, finished_at: sampled,
+                      results: [{ mount_id: 101, status: 'refreshed', reason: null, sampled_at: sampled }] } }) });
     });
     await page.route('**/api/r1/storage/fill', async route => {
       const request = route.request();
@@ -667,7 +678,7 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
     check('容量 used 缺测补齐不循环', fillPosts.length === fillBase + 1);
 
     capState.sda = { stamp: NOW, used: 1000, total: 4000, status: 'cached',
-      smartStamp: NOW, smartFresh: true, smartAvailable: false, temp: null };
+      smartStamp: Date.now() / 1000, smartFresh: true, smartAvailable: false, temp: null };
     fillBase = fillPosts.length;
     await page.goto(info.primary.origin + '/', { waitUntil: 'networkidle' });
     await page.waitForTimeout(1800);
