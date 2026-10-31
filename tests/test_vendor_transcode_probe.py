@@ -163,16 +163,16 @@ class DefinitionTests(unittest.TestCase):
             probe.project_offline_path(shape_frame(**kwargs)[1]))
 
     def test_profile_codes_become_the_same_labels_the_tv_player_shows(self):
-        self.assertEqual(self.labels('high,mid,low'), ['原画', '高清', '标清', '流畅'])
+        self.assertEqual(self.labels('high,mid,low'), ['原画', '高清', '清晰', '流畅'])
 
     def test_offline_720p_appends_mid_after_the_profile_branch(self):
-        # 0x0124 结束拆分后落入 0x0126；profile 不含 mid 且 720p 非空 → 追加标清。
+        # 0x0124 结束拆分后落入 0x0126；profile 不含 mid 且 720p 非空 → 追加清晰。
         self.assertEqual(self.labels('high', video_720p='/private/' + SECRET),
-                         ['原画', '高清', '标清'])
+                         ['原画', '高清', '清晰'])
 
     def test_origin_profile_without_mid_and_with_720p_adds_one_definition(self):
         self.assertEqual(self.labels('origin', video_720p='/private/' + SECRET),
-                         ['原画', '标清'])
+                         ['原画', '清晰'])
 
     def test_origin_profile_already_containing_mid_skips_the_append(self):
         # 0x013e contains("mid") → 0x0146 if-nez → 0x016c 跳过追加。
@@ -183,11 +183,11 @@ class DefinitionTests(unittest.TestCase):
         self.assertEqual(self.labels('origin'), ['原画'])
 
     def test_empty_profile_only_uses_the_offline_720p_definition(self):
-        self.assertEqual(self.labels('', video_720p='/private/' + SECRET), ['原画', '标清'])
+        self.assertEqual(self.labels('', video_720p='/private/' + SECRET), ['原画', '清晰'])
 
     def test_null_capabilities_has_its_own_720p_fallback(self):
         value = self.shape(capabilities=None, video_720p='/private/' + SECRET)
-        self.assertEqual(value['labels'], ['原画', '标清'])
+        self.assertEqual(value['labels'], ['原画', '清晰'])
         self.assertEqual(value['source'], 'video_720p')
         self.assertEqual(value['capabilities_state'], 'null')
 
@@ -241,7 +241,7 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(value['status'], 'ok')
         self.assertEqual(value['tv_player']['playback'], 'hls')
         self.assertIs(value['tv_player']['definition_menu_visible'], True)
-        self.assertEqual(value['tv_player']['labels'], ['原画', '高清', '标清', '流畅'])
+        self.assertEqual(value['tv_player']['labels'], ['原画', '高清', '清晰', '流畅'])
 
     def test_result_carries_no_private_marker_from_any_step(self):
         value = run(FakeClient(responses()))
@@ -366,7 +366,7 @@ class CollectTests(unittest.TestCase):
         frame = shape_frame(capabilities=None, video_720p='/private/' + SECRET)[1]
         value = run(FakeClient(responses(offline_video_path=(200, frame))))
         self.assertEqual(value['capacity']['capabilities_state'], 'null')
-        self.assertEqual(value['definitions']['labels'], ['原画', '标清'])
+        self.assertEqual(value['definitions']['labels'], ['原画', '清晰'])
         # 0x01a6 在 capabilities 为空时直接返回，不建 m3u8。
         self.assertIsNone(value['tv_player']['playback'])
         self.assertEqual(value['reason'], 'capacity_structure_missing')

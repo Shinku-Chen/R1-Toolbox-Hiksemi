@@ -68,6 +68,15 @@ HTTP `200`、外层 `ok:true` 表示测试请求已处理。应继续检查 `pro
 
 本节针对电视播放器的清晰度切换。影视列表另有“清晰度／解码”筛选，后者的“解码”实际表示杜比视界、HDR、SDR 等动态范围分类；候选列表不足时客户端会隐藏筛选项。该列表的候选数据与显示条件不由 `probe_transcode` 验证，不能把播放接口的拒绝码直接当成列表筛选故障的原因。
 
+### 匹配固件与电视 APK 的静态结论
+
+以下结论来自 `emhistor` SHA-256 `402964bb23e32786db2a8d8b8a0ef2a2121cf6f753b4238cf5da53a4aa1c8d26` 与已核同一 APK 的 DEX：`classes.dex` 为 `fd7af59cc22fb4c324b71e0f3125d247ab221aa70fe011be157a0f51c75c070a`，`classes2.dex` 为 `b7656afa0c333852c905c8dbaf01240ea4b01b624acce77fd78dc57b4006cec2`。这些是样本之间的确定代码关系，尚未证明用户当前电视和 NAS 的请求实际命中：
+
+- 本人播放路径固定发送 `video_capability=1`。原厂通过前置身份／路径等门后，在 `0x24bb08`／`0x24bbb9` 返回 `-5402`；HTTP 200 的带空格 JSON 错误能被该电视网络层正确解析，首次发送旗标使后续能力 JSON 不再覆盖它。电视端回原画并禁止此次清晰度切换。这属于该请求形态与固件的合同不兼容，不能解释成某一种影片编码必然不支持，也不能推广到共享播放的其它路径。
+- 静态能力表声明视频转码为 1、转码开关能力为 0；电视机型表包含 `R1`／`R1X`／`SR1`。开关接口缺失本身不是禁用清晰度的充分原因。固件还包含 `/tmp/tr_video_sock` → daemon → `trctl_v1` → FFmpeg 的 VAAPI 转码链，但文件存在不证明实机驱动、进程或转码可用。
+- 影视列表走 `/rest/1.1/scraper?action=dynamic_filter`，带 `tv=1` 及当前库的 `lid`／`type`，原厂转发至 scraper `query_tab`。电视只纳入白名单中标记为 1 的分类，非空列表加“全部”，仅总数量大于 2 才显示筛选行。因此只有一种实际分类时会隐藏该行；须核对同一选中库，不能用全库数量替代。后端存在失败时返回 `code=0`／空结构的分支，不能只凭零或空对象认定没有分类。当前 `probe_transcode` 不采集此列表接口。
+- `getDefinitionText`（`0x459308`）的原厂标签为 `raw`＝原画、`high`＝高清、`mid`＝清晰、`low`＝流畅；`mid` 使用资源 `2131755012`。标签差异不改变原厂错误码或菜单分支。
+
 电视端播放器的每条门槛要分开看，不能概括成「任一不满足就只原画」：
 
 - `cap_transcode_video` 不为 1（客户端本地机型判断 + 该能力位）→ `buildVideoPath` 直接走原画并把清晰度入口设为不可见；
@@ -175,16 +184,16 @@ console.log(await response.json());
 按 `classes.dex` SHA-256 `fd7af59c…` 的 `onCapacityResult` 固定引用推导档位：
 
 1. `capabilities == null`：`0x006e` 跳到 `0x016c`，`0x0170` 不跳，落到 `0x0174`
-   的 `video_720p` 检查，有值才在 `0x0184` 追加一档「标清」（独立 fallback）。
+   的 `video_720p` 检查，有值才在 `0x0184` 追加一档「清晰」（独立 fallback）。
 2. `capabilities` 是对象但 `video` 缺失／null／空数组：`0x007a`／`0x008e` 跳到
    `0x016c`，`0x0170` 因对象非空跳到 `0x0196`，**不追加任何档位**。
 3. `capabilities.video[0]` 存在：`profile` 非空且不含 `origin` 时按逗号拆分；
    随后（`0x0124` 结束后仍落入 `0x0126`，不是二选一）用 `0x013e` 的
    `contains("mid")` 与 `0x0146` 的跳转决定是否追加：不含 `mid` 且
-   `video_720p` 非空才追加「标清」。首个 `profile` 为空时走自己的 fallback，
+   `video_720p` 非空才追加「清晰」。首个 `profile` 为空时走自己的 fallback，
    同样只看 `video_720p`。
 
-因此：`high`＋720p → 原画／高清／标清；`origin`＋720p → 原画／标清；
+因此：`high`＋720p → 原画／高清／清晰；`origin`＋720p → 原画／清晰；
 `origin,mid`＋720p → 原画（含 mid 时原厂跳过追加）；`capabilities={}` 或
 `video` 缺失／null／空数组＋720p → 只有原画。非法数组类型、坏首行或未识别档位不返回原文，记 `unmapped_profile_count` 与 `profile_metadata_unknown`，档位列表为空、播放方式未知。
 

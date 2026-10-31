@@ -36,9 +36,9 @@ SHARPNESS = 'raw'
 TERMINAL = '00000000-0000-0000-0000-000000000000'
 CAPABILITY_NAMES = ('cap_transcode_video', 'cap_tr_video_switch_v1')
 PROFILE_CODES = frozenset(('raw', 'high', 'mid', 'low', 'origin'))
-PROFILE_LABELS = {'raw': '原画', 'high': '高清', 'mid': '标清', 'low': '流畅'}
+PROFILE_LABELS = {'raw': '原画', 'high': '高清', 'mid': '清晰', 'low': '流畅'}
 ORIGINAL_LABEL = '原画'
-MID_LABEL = '标清'
+MID_LABEL = '清晰'
 MAX_STREAMS = 32
 MAX_SAFE_INTEGER = 2 ** 53 - 1
 _NOTES = (
@@ -240,12 +240,12 @@ def derive_definitions(capacity):
     但没有 video 行」合并：
 
     - `capabilities == null`：`0x006e` 直接跳到 `0x016c`，`0x0170` 因对象为空而
-      不跳，落到 `0x0174` 的 `video_720p` 检查；有值才在 `0x0184` 追加一档「标清」。
+      不跳，落到 `0x0174` 的 `video_720p` 检查；有值才在 `0x0184` 追加一档「清晰」。
     - `capabilities` 是对象但 `video` 缺失／null／空数组：`0x007a`／`0x008e` 跳到
       `0x016c`，`0x0170` 因对象非空跳到 `0x0196`，**不会再追加**。
     - `capabilities.video[0]` 存在：`profile` 非空且不含 `origin` 时按逗号拆分；
       随后（拆分分支 `0x0124` 结束后仍落入 `0x0126`，不是二选一）在
-      `0x013e` 判断 `contains("mid")`，不含且 `video_720p` 非空才追加「标清」。
+      `0x013e` 判断 `contains("mid")`，不含且 `video_720p` 非空才追加「清晰」。
       首个 `profile` 为空则走自己的 fallback：同样按 `video_720p` 决定是否追加。
 
     未识别档位码不返回原文；非法首行保持未知，不拿下一行代替。
