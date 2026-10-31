@@ -245,7 +245,7 @@ class SmartRefreshHTTPTests(unittest.TestCase):
         status, receipt = self.request({'force': False})
         self.assertEqual(status, 200, receipt)
         self.assertEqual(receipt['results'][0]['status'], 'refreshed')
-        self.assertEqual(calls, [['/fixture/smartctl', '-n', 'standby', '-j', '-a', '/dev/sda']])
+        self.assertEqual(calls, [['/fixture/smartctl', '-n', 'standby', '--json=o', '-a', '/dev/sda']])
         storage.snapshot.assert_not_called()
         status, detail = self.request(method='GET', path='/api/smart?dev=sda')
         self.assertEqual(status, 200, detail)

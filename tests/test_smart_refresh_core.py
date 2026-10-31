@@ -223,7 +223,7 @@ class SmartRefreshCoreTests(unittest.TestCase):
         self.assert_receipt(result, {'sda': 'refreshed'})
         self.assertIs(result['force'], False)
         self.assertEqual(result['status'], 'complete')
-        self.assertEqual(self.calls[0][0], ['/fixture/bin/smartctl', '-n', 'standby', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[0][0], ['/fixture/bin/smartctl', '-n', 'standby', '--json=o', '-a', '/dev/sda'])
         self.assertGreater(self.calls[0][1], 0)
         self.assertLessEqual(self.calls[0][1], 3)
         row = self.row()
@@ -242,10 +242,10 @@ class SmartRefreshCoreTests(unittest.TestCase):
         forced = self.refresh(force=True)
         self.assert_receipt(forced, {'sda': 'refreshed'})
         self.assertIs(forced['force'], True)
-        self.assertEqual(self.calls[0][0], ['/fixture/bin/smartctl', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[0][0], ['/fixture/bin/smartctl', '--json=o', '-a', '/dev/sda'])
         regular = self.refresh()
         self.assert_receipt(regular, {'sda': 'refreshed'})
-        self.assertEqual(self.calls[1][0], ['/fixture/bin/smartctl', '-n', 'standby', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[1][0], ['/fixture/bin/smartctl', '-n', 'standby', '--json=o', '-a', '/dev/sda'])
         before = len(self.calls)
         self.now += 60
         self.collector._collect_slow()
@@ -584,8 +584,8 @@ class SmartRefreshCoreTests(unittest.TestCase):
         result = self.refresh()
         self.assert_receipt(result, {'nvme0n1': 'refreshed', 'sda': 'refreshed'})
         self.assertEqual({tuple(argv[1:]) for argv, _ in self.calls}, {
-            ('-n', 'standby', '-j', '-a', '/dev/nvme0n1'),
-            ('-n', 'standby', '-j', '-a', '/dev/sda')})
+            ('-n', 'standby', '--json=o', '-a', '/dev/nvme0n1'),
+            ('-n', 'standby', '--json=o', '-a', '/dev/sda')})
 
     def test_malformed_nested_native_data_is_unknown_and_never_exposes_text(self):
         self.behavior = (0, {'smartctl': [PRIVATE], 'smart_status': {'passed': True}})

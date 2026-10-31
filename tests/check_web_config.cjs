@@ -34,8 +34,14 @@ from web_config import WebConfigServer
 from fan_policy import FanPolicyController
 from light_policy import LightPolicyController
 from monitoring import MonitoringService
+from device_info import temperature_display_role
 import fnm_compat
 import copy
+
+# Only regular TEMP metadata files are read by this fixture. Windows has no
+# O_NONBLOCK constant; keep real Monitoring sampling instead of a legacy fallback.
+if os.name == 'nt' and not hasattr(os, 'O_NONBLOCK'):
+    os.O_NONBLOCK = 0
 
 # This browser suite verifies the explicitly requested legacy pairing workflow.
 os.environ['R1_WEB_AUTH_MODE'] = 'pair'
@@ -95,10 +101,26 @@ class Sources:
         entries = [('cpu', 'CPU Package', 'cpu', cpu_temperature), ('board', '主板温度', 'board', 66), ('disk', '硬盘 A', 'disk', 47), ('disk2', '硬盘 B', 'disk', 39)]
         if saver_extra_sources:
             entries += [('extra:' + str(index), ('<img src=x onerror="window.saverLabelInjected=1">' + '超长温度设备名' * 20) if index == 0 else '扩展温度 ' + str(index), 'disk', 35) for index in range(12)]
-        return [{'id': name, 'label': label, 'kind': kind, 'temperature_c': temperature, 'status': 'ok',
-                 'sampled_monotonic': now - (30 if (name == 'board' and board_stale) or (name == 'cpu' and cpu_stale) else 0),
-                 'max_age_seconds': 10, 'critical_celsius': 95 if kind == 'cpu' else None}
-                for name, label, kind, temperature in entries if name not in missing_sources]
+        rows = []
+        for name, label, kind, temperature in entries:
+            if name in missing_sources:
+                continue
+            row = {'id': name, 'label': label, 'kind': kind, 'temperature_c': temperature, 'status': 'ok',
+                   'sampled_monotonic': now - (30 if (name == 'board' and board_stale) or (name == 'cpu' and cpu_stale) else 0),
+                   'max_age_seconds': 10, 'critical_celsius': 95 if kind == 'cpu' else None}
+            if kind in ('cpu', 'board'):
+                # Match TemperatureSources' display-only hwmon metadata while
+                # keeping the existing IDs/kinds used by every control test.
+                driver, display_label, channel = (('coretemp', 'Package', 'temp1') if kind == 'cpu'
+                                                   else ('nct6775', 'SYSTIN', 'temp2'))
+                role, evidence = temperature_display_role(driver, display_label)
+                row.update(display_driver=driver, display_label=display_label,
+                           display_channel=channel, display_source='hwmon')
+            else:
+                role, evidence = temperature_display_role('smart', '', 'smart')
+            row.update(display_role=role, display_evidence=evidence)
+            rows.append(row)
+        return rows
 class Adapter:
     def __init__(self, available):
         self.available, self.channels, self.targets = available, set(), {}
@@ -163,7 +185,7 @@ def policy(folder, available):
 class Monitor:
     def snapshot(self):
         return {'schema_version':1,'available':True,'hostname':'R1-Fixture','uptime_seconds':201600,
-                'cpu':{'usage_percent':24.5,'temp_c':62},'memory':{'usage_percent':37.5,'used_bytes':3e9,'total_bytes':8e9},
+                'cpu':{'usage_percent':24.5,'temp_c':58},'memory':{'usage_percent':37.5,'used_bytes':3e9,'total_bytes':8e9},
                 'network':{'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000},
                 'disks':[{'mount':'/drives/data','used_bytes':1e12,'total_bytes':4e12,'usage_percent':25}]}
 class Insights:
@@ -173,7 +195,7 @@ class Insights:
                      'cpu_usage_percent':24.5,'load_average':[.2,.3,.5],'memory':{'used_bytes':3e9,'total_bytes':8e9,'usage_percent':37.5},
                      'cpu_cores':[{'id':n,'usage_percent':10+n*5} for n in range(4)]},
                   'device':{'identity':{'hostname':'R1-Fixture','os':{'PRETTY_NAME':'Fixture Linux 12 (R1)','NAME':'Fixture Linux','VERSION_ID':'12'},'kernel':'6.1-fixture','firmware':{'version':'V6.3.3_Build_260907','build':'260907','model':'R1'}},
-                    'cpu':{'physical_cores':4,'architecture':'x86_64'},'thermal':[{'driver':'coretemp','label':'Package','celsius':62}],
+                    'cpu':{'physical_cores':4,'architecture':'x86_64'},'thermal':[{'driver':'coretemp','label':'Package','celsius':58}],
                     'network':[{'name':'eth0','speed_mbps':2500,'ipv6_addresses':[{'address':'2001:db8:1234:5678:90ab:cdef:1234:5678','prefix_length':64,'scope':'global'}]}],
                     'network_config':{'default_routes':{'ipv4':[{'interface':'eth0','gateway':'192.168.1.1','metric':100,'source':'/proc/net/route'}],'ipv6':[{'interface':'eth0','gateway':None,'metric':200,'source':'/proc/net/ipv6_route'}]},'route_status':{'ipv4':'ok','ipv6':'ok'},'dns':{'servers':['192.168.1.1','2001:4860:4860::8888'],'search':['home.arpa'],'domains':['home.arpa'],'status':'ok'}},'storage':{'raid':[]}},
                   'interfaces':[{'name':'eth0','ipv4':['192.168.1.10'],'mac':'00:11:22:33:44:55','operstate':'up','rx_bytes':400000000,'tx_bytes':100000000,'rx_bytes_per_sec':1250000,'tx_bytes_per_sec':480000}],
@@ -219,7 +241,9 @@ monitor,insights=Monitor(),Insights()
 lamps=[Lamp(fixture),Lamp(fixture/'unsupported')]
 lights=[LightPolicyController(lamp,Sources()) for lamp in lamps]
 for light in lights:light.start()
-monitoring=MonitoringService(fixture/'data',insights,monitor,Sources(),proc_root=fixture/'proc',sys_root=fixture/'sys').start()
+monitoring=MonitoringService(fixture/'data',insights,monitor,Sources(),proc_root=fixture/'proc',sys_root=fixture/'sys')
+monitoring.sample_once()  # Initialization failures must fail boot, not be hidden by legacy values.
+monitoring.start()
 fnm_compat.fetch_weather = lambda city: {'ok': True, 'city': 'Fixture City', 'temp': 21.5, 'feels': 20.0,
     'humidity': 55.0, 'wind': 2.5, 'code': 0, 'desc': '晴', 'is_day': 1}
 primary = WebConfigServer(controller(fixture), insights=insights, fan_policy=policy(fixture, True), light_policy=lights[0],monitoring=monitoring,monitor=monitor, host='127.0.0.1', port=0, asset_dir=repo / 'ui/web', dev_root=fixture / 'dev', udev_root=fixture / 'udev').start()
@@ -455,7 +479,12 @@ finally:
     check('CPU 使用率映射', !!overview.body && !!overview.body.cpu && overview.body.cpu.percent === 24.5, JSON.stringify(overview.body && overview.body.cpu));
     check('内存映射', !!overview.body && !!overview.body.mem && overview.body.mem.percent === 37.5);
     check('硬盘温度映射', !!overview.body && !!overview.body.disks_detail && !!overview.body.disks_detail[0] && overview.body.disks_detail[0].temp === 39);
-    check('温度来自 hwmon', !!overview.body && !!overview.body.temp && overview.body.temp.cpu === 62);
+    check('温度来自同源 Monitoring hwmon 缓存', !!overview.body && !!overview.body.temp
+      && overview.body.temp.cpu === 62 && overview.body.temp.system === 66 && overview.body.temp.mb === 66
+      && overview.body.temp.source === 'monitoring_temperature_cache'
+      && overview.body.temp.samples.cpu.fresh === true && overview.body.temp.samples.board.fresh === true
+      && overview.body.temp.samples.cpu.sampled_at > 0 && overview.body.temp.samples.board.sampled_at > 0,
+      JSON.stringify(overview.body && overview.body.temp));
     check('封装功耗缺失时不伪造', !!overview.body && !!overview.body.power && overview.body.power.ok === false && overview.body.power.total === null);
     // The production panel wraps internal const helpers in an IIFE. Exercise
     // their exact source with the real installed R1 provider, without exporting
@@ -585,7 +614,12 @@ finally:
     const system = await api('/api/system');
     check('固件版本来自官方元数据', !!system.body && system.body.fnos_version === 'V6.3.3_Build_260907');
     const sensors = await api('/api/sensors');
-    check('温度传感器接口', !!sensors.body && sensors.body.available === true && sensors.body.temps.length >= 1);
+    check('温度传感器接口', !!sensors.body && sensors.body.available === true && sensors.body.temps.length >= 1
+      && sensors.body.temps.some(row => row.driver === 'coretemp' && row.label === 'Package'
+        && row.display_role === 'cpu' && row.value === 62 && row.temp === 62 && row.crit === 95 && row.fresh === true)
+      && sensors.body.temps.some(row => row.driver === 'nct6775' && row.label === 'SYSTIN'
+        && row.display_role === 'board' && row.value === 66 && row.temp === 66 && row.fresh === true),
+      JSON.stringify(sensors.body));
     const docker = await api('/api/docker');
     check('容器列表映射', !!docker.body && docker.body.available === true && docker.body.containers.length === 2);
     const health = await api('/api/disk_health');

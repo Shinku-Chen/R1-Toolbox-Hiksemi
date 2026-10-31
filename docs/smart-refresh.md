@@ -49,10 +49,16 @@ console.log(await response.json());
 
 | 本次模式 | 固定命令形态 | 边界 |
 |---|---|---|
-| `force:false` | `smartctl -n standby -j -a` | 休眠跳过；设备不支持可靠待机保护时保持不可用，不自动改用强制模式 |
-| `force:true` | `smartctl -j -a` | 仅本次省略 `-n standby`，可能唤醒硬盘；不启动 SMART 自检或更改设备配置 |
+| `force:false` | `smartctl -n standby --json=o -a` | 休眠跳过；设备不支持可靠待机保护时保持不可用，不自动改用强制模式 |
+| `force:true` | `smartctl --json=o -a` | 仅本次省略 `-n standby`，可能唤醒硬盘；不启动 SMART 自检或更改设备配置 |
 
 `-n standby` 是普通刷新的保护方式，不是对全部设备／驱动组合绝不唤盘的保证。强制模式不改变后续网页、小屏、后台或健康评估的缓存语义。
+
+`--json=o` 仅把同一次命令已有的文字保留在私有 JSON `smartctl.output[]`，不新增命令或设备查询。自动设备识别、设备打开及驱动行为仍可能唤盘；事后没有取得可信电源依据，不能倒称命令没有读盘。`-g power` 不是合法选项，本实现不使用它，也不为补电源状态追加查询或重试。
+
+命令拼写必须为长选项 `--json=o`。[官方选项声明](https://github.com/smartmontools/smartmontools/blob/0c0bada5eedb759c9d7bb50ff54959cf0809c5a9/smartmontools/smartctl.cpp#L313-L357) 的短选项 `-j` 不接参数，只有长选项 `json` 接可选参数；先前候选 `-j=o` 会把 `=` 当作非法短选项，在打开设备前失败。该候选已废弃，不能把此前 mock runner 通过当作命令可用证据；永久合同测试使用真实 GNU getopt 解析实际生产参数，并保留错误拼写被拒绝的反例，不执行 smartctl。
+
+原始文字可能包含序列号、设备路径和自由文本，只在 `_probe_smart` 局部有界解析，并在首次复制 JSON 前删除；所有者完整详情、强制刷新、温控测量、失败结果和内存缓存均不保存或返回该数组。仅内部固定电源枚举可进入已有同代收据，不能把原始输出放进诊断或日志。
 
 ## 授权、并发与生命周期
 
@@ -91,6 +97,12 @@ HTTP `200` 表示这批操作已处理，不代表每块盘都已取得 SMART �
 ## SMART 电源状态格式
 
 非待机资格读取 smartmontools 官方 `power_mode.name`，并兼容旧 `power_mode.string`。官方 7.5 的 [JSON 写入与 ATA 对照表](https://github.com/smartmontools/smartmontools/blob/f276b249fdc84019403491303479485030ac7c80/smartmontools/ataprint.cpp#L3400-L3449) 同时输出 `ata_value`；该数值是 ATA 电源枚举，不是命令退出码。两个文本字段同时存在时必须表示同一规范化状态；存在数值时也必须与文本精确对应，不能选择一个字段掩盖另一个字段的矛盾。
+
+旧版文字兼容只用于已审计的正式 7.0–7.4 版本、明确 `device.protocol:ATA`、正式电源字段缺省或空对象且私有输出中只有一条精确工具电源行的情况。[7.4 ATA 源码](https://github.com/smartmontools/smartmontools/blob/0c0bada5eedb759c9d7bb50ff54959cf0809c5a9/smartmontools/ataprint.cpp#L3355-L3413) 在 `-n` 前置检查取得电源模式，随后 [drive_info 输出](https://github.com/smartmontools/smartmontools/blob/0c0bada5eedb759c9d7bb50ff54959cf0809c5a9/smartmontools/ataprint.cpp#L3739-L3745) 的 `Power mode is:    ACTIVE or IDLE` 或 `Power mode was:   IDLE`／`IDLE_A`／`IDLE_B`／`IDLE_C` 可保留这次检查的依据；`was` 不表示测量结束时再次核对过电源。单词 `ACTIVE` 不是这些 ATA 分支的正式文字，不能据此授予容量。版本数组必须精确为 `[7,0]` 至 `[7,4]`，不自动接受补丁版、开发版或未知后续版；7.5 的正式结构化 JSON 路径继续独立校验。
+
+官方 [7.0 的 CLI](https://github.com/smartmontools/smartmontools/blob/51e8d5e8ffb4039e0ef4b4f72323b87c7ef5217a/smartmontools/smartctl.cpp#L1106)、[7.1](https://github.com/smartmontools/smartmontools/blob/249b38c426330f5d267c8a9895d1ede591ee8519/smartmontools/smartctl.cpp#L1106)、[7.2](https://github.com/smartmontools/smartmontools/blob/59efad4c0000cf40e3441acdc8b0ee58adac7a11/smartmontools/smartctl.cpp#L1115)、[7.3](https://github.com/smartmontools/smartmontools/blob/ade59e8d9460e5e2b057855c6858d557dd4935ad/smartmontools/smartctl.cpp#L1136) 至上述 7.4 CLI 均将 `--json=o` 的既有文字放进 `smartctl.output[]`。7.0–7.2 的部分忽略保护警告只使用普通文字输出，不能只检查 `messages[]`；本解析同时检查有界私有文字，并删除原文。正式电源字段已存在但未知、空文字或畸形时，不用旧版文字覆盖它。
+
+文字与正式字段必须一致；多行、矛盾、未知、畸形、超限、未审计版本或非 ATA 协议都不能由文字获得容量资格。SCSI 的默认 ACTIVE、NVMe 和过时 NV 模式不套用 ATA 依据。私有文本最多 1024 行、每行 1023 字符、合计 131072 字符；拒绝嵌入换行、NUL 和其它控制字符。保护不支持、忽略 `-n` 等文字会否决普通采集依据。合法温度／健康与容量资格仍独立，文字缺失或无资格不能把未知电源当作活动；强制模式始终不产生普通非待机证明。
 
 - `IDLE`／`IDLE_A`／`IDLE_B`／`IDLE_C` 分别对应 `128`／`129`／`130`／`131`，`ACTIVE or IDLE` 对应 `255`。这些状态在固定 `-n standby` 下允许继续；原有 `ACTIVE` 文本也保留，但不为它猜测 ATA 数值。
 - `SLEEP`／`STANDBY`／`STANDBY_Y` 分别对应 `-1`／`0`／`1`，只作跳过依据，不授予容量采集权。数值单独出现不足以确定状态；特别是 `-1` 不能单独证明睡眠。

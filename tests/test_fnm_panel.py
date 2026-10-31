@@ -98,10 +98,17 @@ class Monitoring:
         self.settings = {'history_enabled': True, 'retention_days': 30, 'traffic_exclude_virtual': True,
                          'thresholds': {'cpu_warn': 85, 'cpu_critical': 95}}
         self.calls = []
+        self.temperature_sample = time.monotonic()
+        self.temperature_wall = time.time()
 
     def snapshot(self):
         return {'available': True, 'settings': copy.deepcopy(self.settings),
-                'current': {'power': {'available': True, 'cpu_package_w': 12.5, 'domains': [], 'scope': 'cpu_package'},
+                'current': {'metrics': [{'id': 'cpu_temperature_c', 'value': 62.0,
+                                        'sampled_monotonic': self.temperature_sample,
+                                        'sampled_at': self.temperature_wall,
+                                        'max_age_seconds': 3, 'reason': None}],
+                            'sampled_monotonic': self.temperature_sample,
+                            'power': {'available': True, 'cpu_package_w': 12.5, 'domains': [], 'scope': 'cpu_package'},
                             'disk_io': [{'name': 'sda', 'read_bytes_per_sec': 1048576.0, 'write_bytes_per_sec': 0.0}]},
                 'summary': {}}
 

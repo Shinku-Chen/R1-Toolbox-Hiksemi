@@ -116,7 +116,7 @@ class SmartFillPolicyTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.behavior = (0, self.good_response(44))
         self.policy_tick()
-        self.assertEqual(self.calls[0][0][1:], ['-n', 'standby', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[0][0][1:], ['-n', 'standby', '--json=o', '-a', '/dev/sda'])
         self.assertEqual(self.selected_row()['temperature_c'], 44)
         self.policy_tick()
         self.assertEqual(self.controller.channels['cpu']['reference_c'], 44)
@@ -413,7 +413,7 @@ class SmartFillPolicyTests(unittest.TestCase):
     def test_fill_only_missing_ordinary_and_cached_hit_does_not_renew_timestamp(self):
         first = self.fill()
         self.assertEqual(first['results'][0]['status'], 'refreshed')
-        self.assertEqual(self.calls[0][0][1:], ['-n', 'standby', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[0][0][1:], ['-n', 'standby', '--json=o', '-a', '/dev/sda'])
         sampled = self.row()['smart_sampled_monotonic']
         self.now += 29.999
         result = self.fill()

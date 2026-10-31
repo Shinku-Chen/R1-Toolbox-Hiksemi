@@ -26,6 +26,7 @@ import math
 import os
 from pathlib import Path
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -78,7 +79,7 @@ HISTORY_MAP = {
     'temp': 'cpu_temperature_c',
     'power': 'cpu_package_w',
     'load1': None,
-    'temp_mb': None,
+    'temp_mb': 'board_temperature_c',
     'fan_avg': None,
     'disk_total': None,
     'net_bytes': None,
@@ -494,6 +495,8 @@ class FnmonitorPanel:
         self._weather_cache = None
         self._weather_at = 0.0
         self._weather_key = None
+        self._temperature_read_clock = None
+        self._temperature_clock_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # snapshots
@@ -881,27 +884,101 @@ class FnmonitorPanel:
             result['exclude_virtual'] = None
         return result
 
+    def _temperature_cache(self):
+        """Take one memory snapshot and atomically advance the display clock."""
+        current = _dict(self._monitoring().get('current'))
+        with self._temperature_clock_lock:
+            now = _number(self.clock(), 0)
+            previous = self._temperature_read_clock
+            regressed = now is None or previous is not None and now < previous
+            if now is not None:
+                self._temperature_read_clock = max(now, previous) if previous is not None else now
+        return current, now, regressed
+
+    @staticmethod
+    def _temperature_observation(row, now, evaluated, regressed):
+        """Both temperature cards and sensor rows obey the original lifetime."""
+        sampled = _number(row.get('sampled_monotonic'), 0)
+        maximum = _number(row.get('max_age_seconds'), 0, 120)
+        sampled_wall = _number(row.get('sampled_at'), 0)
+        value = _number(row.get('value'), -40, 150)
+        reason = row.get('reason')
+        reasons = {'missing_sample', 'unavailable', 'invalid_sample', 'future_sample',
+                   'stale_sample', 'clock_regressed', 'display_role_unverified'}
+        if regressed:
+            reason = 'clock_regressed'
+        elif evaluated is not None and evaluated > now:
+            reason = 'future_sample'
+        elif reason is not None:
+            reason = reason if isinstance(reason, str) and reason in reasons else 'invalid_sample'
+        elif sampled is None or maximum is None or sampled_wall is None:
+            reason = 'missing_sample'
+        elif sampled > now:
+            reason = 'future_sample'
+        elif now - sampled > maximum:
+            reason = 'stale_sample'
+        elif value is None:
+            reason = 'unavailable'
+        sample = {'sampled_at': sampled_wall, 'sampled_monotonic': sampled,
+                  'max_age_seconds': maximum, 'fresh': reason is None, 'reason': reason}
+        return value if reason is None else None, sample
+
     def _sensors(self):
         device = self._device()
         temps, fans = [], []
-        for row in _list(device.get('thermal'), 256):
-            if not isinstance(row, dict):
-                continue
-            celsius = _number(row.get('celsius'), -100, 250)
-            if celsius is None:
-                continue
-            label = _text(row.get('label'), 80) or _text(row.get('channel'), 40) or '温度'
-            driver = str(row.get('driver') or '')
-            name = label
-            if driver:
-                name = label + ' · ' + driver
-            temps.append({'name': name, 'label': label,
-                          'value': celsius, 'temp': celsius,
-                          'max': _number(row.get('max_celsius'), -100, 250),
-                          'crit': _number(row.get('critical_celsius'), -100, 250),
-                          'source': row.get('source'), 'driver': driver,
-                          'channel': row.get('channel'),
-                          'type': 'cpu' if driver in ('coretemp', 'k10temp') else 'other'})
+        if self.monitoring is not None:
+            current, now, regressed = self._temperature_cache()
+            evaluated = _number(current.get('sampled_monotonic'), 0)
+            rows = [row for row in _list(current.get('metrics'), 512) if isinstance(row, dict)
+                    and isinstance(row.get('id'), str) and row['id'].startswith('temperature.')]
+            for row in rows:
+                role = row.get('display_role')
+                if role == 'disk' or row.get('display_source') == 'smart':
+                    continue  # Disk display remains the existing dated disk projection.
+                value, sample = self._temperature_observation(row, now, evaluated, regressed)
+                if sum(other.get('id') == row['id'] for other in rows) != 1:
+                    value, sample = None, {**sample, 'fresh': False, 'reason': 'invalid_sample'}
+                driver = _text(row.get('display_driver'), 80) or ''
+                label = _text(row.get('display_label'), 80) or _text(row.get('label'), 120) or '温度'
+                evidence = _text(row.get('display_evidence'), 40)
+                accepted = {'cpu': ('cpu_driver', 'cpu_label'), 'board': ('board_label',),
+                            'unknown': ('unclassified', 'invalid_metadata', 'display_role_unverified')}
+                if not isinstance(role, str) or evidence not in accepted.get(role, ()):
+                    role, evidence = 'unknown', 'invalid_metadata'
+                temps.append({'name': label + ' · ' + driver if driver else label,
+                              'label': label, 'value': value, 'temp': value,
+                              'max': None, 'crit': _number(row.get('critical_celsius'), 40, 150),
+                              'source': _text(row.get('display_source'), 16), 'driver': driver,
+                              'channel': _text(row.get('display_channel'), 40),
+                              'type': role if role in ('cpu', 'board') else 'other',
+                              'display_role': role, 'display_evidence': evidence, **sample})
+        else:
+            sampled = _stamp(device.get('sampled_at'))
+            sample_age = self.wall_clock() - sampled if sampled is not None else None
+            sensor_fresh = sample_age is not None and 0 <= sample_age <= 3
+            for row in _list(device.get('thermal'), 256):
+                if not isinstance(row, dict):
+                    continue
+                celsius = _number(row.get('celsius'), -100, 250)
+                if celsius is None:
+                    continue
+                label = _text(row.get('label'), 80) or _text(row.get('channel'), 40) or '温度'
+                driver = str(row.get('driver') or '')
+                try:
+                    from device_info import temperature_display_role
+                    role, evidence = temperature_display_role(driver, label, row.get('source', 'hwmon'))
+                except ImportError:
+                    role, evidence = 'unknown', 'display_role_unverified'
+                temps.append({'name': label + ' · ' + driver if driver else label, 'label': label,
+                              'value': celsius if sensor_fresh else None, 'temp': celsius if sensor_fresh else None,
+                              'max': _number(row.get('max_celsius'), -100, 250),
+                              'crit': _number(row.get('critical_celsius'), -100, 250),
+                              'source': row.get('source'), 'driver': driver, 'channel': row.get('channel'),
+                              'type': role if role in ('cpu', 'board', 'disk') else 'other',
+                              'display_role': role, 'display_evidence': evidence,
+                              'sampled_at': sampled, 'max_age_seconds': 3, 'fresh': sensor_fresh,
+                              'reason': None if sensor_fresh else 'missing_sample' if sampled is None
+                              else 'future_sample' if sample_age < 0 else 'stale_sample'})
         for row in _list(device.get('fans'), 128):
             if not isinstance(row, dict):
                 continue
@@ -939,16 +1016,51 @@ class FnmonitorPanel:
                 'reason': None if ok else _text(power.get('reason'), 160) or '未取得 RAPL 实测功耗；不估算整机功耗'}
 
     def _temperature(self, disks):
-        basic = self._basic()
-        cpu = _number(_dict(basic.get('cpu')).get('temp_c'), -40, 200)
-        sensors = self._sensors()
-        if cpu is None:
-            cpu = max([row['value'] for row in sensors['temps'] if row.get('type') == 'cpu'], default=None)
-        board = [row['value'] for row in sensors['temps']
-                 if row.get('type') != 'cpu' and row.get('driver') not in ('coretemp', 'k10temp')]
+        samples, values = {}, {}
+        if self.monitoring is not None:
+            current, now, regressed = self._temperature_cache()
+            metrics = _list(current.get('metrics'), 512)
+            evaluated = _number(current.get('sampled_monotonic'), 0)
+            for role, identity in (('cpu', 'cpu_temperature_c'), ('board', 'board_temperature_c')):
+                matches = [row for row in metrics if isinstance(row, dict) and row.get('id') == identity]
+                row = matches[0] if len(matches) == 1 else {
+                    'reason': 'missing_sample' if not matches else 'invalid_sample'}
+                values[role], samples[role] = self._temperature_observation(row, now, evaluated, regressed)
+            source = 'monitoring_temperature_cache'
+        else:
+            # Old embedding callers have no control-source catalog. Only a
+            # genuinely dated, still-fresh cache can supply a display value.
+            basic, sensors = self._basic(), self._sensors()
+            sampled = _stamp(basic.get('sampled_at') or basic.get('timestamp'))
+            value = _number(_dict(basic.get('cpu')).get('temp_c'), -40, 150)
+            now = self.wall_clock()
+            for role in ('cpu', 'board'):
+                candidates = [row for row in sensors['temps']
+                              if row.get('display_role') == role and row.get('fresh') is True
+                              and _number(row.get('value'), -40, 150) is not None]
+                if role == 'cpu' and value is not None and sampled is not None and 0 <= now - sampled <= 3:
+                    selected = {'value': value, 'sampled_at': sampled, 'fresh': True, 'reason': None}
+                else:
+                    selected = max(candidates, key=lambda row: row['value'], default={})
+                if not selected:
+                    old = [row for row in sensors['temps'] if row.get('display_role') == role]
+                    selected = dict(old[0]) if old else {}
+                    if selected:
+                        selected.update(value=None, fresh=False,
+                                        reason=selected.get('reason') or 'invalid_sample')
+                    if role == 'cpu' and sampled is not None:
+                        selected = {'value': None, 'sampled_at': sampled, 'fresh': False,
+                                    'reason': 'future_sample' if sampled > now else
+                                    'stale_sample' if now - sampled > 3 else 'unavailable'}
+                values[role] = selected.get('value')
+                samples[role] = {'sampled_at': selected.get('sampled_at'), 'sampled_monotonic': None,
+                                 'max_age_seconds': 3, 'fresh': selected.get('fresh') is True,
+                                 'reason': selected.get('reason') if selected else 'missing_sample'}
+            source = 'legacy_temperature_cache'
         disk_temps = [{'name': disk['name'], 'temp': disk['temp']} for disk in disks
                       if _number(disk.get('temp'), -40, 200) is not None]
-        return {'cpu': cpu, 'system': max(board) if board else None, 'disks': disk_temps}
+        return {'cpu': values['cpu'], 'system': values['board'], 'mb': values['board'],
+                'disks': disk_temps, 'samples': samples, 'source': source}
 
     def _disk_io(self):
         rows = []

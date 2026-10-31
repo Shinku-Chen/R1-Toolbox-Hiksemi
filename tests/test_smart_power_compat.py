@@ -178,7 +178,7 @@ class SmartPowerCompatTests(unittest.TestCase):
         self.assertEqual(overview['disk_total'], 25.0)
         self.assertEqual(capacity['results'][0]['status'], 'skipped_standby')
         self.assertEqual(len(self.calls), 4)
-        self.assertTrue(all(argv[1:] == ['-n', 'standby', '-j', '-a', argv[-1]]
+        self.assertTrue(all(argv[1:] == ['-n', 'standby', '--json=o', '-a', argv[-1]]
                             for argv, _ in self.calls))
         self.assertNotIn(smart_fixture.PRIVATE, json.dumps((smart, capacity, overview)))
         self.assertFalse(self.collector._smart_cache)
@@ -434,7 +434,7 @@ class SmartPowerCompatTests(unittest.TestCase):
         self.responses = {name: self.response({'name': 'IDLE', 'ata_value': 128})
                           for name in self.mounts}
         self.collector.refresh_smart(force=True, authorizer=lambda: self.active)
-        self.assertTrue(all(argv[1:3] == ['-j', '-a'] for argv, _ in self.calls))
+        self.assertTrue(all(argv[1:3] == ['--json=o', '-a'] for argv, _ in self.calls))
         self.assertEqual(self.collector.capacity_fill_eligibility('sda'), 'power_state_unverified')
         self.monitor.refresh_capacity_missing(authorizer=lambda: self.active,
             eligibility=self.collector.capacity_fill_eligibility)

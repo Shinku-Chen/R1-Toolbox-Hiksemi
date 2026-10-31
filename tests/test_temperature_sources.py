@@ -211,7 +211,7 @@ class TemperatureTests(unittest.TestCase):
         row = next(row for row in self.sources.snapshot() if row['kind'] == 'disk')
         self.assertEqual(row['status'], 'unavailable')
         self.assertEqual(row['sampled_monotonic'], 100)
-        self.assertEqual(self.calls[0][1:], ['-n', 'standby', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[0][1:], ['-n', 'standby', '--json=o', '-a', '/dev/sda'])
         self.assertEqual(len(self.calls), 1)
 
     def test_standby_check_error_is_not_a_confirmed_sleep_state(self):

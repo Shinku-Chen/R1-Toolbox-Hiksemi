@@ -11,7 +11,8 @@ import re
 import threading
 import time
 
-from device_info import _sysfs_sensor_path, disk_sensor_roots, is_disk_temperature_source, sysfs_sensor_names
+from device_info import (_sysfs_sensor_path, disk_sensor_roots, is_disk_temperature_source,
+                         sysfs_sensor_names, temperature_display_role)
 
 CPU_DRIVERS = frozenset(('coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'cpu-thermal'))
 CPU_ZONE_TYPES = frozenset(('x86_pkg_temp', 'cpu-thermal', 'cpu_thermal', 'cpu', 'soc_thermal'))
@@ -75,11 +76,23 @@ class TemperatureSources:
         return prefix + ':' + hashlib.sha256(value.encode()).hexdigest()[:24]
 
     @staticmethod
-    def _row(identity, label, kind, temperature, sampled, max_age, critical=None, status=None):
-        return {'id': identity, 'label': label, 'kind': kind, 'temperature_c': temperature,
-                'status': status or ('ok' if temperature is not None else 'unavailable'),
-                'sampled_monotonic': sampled, 'max_age_seconds': max_age,
-                'critical_celsius': critical}
+    def _row(identity, label, kind, temperature, sampled, max_age, critical=None, status=None,
+             *, display=('unknown', 'unclassified'), display_driver=None, display_label=None,
+             display_channel=None, display_source=None):
+        """Attach existing sysfs display metadata without changing control fields.
+
+        SMART rows omit the view fields: a cached control source must not add a
+        new device/path identity channel to the general sensor catalog.
+        """
+        row = {'id': identity, 'label': label, 'kind': kind, 'temperature_c': temperature,
+               'status': status or ('ok' if temperature is not None else 'unavailable'),
+               'sampled_monotonic': sampled, 'max_age_seconds': max_age,
+               'critical_celsius': critical,
+               'display_role': display[0], 'display_evidence': display[1]}
+        if display_source is not None:
+            row.update(display_driver=display_driver, display_label=display_label,
+                       display_channel=display_channel, display_source=display_source)
+        return row
 
     def _read_sysfs(self, now):
         rows = []
@@ -106,7 +119,10 @@ class TemperatureSources:
                 identity = self._id('sysfs', physical, driver, channel)
                 rows.append(self._row(identity, driver + ' · ' + label, kind, temperature,
                                       now if temperature is not None else None, SYSFS_MAX_AGE,
-                                      self._temperature(folder / (channel + '_crit'), critical=True)))
+                                      self._temperature(folder / (channel + '_crit'), critical=True),
+                                      display=temperature_display_role(driver, label),
+                                      display_driver=driver, display_label=label,
+                                      display_channel=channel, display_source='hwmon'))
         base = self.sys_root / 'class/thermal'
         for name in sysfs_sensor_names(base, r'thermal_zone\d+', self.sys_root):
             folder = base / name
@@ -126,7 +142,10 @@ class TemperatureSources:
                         critical.append(value)
             rows.append(self._row(self._id('thermal', self._physical(folder), driver, 'temp'),
                                   driver, kind, temperature, now if temperature is not None else None,
-                                  SYSFS_MAX_AGE, min(critical) if critical else None))
+                                  SYSFS_MAX_AGE, min(critical) if critical else None,
+                                  display=temperature_display_role(driver, driver, 'thermal'),
+                                  display_driver='thermal', display_label=driver,
+                                  display_channel=name, display_source='thermal'))
         return rows
 
     @staticmethod
@@ -188,7 +207,8 @@ class TemperatureSources:
                 temperature = None
             row = self._row(identity, '磁盘 · ' + (user_name or model or '存储设备')[:128] + suffix, 'disk', temperature,
                             sampled if type(sampled) in (int, float) and 0 <= sampled <= now and math.isfinite(sampled) else None,
-                            SMART_MAX_AGE, _number(item.get('temperature_critical_c'), minimum=40), status)
+                            SMART_MAX_AGE, _number(item.get('temperature_critical_c'), minimum=40), status,
+                            display=temperature_display_role('smart', '', 'smart'))
             rows.append(row)
             active.add(identity)
             if identity not in self.known_disks and len(self.known_disks) >= 256:

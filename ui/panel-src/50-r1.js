@@ -30,6 +30,96 @@ window.panelNetworkAggregate = (overview, field) => {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 };
 
+const r1NetworkRate = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+/** null 是明确缺测；undefined 才表示旧后端没有 canonical 合同。 */
+function r1NetworkAggregate(o) {
+  const rates = ['rx_rate', 'tx_rate'].map(field => window.panelNetworkAggregate(o, field));
+  return rates.every(value => value === undefined) ? null : rates;
+}
+/** 原生 feed 已按快照时间去重；仅补它因网口显示过滤而漏掉的 canonical 点。 */
+const r1NetworkFeed = feed;
+feed = function (o) {
+  const added = r1NetworkFeed(o), rates = r1NetworkAggregate(o);
+  if (added && rates && !nets(o).length) {
+    const ts = +o.ts || Date.now() / 1000;
+    rates.forEach((value, index) => { if (value !== null) push(S.live[index ? 'tx' : 'rx'], [ts, value]); });
+  }
+  return added;
+};
+const r1NetworkMetrics = MODS.metrics.update;
+MODS.metrics.update = function (o, m) {
+  r1NetworkMetrics.call(this, o, m);
+  const rates = r1NetworkAggregate(o);
+  if (!rates || nets(o).length) return;
+  dnumU(m.x.rxV, m.x.rxU, rates[0], F.rate); dnumU(m.x.txV, m.x.txU, rates[1], F.rate);
+  setText(m.x.netSt, rates.every(value => value !== null) ? (rates[0] + rates[1] < 10240 ? '空闲' : '活跃') : '未知');
+};
+const r1NetworkUpdate = MODS.network.update;
+MODS.network.update = function (o, m) {
+  r1NetworkUpdate.call(this, o, m);
+  if (!o) return;
+  const rates = r1NetworkAggregate(o);
+  if (!m.r1Rates) {
+    m.r1Rates = mount('<p class="sub" data-ref="r1NetworkRates"></p>');
+    m.x.ifs.before(m.r1Rates);
+  }
+  m.r1Rates.hidden = !rates;
+  if (rates) setText(m.r1Rates, `已计网口速率 · ↓ ${F.rateStr(rates[0])} · ↑ ${F.rateStr(rates[1])}`);
+  nets(o).forEach((row, index) => {
+    ['rx', 'tx'].forEach(field => {
+      if (r1NetworkRate(row[field + '_rate']) === null)
+        tween(m.x[field + index], null, value => setText(m.x[field + index], '--'));
+    });
+    if (r1NetworkRate(row.rx_rate) === null || r1NetworkRate(row.tx_rate) === null) m.x['uw' + index].hidden = true;
+  });
+};
+const r1NetworkSheet = SHEETS.net.build;
+SHEETS.net.build = function (body, arg, context) {
+  const update = r1NetworkSheet.call(this, body, arg, context);
+  return o => {
+    update(o);
+    // 流量累计列表没有当前速率；网口明细与总览统一读取同一 overview。
+    const rows = (o.net || []).filter(row => row.iface !== 'lo');
+    setHTML(body.querySelector('[data-ref="ifs"]'), rows.length ? kvHTML(rows.map(row => [
+      esc(row.iface) + (VIRT.test(row.iface) ? ' <span class="faint">虚拟</span>' : ''),
+      `↓ ${F.rateStr(r1NetworkRate(row.rx_rate))} · ↑ ${F.rateStr(r1NetworkRate(row.tx_rate))}`
+        + `<div class="sub">累计 ↓ ${F.bytesStr(row.rx_bytes)} · ↑ ${F.bytesStr(row.tx_bytes)}`
+        + (+row.rx_drop || +row.tx_drop ? ` · <span class="st-warn">丢包 ${esc(row.rx_drop || 0)} / ${esc(row.tx_drop || 0)}</span>` : '')
+        + (+row.rx_errs || +row.tx_errs ? ` · <span class="st-warn">错包 ${esc(row.rx_errs || 0)} / ${esc(row.tx_errs || 0)}</span>` : '') + '</div>',
+    ])) : `<div class="card pad">${emptyHTML('没有网口数据')}</div>`);
+  };
+};
+
+/** A missing board reading must not be replaced with a CPU or generic zone. */
+function r1TemperatureNote(host, overview) {
+  if (!host) return;
+  const missing = overview && overview.temp && overview.temp.system === null;
+  let note = host.querySelector(':scope > [data-r1-temperature-note]');
+  if (!note && missing) {
+    note = document.createElement('p');
+    note.className = 'sub'; note.dataset.r1TemperatureNote = '';
+    note.textContent = '主板温度暂无有效读数；CPU 或未确认的热区不会代替主板测点。其他测点可在“全部传感器”查看。';
+    host.appendChild(note);
+  }
+  if (note) note.hidden = !missing;
+}
+const r1TemperatureTrends = MODS.trends.update;
+MODS.trends.update = function (o, m) {
+  r1TemperatureTrends.call(this, o, m);
+  const chart = m.x && m.x['ch-temp'];
+  r1TemperatureNote(chart && chart.parentElement, o);
+};
+const r1TemperatureModule = MODS.thermal.update;
+MODS.thermal.update = function (o, m) {
+  r1TemperatureModule.call(this, o, m);
+  r1TemperatureNote(m.x && m.x.tl && m.x.tl.parentElement, o);
+};
+const r1TemperatureSheet = SHEETS.temp.build;
+SHEETS.temp.build = function (body, arg, context) {
+  const update = r1TemperatureSheet.call(this, body, arg, context);
+  return o => { update(o); r1TemperatureNote(body, o); };
+};
+
 const R1 = {
   st: null, loading: false,
   async load() {

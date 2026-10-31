@@ -98,6 +98,8 @@ python tools/demo/run.py --screen-port 28731 --web-port 28732  # 本地假 NAS �
 node tests/check_histor_bridge.cjs
 node tests/check_interactions.cjs
 node tests/check_web_config.cjs
+node tests/check_network_curves.cjs      # 真实采集、聚合与网页网络曲线
+node tests/check_temperature_curves.cjs  # 同源温度缓存、历史与网页曲线
 node tests/check_api_management.cjs
 node tests/check_service_settings.cjs
 python tools/boot-once/test_runner.py

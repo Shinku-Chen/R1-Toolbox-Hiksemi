@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -62,6 +63,66 @@ _SMART_POWER_ATA_VALUES = {
 }
 _SMART_NON_STANDBY = frozenset(('ACTIVE', 'IDLE', 'IDLE_A', 'IDLE_B', 'IDLE_C', 'ACTIVE OR IDLE'))
 _SMART_STANDBY = frozenset(('SLEEP', 'STANDBY', 'STANDBY_Y'))
+# Release sources 7.0--7.4 share this --json=o / ATA drive_info print contract.
+_SMART_LEGACY_OUTPUT_VERSIONS = frozenset((7, minor) for minor in range(5))
+_SMART_UNSAFE_POWER = re.compile(
+    r'(?:failed|unable|unsupported|unknown|not[\s_-]+supported|not[\s_-]+implemented).*?(?:power|standby|sleep)'
+    r'|(?:power|standby|sleep).*?(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|cannot|failed|ignoring|ignored)'
+    r'|\bignor(?:ing|ed)\s+(?:the\s+)?-n\b', re.I)
+
+
+def _smart_private_output_power(data):
+    """Discard --json=o text before caching; return only bounded power evidence.
+
+    The audited ATA -n branch prints its original check in drive_info. It is
+    not a second check or a promise that the drive remains in that state.
+    Structured JSON remains independent; unknown text cannot replace it.
+    """
+    proof = {'mode': None, 'legacy': False, 'invalid': False,
+             'unsafe': False, 'standby': False}
+    info = data.get('smartctl', {})
+    if not isinstance(info, dict):
+        raise ValueError('invalid SMART metadata')
+    if 'output' not in info:
+        return proof
+    # Nothing below, including an invalid response, retains this private text.
+    lines = info.pop('output')
+    if (type(lines) is not list or len(lines) > 1024
+            or any(type(line) is not str or len(line) > 1023 for line in lines)
+            or sum(map(len, lines)) > 131072
+            or any(any((ord(char) < 32 and char != '\t') or ord(char) == 127 for char in line) for line in lines)):
+        proof['invalid'] = True
+        return proof
+    candidates, low_power = [], []
+    for line in lines:
+        if _SMART_UNSAFE_POWER.search(line):
+            proof['unsafe'] = True
+        low = re.fullmatch(r'Device is in (SLEEP|STANDBY|STANDBY_Y) mode, exit\([0-9]+\)', line)
+        if low is not None:
+            low_power.append(low[1])
+        if re.match(r'\s*Power\s+mode\b', line, re.I):
+            candidates.append(line)
+    if len(candidates) + len(low_power) != 1:
+        proof['invalid'] = bool(candidates or low_power)
+        return proof
+    if low_power:
+        proof.update(mode=low_power[0], standby=True)
+        return proof
+    # Exact strings emitted by the audited ATA branches, not generic ACTIVE
+    # text (the SCSI implementation can print ACTIVE without an ATA check).
+    match = re.fullmatch(r'Power mode (?:was:   (IDLE(?:_[ABC])?)|is:    (ACTIVE or IDLE))', candidates[0])
+    if match is None:
+        proof['invalid'] = True
+        return proof
+    proof['mode'] = (match[1] or match[2]).upper()
+    version = info.get('version')
+    device = data.get('device')
+    proof['legacy'] = (type(version) is list and len(version) == 2
+                       and all(type(part) is int for part in version)
+                       and tuple(version) in _SMART_LEGACY_OUTPUT_VERSIONS
+                       and info.get('pre_release', False) is False
+                       and isinstance(device, dict) and device.get('protocol') == 'ATA')
+    return proof
 
 
 def _smart_power_mode(value):
@@ -510,6 +571,14 @@ class InsightsCollector:
         for path in sorted((self.sys_root / "class/net").glob("*"))[:128]:
             if not re.fullmatch(r"[A-Za-z0-9_.:@-]{1,64}", path.name):
                 continue
+            # This bonding attribute is a control file, not a missing-counter
+            # interface. Unproven type/lifetime and real interfaces stay unknown.
+            if path.name == "bonding_masters":
+                try:
+                    if stat.S_ISREG(path.lstat().st_mode):
+                        continue
+                except OSError:
+                    pass
             rx, tx = _integer(path / "statistics/rx_bytes"), _integer(path / "statistics/tx_bytes")
             entry = {"name": path.name, "ipv4": [],
                      "mac": (_text(path / "address", 128) or "").strip() or None,
@@ -948,7 +1017,7 @@ class InsightsCollector:
     def _probe_smart(self, name, *, force=False, timeout=3, measurement_only=False, require_power_state=False):
         """The sole SMART command path, behind the shared batch grant and lock."""
         result = self._unknown_smart()
-        arguments = ([] if force else ['-n', 'standby']) + ['-j', '-a', '/dev/' + name]
+        arguments = ([] if force else ['-n', 'standby']) + ['--json=o', '-a', '/dev/' + name]
         command, error = self._run('smartctl', arguments, timeout=timeout)
         status, reason = 'failed', 'command_failed'
         if error:
@@ -961,23 +1030,29 @@ class InsightsCollector:
                 data = json.loads(output)
                 if not isinstance(data, dict):
                     raise ValueError("invalid SMART response")
-                # Keep the complete smartctl JSON in the cache for the on-demand
-                # disk detail endpoint.  It is deliberately not copied into the
-                # frequent overview snapshot; smart() reads this cached copy and
-                # never launches another probe.
+                # --json=o retains existing text locally, without another device
+                # query. Remove it before the very first copy, even for force
+                # or failed results: it can contain paths and serial numbers.
+                private_power = _smart_private_output_power(data)
+                # Owner details keep the sanitized JSON; passive views never
+                # launch another command or receive the private output array.
                 if not measurement_only:
                     result["smart_data"] = copy.deepcopy(data)
                 messages = data.get("smartctl", {}).get("messages", [])
                 notes = " ".join(str(entry.get("string", "")) for entry in messages if isinstance(entry, dict))
-                power, invalid_power = _smart_power_mode(data.get("power_mode", {}))
-                standby = bool(power in _SMART_STANDBY
+                structured_power = data.get("power_mode", {})
+                power, invalid_power = _smart_power_mode(structured_power)
+                if private_power['mode'] is not None and power is not None and private_power['mode'] != power:
+                    private_power['invalid'] = True
+                if (power is None and structured_power == {} and not invalid_power and not private_power['invalid']
+                        and private_power['legacy']):
+                    power = private_power['mode']
+                standby = not private_power['invalid'] and bool(power in _SMART_STANDBY
+                               or private_power['standby']
                                or re.search(r'\b(?:device|disk)\s+is\s+in\s+(?:standby|sleep)\s+mode\b', notes, re.I))
-                unsafe_power = not force and bool(invalid_power or re.search(
-                    r'\b(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|failed|unavailable)\b', power or '', re.I) or re.search(
-                    r'(?:failed|unable|unsupported|unknown|not[\s_-]+supported|not[\s_-]+implemented).*?(?:power|standby|sleep)'
-                    r'|(?:power|standby|sleep).*?(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|cannot|failed|ignoring|ignored)'
-                    r'|\bignor(?:ing|ed)\s+(?:the\s+)?-n\b',
-                    notes + ' ' + (power or ''), re.I))
+                unsafe_power = not force and bool(invalid_power or private_power['unsafe'] or re.search(
+                    r'\b(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|failed|unavailable)\b', power or '', re.I)
+                    or _SMART_UNSAFE_POWER.search(notes + ' ' + (power or '')))
                 result["standby"] = True if standby else None
                 if standby:
                     status, reason = 'skipped_standby', 'standby'
@@ -1031,7 +1106,7 @@ class InsightsCollector:
                     status, reason = 'unavailable', 'power_mode_unverified'
                     result = self._unknown_smart()
                 if require_power_state and not standby:
-                    if power in _SMART_NON_STANDBY and status == 'refreshed':
+                    if power in _SMART_NON_STANDBY and not private_power['invalid'] and status == 'refreshed':
                         # This explicit parser proof, never bool(None), is the
                         # ordinary batch's non-standby capacity prerequisite.
                         result['standby'] = False

@@ -31,7 +31,7 @@ class SmartVisibleRefreshTests(unittest.TestCase):
         self.behavior = (0, self.active_response())
         result = self.visible()
         self.assertEqual(len(self.calls), 2)
-        self.assertEqual(self.calls[-1][0][1:], ['-n', 'standby', '-j', '-a', '/dev/sda'])
+        self.assertEqual(self.calls[-1][0][1:], ['-n', 'standby', '--json=o', '-a', '/dev/sda'])
         self.assertFalse(result['force'])
         self.assertEqual(self.collector._smart_cache, original)
         current = self.collector.smart_cached('sda')

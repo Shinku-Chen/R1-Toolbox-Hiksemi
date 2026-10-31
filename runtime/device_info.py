@@ -366,6 +366,41 @@ def is_disk_temperature_source(folder, driver, sys_root, disk_roots=None):
                for path in (physical, device) if path is not None for root in roots)
 
 
+def temperature_display_role(driver, label, source='hwmon'):
+    """Classify existing metadata for display only, never control or identity.
+
+    The fixed evidence code explains a conservative label; channel numbers and
+    generic ACPI/chipset zones do not prove a motherboard measurement. No file
+    or hardware reads are performed here.
+    """
+    values = (driver, label, source)
+    if any(not isinstance(value, str) or len(value) > 256
+           or any(ord(char) < 32 or ord(char) == 127 for char in value)
+           for value in values):
+        return 'unknown', 'invalid_metadata'
+    driver, label, source = (value.strip().casefold() for value in values)
+    if source not in ('hwmon', 'thermal', 'smart'):
+        return 'unknown', 'invalid_metadata'
+    if source == 'smart':
+        return 'disk', 'smart_cache'
+    if driver in ('disk', 'nvme', 'drivetemp'):
+        return 'disk', 'disk_driver'
+    if driver in ('coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'cpu-thermal',
+                  'x86_pkg_temp', 'cpu', 'soc_thermal', 'tcpu_pci'):
+        return 'cpu', 'cpu_driver'
+    if re.fullmatch(r'(?:package(?: id)?(?: [0-9]+)?|core(?: [0-9]+)?|tcpu_pci|'
+                    r'cpu(?: temperature| temp)?(?: [0-9]+)?)', label):
+        return 'cpu', 'cpu_label'
+    # These zones are not a board location, even if a generic label says System.
+    if source == 'thermal' or driver.startswith(('acpitz', 'int340', 'pch')):
+        return 'unknown', 'unclassified'
+    board_driver = bool(re.fullmatch(r'(?:it87[0-9]{0,2}|nct67[0-9]{2}|nct668[367]|'
+                                    r'w83627(?:ehf|hf)|w83781d|f718(?:82fg|08e))', driver))
+    if board_driver and label in ('system', 'motherboard', 'systin'):
+        return 'board', 'board_label'
+    return 'unknown', 'unclassified'
+
+
 def _sensors(reader, sys):
     thermal, fans = [], []
     base = sys / "class/hwmon"
@@ -378,9 +413,12 @@ def _sensors(reader, sys):
                         else sysfs_sensor_names(root, r"temp\d+_input", sys))
         for attribute in temperatures:
             channel = attribute[:-6]
+            label = reader.text(root / (channel + "_label"), 128) or channel
+            display_role, display_evidence = temperature_display_role(driver, label)
             thermal.append({
                 "id": f"{name}:{channel}", "driver": driver, "channel": channel,
-                "label": reader.text(root / (channel + "_label"), 128) or channel,
+                "label": label,
+                "display_role": display_role, "display_evidence": display_evidence,
                 "celsius": reader.number(root / attribute, -100, 250, 1000),
                 "max_celsius": reader.number(root / (channel + "_max"), -100, 250, 1000),
                 "critical_celsius": reader.number(root / (channel + "_crit"), -100, 250, 1000),
@@ -411,8 +449,10 @@ def _sensors(reader, sys):
         driver = (reader.text(driver_path, 128) if driver_path is not None else None) or name
         if is_disk_temperature_source(root, driver, sys, disk_roots):
             continue
+        display_role, display_evidence = temperature_display_role(driver, driver, 'thermal')
         thermal.append({"id": name, "driver": "thermal", "channel": name,
                         "label": driver,
+                        "display_role": display_role, "display_evidence": display_evidence,
                         "celsius": reader.number(root / "temp", -100, 250, 1000),
                         "max_celsius": None, "critical_celsius": None, "source": "thermal"})
     return thermal[:_ITEM_LIMIT], fans[:_ITEM_LIMIT]

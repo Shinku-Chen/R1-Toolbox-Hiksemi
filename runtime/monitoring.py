@@ -32,7 +32,8 @@ DEFAULTS = {"history_enabled": True, "retention_days": 30, "traffic_exclude_virt
 META = {
     "cpu_usage_percent": ("CPU 使用率", "%"), "memory_usage_percent": ("内存使用率", "%"),
     "rx_bytes_per_sec": ("已计网口接收速率", "B/s"), "tx_bytes_per_sec": ("已计网口发送速率", "B/s"),
-    "cpu_temperature_c": ("CPU 最高温度", "°C"), "disk_temperature_c": ("硬盘最高温度", "°C"),
+    "cpu_temperature_c": ("CPU 最高温度", "°C"), "board_temperature_c": ("主板最高温度", "°C"),
+    "disk_temperature_c": ("硬盘最高温度", "°C"),
     "cpu_package_w": ("CPU 封装功耗 · RAPL", "W"),
     "disk_read_bytes_per_sec": ("物理磁盘读取速率", "B/s"),
     "disk_write_bytes_per_sec": ("物理磁盘写入速率", "B/s"),
@@ -68,6 +69,65 @@ def fresh(snapshot, stamp, maximum):
         return 0 <= stamp - sampled <= maximum
     except (TypeError, ValueError, AttributeError, OverflowError):
         return False
+
+
+def temperature_observation(row, now, clock_regressed=False):
+    """Preserve the source's measurement clock; evaluating never renews it.
+
+    Rejected but genuine times explain stale/future samples. Wall dates are
+    separately bound to the first valid observation, never recalculated here.
+    Reasons are fixed enums; labels and source failures are never copied here.
+    """
+    sampled = number(row.get("sampled_monotonic"), 0)
+    maximum = number(row.get("max_age_seconds"), 0, 120)
+    result = {"value": None, "sampled_monotonic": sampled,
+              "max_age_seconds": maximum, "sampled_at": None,
+              "reason": "missing_sample"}
+    if clock_regressed:
+        result["reason"] = "clock_regressed"
+    elif sampled is None or maximum is None:
+        if (row.get("sampled_monotonic") is not None and sampled is None
+                or row.get("max_age_seconds") is not None and maximum is None):
+            result["reason"] = "invalid_sample"
+    elif sampled > now:
+        result["reason"] = "future_sample"
+    else:
+        if now - sampled > maximum:
+            result["reason"] = "stale_sample"
+        elif row.get("status") != "ok":
+            result["reason"] = "unavailable"
+        else:
+            value = number(row.get("temperature_c"), -40, 150)
+            result.update(value=value, reason=None if value is not None else "invalid_sample")
+    return result
+
+
+def temperature_display(row, role):
+    """Project existing display metadata only; never copy a source row whole."""
+    result = {"display_role": role if role in ("cpu", "board", "disk", "unknown") else "unknown",
+              "critical_celsius": number(row.get("critical_celsius"), 40, 150)}
+    for field in ("display_driver", "display_channel", "display_source", "display_evidence"):
+        value = row.get(field)
+        result[field] = value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:@-]{1,64}", value) else None
+    value = row.get("display_label")
+    result["display_label"] = (value if isinstance(value, str) and 0 < len(value) <= 120
+                               and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+                               and not value.startswith(("/", "\\"))
+                               and not re.match(r"^[A-Za-z]:[\\/]", value) else None)
+    return result
+
+
+def aggregate_temperature(candidates):
+    """Use an actual winning row; equal readings keep the older source time."""
+    available = [row for row in candidates if row["value"] is not None]
+    if available:
+        return dict(min(available, key=lambda row: (-row["value"], row["sampled_monotonic"])))
+    timed = [row for row in candidates if row["sampled_monotonic"] is not None]
+    if timed:
+        return dict(min(timed, key=lambda row: row["sampled_monotonic"]))
+    return dict(candidates[0]) if candidates else {
+        "value": None, "sampled_monotonic": None, "max_age_seconds": None,
+        "sampled_at": None, "reason": "missing_sample"}
 
 
 def validate_settings(changes, previous):
@@ -114,6 +174,8 @@ class MonitoringService:
         self.next_flush, self.next_db_retry = 0, 0
         self.traffic_loaded, self.traffic_partial = False, True
         self.last_wall, self.last_metrics, self.last_report = None, {}, {}
+        self._temperature_clock_high_water = None
+        self._temperature_anchors, self._temperature_anchor_epoch = {}, 0
         self.traffic_cache = {"available": False, "periods": {}, "interfaces": [], "totals": {"today": None, "month": None},
                               "coverage": "observed_counter_deltas", "partial": True, "reason": "等待真实计数差分"}
         self.alerts_cache = {"active": [], "events": [], "smart_observations": []}
@@ -278,6 +340,37 @@ class MonitoringService:
         except (TypeError, ValueError):
             return False
 
+    def _temperature_date(self, identity, context, observation, now, wall, previous_now, epoch):
+        """One bounded source-generation anchor, independent of display grouping.
+
+        A wall-clock correction cannot move an already dated measurement. A
+        newly seen backfilled/stale sample has no proven old wall date; wait
+        for a new valid source sample instead of making that date up.
+        """
+        result = dict(observation)
+        with self.lock:
+            if epoch != self._temperature_anchor_epoch or self.stopped.is_set():
+                return {**result, "value": None, "sampled_at": None, "reason": "unavailable"}
+            if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", identity):
+                return result
+            previous = self._temperature_anchors.get(identity)
+            if previous is not None and previous["context"] != context:
+                self._temperature_anchors.pop(identity, None)
+                previous = None
+            if result["reason"] in ("missing_sample", "invalid_sample", "future_sample", "clock_regressed"):
+                return result
+            sampled = result["sampled_monotonic"]
+            if previous is not None and previous["sampled_monotonic"] == sampled:
+                result["sampled_at"] = previous["sampled_at"]
+            elif (result["value"] is not None and wall is not None
+                  and (previous_now is None or sampled > previous_now)):
+                dated = number(wall - (now - sampled), 0)
+                if dated is not None:
+                    self._temperature_anchors[identity] = {"context": context,
+                        "sampled_monotonic": sampled, "sampled_at": dated}
+                    result["sampled_at"] = dated
+            return result
+
     def _traffic_sample(self, interfaces, stamp):
         boot = (self._read(self.proc / "sys/kernel/random/boot_id", 128, self.proc) or "").strip()
         if not re.fullmatch(r"[0-9a-fA-F-]{16,64}", boot):
@@ -427,6 +520,8 @@ class MonitoringService:
     def sample_once(self):
         """One fixtureable sample. Production calls this only from our worker."""
         with self.worker_lock:
+            with self.lock:
+                temperature_epoch = self._temperature_anchor_epoch
             now, stamp = self.clock(), int(self.wall_clock())
             if self.settings["history_enabled"] and self.db is None and now >= self.next_db_retry:
                 self.next_db_retry = now + 30
@@ -448,9 +543,26 @@ class MonitoringService:
                 sources = self.sources.snapshot() or []
             except Exception:
                 sources = []
+            # Sources may read fresh sysfs data during snapshot(). Comparing
+            # those readings to the clock taken before that call rejects them
+            # as future samples every time the one-second source cache rolls.
+            temperature_now = number(self.clock(), 0)
+            temperature_wall = number(self.wall_clock(), 0)
+            high_water = self._temperature_clock_high_water
+            clock_regressed = (temperature_now is None or temperature_now < now
+                               or high_water is not None and temperature_now < high_water)
+            clocks = [value for value in (number(now, 0), temperature_now, high_water) if value is not None]
+            self._temperature_clock_high_water = max(clocks) if clocks else None
             insight = insight if isinstance(insight, dict) else {}
             basic = basic if isinstance(basic, dict) else {}
             sources = sources if isinstance(sources, list) else []
+            source_ids = {row.get("id") for row in sources[:128] if isinstance(row, dict)
+                          and isinstance(row.get("id"), str)
+                          and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", row["id"])}
+            with self.lock:
+                if temperature_epoch == self._temperature_anchor_epoch:
+                    self._temperature_anchors = {identity: value for identity, value in self._temperature_anchors.items()
+                                                 if identity in source_ids}
             system = insight.get("system", {})
             system = system if isinstance(system, dict) else {}
             memory = system.get("memory", {})
@@ -465,23 +577,53 @@ class MonitoringService:
                     if values[key] is None:
                         values[key] = number(value, 0, 100)
             meta = dict(META)
-            temperatures = {"cpu": [], "disk": []}
+            temperatures = {"cpu": [], "board": [], "disk": []}
+            unclassified_board = []
+            temperature_metrics = {}
+            independent_temperatures = []
             for row in sources[:128]:
-                if not isinstance(row, dict) or row.get("status") != "ok":
+                if not isinstance(row, dict):
                     continue
-                value = number(row.get("temperature_c"), -40, 150)
-                sampled = number(row.get("sampled_monotonic"), 0)
-                age = number(row.get("max_age_seconds"), 0, 120)
-                if value is None or sampled is None or age is None or not 0 <= now - sampled <= age:
-                    continue
-                if row.get("kind") in temperatures:
-                    temperatures[row["kind"]].append(value)
+                observation = temperature_observation(row, temperature_now, clock_regressed)
+                # Display classification never changes the control kind/ID.
+                # Legacy CPU/disk rows remain compatible; board is opt-in
+                # evidence from TemperatureSources, not "everything else".
+                role = row.get("display_role")
+                if "display_role" not in row and row.get("kind") in ("cpu", "disk"):
+                    role = row["kind"]
+                display = temperature_display(row, role)
                 identity = row.get("id")
-                if isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", identity) and len(values) < MAX_METRICS - 15:
-                    key = "temperature." + identity
-                    values[key], meta[key] = value, (label(row.get("label", identity)), "°C")
-            for kind, key in (("cpu", "cpu_temperature_c"), ("disk", "disk_temperature_c")):
-                values[key] = max(temperatures[kind]) if temperatures[kind] else None
+                source_label = label(row.get("label", identity))
+                context = (row.get("kind") if isinstance(row.get("kind"), str) else None,
+                           source_label, tuple((key, value) for key, value in display.items()
+                                               if key != "critical_celsius"), observation["max_age_seconds"])
+                observation = self._temperature_date(identity, context, observation, temperature_now,
+                                                     temperature_wall, high_water, temperature_epoch)
+                if isinstance(role, str) and role in temperatures:
+                    temperatures[role].append(observation)
+                elif row.get("kind") == "board":
+                    rejected = {**observation, "value": None,
+                                "reason": "display_role_unverified" if observation["value"] is not None
+                                else observation["reason"]}
+                    unclassified_board.append(rejected)
+                if isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", identity):
+                    independent_temperatures.append((identity, source_label, observation, display))
+            # Null diagnostic points must not displace existing valid source
+            # points when the bounded metric budget is full.
+            for identity, source_label, observation, display in sorted(
+                    independent_temperatures, key=lambda entry: entry[2]["value"] is None):
+                if len(values) >= MAX_METRICS - 15:
+                    break
+                key = "temperature." + identity
+                values[key], meta[key] = observation["value"], (source_label, "°C")
+                temperature_metrics[key] = {**observation, **display}
+            for kind, key in (("cpu", "cpu_temperature_c"), ("board", "board_temperature_c"),
+                              ("disk", "disk_temperature_c")):
+                candidates = temperatures[kind]
+                if kind == "board" and not candidates:
+                    candidates = unclassified_board
+                observation = aggregate_temperature(candidates)
+                values[key], temperature_metrics[key] = observation["value"], observation
             interfaces = insight.get("interfaces", [])
             interfaces = interfaces[:128] if isinstance(interfaces, list) and main_fresh else []
             self._traffic_sample(interfaces, stamp)
@@ -546,13 +688,20 @@ class MonitoringService:
                     self.last_smart[identity] = (signature, stamp)
             self.last_smart = {key: value for key, value in list(self.last_smart.items())[-256:]}
             capacities = basic.get("disks", []) if basic_fresh else []
-            self._alerts(values, smart_rows, capacities if isinstance(capacities, list) else [], stamp)
             metrics = [{"id": key, "label": meta.get(key, (key, ""))[0], "unit": meta.get(key, (key, ""))[1],
-                        "value": value, "sampled_at": stamp} for key, value in values.items()][:MAX_METRICS]
+                        "value": value, "sampled_at": stamp, **temperature_metrics.get(key, {})}
+                       for key, value in values.items()][:MAX_METRICS]
             valid = sum(row["value"] is not None for row in metrics)
             traffic = self._traffic_snapshot(stamp)
             with self.lock:
-                self.current = {"metrics": metrics, "power": power, "disk_io": io_rows, "sampled_at": stamp}
+                # Collection can finish after stop/start has revoked its
+                # source generation. Alerts and all public metric caches must
+                # commit on the same side of that lifecycle boundary.
+                if temperature_epoch != self._temperature_anchor_epoch or self.stopped.is_set():
+                    return
+                self._alerts(values, smart_rows, capacities if isinstance(capacities, list) else [], stamp)
+                self.current = {"metrics": metrics, "power": power, "disk_io": io_rows, "sampled_at": stamp,
+                                "sampled_monotonic": temperature_now}
                 self.smart = smart_rows
                 self.traffic_cache = traffic
                 self.alerts_cache = {"active": list(self.active.values()), "events": list(self.events)[-100:],
@@ -560,7 +709,11 @@ class MonitoringService:
                 self.summary = {"status": "critical" if any(row["level"] == "critical" for row in self.active.values()) else "warning" if self.active else "ok" if valid else "unknown",
                     "label": "存在严重告警" if any(row["level"] == "critical" for row in self.active.values()) else "存在需要留意的指标" if self.active else "已采集指标未见告警" if valid else "等待有效数据",
                     "active_alerts": len(self.active), "known_metrics": valid, "unknown_metrics": len(metrics) - valid}
-                self.last_metrics, self.last_wall = {row["id"]: {"value": row["value"], "label": row["label"], "unit": row["unit"]} for row in metrics}, stamp
+                self.last_metrics, self.last_wall = {
+                    row["id"]: {"value": row["value"], "label": row["label"], "unit": row["unit"],
+                                **{key: value for key, value in temperature_metrics.get(row["id"], {}).items()
+                                   if key != "value"}}
+                    for row in metrics}, stamp
                 self.last_report = {"cpu_model": label(system.get("cpu_model") or ""), "uptime_seconds": number(system.get("uptime_seconds"), 0),
                                     "memory_total_bytes": number(memory.get("total_bytes"), 0)}
             if now >= self.next_flush:
@@ -740,6 +893,8 @@ class MonitoringService:
         with self.lock:
             if self.thread is not None and self.thread.is_alive():
                 return self
+            self._temperature_anchor_epoch += 1
+            self._temperature_anchors.clear()
             self.stopped.clear()
             self.thread = threading.Thread(target=self._loop, name="r1-monitoring", daemon=True)
             self.thread.start()
@@ -763,7 +918,10 @@ class MonitoringService:
                 self.db = None
 
     def stop(self):
-        self.stopped.set()
+        with self.lock:
+            self.stopped.set()
+            self._temperature_anchor_epoch += 1
+            self._temperature_anchors.clear()
         if self.thread is not None and self.thread is not threading.current_thread():
             self.thread.join(timeout=3)
         elif self.thread is None:

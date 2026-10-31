@@ -254,7 +254,7 @@ class InsightsTests(unittest.TestCase):
 
     def test_smart_standby_command_never_wakes_disk_and_is_cached(self):
         self.block()
-        args = ["-n", "standby", "-j", "-a", "/dev/sda"]
+        args = ["-n", "standby", "--json=o", "-a", "/dev/sda"]
         self.respond("smartctl", args, {"smartctl": {"messages": [{"string": "Device is in STANDBY mode, exit(2)"}]}}, 2)
         first = self.collector._disks()["items"][0]
         self.assertTrue(first["standby"])
@@ -272,7 +272,7 @@ class InsightsTests(unittest.TestCase):
 
     def test_smart_cached_keeps_full_json_for_detail_endpoint(self):
         self.block()
-        self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], {
+        self.respond("smartctl", ["-n", "standby", "--json=o", "-a", "/dev/sda"], {
             'smart_status': {'passed': True},
             'ata_smart_attributes': {'table': [{
                 'id': 5, 'name': 'Reallocated_Sector_Ct', 'value': 100,
@@ -306,7 +306,7 @@ class InsightsTests(unittest.TestCase):
             data = {"power_mode": {"string": "STANDBY"}}
             if serial is not None:
                 data["serial_number"] = serial
-        self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], data, 2 if standby else 0)
+        self.respond("smartctl", ["-n", "standby", "--json=o", "-a", "/dev/sda"], data, 2 if standby else 0)
 
     def test_disk_names_reuse_current_smart_serial_with_no_sysfs_serial_or_new_probe(self):
         self.block()
@@ -728,7 +728,7 @@ class InsightsTests(unittest.TestCase):
 
     def test_smart_failed_health_is_kept_even_with_nonzero_exit_status(self):
         self.block()
-        self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/sda"], {"smart_status": {"passed": False}, "temperature": {"current": 48}}, 8)
+        self.respond("smartctl", ["-n", "standby", "--json=o", "-a", "/dev/sda"], {"smart_status": {"passed": False}, "temperature": {"current": 48}}, 8)
         disk = self.collector._disks()["items"][0]
         self.assertFalse(disk["health"]["passed"])
         self.assertTrue(disk["smart_available"])
@@ -738,7 +738,7 @@ class InsightsTests(unittest.TestCase):
         self.block("nvme0n1", temp=42000)
         self.block("loop0")
         self.block("dm-0")
-        self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/nvme0n1"], {"nvme_smart_health_information_log": {"temperature": 90, "critical_warning": 0}})
+        self.respond("smartctl", ["-n", "standby", "--json=o", "-a", "/dev/nvme0n1"], {"nvme_smart_health_information_log": {"temperature": 90, "critical_warning": 0}})
         disks = self.collector._disks()["items"]
         self.assertEqual(len(disks), 1)
         self.assertEqual(disks[0]["temp_c"], 90)
@@ -748,7 +748,7 @@ class InsightsTests(unittest.TestCase):
 
     def test_smart_timeout_and_invalid_output_are_explicit(self):
         self.block()
-        key = ("smartctl", "-n", "standby", "-j", "-a", "/dev/sda")
+        key = ("smartctl", "-n", "standby", "--json=o", "-a", "/dev/sda")
         self.responses[key] = subprocess.TimeoutExpired("smartctl", 3)
         receipt = self.collector.refresh_smart(authorizer=lambda: True)
         disk = self.collector._disks()["items"][0]
@@ -1027,7 +1027,7 @@ class InsightsTests(unittest.TestCase):
             entered.set()
             release.wait(timeout=5)
             return 0, json.dumps({"smart_status": {"passed": True}})
-        self.responses[("smartctl", "-n", "standby", "-j", "-a", "/dev/sda")] = slow
+        self.responses[("smartctl", "-n", "standby", "--json=o", "-a", "/dev/sda")] = slow
         self.collector.start()
         refresh = threading.Thread(target=lambda: self.collector.refresh_smart(authorizer=lambda: True), daemon=True)
         refresh.start()
