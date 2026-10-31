@@ -11,8 +11,9 @@ Deliberate limits, matching the project's rules:
 * Unknown readings are ``None`` (the panel prints ``--``), never zero.
 * Power is only reported when RAPL provides a real CPU package reading; there is
   no whole-machine estimate.
-* SMART detail is not probed per request.  The disk list uses the background
-  probe (``smartctl -n standby``) and never wakes a sleeping disk.
+* SMART detail only projects dated explicit-refresh cache. Background sampling
+  and opening pages never run SMART. The manual default requests standby skip;
+  device detection/unsupported power modes may still wake a disk.
 * fnOS-only integrations (iDRAC, RAID cards, the app centre, the self-updater)
   report themselves unavailable instead of pretending to exist.  Weather uses
   Open-Meteo instead of the fnOS weather provider.
@@ -762,6 +763,8 @@ class FnmonitorPanel:
                 'smart_available': bool(item.get('smart_available')),
                 'standby': item.get('standby') if type(item.get('standby')) is bool else None,
                 'smart_status': item.get('smart_status'),
+                'smart_sampled_at': _number(item.get('smart_sampled_at'), 0),
+                'smart_fresh': item.get('smart_fresh') is True,
                 'temperature_critical_c': _number(item.get('temperature_critical_c'), 0, 200),
             })
         return rows
@@ -1340,7 +1343,7 @@ class FnmonitorPanel:
             return {'available': False, 'reason': type(error).__name__}
 
     def smart(self, device, *, include_identity=False):
-        """Disk detail from the background probe; never runs smartctl here."""
+        """Dated manual-cache detail; opening this page never runs smartctl."""
         if not isinstance(device, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,32}', device):
             raise ValueError('设备标识无效')
         for disk in self._disks(include_identity=include_identity):
@@ -1362,7 +1365,9 @@ class FnmonitorPanel:
                         'temp': disk.get('temp'), 'health': disk.get('health'),
                         'standby': disk.get('standby'),
                         'reason': disk.get('health_reason'),
-                        'source': 'background_smartctl',
+                        'source': 'manual_smartctl_cache',
+                        'sampled_at': _number(_dict(cached).get('smart_sampled_at'), 0),
+                        'fresh': _dict(cached).get('smart_fresh') is True,
                         'attributes': detail['attributes'],
                         'nvme_rows': detail['nvme_rows'],
                         'power_on_hours': detail['power_on_hours'],
@@ -1376,17 +1381,17 @@ class FnmonitorPanel:
                         'scsi': detail['scsi'],
                         'manufactured': detail['manufactured'],
                         'raw': detail['raw'],
-                        'note': '页面读取后台 SMART 缓存；完整属性不会为了打开详情而重新探测或唤醒磁盘'}
+                        'note': '页面仅显示有日期的手动 SMART 缓存；过期温度与健康为未知，打开详情不会查询硬盘'}
         return {'ok': False, 'dev': device, 'error': '未找到该硬盘的 SMART 观测'}
 
     def disk_health(self):
-        """Grades for the bay cards, derived from the background SMART probe."""
+        """Grades from fresh explicit SMART cache; no background SMART activity."""
         items, summary = {}, {'ok': 0, 'warn': 0, 'crit': 0, 'unknown': 0}
         stamp = None
         for disk in self._disks():
             grade, detail = 'unknown', ''
             if disk.get('standby'):
-                grade, detail = 'ok', '休眠中'
+                grade, detail = 'unknown', '上次查询因休眠跳过，健康未知'
             elif disk.get('health') == 'FAIL':
                 grade, detail = 'crit', disk.get('health_reason') or 'SMART 未通过'
             elif disk.get('health') == 'PASS':
@@ -1401,12 +1406,13 @@ class FnmonitorPanel:
             key = grade if grade in summary else 'unknown'
             summary[key] += 1
             items[disk['name']] = {'grade': grade, 'detail': detail}
-        sampled = _dict(self._insights().get('disks')).get('sampled_at')
-        stamp = _stamp(sampled) or int(self.wall_clock())
+            sampled = _number(disk.get('smart_sampled_at'), 0)
+            if sampled is not None:
+                stamp = max(stamp or 0, sampled)
         return {'ok': True, 'enabled': True, 'interval_h': 0, 'presets': [],
                 'last_ts': stamp, 'next_ts': None, 'scanning': False,
                 'summary': summary, 'error': '', 'items': items, 'now': self.wall_clock(),
-                'source': 'background_smart'}
+                'source': 'manual_smart_cache'}
 
     def scan_log(self, query=None):
         return {'ok': True, 'items': [], 'keep_ok_days': 0,

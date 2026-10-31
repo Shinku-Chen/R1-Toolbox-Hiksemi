@@ -103,7 +103,7 @@ Build_260907 的当前用户名称应从原厂 `disk_space` 进程的实时空�
 
 - 四块数据盘 `sda`／`sdb`／`sdc`／`sdd` 的 `user_name` 都为空，名称采集报告旧数据库不存在。
 - 网页回退卷标依次是 `NAS-DISK2`、`NAS-DISK3`、`NAS-DISK1`、`NAS-DISK3`；重名不能证明物理身份或海康自定义名称。
-- 四盘 sysfs／udev 采集的序列号为空，已有后台 SMART 原始缓存则都含真实 `serial_number`。
+- 四盘 sysfs／udev 采集的序列号为空，当时已有的后台 SMART 原始缓存则都含真实 `serial_number`。
 - 原厂 `disk_space` 正在运行，R1 确实使用 `restart_disk_space_v1.sh`。
 
 上述结果来自改动前的 `9c2495b`。该版本没有存储 getter 调试入口，不能通过它上传或执行任意代码；当前也没有这台 NAS 的已配置 SSH 通道。不能把静态分析或本地 fixture 测试宣称为实机名称已通过。
@@ -148,7 +148,7 @@ console.log(await response.json());
 
 ## 显式读取完整硬盘序列号
 
-所有者网页的 `/api/overview` 与 `/api/smart?dev=...` 现可显示经过核验的完整 SN。只读取后台已取得的身份缓存并重新检查设备生命周期，不调用原厂空间管理或重新运行 SMART；缺失、冲突、换盘和缓存失效仍为 `null`。已有口令时需要网页登录；首次未设口令的 `open` 模式沿用网页授权。Bearer、开发白名单本身、MCP、公开 v1 以及小屏快照不会因此获得完整 SN。数据覆盖和未接入项见[三端数据覆盖](data-coverage.md)。
+所有者网页的 `/api/overview` 与 `/api/smart?dev=...` 现可显示经过核验的完整 SN。只读取已取得的独立身份缓存并重新检查设备生命周期，后台不再采集 SMART，不调用原厂空间管理或重新运行 SMART；缺失、冲突、换盘和缓存失效仍为 `null`。已有口令时需要网页登录；首次未设口令的 `open` 模式沿用网页授权。Bearer、开发白名单本身、MCP、公开 v1 以及小屏快照不会因此获得完整 SN。数据覆盖和未接入项见[三端数据覆盖](data-coverage.md)。
 
 默认 `storage` 检查和原 `POST /api/dev/storage` 继续只返回序列号摘要。用户明确需要完整序列号时，在已授权的开发窗口使用统一入口 `POST /api/dev/diagnostics`，显式请求：
 

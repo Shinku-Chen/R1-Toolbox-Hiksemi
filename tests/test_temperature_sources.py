@@ -63,6 +63,7 @@ class TemperatureTests(unittest.TestCase):
     def disk(self, name='sda', serial='serial-a', physical='pci0000:00/0000:00:17.0/ata2/host0/target0:0:0/0:0:0:0'):
         folder = self.sys / 'devices' / physical / 'block' / name
         self.write(folder / 'size', 1000000)
+        self.write(folder / 'dev', '8:0')
         self.write(folder / 'queue/rotational', 1)
         self.write(folder / 'device/model', 'Fixture HDD')
         if serial is not None:
@@ -72,7 +73,9 @@ class TemperatureTests(unittest.TestCase):
         link.symlink_to(folder, target_is_directory=True)
         return folder, link
 
-    def collect_disks(self):
+    def collect_disks(self, *, refresh=True):
+        if refresh:
+            self.collector.refresh_smart(authorizer=lambda: True)
         self.collector._publish_integration('disks', self.collector._disks)
         return [row for row in self.sources.snapshot() if row['kind'] == 'disk']
 
@@ -147,7 +150,7 @@ class TemperatureTests(unittest.TestCase):
         self.assertEqual(first['temperature_c'], 40)
         self.assertEqual(first['sampled_monotonic'], 100)
         self.now += 29
-        second = self.collect_disks()[0]
+        second = self.collect_disks(refresh=False)[0]
         self.assertEqual(second['sampled_monotonic'], 100)
         self.assertEqual(len(self.calls), 1)
         self.now += 62
@@ -211,7 +214,7 @@ class TemperatureTests(unittest.TestCase):
         row = self.collect_disks()[0]
         self.assertEqual(row['sampled_monotonic'], 102.5)
         self.now += 29
-        self.assertEqual(self.collect_disks()[0]['sampled_monotonic'], 102.5)
+        self.assertEqual(self.collect_disks(refresh=False)[0]['sampled_monotonic'], 102.5)
         self.assertEqual(len(self.calls), 1)
 
     def test_bad_smart_values_or_missing_sample_time_cannot_control(self):
@@ -226,7 +229,8 @@ class TemperatureTests(unittest.TestCase):
         self.now += 31
         self.collect_disks()
         for timestamp in (None, float('nan'), self.now + 10, True):
-            self.collector._state['disks']['items'][0]['smart_sampled_monotonic'] = timestamp
+            cached = self.collector._smart_cache['sda']
+            self.collector._smart_cache['sda'] = (timestamp, cached[1], cached[2])
             self.assertEqual(self.sources.snapshot()[0]['status'], 'unavailable')
 
     def test_disk_serial_and_physical_fallback_survive_sdx_renumbering(self):
@@ -280,14 +284,17 @@ class TemperatureTests(unittest.TestCase):
         row = self.collect_disks()[0]
         self.assertEqual(row['status'], 'unavailable')
         self.assertIsNone(row['temperature_c'])
-        self.assertEqual(row['sampled_monotonic'], 100)
+        self.assertIsNone(row['sampled_monotonic'])
 
     def test_disk_user_name_updates_label_without_changing_source_or_probing(self):
         item = {'stable_identity': 'serial:' + 'a' * 24, 'model': 'Fixture HDD',
                 'device': '/dev/sda', 'user_name': '测试自定义磁盘',
                 'smart_temperature_c': 35, 'smart_sampled_monotonic': self.now,
                 'smart_status': 'ok'}
-        self.collector._state['disks'] = {'available': True, 'items': [item]}
+        # This exercises catalog formatting with an already validated source;
+        # real InsightsCollector rows separately require a captured lifetime.
+        self.sources.insights = types.SimpleNamespace(snapshot=lambda: {
+            'disks': {'available': True, 'items': [item]}})
         first = self.sources.snapshot()[0]
         self.assertEqual(first['label'], '磁盘 · 测试自定义磁盘 · /dev/sda')
         item['user_name'] = '重命名测试盘'

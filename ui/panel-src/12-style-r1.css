@@ -240,3 +240,22 @@
   .r1-api-meta dd + dt { margin-top: 7px; }
   .r1-api-actions > .btn { flex: 1 1 auto; }
 }
+
+/* 磁盘页：手动刷新 SMART（默认跳过休眠盘，只有点击才请求） */
+.r1-smart-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.r1-smart-head h3 { margin: 0 0 4px; }
+.r1-smart-head .btn { flex: 0 0 auto; }
+.r1-smart-force { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; margin: 12px 0 6px; }
+.r1-smart-force input { margin-top: 3px; flex: none; }
+.r1-smart-force .sub { flex: 1 1 180px; min-width: 0; }
+.r1-smart-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.r1-smart-row { display: grid; grid-template-columns: minmax(52px, 88px) minmax(0, 1fr) minmax(0, 1.4fr) minmax(92px, auto); gap: 8px; align-items: baseline; font-size: 13px; padding-top: 8px; border-top: 1px solid var(--line); }
+.r1-smart-row:first-child { padding-top: 0; border-top: 0; }
+.r1-smart-row strong { font-weight: 600; overflow-wrap: anywhere; }
+.r1-smart-row span { min-width: 0; overflow-wrap: anywhere; }
+.r1-smart-row[data-status="failed"] span:first-of-type,
+.r1-smart-row[data-status="identity_changed"] span:first-of-type { color: var(--orange, inherit); }
+@media (max-width: 520px) {
+  .r1-smart-head .btn { width: 100%; }
+  .r1-smart-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+}

@@ -70,7 +70,7 @@
 
 `disk_dev_smart_get@0x23bab` 仅 19 字节，函数保存参数后直接返回 `0`，不填写输出。因此注册了 `get_smart_info` 不代表具备有效 SMART 读取能力。
 
-`disk_get_self_test_status@0x24842` 在 `0x248ff` 引用 `smartctl -a /dev/%s`，`0x24929` 调用 `popen`。这个 getter 没有休眠保护。Toolbox 仍只使用自己的后台缓存和带 `-n standby` 的采集链；不能为补字段临时调用该接口。
+`disk_get_self_test_status@0x24842` 在 `0x248ff` 引用 `smartctl -a /dev/%s`，`0x24929` 调用 `popen`。这个 getter 没有休眠保护。Toolbox 已停止自动 SMART，仅所有者显式刷新可运行自己的固定命令；普通模式带 `-n standby`，单次强制须确认可能唤盘，不能为补字段临时调用此原厂接口。见 [SMART 按需刷新](smart-refresh.md)。
 
 ## APP 空间管理 REST：`space_manage`
 

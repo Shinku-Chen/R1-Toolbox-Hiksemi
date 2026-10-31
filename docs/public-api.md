@@ -60,7 +60,7 @@ console.log(state.status.cpu, state.fan_policy.channels);
 
 `insights.containers.items` 提供容器 `id`、`name`、`image`、`state`、`status`、`ports`、CPU／内存读数，以及 `protected` 和 `available_actions`。操作数组只说明该次采样下可用的白名单操作，不授予写权限：运行中通常为 `stop`／`restart`，已退出或未启动为 `start`，受保护、暂停、转换中或未知状态为空数组。提交时服务会重新读取当前状态与保护标记，拒绝过期列表中的不适用操作。容器名和端口均为文本，第三方界面应按普通文本显示。
 
-CPU／主板温度与SMART有各自的采样时间和有效期；请求API不会刷新旧温度的寿命。SMART通常约30秒更新，并继续使用`-n standby`。曲线空值必须画为缺口，不应连成一条假连续曲线。
+CPU／主板温度与 SMART 有各自的采样时间和有效期；请求 API 不延长旧温度寿命。SMART 不自动采集，公开 API 只消费所有者显式刷新后至多三十秒且设备身份有效的缓存，缺失／过期为未知；公开接口不能触发普通或强制刷新。曲线空值必须画为缺口，不应连成一条假连续曲线。见 [SMART 按需刷新](smart-refresh.md)。
 
 历史点为`[Unix秒, 数值或null]`，每条序列自带`id`、`label`和`unit`。流量按真实计数器差值累计，首次启动以前没有监测到的时间不补算；重置、重启及接口变化也不应产生负值或巨大跳变。CPU RAPL功率仅表示CPU封装，不作为整机插座功耗。
 

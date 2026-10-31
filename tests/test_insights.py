@@ -81,6 +81,10 @@ class InsightsTests(unittest.TestCase):
 
     def respond(self, program, arguments, body, code=0):
         self.responses[self.response_key(program, arguments)] = (code, body if isinstance(body, str) else json.dumps(body))
+        if program == 'smartctl':
+            # Seed only through the real explicit entry; passive disk reads
+            # below must never be responsible for launching this fake command.
+            self.collector.refresh_smart(authorizer=lambda: True)
 
     def cpu(self, user=100, idle=900):
         self.write(self.proc / "stat", f"cpu {user} 0 0 {idle} 0 0 0 0\ncpu0 {user} 0 0 {idle} 0 0 0 0\n")
@@ -96,6 +100,7 @@ class InsightsTests(unittest.TestCase):
     def block(self, name="sda", temp=None):
         folder = self.sys / "block" / name
         self.write(folder / "size", "1000000")
+        self.write(folder / 'dev', '259:0' if name.startswith('nvme') else '8:0')
         self.write(folder / "device/model", "Fixture disk\n")
         self.write(folder / "queue/rotational", 0 if name.startswith("nvme") else 1)
         if temp is not None:
@@ -244,7 +249,7 @@ class InsightsTests(unittest.TestCase):
         value = self.collector.snapshot()
         self.assertIn("docker", value["containers"]["reason"])
         self.assertIn("virsh", value["vms"]["reason"])
-        self.assertIn("smartctl", value["disks"]["items"][0]["health"]["reason"])
+        self.assertIn("手动", value["disks"]["items"][0]["health"]["reason"])
         self.assertEqual(self.calls, [])
 
     def test_smart_standby_command_never_wakes_disk_and_is_cached(self):
@@ -260,6 +265,8 @@ class InsightsTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.now += 1
         self.collector._disks()
+        self.assertEqual(len(self.calls), 1)
+        self.collector.refresh_smart(authorizer=lambda: True)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.calls[0], (["/fixture/bin/smartctl", *args], 3))
 
@@ -650,8 +657,18 @@ class InsightsTests(unittest.TestCase):
             return data
 
         client.snapshot.side_effect = replace_during_getter
-        self.assertIsNone(self.collector._disks()["items"][0]["user_name"])
+        before = list(self.calls)
+        result = self.collector._disks()
+        self.assertEqual(result['items'], [], 'a changed disk invalidates the complete sampled row')
+        self.assertNotIn('家庭照片', json.dumps(result))
         self.assertEqual(self.collector._disk_serial_cache, {})
+        self.assertEqual(self.collector._disk_name_context, {})
+        self.assertEqual(self.collector._disk_verified_serials, {})
+        client.snapshot.side_effect = None
+        replacement = self.collector._disks()['items'][0]
+        self.assertIsNone(replacement['user_name'])
+        self.assertIsNone(self.collector._disk_verified_serials['sda']['serial'])
+        self.assertEqual(self.calls, before, 'replacement metadata cannot trigger SMART')
 
     def test_diagnostic_final_identity_check_rejects_change_after_serial_read(self):
         folder = self.block()
@@ -732,13 +749,14 @@ class InsightsTests(unittest.TestCase):
         self.block()
         key = ("smartctl", "-n", "standby", "-j", "-a", "/dev/sda")
         self.responses[key] = subprocess.TimeoutExpired("smartctl", 3)
+        receipt = self.collector.refresh_smart(authorizer=lambda: True)
         disk = self.collector._disks()["items"][0]
-        self.assertIn("超时", disk["health"]["reason"])
+        self.assertEqual(receipt['results'][0]['reason'], 'command_timeout')
         self.assertIsNone(disk["temp_c"])
         self.now += 31
         self.responses[key] = (0, "not JSON")
-        disk = self.collector._disks()["items"][0]
-        self.assertIn("无效", disk["health"]["reason"])
+        receipt = self.collector.refresh_smart(authorizer=lambda: True)
+        self.assertEqual(receipt['results'][0]['reason'], 'invalid_response')
 
     def test_docker_status_stats_and_protected_toolbox_are_real_fields(self):
         capability = self.container_list()
@@ -1010,6 +1028,8 @@ class InsightsTests(unittest.TestCase):
             return 0, json.dumps({"smart_status": {"passed": True}})
         self.responses[("smartctl", "-n", "standby", "-j", "-a", "/dev/sda")] = slow
         self.collector.start()
+        refresh = threading.Thread(target=lambda: self.collector.refresh_smart(authorizer=lambda: True), daemon=True)
+        refresh.start()
         self.assertTrue(entered.wait(timeout=1))
         deadline = time.monotonic() + 1
         while not self.collector.snapshot()["timestamp"] and time.monotonic() < deadline:
@@ -1019,6 +1039,7 @@ class InsightsTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 0.1)
         self.assertEqual(value["system"]["cpu_logical_cores"], 1)
         release.set()
+        refresh.join(timeout=1)
 
 
 if __name__ == "__main__":

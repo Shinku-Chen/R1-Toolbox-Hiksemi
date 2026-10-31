@@ -15,7 +15,7 @@
 
 - **概览**：健康结论、时钟、核心指标（CPU／内存／存储／网络／温度）、趋势、
   算力与内存、进程、主机信息，以及 R1 新增的 **小屏与电源** 磁贴。
-- **存储**：存储池用量与每块物理 HDD／SSD／NVMe；原厂当前空间列表通过两个固定只读 getter 取得，结合已有 SMART 缓存严格核对序列号、盘名和端口。海康名称无法确认时沿用 udev 文件系统卷标和 `/drives` 目录名，不能把回退卷标当成自定义名称。SMART 不可用时仍显示容量并标注未读取，盘位详情沿用同一抽屉。设备昵称与主机名分别显示，名称与测点同步；实机验证见 [存储名称](disk-names.md)。
+- **存储**：存储池用量与每块物理 HDD／SSD／NVMe；原厂当前空间列表通过两个固定只读 getter 取得，结合已有 SMART 缓存严格核对序列号、盘名和端口。海康名称无法确认时沿用 udev 文件系统卷标和 `/drives` 目录名，不能把回退卷标当成自定义名称。SMART 不可用或三十秒过期时仍显示容量并标注未知，盘位详情沿用同一抽屉；后台不采集 SMART，仅所有者可显式普通刷新或确认单次强制刷新。设备昵称与主机名分别显示，名称与测点同步；实机验证见 [存储名称](disk-names.md)。
 - **网络**：网口速率、流量统计与容器流量。
 - **应用**：容器列表、资源占用、端口与确认式启停；端口占用查询；内置应用在 R1 上为空。
 - **温度**：温度测点、风扇与电压，R1 新增的 **双路风扇**、**机身灯光**，以及能耗。
@@ -39,18 +39,20 @@ NAS 的 `panel-ui.json`，换设备或清缓存后自动恢复。
 
 | 面板接口 | R1 数据来源 |
 |---|---|
-| `/api/overview`、`/api/system`、`/api/sensors`、`/api/fans` | 指标采样、设备库存、hwmon/thermal、后台 SMART |
+| `/api/overview`、`/api/system`、`/api/sensors`、`/api/fans` | 指标采样、设备库存、hwmon／thermal、显式刷新后的新鲜 SMART 缓存 |
 | `/api/docker`、`/api/ports`、`/api/processes` | 应用、容器与端口采集 |
 | `/api/history`、`/api/export`、`/api/report` | 本地 SQLite 历史与报告 |
 | `/api/traffic`、`/api/power`、`/api/power_stats` | 计数器差值、RAPL 实测（不估算整机功耗） |
-| `/api/hardware`、`/api/gpu`、`/api/disk_health`、`/api/smart` | 设备库存、后台 SMART 缓存；`/api/smart` 返回缓存中的完整属性与原始 JSON，不额外探测 |
+| `/api/hardware`、`/api/gpu`、`/api/disk_health`、`/api/smart` | 设备库存、显式刷新后的新鲜 SMART 缓存；`/api/smart` 仅投影缓存允许属性，不额外探测 |
 | `/api/weather` | Open-Meteo 当前天气；自动定位或用户设置的城市／坐标，不经过 fnOS 天气服务 |
 | `/api/r1` 及 `/api/r1/*` | 双路风扇、灯光、屏幕、电源、统计、登录口令 |
 | `/api/services` 及固定 `/api/services/*` | 所有者管理小屏／MCP 开关和持久化开发窗口，不向 API Token 开放 |
 | `/api/access` 及固定 `/api/access/keys/*` | 所有者管理独立 Token、角色、功能、文件范围、来源规则与审计 |
 
-不会为了打开页面而临时执行 `smartctl`、扫 I²C 或写硬件；SMART 使用后台
-`smartctl -n standby` 缓存，休眠盘不被唤醒；未知读数保持 `null`，面板显示 `--`。
+启动、后台库存、打开页面或详情均不执行 `smartctl`，也不为补字段扫 I²C 或写硬件。
+SMART 温度与健康只读合法且三十秒内的缓存，过期或缺失为 `null`／`--`。
+所有者显式 `POST /api/r1/storage/smart/refresh` 严格接受布尔 `force`；默认待机保护、
+单次强制可能唤盘，均不授予机器 Token 或开发白名单。固定回执与边界见 [SMART 按需刷新](smart-refresh.md)。
 
 fnOS 专有集成（应用中心、iDRAC、阵列卡、巡检自检、面板自更新、外部通知）
 在 R1 上返回明确的“不可用”，不生成占位数据，也不显示对应设置分组。

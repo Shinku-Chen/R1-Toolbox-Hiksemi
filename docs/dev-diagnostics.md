@@ -109,7 +109,7 @@ Docker 候选、文件上下文和协议检查会访问元数据，部分原厂�
 | `serial_sources` | 只列来源标识，例如 `smart_cache`、`smart_identity_cache`、`sysfs:0`；核对通过时追加 `hiksemi_storage_socket`，不导出原始缓存或原厂列表 |
 | `matched` | 当前缓存身份与唯一原厂物理盘记录是否一致；不代表已设置自定义名称，未命名盘仍可核对序列号 |
 
-采集先冻结已有设备生命周期，再使用固定 `get_disk_list;`／`get_space_list;`。序列号只复用相同生命周期的后台 SMART 缓存、已核验的休眠身份缓存，以及已有 sysfs／udev 身份元数据；返回前再次检查生命周期和稳定身份。序列号来源冲突、重复映射、设备拔插或身份改变均返回 `serial:null`，不会拿原厂列表中的另一个序列号补齐。至少一盘核对通过时该来源 `available:true`，否则仍保留逐盘原因，`available:false`。
+采集先冻结已有设备生命周期，再使用固定 `get_disk_list;`／`get_space_list;`。序列号只复用相同生命周期的既有显式 SMART 刷新缓存、已核验的休眠身份缓存，以及已有 sysfs／udev 身份元数据；返回前再次检查生命周期和稳定身份。序列号来源冲突、重复映射、设备拔插或身份改变均返回 `serial:null`，不会拿原厂列表中的另一个序列号补齐。至少一盘核对通过时该来源 `available:true`，否则仍保留逐盘原因，`available:false`。
 
 接口不调用 SMART、不触发后台刷新、不打开块设备或用户文件，不唤醒休眠盘。与 `storage`／旧 `/api/dev/storage` 共用非阻塞存储锁，忙碌返回该项 `409`。不把完整序列号写入默认诊断、公开概览、业务快照或审计；原四项默认快照和 `storage` 的哈希投影不变。
 

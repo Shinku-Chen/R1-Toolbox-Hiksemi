@@ -2292,3 +2292,258 @@ defineModule({
   },
 });
 Poll.add('r1-business', async () => { await R1_BUSINESS.load(); renderNow(); }, 30000, () => S.page === 'apps');
+
+/* ---- 磁盘页：手动刷新 SMART（后台不自动探测） -------------------------------
+   固定合同：POST /api/r1/storage/smart/refresh，请求严格 {force:false|true}。
+   只有点击按钮才发请求；勾选、切换页面、打开详情与定时器都不会触发。
+   页面用内存态保存 busy／回执，DOM 重建或切换磁盘后同步到当前卡片，不重复发请求。
+   成功后只失效并重新 GET 被动缓存（/api/smart），绝不自动再发 SMART 命令。 */
+const R1_SMART_STATUS = {
+  refreshed: '已刷新', skipped_standby: '已跳过（休眠）', failed: '失败',
+  unavailable: '不可用', identity_changed: '身份已变化，未采用',
+};
+const R1_SMART_REASON = {
+  command_unavailable: 'SMART 命令不可用',
+  command_timeout: 'SMART 命令超时',
+  command_failed: 'SMART 命令执行失败',
+  standby: '硬盘处于休眠，已按默认跳过',
+  smart_unavailable: '该硬盘未提供可用的 SMART 数据',
+  smart_unsupported: '该硬盘不支持通用 SMART',
+  invalid_response: 'SMART 返回了无法识别的数据',
+  identity_unverified: '硬盘身份无法确认，未采用结果',
+  identity_changed: '硬盘身份已变化，未采用结果',
+  timeout: '本轮刷新超时，未完成',
+  unavailable: '暂不可用',
+  authorization_denied: '网页登录授权已失效',
+  invalid_parameters: '刷新参数无效',
+  busy: '已有刷新正在进行',
+  stopping: '服务正在停止',
+};
+const R1_SMART_STATE = { busy: false, result: null, error: null, device: null };
+const R1_SMART_MAX_ROWS = 128;
+function r1SmartStatusText(value) { return R1_SMART_STATUS[value] || '未知状态'; }
+function r1SmartReasonText(value) {
+  if (value == null || value === '') return '';
+  return R1_SMART_REASON[value] || '原因未说明';
+}
+function r1SmartStamp(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '未提供时间';
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? '未提供时间' : date.toLocaleString();
+}
+function r1SmartIsStamp(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+/** 严格校验固定回执；任何形状、时间、顺序或 force 不一致都返回 null。 */
+function r1SmartSnapshot(payload, sentForce) {
+  if (!payload || typeof payload !== 'object' || payload.ok !== true) return null;
+  if (typeof payload.force !== 'boolean' || payload.force !== sentForce) return null;
+  if (payload.status !== 'complete' && payload.status !== 'partial') return null;
+  if (!r1SmartIsStamp(payload.started_at) || !r1SmartIsStamp(payload.finished_at)) return null;
+  if (payload.finished_at < payload.started_at) return null;
+  if (!Array.isArray(payload.results) || payload.results.length > R1_SMART_MAX_ROWS) return null;
+  const rows = [], seen = new Set();
+  for (const row of payload.results) {
+    if (!row || typeof row !== 'object') return null;
+    if (typeof row.device !== 'string' || !/^[A-Za-z0-9_.:-]{1,32}$/.test(row.device)) return null;
+    if (seen.has(row.device)) return null;
+    seen.add(row.device);
+    if (!Object.prototype.hasOwnProperty.call(R1_SMART_STATUS, row.status)) return null;
+    if (!Object.prototype.hasOwnProperty.call(row, 'reason')) return null;
+    if (row.reason !== null && (typeof row.reason !== 'string' || row.reason.length > 64)) return null;
+    if (!Object.prototype.hasOwnProperty.call(row, 'sampled_at')) return null;
+    if (row.sampled_at !== null && !r1SmartIsStamp(row.sampled_at)) return null;
+    rows.push({ device: row.device, status: row.status,
+                reason: row.reason == null ? null : row.reason,
+                sampled_at: row.sampled_at == null ? null : row.sampled_at });
+  }
+  return { force: payload.force, status: payload.status,
+           started_at: payload.started_at, finished_at: payload.finished_at, rows };
+}
+function r1SmartCardHTML() {
+  return `<div class="card pad r1-smart" data-ref="r1Smart">
+    <div class="r1-smart-head">
+      <div><h3>刷新 SMART</h3><p class="sub">点击按钮才会读取当前已识别硬盘；默认跳过休眠硬盘。后台不会自动补采。</p></div>
+      <button class="btn" type="button" data-ref="r1SmartGo">刷新 SMART</button>
+    </div>
+    <label class="r1-smart-force"><input type="checkbox" data-ref="r1SmartForce">
+      <span>强制刷新休眠硬盘</span>
+      <span class="sub">可能唤醒硬盘；默认不勾选，刷新结束后自动复位。</span>
+    </label>
+    <p class="sub r1-smart-snapshot" data-ref="r1SmartSnapshot">手动快照，非实时；健康与属性表示采样时状态 · 采样时间未知</p>
+    <p class="sub" data-ref="r1SmartState" role="status" aria-live="polite">尚未刷新。后台不再自动探测 SMART。</p>
+    <div class="r1-smart-rows" data-ref="r1SmartRows" hidden></div>
+  </div>`;
+}
+function r1SmartBody(card, snapshot) {
+  const skipped = snapshot.rows.filter(row => row.status === 'skipped_standby').length;
+  const problems = snapshot.rows.filter(row => ['failed', 'unavailable', 'identity_changed'].includes(row.status)).length;
+  let text = (snapshot.force ? '强制刷新' : '默认跳过休眠') + ' · 完成于 ' + r1SmartStamp(snapshot.finished_at);
+  if (snapshot.status === 'partial') text += ' · 部分硬盘未完成';
+  if (skipped) text += ' · 跳过 ' + skipped + ' 块休眠硬盘';
+  if (problems) text += ' · ' + problems + ' 块异常';
+  return { text, html: snapshot.rows.length
+    ? snapshot.rows.map(row => `<div class="r1-smart-row" data-status="${esc(row.status)}" data-device="${esc(row.device)}"><strong>${esc(row.device)}</strong><span>${esc(r1SmartStatusText(row.status))}</span><span class="sub">${esc(r1SmartReasonText(row.reason) || '—')}</span><span class="sub">${esc(r1SmartStamp(row.sampled_at))}</span></div>`).join('')
+    : '<p class="sub">本次回执没有硬盘条目。</p>' };
+}
+/** 把内存态同步到当前挂载的卡片；DOM 重建或切换磁盘不会丢结果。 */
+function r1SmartSync(host) {
+  if (!host) return;
+  const button = host.querySelector('[data-ref="r1SmartGo"]');
+  const force = host.querySelector('[data-ref="r1SmartForce"]');
+  const state = host.querySelector('[data-ref="r1SmartState"]');
+  const rows = host.querySelector('[data-ref="r1SmartRows"]');
+  if (!button || !force || !state || !rows) return;
+  button.disabled = R1_SMART_STATE.busy;
+  force.disabled = R1_SMART_STATE.busy;
+  /* 用固定签名避免「写入→观察→再写入」的递归；同签名不重复改 DOM。 */
+  const busy = R1_SMART_STATE.busy;
+  const view = busy
+    ? { text: '正在刷新当前硬盘…', html: null }
+    : R1_SMART_STATE.error
+      ? { text: R1_SMART_STATE.error + (rows.hidden ? '' : ' 下方为上一次结果，未重新采集。'), html: null }
+      : R1_SMART_STATE.result ? r1SmartBody(host, R1_SMART_STATE.result) : null;
+  const signature = JSON.stringify([busy, view && view.text, view && view.html]);
+  if (host.dataset.smartSignature === signature) return;
+  host.dataset.smartSignature = signature;
+  const label = busy ? '刷新中…' : '刷新 SMART';
+  if (button.textContent !== label) setText(button, label);
+  if (busy) button.setAttribute('aria-busy', 'true'); else button.removeAttribute('aria-busy');
+  if (!view) return;
+  if (state.textContent !== view.text) setText(state, view.text);
+  if (view.html !== null) {
+    if (rows.hidden) rows.hidden = false;
+    setHTML(rows, view.html);
+  }
+}
+/** 当前仍打开的磁盘详情（直接读既有 sheetCtx.key，不从标题猜设备名）。 */
+function r1SmartVisibleDisk() {
+  if (typeof sheetCtx === 'undefined' || !sheetCtx || typeof sheetCtx.key !== 'string') return null;
+  const [type, ...rest] = sheetCtx.key.split('/');
+  if (type !== 'disk' || !rest.length) return null;
+  try { return decodeURIComponent(rest.join('/')); } catch (_) { return rest.join('/'); }
+}
+/** 成功后失效本批次所有前端 detail 缓存；只为当前可见盘 GET 已经存在的被动缓存并重绘。 */
+async function r1SmartReloadBatches(devices) {
+  const seen = new Set();
+  for (const device of devices) {
+    if (typeof device !== 'string' || !device || seen.has(device)) continue;
+    seen.add(device);
+    try { if (S && S.smartDetail) delete S.smartDetail[device]; } catch (_) { /* ignore */ }
+  }
+  const visible = r1SmartVisibleDisk();
+  if (!visible || !seen.has(visible)) return;   // 已关闭抽屉或切到别的类型：不抢回导航
+  try { if (typeof loadSmartDetail === 'function') await loadSmartDetail(visible); } catch (_) { /* keep unknown */ }
+  const now = r1SmartVisibleDisk();
+  if (now !== visible) return;                  // 读取期间用户已切走
+  if (typeof closeSheet === 'function' && typeof openSheet === 'function') {
+    closeSheet(true);
+    openSheet('disk/' + encodeURIComponent(visible), true);  // fromRoute：不改 history
+  }
+}
+async function r1SmartRun(host) {
+  if (R1_SMART_STATE.busy) return;
+  const force = host.querySelector('[data-ref="r1SmartForce"]');
+  const wanted = force && force.checked === true;
+  R1_SMART_STATE.busy = true;
+  R1_SMART_STATE.error = null;
+  r1SmartSync(host);
+  try {
+    const payload = await API.post('/api/r1/storage/smart/refresh', { force: wanted });
+    const snapshot = r1SmartSnapshot(payload, wanted);
+    if (!snapshot) throw new Error('request_receipt_invalid');
+    R1_SMART_STATE.result = snapshot;
+    R1_SMART_STATE.device = (snapshot.rows.find(row => row.status === 'refreshed') || snapshot.rows[0] || {}).device || null;
+  } catch (error) {
+    const status = error && error.status;
+    R1_SMART_STATE.error = status === 409 ? '刷新未完成：已有刷新正在进行，请稍候。'
+      : status === 401 ? '刷新未完成：需要登录后再刷新。'
+        : status === 403 ? '刷新未完成：当前会话没有操作权限。'
+          : (error && error.message === 'request_receipt_invalid') ? '刷新未完成：回执无法确认，未当作成功。'
+            : '刷新未完成：请求失败，请稍后重试。';
+  } finally {
+    R1_SMART_STATE.busy = false;
+    document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => {
+      const box = card.querySelector('[data-ref="r1SmartForce"]');
+      if (box) box.checked = false;
+    });
+    document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => r1SmartSync(card));
+  }
+  if (R1_SMART_STATE.result && !R1_SMART_STATE.error) {
+    await r1SmartReloadBatches(R1_SMART_STATE.result.rows.map(row => row.device));
+    /* 重建后同步被动缓存里的采样时间/fresh 说明（不依赖刷新回执）。 */
+    document.querySelectorAll('[data-ref="r1Smart"]').forEach(host => r1SmartUpdateSnapshot(host));
+  }
+}
+/** 上游休眠说明写着「下次被系统唤醒时更新」，停掉自动 SMART 后必须改成手动刷新口径。 */
+function r1SmartPatchSleepNote() {
+  const body = document.querySelector('#sheetBody');
+  if (!body) return;
+  for (const note of body.querySelectorAll('.note.sleep span')) {
+    const fixed = '这块硬盘已停转休眠。后台不再自动读取 SMART：容量与温度为休眠前的最后读数，SMART 只在磁盘页手动刷新时读取（默认跳过休眠硬盘）。';
+    if (note.textContent !== fixed) note.textContent = fixed;
+  }
+}
+/** 严格读取被动 /api/smart 缓存里的采样时间；0／缺失都按未知处理，不伪造时间。 */
+function r1SmartDetailStamp(detail) {
+  const value = detail && detail.sampled_at;
+  return (typeof value === 'number' && Number.isFinite(value) && value > 0) ? value : null;
+}
+/** 手动快照说明：不依赖刷新回执，重开抽屉或刷新网页后仍显示缓存原始采样时间。 */
+function r1SmartSnapshotNote(detail) {
+  const stamp = r1SmartDetailStamp(detail);
+  const parts = ['手动快照，非实时；健康与属性表示采样时状态',
+                 stamp === null ? '采样时间未知' : '采样于 ' + r1SmartStamp(stamp)];
+  if (detail && detail.fresh === false) parts.push('观测已过期，当前健康未知，请手动刷新');
+  return parts.join(' · ');
+}
+/** 只读已加载的被动缓存；未加载时复用同一个在途 GET，绝不触发 SMART 命令。 */
+function r1SmartUpdateSnapshot(host) {
+  const device = host.dataset.device || r1SmartVisibleDisk();
+  const node = host.querySelector('[data-ref="r1SmartSnapshot"]');
+  if (!node || !device || typeof loadSmartDetail !== 'function') return;
+  const apply = detail => {
+    if (!node.isConnected) return;
+    const text = r1SmartSnapshotNote(detail);
+    if (node.textContent !== text) setText(node, text);
+  };
+  if (typeof smartDetailOf === 'function') apply(smartDetailOf(device));
+  Promise.resolve(loadSmartDetail(device)).then(apply).catch(() => {});
+}
+function r1SmartMount() {
+  const body = document.querySelector('#sheetBody');
+  if (!body) return;
+  r1SmartPatchSleepNote();
+  const anchor = body.querySelector('[data-ref="smartAll"]');
+  if (!anchor) return;
+  let host = body.querySelector('[data-ref="r1Smart"]');
+  if (!host) {
+    const card = anchor.closest('.card') || anchor;
+    card.insertAdjacentHTML('afterend', r1SmartCardHTML());
+    host = body.querySelector('[data-ref="r1Smart"]');
+    if (!host) return;
+    host.dataset.device = r1SmartVisibleDisk() || '';
+    host.querySelector('[data-ref="r1SmartGo"]').addEventListener('click', () => { void r1SmartRun(host); });
+    host.querySelector('[data-ref="r1SmartForce"]').addEventListener('change', event => {
+      if (R1_SMART_STATE.busy) return;
+      setText(host.querySelector('[data-ref="r1SmartState"]'),
+        event.target.checked ? '已勾选强制：刷新时会唤醒休眠硬盘，点击按钮才会执行。'
+                             : '未勾选强制：刷新会跳过休眠硬盘，点击按钮才会执行。');
+    });
+  }
+  r1SmartSync(host);
+  r1SmartUpdateSnapshot(host);
+}
+(function r1SmartWatch() {
+  const body = document.querySelector('#sheetBody');
+  if (!body) { document.addEventListener('DOMContentLoaded', r1SmartWatch, { once: true }); return; }
+  let muted = false;
+  const run = () => {
+    if (muted) return;
+    muted = true;
+    try { r1SmartMount(); } finally { setTimeout(() => { muted = false; }, 0); }
+  };
+  run();
+  /* 只在 DOM 变化时补挂/同步控件；自身写入期间静默，避免递归重挂。 */
+  new MutationObserver(run).observe(body, { childList: true, subtree: true });
+})();

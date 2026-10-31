@@ -89,6 +89,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/files/authority/initialize', '/api/files/authority/inspect', '/api/files/authority/preflight',
     '/api/files/authority/revoke', '/api/files/authority/restore',
     '/api/plugins/media-sort/probe', '/api/plugins/media-sort/apply', '/api/plugins/media-sort/revert',
+    '/api/r1/storage/smart/refresh',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
@@ -101,7 +102,8 @@ FILE_AUTHORITY_POST_ROUTES = frozenset(('/api/files/authority/initialize', '/api
                                       '/api/files/authority/revoke', '/api/files/authority/restore'))
 MEDIA_SORT_POST_ROUTES = frozenset(('/api/plugins/media-sort/probe', '/api/plugins/media-sort/apply',
                                    '/api/plugins/media-sort/revert'))
-MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES | MEDIA_SORT_POST_ROUTES
+SMART_REFRESH_ROUTE = '/api/r1/storage/smart/refresh'
+MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES | MEDIA_SORT_POST_ROUTES | frozenset((SMART_REFRESH_ROUTE,))
 OWNER_READ_ROUTES = frozenset(('/api/access', '/api/access/contracts', '/api/access/file-readiness',
                                '/api/services', '/api/docker/projects', '/api/docker/projects/catalog',
                                '/api/docker/deployments', '/api/docker/deployments/catalog', '/api/files/authority',
@@ -375,7 +377,11 @@ class WebConfigServer:
         self._media_sort_generation = object()
 
     def _media_sort_current(self, headers, peer, *, generation):
-        """Only a still-current browser owner may inspect or change this plugin."""
+        """Compatibility wrapper for the shared Web owner lifetime predicate."""
+        return self._owner_current(headers, peer, generation=generation)
+
+    def _owner_current(self, headers, peer, *, generation):
+        """Only the current browser owner and Web lifetime authorize explicit work."""
         try:
             return (generation is self._media_sort_generation
                     and not self._media_sort_closed and not self.integration._closed
@@ -1033,7 +1039,7 @@ class WebConfigServer:
         return 404, {'ok': False, 'error': 'not_found'}, 'application/json; charset=utf-8'
 
     def panel_post(self, route, body, headers, ip='', *, media_sort_current=None,
-                   media_debug_current=None):
+                   smart_refresh_current=None, media_debug_current=None):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route in MANAGEMENT_POST_ROUTES and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
@@ -1105,6 +1111,8 @@ class WebConfigServer:
                           'message': '需要在小屏「设置 → 网页配置」生成五位配对码后解锁设置'}, None
         if route in MEDIA_SORT_POST_ROUTES:
             return self._media_sort_post(route, body, headers, ip, media_sort_current)
+        if route == SMART_REFRESH_ROUTE:
+            return self._smart_refresh_post(body, headers, ip, current=smart_refresh_current)
         if route in PROJECT_POST_ROUTES or route in FILE_AUTHORITY_POST_ROUTES:
             # Registry has its own bounded lock; daemon reads must not hold the
             # hardware-policy lock while an owner registers metadata.
@@ -1145,6 +1153,41 @@ class WebConfigServer:
             return status, payload, None
         finally:
             self.operation_lock.release()
+
+    def _smart_refresh_post(self, body, headers, ip, *, current=None):
+        """Owner-only explicit all-disk refresh; no device/command selector.
+
+        ``force`` applies only to this request. Batch completion is not a disk
+        success: the fixed per-device receipt carries the actual outcome.
+        """
+        generation = self._media_sort_generation
+        current = current or (lambda: self._owner_current(headers, ip, generation=generation))
+        if not current():
+            return 403, {'ok': False, 'error': 'SMART 刷新需要当前网页登录授权',
+                         'reason': 'authorization_denied'}, None
+        if type(body) is not dict or set(body) != {'force'} or type(body['force']) is not bool:
+            return 400, {'ok': False, 'error': 'SMART 刷新仅接受显式布尔 force，不接受磁盘路径或命令',
+                         'reason': 'invalid_parameters'}, None
+        refresh = getattr(self.insights, 'refresh_smart', None)
+        if not callable(refresh):
+            return 503, {'ok': False, 'error': 'SMART 手动刷新当前不可用',
+                         'reason': 'unavailable'}, None
+        try:
+            value = refresh(force=body['force'], authorizer=current)
+        except Exception as error:
+            # Neither command stderr nor native identities belong in this API.
+            reason = getattr(error, 'reason', None)
+            errors = {'busy': (409, '已有 SMART 刷新正在进行'),
+                      'authorization_denied': (403, '网页登录授权已失效，已丢弃结果'),
+                      'stopping': (503, '服务正在停止，未确认 SMART 刷新结果'),
+                      'invalid_parameters': (400, 'SMART 刷新参数无效')}
+            status, message = errors.get(reason, (503, 'SMART 刷新未完成'))
+            return status, {'ok': False, 'error': message,
+                           'reason': reason if reason in errors else 'unavailable'}, None
+        if not current():
+            return 403, {'ok': False, 'error': '网页登录授权已失效，已丢弃结果',
+                         'reason': 'authorization_denied'}, None
+        return 200, value, None
 
     def _file_write_preflight_post(self, body, headers, ip):
         """Explicit native-index observation, never a file mutation or proxy.
@@ -2211,7 +2254,7 @@ class WebConfigServer:
                         developer_guard, media_debug_current = False, None
                         try:
                             guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
-                                     if route in MEDIA_SORT_POST_ROUTES else None)
+                                     if route in MEDIA_SORT_POST_ROUTES or route == SMART_REFRESH_ROUTE else None)
                             if (route == '/api/dev/media' and isinstance(body, dict)
                                     and body.get('action') in ('probe_listener', 'probe_transcode')):
                                 developer_guard = True
@@ -2219,7 +2262,9 @@ class WebConfigServer:
                                     self.client_address[0], generation=self.media_sort_generation)
                             status, value, cookie = outer.panel_post(route, body, self.headers,
                                                                      self.client_address[0],
-                                                                     **({'media_sort_current': guard} if guard else {}),
+                                                                     **({'smart_refresh_current': guard}
+                                                                        if route == SMART_REFRESH_ROUTE else
+                                                                        {'media_sort_current': guard} if guard else {}),
                                                                      **({'media_debug_current': media_debug_current}
                                                                         if developer_guard else {}))
                         except Exception:

@@ -46,6 +46,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node tests/check_interactions.cjs
           node tests/check_web_config.cjs
+          node tests/check_smart_refresh.cjs
           node tests/check_api_management.cjs
           node tests/check_service_settings.cjs
           node tests/check_business_status.cjs

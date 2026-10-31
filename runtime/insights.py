@@ -1,7 +1,8 @@
 """Bounded, local NAS diagnostics and explicitly confirmed application actions.
 
-Fast proc/sys sampling and slow optional commands run in separate workers.  The
-HTTP-facing snapshot only copies memory; SMART probing never blocks a request.
+Fast proc/sys sampling and slow optional commands run in separate workers. The
+HTTP-facing snapshot copies memory and validates cached disk lifetimes in sysfs;
+SMART runs only in the explicit manual refresh, never in those workers or GETs.
 All commands have fixed arguments and run without a shell.
 """
 
@@ -39,8 +40,17 @@ DOCKER_LOCAL_HOST = "unix:///var/run/docker.sock"
 DOCKER_READ_TIMEOUT = 20
 DOCKER_START_TIMEOUT = 20
 DOCKER_STOP_TIMEOUT = 30
+SMART_CACHE_SECONDS = 30.0
+SMART_REFRESH_TIMEOUT = 30.0
 _DOCKER_CONNECTION_ENV = frozenset(("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_API_VERSION",
                                      "DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"))
+
+
+class SmartRefreshError(ValueError):
+    """Fixed explicit-refresh failure; no command output or paths are exposed."""
+    def __init__(self, reason):
+        self.reason = reason if reason in ('invalid_parameters', 'authorization_denied', 'busy', 'stopping') else 'invalid_parameters'
+        super().__init__(self.reason)
 
 
 def _text(path, limit=262144):
@@ -232,6 +242,7 @@ class InsightsCollector:
         self._disk_activity_lock = threading.Lock()
         self._disk_activity_previous = None
         self._smart_cache = {}
+        self._smart_refresh_lock = threading.Lock()
         self._disk_name_context = {}
         # Serial identity survives a standby-only SMART response, independently
         # of all temperature/health/raw-data expiry. It never survives a changed
@@ -271,6 +282,34 @@ class InsightsCollector:
     def snapshot(self):
         with self._lock:
             state = copy.deepcopy(self._state)
+        # A stopped/slow sampler cannot keep a manual SMART temperature or
+        # health verdict fresh. This projection reads only sysfs/cache.
+        current_disks = []
+        for disk in state.get('disks', {}).get('items', []):
+            name = disk.get('id') if isinstance(disk, dict) else None
+            if isinstance(name, str) and re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', name):
+                # The row's sysfs temperature/model/names were collected for
+                # this exact lifetime. Never rebind those old values to a new
+                # disk just because it reuses the same /dev name.
+                lifetime = disk.pop('_lifecycle', None)
+                if lifetime is None or self._smart_context(name) != lifetime:
+                    continue
+                smart = self._smart(name, lifetime)
+                for key in ('health', 'smart_available', 'standby', 'smart_temperature_c',
+                            'smart_sampled_monotonic', 'smart_sampled_at', 'smart_status',
+                            'smart_fresh', 'temperature_critical_c'):
+                    disk[key] = copy.deepcopy(smart.get(key))
+                disk['stable_identity'] = self._disk_identity(name, self.sys_root / 'block' / name,
+                                                             smart.get('smart_identity'))
+                if disk.get('temperature_source') != 'sysfs':
+                    disk['temp_c'] = smart.get('temp_c')
+                if self._smart_context(name) != lifetime:
+                    continue
+            else:
+                continue
+            current_disks.append(disk)
+        if isinstance(state.get('disks'), dict):
+            state['disks']['items'] = current_disks
         # Local inventory may read sysfs serials, but its shared snapshot serves
         # public v1, the small screen and machine integrations as well as Web.
         for device in state.get("device", {}).get("storage", {}).get("devices", []):
@@ -750,19 +789,64 @@ class InsightsCollector:
             pass
         return None
 
-    def _smart(self, name, identity=None):
-        now = self.clock()
-        cached = self._smart_cache.get(name)
-        if cached and 0 <= now - cached[0] < 30 and len(cached) == 3 and cached[2] == identity:
-            return copy.deepcopy(cached[1])
-        result = {"smart_available": False, "standby": None, "temp_c": None,
+    @staticmethod
+    def _unknown_smart():
+        return {"smart_available": False, "standby": None, "temp_c": None,
                   "health": {"passed": None, "reason": None},
                   "smart_temperature_c": None, "smart_sampled_monotonic": None,
                   "smart_status": "unavailable", "smart_identity": None,
                   "temperature_critical_c": None}
-        command, error = self._run("smartctl", ["-n", "standby", "-j", "-a", "/dev/" + name])
+
+    def _smart_context(self, name):
+        if type(name) is not str or re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', name) is None:
+            return None
+        folder = self.sys_root / 'block' / name
+        generation = self._disk_generation(folder)
+        dev = (_text(folder / 'dev', 32) or '').strip()
+        if generation is None or re.fullmatch(r'[0-9]{1,6}:[0-9]{1,6}', dev) is None:
+            return None
+        identity = self._disk_identity(name, folder)
+        if (self._disk_generation(folder) != generation
+                or (_text(folder / 'dev', 32) or '').strip() != dev
+                or self._disk_identity(name, folder) != identity):
+            return None
+        return (identity, generation, dev)
+
+    def _smart(self, name, identity=None):
+        """Project only an existing matching manual cache; passive callers never probe."""
+        with self._lock:
+            cached = copy.deepcopy(self._smart_cache.get(name))
+        if (not cached or len(cached) != 3 or identity is None or cached[2] != identity
+                or self._smart_context(name) != identity):
+            result = self._unknown_smart()
+            result['health']['reason'] = '尚无有效的手动 SMART 观测'
+            return result
+        result = cached[1]
+        sampled = _finite(cached[0])
+        fresh = sampled is not None and 0 <= self.clock() - sampled < SMART_CACHE_SECONDS
+        result['smart_fresh'] = fresh
+        result['fresh'] = fresh
+        if not fresh:
+            # History remains dated, but stale health, standby and temperatures
+            # cannot masquerade as current measurements or drive fan policy.
+            result.update(standby=None, temp_c=None, smart_temperature_c=None,
+                          smart_status='stale', temperature_critical_c=None,
+                          health={'passed': None, 'reason': '手动 SMART 观测已过期，请显式刷新'})
+            # Attribute rows contain measurements too. Keep raw data only in
+            # the private identity cache, never in a stale public detail view.
+            result.pop('smart_data', None)
+        return result
+
+    def _probe_smart(self, name, *, force=False, timeout=3):
+        """The sole SMART command path; called only by explicit refresh_smart."""
+        result = self._unknown_smart()
+        arguments = ([] if force else ['-n', 'standby']) + ['-j', '-a', '/dev/' + name]
+        command, error = self._run('smartctl', arguments, timeout=timeout)
+        status, reason = 'failed', 'command_failed'
         if error:
             result["health"]["reason"] = error
+            status = 'unavailable' if error.startswith('未安装') else 'failed'
+            reason = 'command_unavailable' if status == 'unavailable' else 'command_timeout' if '超时' in error else 'command_failed'
         else:
             code, output = command
             try:
@@ -779,8 +863,15 @@ class InsightsCollector:
                 power = str(data.get("power_mode", {}).get("string", ""))
                 standby = bool(re.fullmatch(r'(?:standby|sleep)(?:\s+mode)?', power.strip(), re.I)
                                or re.search(r'\b(?:device|disk)\s+is\s+in\s+(?:standby|sleep)\s+mode\b', notes, re.I))
+                unsafe_power = not force and bool(re.search(
+                    r'\b(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|failed|unavailable)\b', power, re.I) or re.search(
+                    r'(?:failed|unable|unsupported|unknown|not[\s_-]+supported|not[\s_-]+implemented).*?(?:power|standby|sleep)'
+                    r'|(?:power|standby|sleep).*?(?:unknown|unsupported|not[\s_-]+supported|not[\s_-]+implemented|cannot|failed|ignoring|ignored)'
+                    r'|\bignor(?:ing|ed)\s+(?:the\s+)?-n\b',
+                    notes + ' ' + power, re.I))
                 result["standby"] = True if standby else None
                 if standby:
+                    status, reason = 'skipped_standby', 'standby'
                     result["smart_status"] = "standby"
                     result["health"]["reason"] = "磁盘处于休眠，已跳过 SMART 读取"
                 else:
@@ -802,6 +893,7 @@ class InsightsCollector:
                     # The control catalog uses bounded physical readings and
                     # this probe's time, independently of the legacy UI field.
                     if code & 7 == 0:
+                        status, reason = 'refreshed', None
                         candidate = temperature.get('current') if isinstance(temperature, dict) else None
                         measured = _finite(candidate, minimum=-40, maximum=150)
                         if measured is None and isinstance(nvme, dict):
@@ -811,6 +903,13 @@ class InsightsCollector:
                             result['smart_status'] = 'ok'
                     critical = temperature.get('op_limit_max') if isinstance(temperature, dict) else None
                     result['temperature_critical_c'] = _finite(critical, minimum=40, maximum=150)
+                    if code & 7:
+                        status, reason = 'unavailable', 'smart_unavailable'
+                        result.update(smart_available=False, temp_c=None, smart_temperature_c=None,
+                                      smart_status='unavailable')
+                        result['health'] = {'passed': None, 'reason': 'SMART 不支持或读取失败'}
+                    elif not result['smart_available'] and result['smart_temperature_c'] is None:
+                        status, reason = 'unavailable', 'smart_unavailable'
                 serial = data.get('serial_number')
                 wwn = data.get('wwn')
                 if isinstance(wwn, dict) and all(type(wwn.get(key)) is int for key in ('naa', 'oui', 'id')):
@@ -818,16 +917,121 @@ class InsightsCollector:
                     result['smart_identity'] = 'wwn:' + hashlib.sha256(raw.encode()).hexdigest()[:24]
                 elif isinstance(serial, str) and 0 < len(serial.strip()) <= 512:
                     result['smart_identity'] = 'serial:' + hashlib.sha256(serial.strip().encode()).hexdigest()[:24]
+                if unsafe_power:
+                    status, reason = 'unavailable', 'power_mode_unverified'
+                    result = self._unknown_smart()
             except (ValueError, TypeError, AttributeError):
                 result["health"]["reason"] = "SMART 返回了无效数据"
+                status, reason = 'failed', 'invalid_response'
         result['smart_sampled_monotonic'] = self.clock()
-        self._smart_cache[name] = (result['smart_sampled_monotonic'], copy.deepcopy(result), identity)
-        return result
+        result['smart_sampled_at'] = time.time()
+        return result, status, reason
 
     def smart_cached(self, name):
-        """Return only the last background SMART result; never probe on request."""
-        cached = self._smart_cache.get(name)
-        return copy.deepcopy(cached[1]) if cached else None
+        """Return dated manual cache for the current device lifetime, without probing."""
+        if type(name) is not str or re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|vd[a-z]+|xvd[a-z]+)', name) is None:
+            return None
+        identity = self._smart_context(name)
+        if identity is None:
+            return None
+        with self._lock:
+            cached = self._smart_cache.get(name)
+            valid = cached and len(cached) == 3 and cached[2] == identity
+        return self._smart(name, identity) if valid else None
+
+    def refresh_smart(self, force=False, authorizer=None):
+        """Explicit bounded batch, fixed devices only; force is never persisted.
+
+        All results/cache writes are private until the final grant and device
+        lifetime checks. Revocation discards the entire batch, without retries.
+        """
+        if type(force) is not bool:
+            raise SmartRefreshError('invalid_parameters')
+        revoked = False
+
+        def authorized():
+            nonlocal revoked
+            try:
+                allowed = not revoked and callable(authorizer) and authorizer() is True
+            except Exception:
+                allowed = False
+            if not allowed:
+                revoked = True
+                raise SmartRefreshError('authorization_denied')
+            if self._stop.is_set():
+                raise SmartRefreshError('stopping')
+
+        authorized()
+        if not self._smart_refresh_lock.acquire(blocking=False):
+            raise SmartRefreshError('busy')
+        started, deadline, pending, results = time.time(), self.clock() + SMART_REFRESH_TIMEOUT, {}, []
+        try:
+            authorized()
+            for folder in sorted((self.sys_root / 'block').glob('*'))[:128]:
+                name = folder.name
+                if re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', name) is None:
+                    continue
+                authorized()
+                row = {'device': name, 'status': 'unavailable', 'reason': None, 'sampled_at': None}
+                results.append(row)
+                identity = self._smart_context(name)
+                if identity is None:
+                    row['reason'] = 'identity_unverified'
+                    continue
+                if name.startswith('mmcblk'):
+                    row['reason'] = 'smart_unsupported'
+                    continue
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    row.update(status='failed', reason='timeout')
+                    continue
+                value, status, reason = self._probe_smart(name, force=force, timeout=min(3.0, remaining))
+                authorized()
+                if self._smart_context(name) != identity:
+                    row.update(status='identity_changed', reason='identity_changed')
+                    continue
+                if self.clock() >= deadline:
+                    row.update(status='failed', reason='timeout')
+                    continue
+                row.update(status=status, reason=reason, sampled_at=value['smart_sampled_at'])
+                if status in ('refreshed', 'skipped_standby'):
+                    pending[name] = (value['smart_sampled_monotonic'], value, identity)
+            authorized()
+            with self._lock:
+                authorized()
+                if self.clock() >= deadline:
+                    for row in results:
+                        if row['device'] in pending:
+                            row.update(status='failed', reason='timeout', sampled_at=None)
+                    pending.clear()
+                for row in results:
+                    name = row['device']
+                    record = pending.get(name)
+                    if record is not None and self._smart_context(name) != record[2]:
+                        row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
+                        pending.pop(name, None)
+                authorized()
+                # Prune against current lifetimes at the commit point, never
+                # an older background scan's list of active names. New manual
+                # records take precedence when enforcing the fixed cache cap.
+                retained = {name: record for name, record in self._smart_cache.items()
+                            if len(record) == 3 and self._smart_context(name) == record[2]}
+                retained.update(copy.deepcopy(pending))
+                keys = list(pending) + [name for name in retained if name not in pending]
+                authorized()
+                if self.clock() >= deadline:
+                    for row in results:
+                        if row['device'] in pending:
+                            row.update(status='failed', reason='timeout', sampled_at=None)
+                else:
+                    self._smart_cache = {name: retained[name] for name in keys[:128]}
+            # snapshot() reprojects this cache immediately. Do not wake the
+            # names worker: its normal storage snapshot is a separate source.
+            return {'ok': True, 'force': force, 'status': 'complete' if all(
+                row['status'] in ('refreshed', 'skipped_standby') for row in results) else 'partial',
+                'started_at': started, 'finished_at': time.time(), 'results': results}
+        finally:
+            self._smart_refresh_lock.release()
 
     @staticmethod
     def _disk_generation(folder):
@@ -891,32 +1095,44 @@ class InsightsCollector:
             if not re.fullmatch(r"(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)", name):
                 continue
             active.add(name)
+            # Bind the entire row before its first sysfs measurement, not
+            # after reading temperature/size from a potentially replaced disk.
+            cache_key = self._smart_context(name)
+            if cache_key is None:
+                identity_cache.pop(name, None)
+                continue
+            identity, generation, _ = cache_key
             sectors = _integer(folder / "size")
             rotational = _integer(folder / "queue/rotational")
             media = "NVMe SSD" if name.startswith("nvme") else "eMMC" if name.startswith("mmcblk") else "HDD" if rotational == 1 else "SSD" if rotational == 0 else None
             temperature = self._disk_temperature(name, folder)
-            identity = self._disk_identity(name, folder)
-            generation = self._disk_generation(folder)
-            cache_key = (identity, generation)
             smart = self._smart(name, cache_key) if not name.startswith("mmcblk") else {
                 "smart_available": False, "standby": None, "temp_c": None,
                 "health": {"passed": None, "reason": "eMMC 不提供通用 SMART 状态"}}
             entry = {"id": name, "device": "/dev/" + name,
+                     "_lifecycle": cache_key,
                      "model": (_text(folder / "device/model", 512) or "").strip() or None,
                      "size_bytes": sectors * 512 if sectors is not None else None, "type": media,
                      "temp_c": temperature if temperature is not None else smart["temp_c"],
+                     "temperature_source": 'sysfs' if temperature is not None else 'smart',
                      "health": smart["health"], "smart_available": smart["smart_available"], "standby": smart["standby"],
                      "stable_identity": self._disk_identity(name, folder, smart.get('smart_identity')),
                      "smart_temperature_c": smart.get('smart_temperature_c'),
                      "smart_sampled_monotonic": smart.get('smart_sampled_monotonic'),
+                     "smart_sampled_at": smart.get('smart_sampled_at'),
+                     "smart_fresh": smart.get('smart_fresh'),
                      "smart_status": smart.get('smart_status', 'unavailable'),
                      "temperature_critical_c": smart.get('temperature_critical_c')}
-            rows.append(entry)
-            consistent = (generation is not None and generation == self._disk_generation(folder)
-                          and identity == self._disk_identity(name, folder))
+            if self._smart_context(name) != cache_key:
+                identity_cache.pop(name, None)
+                continue
             prior = identity_cache.get(name, {})
             prior_serial = prior.get("serial") if prior.get("cache_key") == cache_key else None
-            detail = self._disk_serial_info(name, folder, smart, prior_serial) if consistent else {"serial": None, "status": "identity_changed", "sources": []}
+            detail = self._disk_serial_info(name, folder, smart, prior_serial)
+            if self._smart_context(name) != cache_key:
+                identity_cache.pop(name, None)
+                continue
+            rows.append(entry)
             serials[name] = detail["serial"]
             details[name] = detail
             if detail["status"] == "ok" and any(source in detail["sources"] for source in ("smart_cache", "smart_identity_cache")):
@@ -924,27 +1140,36 @@ class InsightsCollector:
             else:
                 identity_cache.pop(name, None)
             contexts[name] = {"generation": generation, "identity": identity,
-                              "cache_key": cache_key, "row": copy.deepcopy(entry), "consistent": consistent}
-        self._smart_cache = {key: value for key, value in self._smart_cache.items() if key in active}
+                              "cache_key": cache_key, "row": copy.deepcopy(entry), "consistent": True}
         storage = self.storage_client.snapshot()
         names = read_disk_names(serials, storage)
         verified_serials = {}
         # The two vendor getters may overlap a hot unplug. Check the same sysfs
         # lifetime again before publishing an otherwise valid serial/name join.
+        retained = []
         for row in rows:
             name, context = row["id"], contexts[row["id"]]
-            current = (context["consistent"] and context["generation"] == self._disk_generation(self.sys_root / "block" / name)
-                       and context["identity"] == self._disk_identity(name, self.sys_root / "block" / name))
-            row.update(names["items"][name] if current else {"user_name": None, "space_names": [], "name_source": None})
-            context["consistent"] = current
-            if not current:
+            if self._smart_context(name) != context['cache_key']:
                 identity_cache.pop(name, None)
-            detail = details[name] if current else {"serial": None, "status": "identity_changed", "sources": []}
+                contexts.pop(name, None)
+                continue
+            row.update(names["items"][name])
+            detail = details[name]
             serial, status = self._storage_serial_match(name, detail, serials, storage, names["available"])
             verified_serials[name] = {"cache_key": context["cache_key"], "serial": serial,
                                       "serial_status": status,
                                       "serial_sources": detail["sources"] + (["hiksemi_storage_socket"] if serial else [])}
+            retained.append(row)
         with self._lock:
+            rows = []
+            for row in retained:
+                name = row['id']
+                if self._smart_context(name) != contexts[name]['cache_key']:
+                    contexts.pop(name, None)
+                    identity_cache.pop(name, None)
+                    verified_serials.pop(name, None)
+                    continue
+                rows.append(row)
             self._disk_name_context = contexts
             self._disk_serial_cache = {name: value for name, value in identity_cache.items() if name in active}
             self._disk_verified_serials = verified_serials

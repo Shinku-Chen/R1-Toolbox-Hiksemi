@@ -565,7 +565,7 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(row['size'], 3 * 10 ** 12)
         self.assertEqual(row['temp'], 31)
         health = panel.disk_health()['items']['sdz']
-        self.assertEqual(health['grade'], 'ok')
+        self.assertEqual(health['grade'], 'unknown')
         self.assertIn('休眠', health['detail'])
 
     def test_history_maps_two_series_metrics_and_rejects_bad_ranges(self):
@@ -583,9 +583,9 @@ class MappingTests(unittest.TestCase):
     def test_disk_health_and_smart_detail_use_cached_snapshot_only(self):
         health = self.panel.disk_health()
         self.assertEqual(health['items']['sda']['grade'], 'ok')
-        self.assertEqual(health['source'], 'background_smart')
+        self.assertEqual(health['source'], 'manual_smart_cache')
         detail = self.panel.smart('sda')
-        self.assertEqual(detail['source'], 'background_smartctl')
+        self.assertEqual(detail['source'], 'manual_smartctl_cache')
         self.assertEqual(detail['attributes'], [])
         self.assertEqual(self.panel.smart('missing')['ok'], False)
         with self.assertRaises(ValueError):

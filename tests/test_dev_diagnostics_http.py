@@ -302,6 +302,8 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         folder = root / 'sys/block/sda'
         (folder / 'device').mkdir(parents=True)
         (folder / 'queue').mkdir()
+        (folder / 'dev').write_text('8:0\n', encoding='utf8')
+        (folder / 'wwid').write_text('fixture-physical-lifetime-a\n', encoding='utf8')
         (folder / 'size').write_text('1000000', encoding='utf8')
         (folder / 'device/model').write_text('Fixture drive', encoding='utf8')
         (folder / 'queue/rotational').write_text('1', encoding='utf8')
@@ -318,6 +320,13 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
             command_finder=lambda name: '/fixture/' + name, clock=lambda: 10,
             page_size=4096, clock_ticks=100, storage_client=vendor)
         self.addCleanup(collector.stop)
+        collector._state['disks'] = collector._disks()
+        runner.assert_not_called()
+        receipt = collector.refresh_smart(force=False, authorizer=lambda: True)
+        self.assertEqual(receipt['status'], 'complete')
+        self.assertEqual(receipt['results'][0]['device'], 'sda')
+        self.assertEqual(receipt['results'][0]['status'], 'refreshed')
+        runner.assert_called_once()
         collector._state['disks'] = collector._disks()
         collector._state['device'] = copy.deepcopy(self.cached['device'])
         runner.assert_called_once()
