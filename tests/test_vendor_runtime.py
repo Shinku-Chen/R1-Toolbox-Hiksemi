@@ -486,6 +486,335 @@ class VendorRuntimeTests(unittest.TestCase):
         self.links[self.proc / '123/fd/0'] = 'socket:[12345]'
         self.assertEqual(runtime.require_emhistor_listener(self.root)['status'], 'owner_unverified')
 
+    def emhistor(self):
+        self.table(HEADER + tcp(port=20443))
+        self.process(pid=456, comm='emhistor', exe='/histor/bin/emhistor', inodes=('12345',))
+        self.links[self.proc / '123/fd/0'] = 'socket:[54321]'
+
+    def test_emhistor_observer_reuses_real_production_checks_and_clears_old_private_fields(self):
+        self.emhistor()
+        observer = {'secret': '/private/SECRET-TOKEN', 'scan': {'stale': True}}
+        original = runtime.require_emhistor_listener(self.root)
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result, original)
+        self.assertEqual(observer['schema'], 1)
+        self.assertEqual(observer['scan']['status'], 'passed')
+        self.assertTrue(observer['scan']['complete'])
+        self.assertEqual(observer['scan']['counters']['seen'], 2)
+        self.assertEqual(observer['budget'], {'scan_limit_ms': 1000,
+            'external_remaining_ms': None, 'effective_limit_ms': 1000,
+            'max_processes': 4096, 'max_fds': 32768, 'max_bytes': 1048576})
+        self.assertEqual(observer['tables'], {'initial': 'passed', 'final': 'passed'})
+        self.assertEqual(observer['listener_snapshots'], {
+            'initial': [{'socket_inode': '12345', 'address': '127.0.0.1', 'owner_count': 1}],
+            'final': [{'socket_inode': '12345', 'address': '127.0.0.1', 'owner_count': None}]})
+        self.assertEqual(observer['listener']['identity'],
+                         {'pid': 456, 'start_ticks': 100, 'socket_inode': '12345'})
+        self.assertEqual(observer['listener']['final'], {'status': 'passed',
+                         'executable_path_matches': True, 'generation_matches': True})
+        self.assertEqual(observer['processes'], [{'pid': 456, 'start_ticks': 100,
+            'executable_name_matches': True, 'after_scan_identity': 'passed',
+            'final_identity': 'passed', 'final_start_ticks': 100, 'final_fd': 'passed'}])
+        encoded = json.dumps(observer)
+        for private in ('SECRET', '/histor', '/usr', 'PRIVATE-ARGS', 'cmdline', 'environ', '123,'):
+            self.assertNotIn(private, encoded)
+
+    def test_emhistor_observer_does_not_expose_other_socket_owners(self):
+        self.emhistor()
+        self.process(pid=789, comm='PRIVATE-USER-JOB', exe='/private/PRIVATE-USER-JOB')
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'owner_unverified')
+        self.assertEqual(observer['listener']['owner_count'], 2)
+        self.assertEqual(observer['listener']['matching_owner_count'], 1)
+        self.assertFalse(observer['listener']['owner_matches'])
+        self.assertIsNone(observer['listener']['identity'])
+        self.assertEqual(observer['listener']['final']['status'], 'not_run')
+        self.assertNotIn('789', json.dumps(observer))
+        self.assertNotIn('PRIVATE', json.dumps(observer))
+
+    def test_emhistor_observer_initial_table_failure_cannot_be_hidden_by_valid_owner(self):
+        self.emhistor()
+        self.table('malformed\n')
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['tables']['initial'], 'failed')
+        self.assertIn('initial_table_incomplete', observer['scan']['reason_codes'])
+        self.assertEqual(observer['listener']['final']['status'], 'not_run')
+        self.assertIsNone(observer['listener']['identity'])
+
+    def test_emhistor_observer_absent_proc_is_unavailable_not_a_verified_empty_scan(self):
+        observer = {}
+        with mock.patch.object(runtime.os, 'scandir', side_effect=FileNotFoundError('PRIVATE')):
+            result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_unavailable')
+        self.assertIn('proc_directory_unavailable', observer['scan']['reason_codes'])
+        self.assertEqual(observer['scan']['counters']['read_failed'], 1)
+        self.assertEqual(observer['tables']['final'], 'not_run')
+
+    def test_emhistor_observer_external_absolute_deadline_does_not_restart_scan_budget(self):
+        self.emhistor()
+        for external, effective in ((0.25, 250), (10.0, 1000), (-1.0, 0)):
+            with self.subTest(external=external), mock.patch.object(runtime.time, 'monotonic', return_value=0.0):
+                observer = {}
+                result = runtime.require_emhistor_listener(self.root, observer=observer, deadline=external)
+                self.assertEqual(observer['budget']['effective_limit_ms'], effective)
+                if external < 0:
+                    self.assertEqual(result['status'], 'proc_partial')
+                    self.assertGreater(observer['scan']['counters']['deadline'], 0)
+                    self.assertEqual(observer['scan']['counters']['seen'], 0)
+                else:
+                    self.assertTrue(result['available'])
+
+    def test_emhistor_observer_deadline_elapsed_during_fd_read_stays_fail_closed(self):
+        self.emhistor()
+        now = [0.0]
+
+        def delayed(path):
+            if path.parent.name == 'fd':
+                now[0] = 0.3
+
+        observer = {}
+        self.readlink_hook = delayed
+        with mock.patch.object(runtime.time, 'monotonic', side_effect=lambda: now[0]):
+            result = runtime.require_emhistor_listener(self.root, observer=observer, deadline=0.25)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertGreater(observer['scan']['counters']['deadline'], 0)
+        self.assertEqual(observer['scan']['elapsed_ms'], 300)
+        self.assertEqual(observer['listener']['final']['status'], 'not_run')
+
+    def test_emhistor_observer_global_pid_and_fd_budgets_are_not_relaxed(self):
+        self.emhistor()
+        for name, reason in (('MAX_PROCESSES', 'pid_limit'), ('MAX_FDS', 'fd_limit')):
+            with self.subTest(limit=name), mock.patch.object(runtime, name, 1):
+                observer = {}
+                result = runtime.require_emhistor_listener(self.root, observer=observer)
+                self.assertEqual(result['status'], 'proc_partial')
+                self.assertGreater(observer['scan']['counters'][reason], 0)
+                self.assertIn(reason, observer['scan']['reason_codes'])
+                self.assertIsNone(observer['listener']['identity'])
+
+    def test_emhistor_observer_unreadable_process_identity_keeps_partial(self):
+        self.emhistor()
+        (self.proc / '123/stat').write_bytes(b'invalid\n')
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['scan']['counters']['identity_invalid'], 1)
+        self.assertEqual(observer['scan']['counters']['read_failed'], 0)
+        self.assertIn('process_identity_unavailable', observer['scan']['reason_codes'])
+        self.assertEqual(observer['listener']['final']['status'], 'not_run')
+
+    def test_emhistor_observer_real_attribute_permission_error_is_distinct_from_invalid_record(self):
+        self.emhistor()
+        original = runtime.os.open
+
+        def denied(path, flags, *args, **kwargs):
+            if Path(path) == self.proc / '123/comm':
+                raise PermissionError('/private/SECRET')
+            return original(path, flags, *args, **kwargs)
+
+        observer = {}
+        with mock.patch.object(runtime.os, 'open', side_effect=denied):
+            result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['scan']['counters']['read_failed'], 1)
+        self.assertEqual(observer['scan']['counters']['identity_invalid'], 1)
+        self.assertIn('attribute_permission_denied', observer['scan']['reason_codes'])
+        self.assertNotIn('SECRET', json.dumps(observer))
+
+    def test_emhistor_observer_fd_directory_permission_failure_is_visible(self):
+        self.emhistor()
+        original = runtime.os.scandir
+
+        def denied(path):
+            if Path(path) == self.proc / '123/fd':
+                raise PermissionError('/private/SECRET')
+            return original(path)
+
+        observer = {}
+        with mock.patch.object(runtime.os, 'scandir', side_effect=denied):
+            result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['scan']['counters']['fd_directory_failed'], 1)
+        self.assertIn('fd_directory_unavailable', observer['scan']['reason_codes'])
+
+    def test_emhistor_observer_process_record_cap_does_not_skip_shared_owner_scan(self):
+        self.emhistor()
+        for pid in range(457, 473):
+            self.process(pid=pid, comm='emhistor', exe='/histor/bin/emhistor',
+                         inodes=('12345',) if pid == 472 else ('67890',))
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'owner_unverified')
+        self.assertTrue(observer['scan']['complete'])
+        self.assertEqual(observer['scan']['counters']['seen'], 18)
+        self.assertEqual(len(observer['processes']), 16)
+        self.assertIn('process_records_truncated', observer['scan']['reason_codes'])
+        self.assertEqual(observer['listener']['owner_count'], 2)
+        self.assertEqual(observer['listener']['matching_owner_count'], 2)
+
+    def test_emhistor_observer_unrelated_vanished_fd_is_counted_but_not_newly_rejected(self):
+        self.emhistor()
+        self.process(pid=789, comm='ordinary', inodes=('67890',))
+        self.links[self.proc / '789/fd/0'] = FileNotFoundError('PRIVATE-EXCEPTION')
+        observer = {}
+        self.assertTrue(runtime.require_emhistor_listener(self.root, observer=observer)['available'])
+        self.assertEqual(observer['scan']['counters']['fd_vanished'], 1)
+        self.assertNotIn('PRIVATE', json.dumps(observer))
+        self.links[self.proc / '789/fd/0'] = PermissionError('PRIVATE-EXCEPTION')
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['scan']['counters']['fd_read_failed'], 1)
+        self.assertIn('fd_read_failed', observer['scan']['reason_codes'])
+
+    def test_emhistor_observer_target_fd_disappearance_and_pid_generation_are_visible(self):
+        self.emhistor()
+        self.links[self.proc / '456/fd/0'] = FileNotFoundError('PRIVATE')
+        observer = {}
+        self.assertEqual(runtime.require_emhistor_listener(self.root, observer=observer)['status'], 'proc_partial')
+        self.assertIn('target_fd_vanished', observer['scan']['reason_codes'])
+        self.assertEqual(observer['processes'][0]['final_fd'], 'not_run')
+        self.links[self.proc / '456/fd/0'] = 'socket:[12345]'
+
+        def replace(path):
+            if path.parent == self.proc / '456/fd':
+                (self.proc / '456/stat').write_bytes(process_stat(456, 'emhistor', 999).encode('ascii'))
+
+        self.readlink_hook = replace
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['scan']['counters']['generation_changed'], 1)
+        self.assertEqual(observer['processes'][0]['start_ticks'], 100)
+        self.assertEqual(observer['processes'][0]['after_scan_identity'], 'failed')
+        self.assertEqual(observer['processes'][0]['final_identity'], 'not_run')
+
+    def test_emhistor_observer_final_listener_rebind_is_visible(self):
+        self.emhistor()
+
+        def rebind(path):
+            if path.parent.name == 'fd':
+                self.table(HEADER + tcp('67890', port=20443))
+
+        self.readlink_hook = rebind
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['scan']['counters']['table_changed'], 1)
+        self.assertIn('listener_table_changed', observer['scan']['reason_codes'])
+        self.assertEqual(observer['listener']['final']['status'], 'not_run')
+        self.assertEqual(observer['listener_snapshots']['initial'], [
+            {'socket_inode': '12345', 'address': '127.0.0.1', 'owner_count': 1}])
+        self.assertEqual(observer['listener_snapshots']['final'], [
+            {'socket_inode': '67890', 'address': '127.0.0.1', 'owner_count': None}])
+
+    def test_emhistor_observer_final_generation_is_recorded_as_untrusted_observation(self):
+        self.emhistor()
+        original = runtime._read
+        reads = 0
+
+        def replace_after_table(path, limit, deadline=None, **kwargs):
+            nonlocal reads
+            value = original(path, limit, deadline, **kwargs)
+            if Path(path).name == 'tcp':
+                reads += 1
+                if reads == 2:
+                    (self.proc / '456/stat').write_bytes(process_stat(456, 'emhistor', 999).encode('ascii'))
+            return value
+
+        observer = {}
+        with mock.patch.object(runtime, '_read', side_effect=replace_after_table):
+            result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['processes'][0]['start_ticks'], 100)
+        self.assertEqual(observer['processes'][0]['final_start_ticks'], 999)
+        self.assertEqual(observer['processes'][0]['final_identity'], 'failed')
+        self.assertIsNone(observer['listener']['identity'])
+
+    def test_emhistor_observer_listener_snapshot_cap_never_limits_real_competitor_scan(self):
+        self.emhistor()
+        self.table(HEADER + ''.join(tcp(str(12345 + index), port=20443, slot=index) for index in range(17)))
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'ambiguous')
+        self.assertEqual(observer['listener']['listener_count'], 17)
+        self.assertEqual(len(observer['listener_snapshots']['initial']), 16)
+        self.assertEqual(len(observer['listener_snapshots']['final']), 16)
+        self.assertIn('listener_snapshots_truncated', observer['scan']['reason_codes'])
+
+    def test_emhistor_observer_final_owner_fd_release_is_visible_and_rejected(self):
+        self.emhistor()
+        original = runtime._read
+        reads = 0
+
+        def release_after_table(path, limit, deadline=None, **kwargs):
+            nonlocal reads
+            value = original(path, limit, deadline, **kwargs)
+            if Path(path).name == 'tcp':
+                reads += 1
+                if reads == 2:
+                    self.links[self.proc / '456/fd/0'] = '/dev/null'
+            return value
+
+        observer = {}
+        with mock.patch.object(runtime, '_read', side_effect=release_after_table):
+            result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'proc_partial')
+        self.assertEqual(observer['processes'][0]['final_fd'], 'failed')
+        self.assertIn('final_owner_fd_unverified', observer['scan']['reason_codes'])
+        self.assertEqual(observer['listener']['owner_count'], 0)
+        self.assertFalse(observer['listener']['owner_matches'])
+
+    def test_emhistor_observer_short_reads_still_read_to_eof_and_byte_limit_still_applies(self):
+        self.emhistor()
+        original = os.read
+
+        def short_read(descriptor, length):
+            return original(descriptor, min(length, 3))
+
+        observer = {}
+        with mock.patch.object(runtime.os, 'read', side_effect=short_read):
+            self.assertTrue(runtime.require_emhistor_listener(self.root, observer=observer)['available'])
+        self.assertTrue(observer['scan']['complete'])
+        size = (self.proc / 'net/tcp').stat().st_size
+        with mock.patch.object(runtime, 'MAX_BYTES', size - 1):
+            self.assertEqual(runtime.require_emhistor_listener(self.root, observer=observer)['status'], 'proc_partial')
+        self.assertEqual(observer['tables']['initial'], 'failed')
+        self.assertIn('attribute_byte_limit', observer['scan']['reason_codes'])
+
+    def test_emhistor_observer_final_exact_path_and_generation_checks_are_real(self):
+        self.emhistor()
+        original = runtime._kernel_identity
+        calls = 0
+
+        def replace_on_dedicated_final(folder, deadline=None, **kwargs):
+            nonlocal calls
+            value = original(folder, deadline, **kwargs)
+            if folder.name == '456':
+                calls += 1
+                if calls == 4:
+                    return (456, b'emhistor', 999)
+            return value
+
+        observer = {}
+        with mock.patch.object(runtime, '_kernel_identity', side_effect=replace_on_dedicated_final):
+            result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'owner_unverified')
+        self.assertEqual(observer['listener']['final'], {'status': 'failed',
+            'executable_path_matches': True, 'generation_matches': False})
+        self.assertIsNone(observer['listener']['identity'])
+
+    def test_emhistor_observer_multiple_fixed_listeners_remain_ambiguous(self):
+        self.emhistor()
+        self.table(HEADER + tcp(port=20443) + tcp('67890', port=20443, slot=1))
+        observer = {}
+        result = runtime.require_emhistor_listener(self.root, observer=observer)
+        self.assertEqual(result['status'], 'ambiguous')
+        self.assertEqual(observer['listener']['listener_count'], 2)
+        self.assertIsNone(observer['listener']['owner_count'])
+        self.assertEqual(observer['listener']['final']['status'], 'not_run')
+
 
 @unittest.skipUnless(sys.platform.startswith('linux'), '需要 Linux 原生 /proc 网络表头')
 class NativeProcHeaderTests(unittest.TestCase):

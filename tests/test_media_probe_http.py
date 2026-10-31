@@ -19,6 +19,7 @@ import web_config
 _DEFAULT = object()
 ROUTE = '/api/dev/media'
 ACTIONS = ('probe', 'probe_all')
+FIXED_ACTIONS = ACTIONS + ('probe_listener',)
 
 
 class MediaProbeHTTPTests(unittest.TestCase):
@@ -60,6 +61,12 @@ class MediaProbeHTTPTests(unittest.TestCase):
                                             return_value=self.transcode_result)
         self.transcode = transcode_patch.start()
         self.addCleanup(transcode_patch.stop)
+        self.listener_result = {'schema_version': 1, 'available': True, 'status': 'ok',
+                                'reason': 'listener_verified', 'diagnostics': {}}
+        listener_patch = mock.patch.object(web_config, 'collect_listener_preflight',
+                                           return_value=self.listener_result)
+        self.listener = listener_patch.start()
+        self.addCleanup(listener_patch.stop)
         environment = {'R1_WEB_AUTH_MODE': 'password', 'R1_DEV_NO_PAIRING': '1',
                        'R1_DEV_ALLOW_IPS': '127.0.0.1', 'R1_DEV_MINUTES': '60',
                        'R1_DEV_ALLOW_COMMANDS': '0'}
@@ -124,6 +131,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.probe.assert_not_called()
         self.batch.assert_not_called()
         self.transcode.assert_not_called()
+        self.listener.assert_not_called()
         self.insights.snapshot.assert_not_called()
         self.insights.storage_name_diagnostics.assert_not_called()
         self.business.assert_not_called()
@@ -188,7 +196,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
         for attribute, denied in cases:
             with self.subTest(attribute=attribute), \
                     mock.patch.object(self.server, attribute, denied):
-                for action in ACTIONS:
+                for action in FIXED_ACTIONS:
                     with self.subTest(action=action):
                         body = {'action': action}
                         self.assertEqual(self.request(body)[0], 403)
@@ -200,7 +208,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.server.dev_allow_ips = {ipaddress.ip_address('192.0.2.15')}
         headers = {'Cookie': self.cookie, 'Forwarded': 'for=192.0.2.15',
                    'X-Forwarded-For': '192.0.2.15', 'X-Real-IP': '192.0.2.15'}
-        for action in ACTIONS:
+        for action in FIXED_ACTIONS:
             with self.subTest(action=action):
                 self.assertEqual(self.request({'action': action}, headers=headers)[0], 403)
         self.assert_no_sources()
@@ -216,7 +224,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
                  ({'headers': {'Content-Type': 'text/plain'}}, 400),
                  ({'remove': ('Content-Type',)}, 400),
                  ({'remove': ('Content-Length',)}, 400))
-        for action in ACTIONS:
+        for action in FIXED_ACTIONS:
             for kwargs, expected in cases:
                 with self.subTest(action=action, kwargs=kwargs):
                     self.assertEqual(self.request({'action': action}, **kwargs)[0], expected)
@@ -227,7 +235,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
                    ('Cookie', self.cookie), ('Content-Length', '19'),
                    ('Connection', 'close'), ('X-R1-CSRF', 'x' * 43),
                    ('X-FNM-Request', '1'))
-        for action in ACTIONS:
+        for action in FIXED_ACTIONS:
             for key, value in headers:
                 with self.subTest(action=action, header=key):
                     extra = {key: value} if key in ('Cookie', 'X-R1-CSRF') else {}
@@ -246,7 +254,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
                 self.assertEqual(self.request(body)[0], 400)
         self.assert_no_sources()
 
-    def test_request_body_is_exactly_one_of_the_two_fixed_probe_actions(self):
+    def test_request_body_is_one_of_the_strict_fixed_probe_actions(self):
         bodies = ({}, [], 'probe', 1, True, {'action': None}, {'action': []},
                   {'action': {}}, {'action': 1}, {'action': 'probe '},
                   {'action': 'snapshot'}, {'action': 'catalog'},
@@ -256,7 +264,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
         for body in bodies:
             with self.subTest(body=body):
                 self.assertEqual(self.request(body)[0], 400)
-        for action in ACTIONS:
+        for action in FIXED_ACTIONS:
             for field, value in (('sql', 'SELECT token FROM users'),
                                  ('path', '/private/vendor.db'), ('root', '/private'),
                                  ('token', 'private-token'), ('user_id', 1), ('source_id', 1),
@@ -271,7 +279,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assert_no_sources()
 
     def test_nonempty_url_query_or_fragment_cannot_change_the_probe(self):
-        for action in ACTIONS:
+        for action in FIXED_ACTIONS:
             for suffix in ('?action=probe', '?action=probe_all', '?token=private',
                            '?confirmed=1', '#probe', '?=ignored', '?action=probe#other'):
                 with self.subTest(action=action, suffix=suffix):
@@ -358,6 +366,8 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assertIs(value['dev_mode'], False)
         self.probe.assert_not_called()
         self.batch.assert_not_called()
+        self.listener.assert_not_called()
+        self.transcode.assert_not_called()
         self.assert_no_controls()
 
     def test_media_grant_does_not_unlock_old_debug_routes_or_normal_writes(self):
@@ -490,6 +500,294 @@ class MediaProbeHTTPTests(unittest.TestCase):
                 'path': '/drives/sda/Users/admin/Movies/fixture.mkv', 'confirm': True})
         self.assertEqual(status, 403)
         self.assertNotIn('never-disclose', json.dumps(value))
+
+    def test_listener_probe_is_one_fixed_collection_without_native_sources(self):
+        self.assertTrue(self.server.auth.required())
+        self.assertFalse(self.server.dev_commands)
+        status, _, value = self.request({'action': 'probe_listener'})
+        self.assertEqual(status, 200)
+        self.assertIs(value['ok'], True)
+        self.assertEqual(value['listener'], self.listener_result)
+        self.assertNotIn('transcode', value)
+        self.listener.assert_called_once()
+        called = self.listener.call_args
+        self.assertEqual(called.args, ())
+        self.assertEqual(set(called.kwargs), {'authorizer'})
+        self.assertIs(called.kwargs['authorizer']('probe_listener', {}, {}), True)
+        self.probe.assert_not_called()
+        self.batch.assert_not_called()
+        self.transcode.assert_not_called()
+        self.business.assert_not_called()
+        self.assert_no_controls()
+
+    def test_listener_probe_rejects_all_callsite_target_and_confirmation_fields(self):
+        for key, value in (('pid', 7506), ('port', 20443), ('path', '/private/media'),
+                           ('root', '/tmp/proc'), ('command', 'id'), ('token', 'secret'),
+                           ('action_id', 'get_offlinevideo_path'), ('confirm', True),
+                           ('timeout', 60), ('observer', {}), ('client', {})):
+            with self.subTest(field=key):
+                self.assertEqual(self.request({'action': 'probe_listener', key: value})[0], 400)
+        self.assertEqual(self.request(b'{"action":"probe_listener","action":"probe_listener"}')[0], 400)
+        self.assert_no_sources()
+
+    def test_listener_probe_rejects_bearer_even_when_developer_window_is_valid(self):
+        for authorization in ('Bearer private-listener-key', 'Basic private-listener-key', ''):
+            with self.subTest(authorization=authorization):
+                self.assertEqual(self.request({'action': 'probe_listener'},
+                    headers={'Authorization': authorization})[0], 403)
+        self.assert_no_sources()
+
+    def test_listener_probe_shares_the_media_lock_and_preserves_unavailable_results(self):
+        self.assertTrue(self.server.media_probe_lock.acquire(blocking=False))
+        try:
+            self.assertEqual(self.request({'action': 'probe_listener'})[0], 409)
+        finally:
+            self.server.media_probe_lock.release()
+        self.listener.assert_not_called()
+        self.listener_result.update(available=False, status='unavailable')
+        status, _, value = self.request({'action': 'probe_listener'})
+        self.assertEqual(status, 200)
+        self.assertIs(value['listener']['available'], False)
+        self.assertEqual(value['listener']['status'], 'unavailable')
+        self.listener.assert_called_once()
+
+    def test_listener_probe_rechecks_developer_window_after_lock_acquisition(self):
+        def acquire(*args, **kwargs):
+            self.server.dev_until = time.time() - 1
+            return True
+        lock = mock.Mock()
+        lock.acquire.side_effect = acquire
+        with mock.patch.object(self.server, 'media_probe_lock', lock):
+            status, _, value = self.request({'action': 'probe_listener'})
+        self.assertEqual(status, 403)
+        self.assertIs(value['ok'], False)
+        lock.release.assert_called_once_with()
+        self.assert_no_sources()
+
+    def test_listener_probe_drops_complete_result_after_window_revocation(self):
+        def expire(**kwargs):
+            self.server.dev_until = time.time() - 1
+            self.assertIs(kwargs['authorizer']('probe_listener', {}, {}), False)
+            return {'private-marker': 'listener-private-sentinel', 'available': True}
+        self.listener.side_effect = expire
+        status, _, value = self.request({'action': 'probe_listener'})
+        self.assertEqual(status, 403)
+        self.assertNotIn('listener-private-sentinel', json.dumps(value))
+        self.assertNotIn('listener', value)
+        self.assertFalse(self.server.media_probe_lock.locked())
+
+    def test_listener_probe_does_not_expose_exceptions_and_releases_the_lock(self):
+        self.listener.side_effect = OSError('/private/secret-listener-path?token=private-key')
+        status, _, value = self.request({'action': 'probe_listener'})
+        self.assertEqual(status, 503)
+        self.assertNotIn('secret-listener-path', json.dumps(value))
+        self.assertNotIn('private-key', json.dumps(value))
+        self.assertFalse(self.server.media_probe_lock.locked())
+        self.listener.side_effect = None
+        self.assertEqual(self.request({'action': 'probe_listener'})[0], 200)
+
+    def guarded_media_cases(self):
+        return (({'action': 'probe_listener'}, self.listener, 'listener'),
+                ({'action': 'probe_transcode',
+                  'path': '/drives/sda/Users/admin/Movies/fixture.mkv',
+                  'confirm': True}, self.transcode, 'transcode'))
+
+    def test_fixed_media_response_rechecks_window_after_real_json_serialization(self):
+        original = web_config.json.dumps
+        for body, provider, field in self.guarded_media_cases():
+            with self.subTest(action=body['action']):
+                self.server.dev_until = time.time() + 60
+                provider.return_value = {'private-marker': 'serialized-media-must-not-escape'}
+                serialized = []
+
+                def expire(value, *args, **kwargs):
+                    encoded = original(value, *args, **kwargs)
+                    if isinstance(value, dict) and field in value:
+                        serialized.append(True)
+                        self.server.dev_until = time.time() - 1
+                    return encoded
+
+                with mock.patch.object(web_config.json, 'dumps', side_effect=expire):
+                    status, _, value = self.request(body)
+                self.assertEqual(serialized, [True])
+                self.assertEqual(status, 403)
+                self.assertEqual(value['code'], 'development_authorization_expired')
+                self.assertNotIn(field, value)
+                self.assertNotIn('serialized-media-must-not-escape', json.dumps(value))
+                self.assertNotIn('网页登录', value['error'])
+                self.assertFalse(self.server.media_probe_lock.locked())
+        self.assertEqual(self.listener.call_count, 1)
+        self.assertEqual(self.transcode.call_count, 1)
+        self.probe.assert_not_called()
+        self.batch.assert_not_called()
+        self.business.assert_not_called()
+        self.assert_no_controls()
+
+    def test_response_guard_latches_first_false_even_if_window_recovers_during_encoding(self):
+        original_dump = web_config.json.dumps
+        original_factory = self.server._media_debug_authorizer
+        for body, provider, field in self.guarded_media_cases():
+            with self.subTest(action=body['action']):
+                self.server.dev_until = time.time() + 60
+                provider.return_value = {'private-marker': 'restored-window-must-not-revive-data'}
+                guards, checked = [], []
+
+                def capture(peer, *, generation=None):
+                    guard = original_factory(peer, generation=generation)
+                    guards.append(guard)
+                    return guard
+
+                def revoke_restore(value, *args, **kwargs):
+                    encoded = original_dump(value, *args, **kwargs)
+                    if isinstance(value, dict) and field in value:
+                        self.assertEqual(len(guards), 1)
+                        self.server.dev_until = time.time() - 1
+                        self.assertFalse(guards[0]())
+                        self.server.dev_until = time.time() + 60
+                        self.assertTrue(self.server._dev_authorized('127.0.0.1'))
+                        self.assertFalse(guards[0]())
+                        checked.append(True)
+                    return encoded
+
+                with mock.patch.object(self.server, '_media_debug_authorizer', side_effect=capture), \
+                        mock.patch.object(web_config.json, 'dumps', side_effect=revoke_restore):
+                    status, _, value = self.request(body)
+                self.assertEqual(checked, [True])
+                self.assertEqual(status, 403)
+                self.assertEqual(value['code'], 'development_authorization_expired')
+                self.assertNotIn(field, value)
+                self.assertNotIn('restored-window-must-not-revive-data', json.dumps(value))
+                self.assertFalse(guards[0]())
+        self.assertEqual(self.listener.call_count, 1)
+        self.assertEqual(self.transcode.call_count, 1)
+        self.probe.assert_not_called()
+        self.batch.assert_not_called()
+        self.assert_no_controls()
+
+    def test_collector_authorization_false_is_sticky_after_window_is_restored(self):
+        for body, provider, field in self.guarded_media_cases():
+            with self.subTest(action=body['action']):
+                self.server.dev_until = time.time() + 60
+                checked = []
+
+                def revoke_restore(*args, **kwargs):
+                    current = kwargs['authorizer']
+                    self.assertTrue(current('probe_listener', {}, {}))
+                    self.server.dev_until = time.time() - 1
+                    self.assertFalse(current('probe_listener', {}, {}))
+                    self.server.dev_until = time.time() + 60
+                    self.assertTrue(self.server._dev_authorized('127.0.0.1'))
+                    self.assertFalse(current('probe_listener', {}, {}))
+                    checked.append(True)
+                    return {'private-marker': 'collected-under-revoked-window'}
+
+                provider.side_effect = revoke_restore
+                status, _, value = self.request(body)
+                provider.side_effect = None
+                self.assertEqual(checked, [True])
+                self.assertEqual(status, 403)
+                self.assertNotIn(field, value)
+                self.assertNotIn('collected-under-revoked-window', json.dumps(value))
+                self.assertFalse(self.server.media_probe_lock.locked())
+        self.assertEqual(self.listener.call_count, 1)
+        self.assertEqual(self.transcode.call_count, 1)
+        self.probe.assert_not_called()
+        self.batch.assert_not_called()
+        self.assert_no_controls()
+
+    def test_fixed_media_guard_uses_real_peer_even_with_owner_cookie_and_forwarded_headers(self):
+        self.server.dev_allow_ips = {ipaddress.ip_address('192.0.2.15')}
+        headers = {'Cookie': self.cookie, 'Forwarded': 'for=192.0.2.15',
+                   'X-Forwarded-For': '192.0.2.15', 'X-Real-IP': '192.0.2.15'}
+        for body, _, field in self.guarded_media_cases():
+            with self.subTest(action=body['action']):
+                status, _, value = self.request(body, headers=headers)
+                self.assertEqual(status, 403)
+                self.assertNotIn(field, value)
+        self.assert_no_sources()
+
+    def test_transcode_probe_rejects_bearer_instead_of_inheriting_developer_grant(self):
+        body = {'action': 'probe_transcode',
+                'path': '/drives/sda/Users/admin/Movies/fixture.mkv', 'confirm': True}
+        for authorization in ('Bearer private-transcode-key', 'Basic private-transcode-key', ''):
+            with self.subTest(kind=authorization.split(' ')[0]):
+                status, _, value = self.request(body, headers={'Authorization': authorization})
+                self.assertEqual(status, 403)
+                self.assertNotIn('transcode', value)
+        self.assert_no_sources()
+
+    def test_transcode_probe_rechecks_developer_window_after_lock_acquisition(self):
+        def acquire(*args, **kwargs):
+            self.server.dev_until = time.time() - 1
+            return True
+
+        lock = mock.Mock()
+        lock.acquire.side_effect = acquire
+        with mock.patch.object(self.server, 'media_probe_lock', lock):
+            status, _, value = self.request({'action': 'probe_transcode',
+                'path': '/drives/sda/Users/admin/Movies/fixture.mkv', 'confirm': True})
+        self.assertEqual(status, 403)
+        self.assertIs(value['ok'], False)
+        lock.release.assert_called_once_with()
+        self.assert_no_sources()
+
+    def test_fixed_media_guard_cannot_outlive_its_original_absolute_developer_window(self):
+        now = [time.time()]
+        with mock.patch.object(web_config.time, 'time', side_effect=lambda: now[0]):
+            self.server.dev_until = now[0] + 1
+            guard = self.server._media_debug_authorizer('127.0.0.1')
+            self.assertTrue(guard())
+            self.server.dev_until = now[0] + 60
+            now[0] += 2
+            self.assertTrue(self.server._dev_authorized('127.0.0.1'))
+            self.assertFalse(guard(), 'an in-flight request must not inherit an extended grant')
+            self.assertFalse(guard())
+        self.assert_no_sources()
+
+    def test_pending_true_authorization_cannot_clear_a_concurrent_false_latch(self):
+        guard = self.server._media_debug_authorizer('127.0.0.1')
+        self.assertTrue(guard())
+        entered, release = threading.Event(), threading.Event()
+        main_thread = threading.get_ident()
+
+        def grant(peer):
+            self.assertEqual(peer, '127.0.0.1')
+            if threading.get_ident() != main_thread:
+                entered.set()
+                release.wait(timeout=2)
+                return True
+            return False
+
+        with mock.patch.object(self.server, '_dev_authorized', side_effect=grant), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(guard)
+            try:
+                self.assertTrue(entered.wait(timeout=1))
+                self.assertFalse(guard())
+            finally:
+                release.set()
+            self.assertFalse(pending.result(timeout=2))
+        self.assertTrue(self.server._dev_authorized('127.0.0.1'))
+        self.assertFalse(guard())
+        self.assert_no_sources()
+
+    def test_stop_start_never_revives_fixed_media_request_authorizers(self):
+        for body, provider, _ in self.guarded_media_cases():
+            with self.subTest(action=body['action']):
+                self.host = '127.0.0.1:' + str(self.server.port)
+                status, _, _ = self.request(body)
+                self.assertEqual(status, 200)
+                current = provider.call_args.kwargs['authorizer']
+                self.assertTrue(current('probe_listener', {}, {}))
+                self.server.stop()
+                self.assertFalse(current('probe_listener', {}, {}))
+                self.server.start()
+                self.assertTrue(self.server._dev_authorized('127.0.0.1'))
+                self.assertFalse(current('probe_listener', {}, {}))
+        self.probe.assert_not_called()
+        self.batch.assert_not_called()
+        self.business.assert_not_called()
+        self.assert_no_controls()
 
 
 if __name__ == '__main__':

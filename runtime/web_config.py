@@ -28,7 +28,7 @@ from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
 from vendor_media_probe import collect_media_probe
 from vendor_media_batch import collect_media_batch
-from vendor_transcode_probe import (collect_transcode_probe,
+from vendor_transcode_probe import (collect_listener_preflight, collect_transcode_probe,
                                     validate_path as validate_transcode_path)
 from vendor_media_snapshot import record_media_snapshot
 from vendor_app_probe import collect_application_probe
@@ -821,6 +821,30 @@ class WebConfigServer:
             return False
         return peer_matches(str(peer), [str(rule) for rule in self.dev_allow_ips]) if peer else False
 
+    def _media_debug_authorizer(self, peer, *, generation=None):
+        """One fixed media request's real-peer grant, never revived or renewed."""
+        generation = self._media_sort_generation if generation is None else generation
+        revoked, expires_at = False, None
+
+        def current():
+            nonlocal revoked, expires_at
+            if revoked:
+                return False
+            try:
+                allowed = (generation is self._media_sort_generation
+                           and not self._media_sort_closed
+                           and self._dev_authorized(peer) is True)
+                if allowed and expires_at is None:
+                    expires_at = self.dev_until
+                allowed = allowed and time.time() < expires_at
+            except Exception:
+                allowed = False
+            if not allowed:
+                revoked = True
+            return not revoked
+
+        return current
+
     def panel_authorized(self, headers, *, network_csrf=True, peer=None):
         """Password session, or the small-screen pairing session, may write.
 
@@ -1008,7 +1032,8 @@ class WebConfigServer:
             return 200, panel.export_csv(params.get('range', '7d')).encode('utf-8-sig'), 'text/csv; charset=utf-8'
         return 404, {'ok': False, 'error': 'not_found'}, 'application/json; charset=utf-8'
 
-    def panel_post(self, route, body, headers, ip='', *, media_sort_current=None):
+    def panel_post(self, route, body, headers, ip='', *, media_sort_current=None,
+                   media_debug_current=None):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route in MANAGEMENT_POST_ROUTES and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
@@ -1017,7 +1042,7 @@ class WebConfigServer:
         if route == '/api/dev/diagnostics':
             return self._diagnostic_post(body, ip)
         if route == '/api/dev/media':
-            return self._media_debug_post(body, ip)
+            return self._media_debug_post(body, ip, headers, current=media_debug_current)
         if route == '/api/dev/native':
             return self._native_debug_post(body, ip)
         if route == '/api/dev/storage/probe':
@@ -1170,20 +1195,28 @@ class WebConfigServer:
         finally:
             self.media_probe_lock.release()
 
-    def _media_debug_post(self, body, ip):
+    def _media_debug_post(self, body, ip, headers=None, *, current=None):
         """Explicit media probe; credentials stay on the host, never in the API.
 
-        Unlike passive diagnostics this invokes native status queries, whose
-        completion branch may update vendor state. It is never auto-polled.
+        The listener-only action inspects proc state without native requests;
+        other fixed probes may invoke vendor state updates. None auto-poll.
         """
-        if not self._dev_authorized(ip):
+        guarded = (isinstance(body, dict) and body.get('action') in (
+            'probe_listener', 'probe_transcode'))
+        if guarded:
+            current = current or self._media_debug_authorizer(ip)
+        if not (current() if guarded else self._dev_authorized(ip)):
             return 403, {'ok': False, 'error': '媒体测试未启用、已过期或客户端不在白名单'}, None
-        fixed = ({'action': 'probe'}, {'action': 'probe_all'}, {'action': 'probe_business', 'confirm': True})
+        if (guarded
+                and headers is not None and headers.get('Authorization') is not None):
+            return 403, {'ok': False, 'error': '访问密钥不能授权此媒体检测，请使用有效开发白名单窗口'}, None
+        fixed = ({'action': 'probe'}, {'action': 'probe_all'}, {'action': 'probe_listener'},
+                 {'action': 'probe_business', 'confirm': True})
         transcode = (isinstance(body, dict) and set(body) == {'action', 'path', 'confirm'}
                      and body.get('action') == 'probe_transcode'
                      and type(body.get('path')) is str)
         if not isinstance(body, dict) or (body not in fixed and not transcode):
-            return 400, {'ok': False, 'error': '仅支持固定媒体 probe、probe_all、确认后的 probe_business 或带 confirm 的 probe_transcode，不接受账号、令牌或任意路径参数'}, None
+            return 400, {'ok': False, 'error': '仅支持固定媒体 probe、probe_all、probe_listener、确认后的 probe_business 或带 confirm 的 probe_transcode，不接受账号、令牌或任意路径参数'}, None
         if body['action'] == 'probe_transcode' and body.get('confirm') is not True:
             return 400, {'ok': False, 'error': '清晰度排障会触发原厂 getter 条件性读取媒体内容并写 user.md5 元数据，请显式确认后再执行'}, None
         if body['action'] == 'probe_business' and body.get('confirm') is not True:
@@ -1191,6 +1224,16 @@ class WebConfigServer:
         if not self.media_probe_lock.acquire(blocking=False):
             return 409, {'ok': False, 'error': '已有媒体测试正在进行'}, None
         try:
+            if body['action'] == 'probe_listener':
+                # A lock wait or grant change must not turn an earlier decision
+                # into permission to inspect the host or publish private state.
+                if not current():
+                    return 403, {'ok': False, 'error': '开发窗口已失效，未开始监听身份检测'}, None
+                value = collect_listener_preflight(
+                    authorizer=lambda operation, parameters, native_body: current())
+                if not current():
+                    return 403, {'ok': False, 'error': '开发窗口已失效，未返回监听身份检测结果'}, None
+                return 200, {'ok': True, 'listener': value}, None
             if body['action'] == 'probe_business':
                 from vendor_media_operations import collect_media_operations_probe
                 value = collect_media_operations_probe(authorizer=lambda operation, parameters, native_body: self._dev_authorized(ip))
@@ -1198,14 +1241,16 @@ class WebConfigServer:
                     return 403, {'ok': False, 'error': '开发窗口已失效，未返回业务检测结果'}, None
                 return 200, {'ok': True, 'probe': value}, None
             if body['action'] == 'probe_transcode':
+                if not current():
+                    return 403, {'ok': False, 'error': '开发窗口已失效，未开始清晰度档位检测'}, None
                 try:
                     path = validate_transcode_path(body['path'])
                 except ValueError:
                     return 400, {'ok': False, 'error': '转码档位诊断只接受 /drives/<disk>/Users/admin/ 下的绝对路径，拒绝空段、.／..、反斜杠、控制字符、相对路径与其它盘根；仅做字符串形式校验，不判断末段是文件还是目录'}, None
                 value = collect_transcode_probe(
                     path,
-                    authorizer=lambda operation, parameters, native_body: self._dev_authorized(ip))
-                if not self._dev_authorized(ip):
+                    authorizer=lambda operation, parameters, native_body: current())
+                if not current():
                     return 403, {'ok': False, 'error': '开发窗口已失效，未返回清晰度档位结果'}, None
                 return 200, {'ok': True, 'transcode': value}, None
             if body['action'] == 'probe_all':
@@ -1762,18 +1807,25 @@ class WebConfigServer:
                 def log_message(self, *args):
                     pass
 
-                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None, guard=None):
+                def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None, guard=None, developer_guard=False):
+                    def denied_value():
+                        if developer_guard:
+                            return {'ok': False, 'error': '开发窗口授权已失效，已丢弃媒体检测结果',
+                                    'code': 'development_authorization_expired'}
+                        return {'ok': False, 'error': '网页登录授权已失效，已丢弃结果',
+                                'code': 'authorization_expired'}
+
                     def still_authorized():
                         try:
                             return guard is None or guard() is True
                         except Exception:
                             return False
                     if not still_authorized():
-                        code, value, cookie = 403, {'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, None
+                        code, value, cookie = 403, denied_value(), None
                     data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
                     if not still_authorized():
                         code, cookie = 403, None
-                        data = json.dumps({'ok': False, 'error': '网页登录授权已失效，已丢弃结果', 'code': 'authorization_expired'}, ensure_ascii=False).encode()
+                        data = json.dumps(denied_value(), ensure_ascii=False).encode()
                     try:
                         self.connection.settimeout(self.RESPONSE_TIMEOUT)
                     except OSError:
@@ -2156,15 +2208,25 @@ class WebConfigServer:
                             self.send(403, {'ok': False, 'error': 'csrf_rejected',
                                             'message': '请求被拒绝：缺少 X-FNM-Request 头或会话校验失败'})
                             return
+                        developer_guard, media_debug_current = False, None
                         try:
                             guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
                                      if route in MEDIA_SORT_POST_ROUTES else None)
+                            if (route == '/api/dev/media' and isinstance(body, dict)
+                                    and body.get('action') in ('probe_listener', 'probe_transcode')):
+                                developer_guard = True
+                                media_debug_current = outer._media_debug_authorizer(
+                                    self.client_address[0], generation=self.media_sort_generation)
                             status, value, cookie = outer.panel_post(route, body, self.headers,
                                                                      self.client_address[0],
-                                                                     **({'media_sort_current': guard} if guard else {}))
+                                                                     **({'media_sort_current': guard} if guard else {}),
+                                                                     **({'media_debug_current': media_debug_current}
+                                                                        if developer_guard else {}))
                         except Exception:
                             status, value, cookie = 503, {'ok': False, 'error': '服务暂不可用'}, None
-                        self.send(status, value, cookie=cookie, guard=guard)
+                        self.send(status, value, cookie=cookie,
+                                  guard=media_debug_current if developer_guard else guard,
+                                  developer_guard=developer_guard)
                         return
                     if route == '/api/pair':
                         if not isinstance(body, dict) or set(body) != {'code'}:

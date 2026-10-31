@@ -25,7 +25,7 @@ class FakeClient:
         self.calls = []
 
     def request(self, operation, parameters=None, body=None, authorizer=None, *,
-                confirmed=False):
+                confirmed=False, observer=None):
         self.calls.append((operation, dict(parameters or {}), dict(body or {})))
         if not callable(authorizer) or authorizer(operation, dict(parameters or {}), {}) is not True:
             raise BusinessTransportError('authorization_denied')
@@ -504,8 +504,10 @@ class CollectTests(unittest.TestCase):
         client = FakeClient(responses())
         original = client.request
 
-        def request(operation, parameters=None, body=None, authorizer=None, *, confirmed=False):
-            value = original(operation, parameters, body, authorizer, confirmed=confirmed)
+        def request(operation, parameters=None, body=None, authorizer=None, *, confirmed=False,
+                    observer=None):
+            value = original(operation, parameters, body, authorizer, confirmed=confirmed,
+                             observer=observer)
             if operation == 'video_capacity':
                 allowed['value'] = False
             return value

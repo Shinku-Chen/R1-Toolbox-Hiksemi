@@ -25,7 +25,8 @@ from datetime import datetime, timezone
 import hashlib
 
 from vendor_business_transport import (BusinessTransportError, VendorBusinessClient,
-                                       REASONS as TRANSPORT_REASONS, media_path)
+                                       REASONS as TRANSPORT_REASONS, media_path,
+                                       public_trace)
 
 
 OWNER_ID = 100000
@@ -402,47 +403,58 @@ def _reason(reason):
 
 def _step(client, operation, parameters, authorizer, usable):
     """单次固定 getter；失败只落在本步，不中断后续步骤。"""
+    observation = {}
+
+    def observed(value):
+        # 原厂帧与异常均不属于诊断；只保留生产检查实际填入的固定白名单。
+        value['transport'] = public_trace(observation)
+        return value
+
     try:
         status_code, frame = client.request(operation, parameters, {},
-                                            authorizer=authorizer)
+                                            authorizer=authorizer, observer=observation)
     except BusinessTransportError as error:
-        return {'ok': False, 'reason': _reason(error.reason),
+        return observed({'ok': False, 'reason': _reason(error.reason),
                 'http_status': error.http_status, 'frame': None,
+                'request_sent': error.request_sent is True,
                 'client_fallback_basis': ('transport_failure' if error.reason in
-                                          ('http_error', 'timeout', 'transport_failed') else None)}
+                                          ('http_error', 'timeout', 'transport_failed') else None)})
     except Exception:
-        return {'ok': False, 'reason': 'transport_failed', 'http_status': None, 'frame': None}
+        return observed({'ok': False, 'reason': 'transport_failed', 'http_status': None, 'frame': None})
     if status_code != 200 or not isinstance(frame, dict):
-        return {'ok': False, 'reason': 'unexpected_response',
-                'http_status': _integer(status_code, 100, 599), 'frame': None}
+        return observed({'ok': False, 'reason': 'unexpected_response',
+                'http_status': _integer(status_code, 100, 599), 'frame': None})
     code = _code(frame.get('code'))
     failed = {'ok': False, 'http_status': status_code, 'frame': None, 'code': code,
               'client_fallback_basis': None}
     if 'code' in frame and code is None:
-        return dict(failed, reason='native_code_invalid')
+        return observed(dict(failed, reason='native_code_invalid'))
     if 'code' not in frame:
         # 只有这两个已审计 getter 有无 code 的正常对象；switch.onSuccess 要求 code。
         codeless = (operation == 'video_capacity' and _usable_capabilities(frame)
                     or operation == 'offline_video_path' and
                     (isinstance(frame.get('capabilities'), dict) or _present(frame.get('video_720p'))))
         if not codeless or not usable(frame):
-            return dict(failed, reason='native_code_unavailable')
+            return observed(dict(failed, reason='native_code_unavailable'))
     elif code != 0:
         # 原厂通用 wrapper 对错误 envelope 的解析格式敏感。仅有非零 code 不足以
         # 证明 onFailure；但 mode 为严格整数时，onSuccess 的 code!=0 分支也置 true。
         if operation == 'transcode_switch' and _code(frame.get('mode')) is not None:
             failed['client_fallback_basis'] = 'nonzero_code_with_integer_mode'
-        return dict(failed, reason='native_request_rejected')
+        return observed(dict(failed, reason='native_request_rejected'))
     elif not usable(frame):
-        return dict(failed, reason='unexpected_response')
-    return {'ok': True, 'reason': None, 'http_status': status_code,
-            'frame': frame, 'code': code, 'client_fallback_basis': None}
+        return observed(dict(failed, reason='unexpected_response'))
+    return observed({'ok': True, 'reason': None, 'http_status': status_code,
+            'frame': frame, 'code': code, 'client_fallback_basis': None})
 
 
 def _public_step(step):
     # HTTP 200 不等于业务成功；只公开安全整数的原厂 code，不返回 msg／路径／原文。
     return {'ok': step['ok'], 'reason': step['reason'],
-            'http_status': step['http_status'], 'native_code': step.get('code')}
+            'http_status': step['http_status'], 'native_code': step.get('code'),
+            'request_sent': (step['request_sent'] if 'request_sent' in step
+                             else (step.get('transport') or {}).get('request_sent')),
+            'transport': public_trace(step.get('transport'))}
 
 
 def project_capacity_rejection(code):
@@ -473,6 +485,61 @@ def _denied_result():
             'reason': 'authorization_denied', 'steps': {}, 'request': None,
             'scope': None, 'capability': None, 'switch': None, 'capacity': None,
             'definitions': None, 'tv_player': None, 'evidence': None}
+
+
+def collect_listener_preflight(*, root='/', authorizer=None, client=None):
+    """只复用生产监听门：不加载凭据、证书，不连接原厂或检查媒体文件。
+
+    诊断仅证明该次有界 proc 采样的结果，不能替代随后运输时的四次复核。
+    任一撤权均丢弃本轮观察，不能在后续授权恢复时发布旧结果。
+    """
+    result = {'schema_version': 1, 'kind': 'emhistor_listener',
+              'available': False, 'status': 'unavailable', 'reason': None,
+              'sampled_at': datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
+              'diagnostics': None, 'proc_metadata_only': True,
+              'native_request_performed': False, 'credentials_read': False,
+              'certificate_read': False, 'media_accessed': False}
+    revoked = False
+
+    def denied():
+        return {'schema_version': 1, 'kind': 'emhistor_listener',
+                'available': False, 'status': 'denied',
+                'reason': 'authorization_denied', 'diagnostics': None}
+
+    def live(*_fixed_context):
+        nonlocal revoked
+        if revoked:
+            return False
+        try:
+            allowed = callable(authorizer) and authorizer('probe_listener', {}, {}) is True
+        except Exception:
+            allowed = False
+        revoked = not allowed
+        return allowed
+
+    if not live():
+        return denied()
+    worker = client if client is not None else VendorBusinessClient(root=root)
+    observation = {}
+    try:
+        gate = worker.probe_listener(authorizer=live, observer=observation)
+        # 实际门仍由 transport._identity 执行，观察数据不作为放行证明。
+        if type(gate) is dict and gate.get('available') is True and gate.get('status') == 'verified':
+            result.update(available=True, status='verified')
+        else:
+            result['reason'] = 'identity_unverified'
+    except BusinessTransportError as error:
+        if error.reason == 'authorization_denied':
+            return denied()
+        result['reason'] = _reason(error.reason)
+    except Exception:
+        result['reason'] = 'transport_failed'
+    if not live():
+        return denied()
+    result['diagnostics'] = public_trace(observation)
+    if not live():
+        return denied()
+    return result
 
 
 def collect_transcode_probe(path, *, root='/', authorizer=None, client=None):

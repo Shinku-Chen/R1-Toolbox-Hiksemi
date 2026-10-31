@@ -1,6 +1,6 @@
-# 原厂相册识别实机验证
+# 原厂媒体显式验证
 
-`POST /api/dev/media` 在宿主内部只读复用管理员已有会话，对固定原厂媒体状态接口进行签名查询，仅返回首帧数据和验证状态。它用于明确发起的实机验证，不属于自动轮询或 `/api/dev/diagnostics` 的被动快照。原有 `probe` 验证相册识别，`probe_all` 逐项验证下表七类状态，`probe_transcode` 诊断转码能力与单个文件的清晰度档位。
+`POST /api/dev/media` 用于明确发起的实机验证，不属于自动轮询或 `/api/dev/diagnostics` 的被动快照。原有 `probe` 验证相册识别，`probe_all` 逐项验证下表七类状态，`probe_transcode` 诊断转码能力与单个文件的清晰度档位；这些查询在宿主内部复用管理员已有会话并签名，只返回安全投影。`probe_listener` 单独复核固定原厂 TLS 监听身份，不读取会话或发送原厂请求。
 
 ## 请求与授权
 
@@ -13,9 +13,51 @@ const response = await fetch('/api/dev/media', {
 console.log(await response.json());
 ```
 
-接口仅接受 `{"action":"probe"}`、`{"action":"probe_all"}`、`{"action":"probe_transcode","path":"..."}` 或 `{"action":"probe_business","confirm":true}`，需要 `R1_DEV_NO_PAIRING=1`、精确实际客户端 `R1_DEV_ALLOW_IPS` 和有效 `R1_DEV_MINUTES` 窗口。开发者白名单授权可直接测试，不依赖浏览器登录或 `R1_DEV_ALLOW_COMMANDS`；同源、JSON 和 CSRF 校验继续生效。没有公开 GET、CORS 或任意参数转发。
+接口仅接受 `{"action":"probe"}`、`{"action":"probe_all"}`、`{"action":"probe_listener"}`、`{"action":"probe_transcode","path":"...","confirm":true}` 或 `{"action":"probe_business","confirm":true}`，需要 `R1_DEV_NO_PAIRING=1`、精确实际客户端 `R1_DEV_ALLOW_IPS` 和有效 `R1_DEV_MINUTES` 窗口。开发者白名单授权可直接测试，不依赖浏览器登录或 `R1_DEV_ALLOW_COMMANDS`；同源、JSON 和 CSRF 校验继续生效。没有公开 GET、CORS 或任意参数转发。`probe_listener` 和 `probe_transcode` 明确拒绝携带 `Authorization`，机器密钥与单独的所有者会话均不能代替开发白名单及窗口。
 
-请求不能指定用户、SQL、文件路径、令牌、原厂动作、地址或端口。同一时间只接受一个测试，重复请求返回 `409`。控制、风扇重试及原有诊断接口的授权不变。
+这两个固定诊断还将同一个开发授权守卫贯通采集与 HTTP 发送：仅核对真实连接来源和当前开发窗口，在 JSON 序列化前后再次检查；第一次失效即锁存拒绝，即使随后窗口恢复也不发布旧结果。守卫绑定本次 Web 生命周期，停止后重启不会复活旧请求；不用所有者授权或转发头代替开发授权。收集函数返回并不代表已获最终发送授权。其它媒体动作的既有查询／缓存行为不因该发送检查扩展。
+
+除 `probe_transcode` 的受限路径字符串外，请求不能指定用户、SQL、文件路径、令牌、原厂动作、地址或端口。同一时间只接受一个测试，重复请求返回 `409`。控制、风扇重试及原有诊断接口的授权不变。
+
+## 固定 TLS 监听身份复核
+
+```javascript
+const response = await fetch('/api/dev/media', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json', 'X-FNM-Request': '1'},
+  body: JSON.stringify({action: 'probe_listener'})
+});
+console.log(await response.json());
+```
+
+请求体只能有 `action`，不能传入 PID、端口、路径、命令、凭据、时限或 `confirm`。本动作只用生产监听身份检查读取有界 proc／sys 元数据：固定 emhistor TLS 端口、监听唯一性、所属进程、PID／启动代次与 socket inode 仍按同一严格门判定。它不读取媒体、会话数据库、证书或私钥，不签名、不建网络连接、不发送原厂 getter，也不进行播放、停止或开关写入。无需对媒体副作用作确认，不能用本动作的成功代替后续真实连接的再次身份复核。
+
+结果放在 `listener`，包含 `schema_version:1`、`kind:"emhistor_listener"`、`available`、`status`（`verified`／`unavailable`／`denied`）、固定 `reason`、`sampled_at` 及 `diagnostics`。正常采集还明确标记 `proc_metadata_only:true`、`native_request_performed:false`、`credentials_read:false`、`certificate_read:false`、`media_accessed:false`；撤权时 `diagnostics:null`，不保留私有中间结果。固定诊断记录扫描是否完整、实际 PID／FD／时间预算及使用量、读失败／进程消失／代次与监听表变化等安全计数，并逐阶段区分 `passed`、`failed`、`not_run`。只公开固定原因和白名单观测；不输出命令行、环境、FD 目标、完整路径、异常原文或凭据。没有执行的后续阶段保持 `not_run`，不能把身份拒绝误写成网络或影片拒绝。
+
+现有生产门核验 proc 身份、固定 exe 路径与 socket 归属，不证明原厂 ELF 摘要、持续不可变或物理转码能力。此入口没有新增 exe 内容读取，也不扩展 scraper 的精确 `0777` 权限例外。
+
+`diagnostics.listener_checks.initial.runtime` 的固定结构包含：
+
+- `budget`：扫描自身上限 1000 毫秒、外层剩余时间与实际较小值，最多 4096 个 PID、32768 个 FD；属性读取仍有实际 EOF 与至多 1 MiB 的上限。这些是拒绝边界，不因诊断提高限额。
+- `scan`：`complete`、实际耗时、固定 `reason_codes`，以及 `seen`、`read_failed`、`vanished`、`generation_changed`、`identity_invalid`、`identity_changed`、`executable_changed`、`fd_seen`、`fd_read_failed`、`fd_vanished`、`fd_directory_failed`、`table_changed`、`deadline`、`pid_limit`、`fd_limit` 计数。读取失败与无法建立完整 comm／stat 身份分开；计数不能替代通过判定。
+- `tables`：初始／末次监听表是否真正完成；`listener_snapshots` 最多各 16 项，只保留固定端口的 socket inode、地址枚举与持有者数量。末次表没有重复扫描持有者时，该数量保持 `null`，不能解释为零。
+- `processes`：最多 16 个 emhistor 的 PID 与初始／末次启动代次；`listener` 给出固定端口监听数、匹配持有者数量和真实末次复核状态。代次或对象变化不拼接成已验证身份，身份只在实际通过时发布。
+
+它与其它媒体检测共用非阻塞媒体锁和业务锁，单轮沿用十秒绝对窗口，不通过重试、放宽 `proc_partial`、省略共享持有者或重置窗口绕过生产门。获得锁后、采集过程中及返回前都复核开发授权；失效立即停止并丢弃本轮结果。初次读取、GET、后台快照与 MCP 不触发本动作，也不缓存为后续请求的放行依据。
+
+### 三个 getter 的运输阶段
+
+`probe_transcode` 的 `steps.capability`、`steps.switch`、`steps.capacity` 各自保留 `transport` 诊断。监听身份在初次、连接后、发送前、收帧后四处复核；发生失败时保留真实拒绝阶段，未到达的阶段为 `not_run`。诊断来自实际生产算法的观察，不另跑一套较宽松扫描。
+
+`transport.listener_checks` 固定包含 `initial`、`connected`、`before_send`、`after_response`，分别对应 `pre_connect`、`post_tls`、`pre_send`、`post_frame`；每项只有 `status`、`reason_code`、`elapsed_ms`、安全 `runtime`／`identity` 和 `expected_matches`。只核监听时仅运行 `initial`，其余保持 `not_run`。
+
+生命周期字段 `request_started`、`send_attempted`、`request_sent`、`send_completed`、`response_started`、`response_received` 和 `discarded_at` 分别记录实际请求进度及丢弃位置；`request_sent` 是保守的「可能已部分发送」，不能替代 `send_completed`。连接前失败可以证明未发请求；发送期间或收帧后身份失败则不能据失败响应宣称原厂没有处理请求。`response_received` 只表示首帧完整接收解析，最终授权或身份失败仍须丢弃业务数据。所有计数和阶段仅是本次观察，不能作为后来调用的身份凭据。
+
+### 当前基线与尚未验证的边界
+
+2026-10-31，精确 `30ea3c4` 的一次已确认基线中，能力查询成功且返回 33 项，`cap_transcode_video=1`、`cap_tr_video_switch_v1=0`；额外开关查询返回 `-2004`。电视在开关能力位为 0 时本来不查询该 getter，不能把它解释为关闭。实机 33 项也不能直接套用匹配固件的静态 24 项表。
+
+档位步骤仅返回 `identity_unverified`，HTTP／业务码均缺测，即**未取得可信原厂码**。旧运输在收帧后仍复核身份，旧版又未保留足够的发送阶段证据，所以本轮不能确认或排除原厂实际返回过 `-5402`，也不能断言 getter 未发送、没有发生条件性的 MD5 读取或 xattr 写入。新固定诊断的实机结果尚未验证；可先显式运行 `probe_listener` 复查身份，避免为观察监听而重复带媒体副作用的影片 getter。它仍不能证明用户电视已走到哪一播放器分支、实际转码或清晰度菜单已恢复。
 
 ## 七类状态批量验证
 
