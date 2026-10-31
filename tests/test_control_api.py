@@ -27,7 +27,7 @@ class FanPolicyFactoryTests(unittest.TestCase):
         self.assertTrue(native.call_args.kwargs["allow_writes"])
         sources.assert_called_once_with(mock.sentinel.insights)
         policy.assert_called_once_with("fixture-state", sources.return_value, native.return_value,
-                                       histor=controller.histor)
+                                       histor=controller.histor, smart_collector=mock.sentinel.insights)
 
 
 class ControlAPITests(unittest.TestCase):

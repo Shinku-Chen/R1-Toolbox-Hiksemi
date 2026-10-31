@@ -47,6 +47,8 @@ jobs:
           node tests/check_interactions.cjs
           node tests/check_web_config.cjs
           node tests/check_smart_refresh.cjs
+          node tests/check_small_screen_fill.cjs
+          node tests/check_storage_fill_http.cjs
           node tests/check_api_management.cjs
           node tests/check_service_settings.cjs
           node tests/check_business_status.cjs
@@ -82,6 +84,18 @@ jobs:
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           if result.testsRun != 4 or result.skipped or not result.wasSuccessful():
               raise SystemExit('real mount suite must execute all four cases without skips or failures')
+          PY
+      - name: Verify capacity cache with real Linux mounts and workers
+        run: |
+          sudo "$(command -v python)" -B - <<'PY'
+          import os
+          import sys
+          import unittest
+          assert sys.platform == 'linux' and os.geteuid() == 0, 'capacity mount suite requires Linux UID 0'
+          suite = unittest.defaultTestLoader.discover('tests', pattern='test_capacity_refresh_mount_linux.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.testsRun != 5 or result.skipped or not result.wasSuccessful():
+              raise SystemExit('capacity mount suite must execute all five cases without skips or failures')
           PY
       - name: Verify real read-only service mount on the disposable runner
         run: sudo python3 tests/check_mount_linux.py

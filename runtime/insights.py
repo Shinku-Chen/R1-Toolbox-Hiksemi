@@ -2,12 +2,14 @@
 
 Fast proc/sys sampling and slow optional commands run in separate workers. The
 HTTP-facing snapshot copies memory and validates cached disk lifetimes in sysfs;
-SMART runs only in the explicit manual refresh, never in those workers or GETs.
+SMART runs only for an explicit Web fill/refresh or a live fan-policy demand;
+inventory workers and GETs never initiate it.
 All commands have fixed arguments and run without a shell.
 """
 
 import array
 from collections import deque
+from contextlib import nullcontext
 import copy
 import datetime
 import hashlib
@@ -242,7 +244,17 @@ class InsightsCollector:
         self._disk_activity_lock = threading.Lock()
         self._disk_activity_previous = None
         self._smart_cache = {}
+        # Automatic fan demand gets measurements only, never serial/raw detail
+        # authority. Attempts also bind short-lived negative results to a disk
+        # lifetime, so visible-page fills do not repeatedly wake/query failures.
+        self._smart_measurements = {}
+        self._smart_attempts = {}
         self._smart_refresh_lock = threading.Lock()
+        self._smart_policy_worker = None
+        self._smart_epoch = 0
+        # Control-catalog aliases are grants for one applied policy only. They
+        # never change public disk identities or grant serial/raw-data access.
+        self._smart_policy_aliases = {}
         self._disk_name_context = {}
         # Serial identity survives a standby-only SMART response, independently
         # of all temperature/health/raw-data expiry. It never survives a changed
@@ -273,6 +285,9 @@ class InsightsCollector:
 
     def stop(self):
         self._stop.set()
+        with self._lock:
+            self._smart_epoch += 1
+            self._smart_policy_aliases = {}
         for event in self._refresh.values():
             event.set()
         for thread in self._threads:
@@ -288,7 +303,7 @@ class InsightsCollector:
         for disk in state.get('disks', {}).get('items', []):
             name = disk.get('id') if isinstance(disk, dict) else None
             if isinstance(name, str) and re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', name):
-                # The row's sysfs temperature/model/names were collected for
+                # The row's model/names were collected for
                 # this exact lifetime. Never rebind those old values to a new
                 # disk just because it reuses the same /dev name.
                 lifetime = disk.pop('_lifecycle', None)
@@ -301,8 +316,8 @@ class InsightsCollector:
                     disk[key] = copy.deepcopy(smart.get(key))
                 disk['stable_identity'] = self._disk_identity(name, self.sys_root / 'block' / name,
                                                              smart.get('smart_identity'))
-                if disk.get('temperature_source') != 'sysfs':
-                    disk['temp_c'] = smart.get('temp_c')
+                disk['temp_c'] = smart.get('temp_c')
+                disk['temperature_source'] = 'smart'
                 if self._smart_context(name) != lifetime:
                     continue
             else:
@@ -748,18 +763,6 @@ class InsightsCollector:
         with self._lock:
             self._state[name] = result
 
-    def _disk_temperature(self, name, folder):
-        candidates = list((folder / "device").glob("hwmon/hwmon*/temp1_input"))
-        candidates += list((folder / "device").glob("hwmon*/temp1_input"))
-        if name.startswith("nvme"):
-            controller = re.match(r"nvme\d+", name)[0]
-            base = self.sys_root / "class/nvme" / controller
-            candidates += list(base.glob("device/hwmon/hwmon*/temp1_input"))
-            candidates += list(base.glob("hwmon*/temp1_input"))
-        values = [_integer(candidate) for candidate in candidates]
-        valid = [value / 1000 for value in values if value is not None and 0 < value <= 200000]
-        return max(valid) if valid else None
-
     def _disk_identity(self, name, folder, smart_identity=None):
         """Stable identity; never hash a transient /dev/sdX or hwmon number."""
         def digest(kind, value):
@@ -813,15 +816,24 @@ class InsightsCollector:
         return (identity, generation, dev)
 
     def _smart(self, name, identity=None):
-        """Project only an existing matching manual cache; passive callers never probe."""
+        """Project existing current-lifetime measurements; never initiate a probe."""
         with self._lock:
-            cached = copy.deepcopy(self._smart_cache.get(name))
+            manual = copy.deepcopy(self._smart_cache.get(name))
+            automatic = copy.deepcopy(self._smart_measurements.get(name))
+        records = [row for row in (manual, automatic) if row and len(row) == 3 and row[2] == identity]
+        fresh = [row for row in records if self._smart_record_fresh(row, identity)]
+        cached = (manual if manual in fresh else max(fresh or records,
+                  key=lambda row: _finite(row[0]) if _finite(row[0]) is not None else -math.inf, default=None))
         if (not cached or len(cached) != 3 or identity is None or cached[2] != identity
                 or self._smart_context(name) != identity):
             result = self._unknown_smart()
-            result['health']['reason'] = '尚无有效的手动 SMART 观测'
+            result['health']['reason'] = '尚无有效的 SMART 观测缓存'
             return result
         result = cached[1]
+        if manual and len(manual) == 3 and manual[2] == identity and cached is not manual:
+            # An already owner-authorized identity may survive an expired
+            # measurement. Automatic reads never introduce a new serial ID.
+            result['smart_identity'] = manual[1].get('smart_identity')
         sampled = _finite(cached[0])
         fresh = sampled is not None and 0 <= self.clock() - sampled < SMART_CACHE_SECONDS
         result['smart_fresh'] = fresh
@@ -831,14 +843,14 @@ class InsightsCollector:
             # cannot masquerade as current measurements or drive fan policy.
             result.update(standby=None, temp_c=None, smart_temperature_c=None,
                           smart_status='stale', temperature_critical_c=None,
-                          health={'passed': None, 'reason': '手动 SMART 观测已过期，请显式刷新'})
+                          health={'passed': None, 'reason': 'SMART 观测缓存已过期'})
             # Attribute rows contain measurements too. Keep raw data only in
             # the private identity cache, never in a stale public detail view.
             result.pop('smart_data', None)
         return result
 
-    def _probe_smart(self, name, *, force=False, timeout=3):
-        """The sole SMART command path; called only by explicit refresh_smart."""
+    def _probe_smart(self, name, *, force=False, timeout=3, measurement_only=False):
+        """The sole SMART command path, behind the shared batch grant and lock."""
         result = self._unknown_smart()
         arguments = ([] if force else ['-n', 'standby']) + ['-j', '-a', '/dev/' + name]
         command, error = self._run('smartctl', arguments, timeout=timeout)
@@ -857,7 +869,8 @@ class InsightsCollector:
                 # disk detail endpoint.  It is deliberately not copied into the
                 # frequent overview snapshot; smart() reads this cached copy and
                 # never launches another probe.
-                result["smart_data"] = copy.deepcopy(data)
+                if not measurement_only:
+                    result["smart_data"] = copy.deepcopy(data)
                 messages = data.get("smartctl", {}).get("messages", [])
                 notes = " ".join(str(entry.get("string", "")) for entry in messages if isinstance(entry, dict))
                 power = str(data.get("power_mode", {}).get("string", ""))
@@ -910,13 +923,14 @@ class InsightsCollector:
                         result['health'] = {'passed': None, 'reason': 'SMART 不支持或读取失败'}
                     elif not result['smart_available'] and result['smart_temperature_c'] is None:
                         status, reason = 'unavailable', 'smart_unavailable'
-                serial = data.get('serial_number')
-                wwn = data.get('wwn')
-                if isinstance(wwn, dict) and all(type(wwn.get(key)) is int for key in ('naa', 'oui', 'id')):
-                    raw = json.dumps({key: wwn[key] for key in ('naa', 'oui', 'id')}, sort_keys=True)
-                    result['smart_identity'] = 'wwn:' + hashlib.sha256(raw.encode()).hexdigest()[:24]
-                elif isinstance(serial, str) and 0 < len(serial.strip()) <= 512:
-                    result['smart_identity'] = 'serial:' + hashlib.sha256(serial.strip().encode()).hexdigest()[:24]
+                if not measurement_only:
+                    serial = data.get('serial_number')
+                    wwn = data.get('wwn')
+                    if isinstance(wwn, dict) and all(type(wwn.get(key)) is int for key in ('naa', 'oui', 'id')):
+                        raw = json.dumps({key: wwn[key] for key in ('naa', 'oui', 'id')}, sort_keys=True)
+                        result['smart_identity'] = 'wwn:' + hashlib.sha256(raw.encode()).hexdigest()[:24]
+                    elif isinstance(serial, str) and 0 < len(serial.strip()) <= 512:
+                        result['smart_identity'] = 'serial:' + hashlib.sha256(serial.strip().encode()).hexdigest()[:24]
                 if unsafe_power:
                     status, reason = 'unavailable', 'power_mode_unverified'
                     result = self._unknown_smart()
@@ -935,11 +949,243 @@ class InsightsCollector:
         if identity is None:
             return None
         with self._lock:
-            cached = self._smart_cache.get(name)
-            valid = cached and len(cached) == 3 and cached[2] == identity
+            valid = any(cached and len(cached) == 3 and cached[2] == identity for cached in (
+                self._smart_cache.get(name), self._smart_measurements.get(name)))
         return self._smart(name, identity) if valid else None
 
     def refresh_smart(self, force=False, authorizer=None):
+        """Owner-explicit full refresh; force applies to this batch only."""
+        return self._smart_batch(force, authorizer)
+
+    def fill_smart_missing(self, authorizer=None):
+        """Owner-explicit fixed fill: ordinary standby-safe reads on cache misses."""
+        return self._smart_batch(False, authorizer, missing_only=True)
+
+    def _smart_record_fresh(self, record, identity):
+        return bool(record and len(record) == 3 and record[2] == identity
+                    and _finite(record[0]) is not None and 0 <= self.clock() - record[0] < SMART_CACHE_SECONDS)
+
+    def capacity_fill_eligibility(self, device_name):
+        """Only a recent ordinary SMART success proves a non-standby fill grant.
+
+        A forced refresh is not evidence that the default standby guard worked.
+        This check is metadata/cache only and never performs a SMART command.
+        """
+        identity = self._smart_context(device_name)
+        if identity is None:
+            return 'power_state_unverified'
+        value = self._smart(device_name, identity)
+        if (value.get('smart_fresh') is True and value.get('standby') is True
+                and self._smart_context(device_name) == identity):
+            return 'standby'
+        with self._lock:
+            attempt = copy.deepcopy(self._smart_attempts.get(device_name))
+        if (attempt and attempt['identity'] == identity
+                and 0 <= self.clock() - attempt['stamp'] < SMART_CACHE_SECONDS
+                and attempt['row']['status'] == 'refreshed' and attempt['nonstandby'] is True
+                and self._smart_context(device_name) == identity):
+            return None
+        return 'power_state_unverified'
+
+    def request_policy_smart(self, demand):
+        """Schedule one bounded measurement-only batch for a live policy token.
+
+        The fan loop never waits for a command or for another SMART batch. The
+        token belongs to FanPolicyController and rechecks applied policy/lease,
+        rather than borrowing an owner Web authorization callback.
+        """
+        if not demand.authorized():
+            return False
+        with self._lock:
+            if self._stop.is_set() or self._smart_policy_worker and self._smart_policy_worker.is_alive():
+                return False
+            epoch = self._smart_epoch
+            worker = threading.Thread(target=self._policy_smart_batch, args=(demand, epoch),
+                                      daemon=True, name='r1-fan-smart')
+            self._smart_policy_worker = worker
+            try:
+                worker.start()
+            except RuntimeError:
+                self._smart_policy_worker = None
+                return False
+        return True
+
+    def _policy_smart_batch(self, demand, epoch):
+        with self._lock:
+            if self._stop.is_set() or self._smart_epoch != epoch:
+                return
+        try:
+            self._smart_batch(False, demand.authorized, missing_only=True, policy_demand=demand,
+                              collector_epoch=epoch)
+        except SmartRefreshError:
+            # Busy/revoked/stopped are not retry loops. A subsequent live fan
+            # tick may schedule a new token, still subject to cache freshness.
+            pass
+
+    def _policy_disk_names(self, demand):
+        """Resolve selected stable source IDs only from current inventory rows."""
+        bindings, _ = self._policy_disk_bindings(demand)
+        return list(dict.fromkeys(bindings.values()))
+
+    def _policy_alias_inventory_complete(self, rows):
+        """Alias uniqueness needs the entire fixed, bounded kernel inventory.
+
+        Global inventory intentionally caps its published rows. An alias must
+        not mistake that cap (or an omitted/unreadable row) for a complete scan.
+        Only fixed sysfs directory metadata is inspected; no SMART is run.
+        """
+        pattern = r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)'
+        published = [row.get('id') for row in rows if isinstance(row, dict)]
+        if (len(published) != len(rows) or len(published) > 128
+                or any(type(name) is not str or re.fullmatch(pattern, name) is None for name in published)
+                or len(set(published)) != len(published)):
+            return False
+        names = set()
+        try:
+            with os.scandir(self.sys_root / 'block') as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 256:  # Also bound irrelevant kernel entries.
+                        return False
+                    if re.fullmatch(pattern, entry.name):
+                        names.add(entry.name)
+                        if len(names) >= 129:
+                            return False
+        except OSError:
+            return False
+        return names == set(published)
+
+    def _policy_disk_bindings(self, demand):
+        """Unique current disk bindings, including policy-only old serial IDs.
+
+        A cold process may have no owner SMART serial cache. Existing consistent
+        sysfs/udev serial metadata can prove the selected serial hash without
+        promoting it to a global stable ID or probing disks to find a match.
+        """
+        with self._lock:
+            rows = copy.deepcopy(self._state.get('disks', {}).get('items', []))
+        # The temperature catalog marks duplicate stable IDs unavailable. Do
+        # not turn that ambiguous source into permission to probe both disks,
+        # or pick one merely because another row failed its lifetime check.
+        candidates, complete = {}, len(rows) <= 128
+        selected_serials = {source for source in demand.sources if source.startswith('disk:serial:')}
+        if selected_serials:
+            complete = complete and self._policy_alias_inventory_complete(rows)
+        for row in rows[:128]:
+            if not isinstance(row, dict):
+                complete = False
+                continue
+            name, identity = row.get('id'), row.get('_lifecycle')
+            source = 'disk:' + str(row.get('stable_identity'))
+            matches = {source: None} if source in demand.sources else {}
+            if identity is not None and self._smart_context(name) == identity:
+                current = self._smart(name, identity)
+                stable = self._disk_identity(name, self.sys_root / 'block' / name, current.get('smart_identity'))
+                if 'disk:' + str(stable) == source and self._smart_context(name) == identity:
+                    if source in matches:
+                        matches[source] = (name, identity, False)
+                if selected_serials:
+                    with self._lock:
+                        manual = self._smart_cache.get(name)
+                        known = manual[1] if manual and len(manual) == 3 and manual[2] == identity else None
+                        prior = self._disk_serial_cache.get(name, {})
+                        prior_serial = prior.get('serial') if prior.get('cache_key') == identity else None
+                    evidence = self._disk_serial_info(name, self.sys_root / 'block' / name, known, prior_serial,
+                                                      policy_sources=selected_serials)
+                    valid = (evidence['policy_metadata_status'] == 'ok' and evidence['status'] == 'ok'
+                             and self._smart_context(name) == identity)
+                    # Conflicting metadata can neither restore an alias nor
+                    # override an already owner-known serial identity.
+                    if source in selected_serials and (evidence['policy_metadata_status'] != 'missing'
+                                                       or evidence['status'] in ('conflict', 'invalid')):
+                        matches[source] = None
+                    for match in evidence['policy_matches']:
+                        matches[match] = ((name, identity, match != 'disk:' + str(stable)) if valid else None)
+            else:
+                complete = False
+            for match, value in matches.items():
+                candidates.setdefault(match, []).append(value)
+        bindings, aliases = {}, {}
+        for source, values in candidates.items():
+            if len(values) != 1 or values[0] is None:
+                continue
+            name, identity, alias = values[0]
+            if alias and not complete:
+                continue
+            bindings[source] = (name, identity)
+            if alias:
+                aliases[source] = (name, identity)
+        return bindings, aliases
+
+    def policy_temperature_aliases(self):
+        """Internal control-catalog projection; no public identity/cache mutation."""
+        empty = {'by_device': {}, 'unavailable_sources': [], 'controlled_sources': [], 'items': []}
+        with self._lock:
+            record = self._smart_policy_aliases
+        if not record:
+            return empty
+        demand = record['demand']
+        selected = {source for source in demand.sources if source.startswith('disk:serial:')}
+        unavailable = {'by_device': {}, 'unavailable_sources': sorted(selected),
+                       'controlled_sources': sorted(selected), 'items': []}
+        with self._lock, demand.publication_guard():
+            if record is not self._smart_policy_aliases:
+                return unavailable
+            if (self._stop.is_set() or record['epoch'] != self._smart_epoch or not demand.authorized()):
+                self._smart_policy_aliases = {}
+                return empty
+            bindings, current = self._policy_disk_bindings(demand)
+            if (not demand.authorized() or self._stop.is_set() or record['epoch'] != self._smart_epoch):
+                self._smart_policy_aliases = {}
+                return empty
+            blocked = selected - bindings.keys()
+            result = {'by_device': {}, 'unavailable_sources': [], 'controlled_sources': sorted(selected), 'items': []}
+            for source, pair in record['bindings'].items():
+                if bindings.get(source) != pair:
+                    blocked.add(source)
+                elif current.get(source) == pair:
+                    result['by_device'].setdefault(pair[0], []).append(source)
+                # A normal base row may now provide the same source after an
+                # owner refresh. Do not duplicate it with an alias row.
+            inventory = {row['id']: row for row in self._state.get('disks', {}).get('items', [])[:128]
+                         if isinstance(row, dict) and isinstance(row.get('id'), str)}
+            for source in sorted(selected - blocked):
+                pair = bindings.get(source)
+                if pair is None:
+                    continue
+                name, identity = pair
+                # A new alias requires this batch's binding grant, not merely
+                # metadata that appeared after it finished.
+                if source in current and record['bindings'].get(source) != pair:
+                    blocked.add(source)
+                    continue
+                row = inventory.get(name)
+                if row is None or row.get('_lifecycle') != identity or self._smart_context(name) != identity:
+                    blocked.add(source)
+                    continue
+                smart = self._smart(name, identity)
+                item = {key: copy.deepcopy(row.get(key)) for key in ('id', 'device', 'model', 'user_name')}
+                item.update({key: copy.deepcopy(smart.get(key)) for key in (
+                    'smart_temperature_c', 'smart_sampled_monotonic', 'smart_status', 'standby',
+                    'temperature_critical_c')})
+                item['policy_source_id'] = source
+                if self._smart_context(name) != identity:
+                    blocked.add(source)
+                    continue
+                result['items'].append(item)
+            # Binding and measurement above come from one private lifecycle.
+            # Never join this grant to a separately copied public sdX row.
+            final_bindings, final_aliases = self._policy_disk_bindings(demand)
+            if final_bindings != bindings or final_aliases != current:
+                return unavailable
+            if (not demand.authorized() or self._stop.is_set() or record['epoch'] != self._smart_epoch):
+                self._smart_policy_aliases = {}
+                return empty
+            result['unavailable_sources'] = sorted(blocked)
+            result['items'] = [item for item in result['items'] if item['policy_source_id'] not in blocked]
+            return result
+
+    def _smart_batch(self, force, authorizer, *, missing_only=False, policy_demand=None,
+                     collector_epoch=None):
         """Explicit bounded batch, fixed devices only; force is never persisted.
 
         All results/cache writes are private until the final grant and device
@@ -948,6 +1194,8 @@ class InsightsCollector:
         if type(force) is not bool:
             raise SmartRefreshError('invalid_parameters')
         revoked = False
+        with self._lock:
+            epoch = self._smart_epoch if collector_epoch is None else collector_epoch
 
         def authorized():
             nonlocal revoked
@@ -958,26 +1206,45 @@ class InsightsCollector:
             if not allowed:
                 revoked = True
                 raise SmartRefreshError('authorization_denied')
-            if self._stop.is_set():
+            if self._stop.is_set() or self._smart_epoch != epoch:
                 raise SmartRefreshError('stopping')
 
         authorized()
         if not self._smart_refresh_lock.acquire(blocking=False):
             raise SmartRefreshError('busy')
         started, deadline, pending, results = time.time(), self.clock() + SMART_REFRESH_TIMEOUT, {}, []
+        attempts, identities = {}, {}
         try:
             authorized()
-            for folder in sorted((self.sys_root / 'block').glob('*'))[:128]:
-                name = folder.name
+            bindings, aliases = self._policy_disk_bindings(policy_demand) if policy_demand is not None else ({}, {})
+            targets = (list(dict.fromkeys(bindings.values())) if policy_demand is not None else
+                       [(folder.name, None) for folder in sorted((self.sys_root / 'block').glob('*'))[:128]])
+            for name, expected in targets:
                 if re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', name) is None:
                     continue
                 authorized()
                 row = {'device': name, 'status': 'unavailable', 'reason': None, 'sampled_at': None}
                 results.append(row)
                 identity = self._smart_context(name)
-                if identity is None:
+                if identity is None or expected is not None and expected != identity:
                     row['reason'] = 'identity_unverified'
                     continue
+                identities[name] = identity
+                if missing_only:
+                    with self._lock:
+                        cached = any(self._smart_record_fresh(record, identity) for record in (
+                            self._smart_cache.get(name), self._smart_measurements.get(name)))
+                        previous = copy.deepcopy(self._smart_attempts.get(name))
+                    if cached:
+                        value = self._smart(name, identity)
+                        row.update(status='skipped_standby' if value.get('standby') is True else 'cached',
+                                   reason='standby' if value.get('standby') is True else None,
+                                   sampled_at=value.get('smart_sampled_at'))
+                        continue
+                    if (previous and previous['identity'] == identity
+                            and 0 <= self.clock() - previous['stamp'] < SMART_CACHE_SECONDS):
+                        row.update(previous['row'])
+                        continue
                 if name.startswith('mmcblk'):
                     row['reason'] = 'smart_unsupported'
                     continue
@@ -985,7 +1252,8 @@ class InsightsCollector:
                 if remaining <= 0:
                     row.update(status='failed', reason='timeout')
                     continue
-                value, status, reason = self._probe_smart(name, force=force, timeout=min(3.0, remaining))
+                value, status, reason = self._probe_smart(name, force=force, timeout=min(3.0, remaining),
+                                                        measurement_only=missing_only)
                 authorized()
                 if self._smart_context(name) != identity:
                     row.update(status='identity_changed', reason='identity_changed')
@@ -994,11 +1262,24 @@ class InsightsCollector:
                     row.update(status='failed', reason='timeout')
                     continue
                 row.update(status=status, reason=reason, sampled_at=value['smart_sampled_at'])
+                if not force:
+                    attempts[name] = {'identity': identity, 'stamp': value['smart_sampled_monotonic'],
+                                      'row': copy.deepcopy(row), 'nonstandby': status == 'refreshed'}
                 if status in ('refreshed', 'skipped_standby'):
+                    if missing_only:
+                        value = {key: copy.deepcopy(value.get(key)) for key in (
+                            'smart_available', 'standby', 'temp_c', 'health', 'smart_temperature_c',
+                            'smart_sampled_monotonic', 'smart_sampled_at', 'smart_status',
+                            'temperature_critical_c')}
                     pending[name] = (value['smart_sampled_monotonic'], value, identity)
             authorized()
-            with self._lock:
+            publication = policy_demand.publication_guard() if policy_demand is not None else nullcontext()
+            with self._lock, publication:
                 authorized()
+                if policy_demand is not None:
+                    current_bindings, current_aliases = self._policy_disk_bindings(policy_demand)
+                    if current_bindings != bindings or current_aliases != aliases:
+                        raise SmartRefreshError('identity_changed')
                 if self.clock() >= deadline:
                     for row in results:
                         if row['device'] in pending:
@@ -1006,29 +1287,43 @@ class InsightsCollector:
                     pending.clear()
                 for row in results:
                     name = row['device']
-                    record = pending.get(name)
-                    if record is not None and self._smart_context(name) != record[2]:
+                    identity = identities.get(name)
+                    if identity is not None and self._smart_context(name) != identity:
                         row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
                         pending.pop(name, None)
+                        attempts.pop(name, None)
                 authorized()
                 # Prune against current lifetimes at the commit point, never
                 # an older background scan's list of active names. New manual
                 # records take precedence when enforcing the fixed cache cap.
-                retained = {name: record for name, record in self._smart_cache.items()
+                cache = self._smart_measurements if missing_only else self._smart_cache
+                retained = {name: record for name, record in cache.items()
                             if len(record) == 3 and self._smart_context(name) == record[2]}
                 retained.update(copy.deepcopy(pending))
                 keys = list(pending) + [name for name in retained if name not in pending]
+                kept_attempts = {name: record for name, record in self._smart_attempts.items()
+                                 if self._smart_context(name) == record['identity']}
+                kept_attempts.update({name: record for name, record in attempts.items()
+                                     if self._smart_context(name) == record['identity']})
                 authorized()
                 if self.clock() >= deadline:
                     for row in results:
                         if row['device'] in pending:
                             row.update(status='failed', reason='timeout', sampled_at=None)
                 else:
-                    self._smart_cache = {name: retained[name] for name in keys[:128]}
+                    cache = {name: retained[name] for name in keys[:128]}
+                    if missing_only:
+                        self._smart_measurements = cache
+                    else:
+                        self._smart_cache = cache
+                    self._smart_attempts = dict(list(kept_attempts.items())[-128:])
+                    if policy_demand is not None:
+                        self._smart_policy_aliases = ({'demand': policy_demand, 'epoch': epoch, 'bindings': aliases}
+                            if any(source.startswith('disk:serial:') for source in policy_demand.sources) else {})
             # snapshot() reprojects this cache immediately. Do not wake the
             # names worker: its normal storage snapshot is a separate source.
             return {'ok': True, 'force': force, 'status': 'complete' if all(
-                row['status'] in ('refreshed', 'skipped_standby') for row in results) else 'partial',
+                row['status'] in ('refreshed', 'skipped_standby', 'cached') for row in results) else 'partial',
                 'started_at': started, 'finished_at': time.time(), 'results': results}
         finally:
             self._smart_refresh_lock.release()
@@ -1043,7 +1338,7 @@ class InsightsCollector:
         except (OSError, ValueError, RuntimeError):
             return None
 
-    def _disk_serial_info(self, name, folder, smart=None, identity_serial=None):
+    def _disk_serial_info(self, name, folder, smart=None, identity_serial=None, *, policy_sources=None):
         """Merge bounded existing metadata, preserving disagreement as unknown."""
         candidates = {}
         invalid = False
@@ -1071,14 +1366,24 @@ class InsightsCollector:
                 for line in metadata.splitlines():
                     if line.startswith("E:ID_SERIAL_SHORT="):
                         candidate("udev:" + str(len(candidates)), line.partition("=")[2])
+        metadata_values = set(candidates.values()) if policy_sources is not None else set()
+        metadata_status = ('invalid' if invalid else 'conflict' if len(metadata_values) > 1
+                           else 'ok' if metadata_values else 'missing')
         data = smart.get("smart_data") if isinstance(smart, dict) else None
         if isinstance(data, dict):
             candidate("smart_cache", data.get("serial_number"))
         candidate("smart_identity_cache", identity_serial)
         values = set(candidates.values())
         status = "invalid" if invalid else "conflict" if len(values) > 1 else "ok" if values else "missing"
-        return {"serial": next(iter(values)) if status == "ok" else None,
-                "status": status, "sources": sorted(candidates)}
+        result = {"serial": next(iter(values)) if status == "ok" else None,
+                  "status": status, "sources": sorted(candidates)}
+        if policy_sources is not None:
+            # Only current sysfs/udev can establish an alias. Existing owner
+            # identity caches participate solely as additional conflict vetoes.
+            result['policy_metadata_status'] = metadata_status
+            result['policy_matches'] = {source for value in metadata_values
+                if (source := 'disk:serial:' + hashlib.sha256(value.encode('utf-8')).hexdigest()[:24]) in policy_sources}
+        return result
 
     def _disk_serial(self, name, folder, smart=None):
         """Use existing sysfs/udev and a caller-verified SMART cache; no probes."""
@@ -1095,8 +1400,7 @@ class InsightsCollector:
             if not re.fullmatch(r"(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)", name):
                 continue
             active.add(name)
-            # Bind the entire row before its first sysfs measurement, not
-            # after reading temperature/size from a potentially replaced disk.
+            # Bind the entire row before its first sysfs size/model read.
             cache_key = self._smart_context(name)
             if cache_key is None:
                 identity_cache.pop(name, None)
@@ -1105,7 +1409,6 @@ class InsightsCollector:
             sectors = _integer(folder / "size")
             rotational = _integer(folder / "queue/rotational")
             media = "NVMe SSD" if name.startswith("nvme") else "eMMC" if name.startswith("mmcblk") else "HDD" if rotational == 1 else "SSD" if rotational == 0 else None
-            temperature = self._disk_temperature(name, folder)
             smart = self._smart(name, cache_key) if not name.startswith("mmcblk") else {
                 "smart_available": False, "standby": None, "temp_c": None,
                 "health": {"passed": None, "reason": "eMMC 不提供通用 SMART 状态"}}
@@ -1113,8 +1416,8 @@ class InsightsCollector:
                      "_lifecycle": cache_key,
                      "model": (_text(folder / "device/model", 512) or "").strip() or None,
                      "size_bytes": sectors * 512 if sectors is not None else None, "type": media,
-                     "temp_c": temperature if temperature is not None else smart["temp_c"],
-                     "temperature_source": 'sysfs' if temperature is not None else 'smart',
+                     "temp_c": smart["temp_c"],
+                     "temperature_source": 'smart',
                      "health": smart["health"], "smart_available": smart["smart_available"], "standby": smart["standby"],
                      "stable_identity": self._disk_identity(name, folder, smart.get('smart_identity')),
                      "smart_temperature_c": smart.get('smart_temperature_c'),

@@ -7314,7 +7314,7 @@ return `<div class="card pad r1-smart" data-ref="r1Smart">
 <span>强制刷新休眠硬盘</span>
 <span class="sub">可能唤醒硬盘；默认不勾选，刷新结束后自动复位。</span>
 </label>
-<p class="sub r1-smart-snapshot" data-ref="r1SmartSnapshot">手动快照，非实时；健康与属性表示采样时状态 · 采样时间未知</p>
+<p class="sub r1-smart-snapshot" data-ref="r1SmartSnapshot">SMART 快照，非实时；健康与属性表示采样时状态 · 采样时间未知</p>
 <p class="sub" data-ref="r1SmartState" role="status" aria-live="polite">尚未刷新。后台不再自动探测 SMART。</p>
 <div class="r1-smart-rows" data-ref="r1SmartRows" hidden></div>
 </div>`;
@@ -7418,7 +7418,7 @@ function r1SmartPatchSleepNote() {
 const body = document.querySelector('#sheetBody');
 if (!body) return;
 for (const note of body.querySelectorAll('.note.sleep span')) {
-const fixed = '这块硬盘已停转休眠。后台不再自动读取 SMART：容量与温度为休眠前的最后读数，SMART 只在磁盘页手动刷新时读取（默认跳过休眠硬盘）。';
+const fixed = '这块硬盘已停转休眠。容量与温度为此前快照；按需采集默认跳过休眠硬盘，手动强制刷新可能唤盘。';
 if (note.textContent !== fixed) note.textContent = fixed;
 }
 }
@@ -7428,7 +7428,7 @@ return (typeof value === 'number' && Number.isFinite(value) && value > 0) ? valu
 }
 function r1SmartSnapshotNote(detail) {
 const stamp = r1SmartDetailStamp(detail);
-const parts = ['手动快照，非实时；健康与属性表示采样时状态',
+const parts = ['SMART 快照，非实时；健康与属性表示采样时状态',
 stamp === null ? '采样时间未知' : '采样于 ' + r1SmartStamp(stamp)];
 if (detail && detail.fresh === false) parts.push('观测已过期，当前健康未知，请手动刷新');
 return parts.join(' · ');
@@ -7481,6 +7481,291 @@ try { r1SmartMount(); } finally { setTimeout(() => { muted = false; }, 0); }
 run();
 new MutationObserver(run).observe(body, { childList: true, subtree: true });
 })();
+if (typeof Poll !== 'undefined' && Poll.add) {
+Poll.add('r1CapacitySync', async () => {
+if (typeof sheetCtx === 'undefined' || !sheetCtx || sheetCtx.type !== 'disk') return;
+document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+}, 2000, () => typeof sheetCtx !== 'undefined' && !!sheetCtx && sheetCtx.type === 'disk');
+}
+const R1_CAP_STATUS = { refreshed: '已刷新', failed: '失败', unavailable: '不可用',
+identity_changed: '身份已变化，未采用' };
+const R1_CAP_STATE = { busy: false, result: null, error: null };
+const R1_CAP_MAX_ROWS = 128;
+function r1CapStatusText(value) { return R1_CAP_STATUS[value] || '未知状态'; }
+function r1CapReasonText(value) {
+if (value == null || value === '') return '';
+const map = { busy: '已有刷新正在进行', identity_changed: '硬盘身份变化，未采用结果',
+unavailable: '暂不可用', statvfs_failed: '文件系统用量读取失败',
+mount_missing: '挂载点不存在', timeout: '本轮刷新超时' };
+return map[value] || '原因未说明';
+}
+function r1CapIsStamp(value) {
+return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+function r1CapSnapshot(payload) {
+if (!payload || typeof payload !== 'object' || payload.ok !== true) return null;
+if (payload.status !== 'complete' && payload.status !== 'partial') return null;
+if (!r1CapIsStamp(payload.started_at) || !r1CapIsStamp(payload.finished_at)) return null;
+if (payload.finished_at < payload.started_at) return null;
+if (!Array.isArray(payload.results) || payload.results.length > R1_CAP_MAX_ROWS) return null;
+const rows = [], seen = new Set();
+for (const row of payload.results) {
+if (!row || typeof row !== 'object') return null;
+if (typeof row.mount_id !== 'number' || !Number.isInteger(row.mount_id) || row.mount_id <= 0) return null;
+if (seen.has(row.mount_id)) return null;
+seen.add(row.mount_id);
+if (!Object.prototype.hasOwnProperty.call(R1_CAP_STATUS, row.status)) return null;
+if (!Object.prototype.hasOwnProperty.call(row, 'reason')) return null;
+if (row.reason !== null && (typeof row.reason !== 'string' || row.reason.length > 64)) return null;
+if (!Object.prototype.hasOwnProperty.call(row, 'sampled_at')) return null;
+if (row.sampled_at !== null && !r1CapIsStamp(row.sampled_at)) return null;
+rows.push({ mount_id: row.mount_id, status: row.status, reason: row.reason,
+sampled_at: row.sampled_at });
+}
+return { status: payload.status, started_at: payload.started_at,
+finished_at: payload.finished_at, rows };
+}
+function r1CapDisk() {
+const device = r1SmartVisibleDisk();
+if (!device) return null;
+const rows = (typeof disksOf === 'function') ? disksOf(S.o) : [];
+return rows.find(row => row && row.name === device) || null;
+}
+function r1CapNote() {
+const disk = r1CapDisk();
+if (!disk) return '容量快照';
+const stamp = r1CapIsStamp(disk.capacity_sampled_at) ? disk.capacity_sampled_at : null;
+const status = typeof disk.capacity_status === 'string' ? disk.capacity_status : '';
+let text = '容量快照 · ' + (stamp === null ? '尚未采集容量' : '采样于 ' + r1SmartStamp(stamp));
+if (status === 'partial' || status === 'failed') text += ' · 上次刷新未完全完成';
+return text;
+}
+function r1CapCardHTML() {
+return `<div class="card pad r1-capacity" data-ref="r1Cap">
+<div class="r1-smart-head">
+<div><h3>刷新容量</h3><p class="sub" data-ref="r1CapNote">容量快照</p></div>
+<button class="btn" type="button" data-ref="r1CapGo">刷新容量</button>
+</div>
+<p class="sub" data-ref="r1CapState" role="status" aria-live="polite">后台不预采集；仅按需补齐容量快照。</p>
+<div class="r1-smart-rows" data-ref="r1CapRows" hidden></div>
+</div>`;
+}
+function r1CapSync(host) {
+const button = host.querySelector('[data-ref="r1CapGo"]');
+const state = host.querySelector('[data-ref="r1CapState"]');
+const note = host.querySelector('[data-ref="r1CapNote"]');
+const rows = host.querySelector('[data-ref="r1CapRows"]');
+if (!button || !state || !note || !rows) return;
+const noteText = r1CapNote();
+if (note.textContent !== noteText) setText(note, noteText);
+const busy = R1_CAP_STATE.busy;
+const label = busy ? '刷新中…' : '刷新容量';
+if (button.textContent !== label) setText(button, label);
+button.disabled = busy;
+if (busy) button.setAttribute('aria-busy', 'true'); else button.removeAttribute('aria-busy');
+const view = busy ? { text: '正在刷新容量…', html: null }
+: R1_CAP_STATE.error ? { text: R1_CAP_STATE.error, html: null }
+: R1_CAP_STATE.result ? (() => {
+const r = R1_CAP_STATE.result;
+const done = r.rows.filter(row => row.status === 'refreshed').length;
+const bad = r.rows.filter(row => row.status !== 'refreshed').length;
+const text = '完成于 ' + r1SmartStamp(r.finished_at) + ' · 成功 ' + done + '，异常 ' + bad
++ (r.status === 'partial' ? ' · 部分未完成' : '');
+const html = r.rows.map(row => `<div class="r1-smart-row" data-status="${esc(row.status)}"><strong>#${esc(String(row.mount_id))}</strong><span>${esc(r1CapStatusText(row.status))}</span><span class="sub">${esc(r1CapReasonText(row.reason) || '—')}</span><span class="sub">${esc(r1SmartStamp(row.sampled_at))}</span></div>`).join('');
+return { text, html };
+})() : null;
+const signature = JSON.stringify([busy, view && view.text, view && view.html, noteText]);
+if (host.dataset.capSignature === signature) return;
+host.dataset.capSignature = signature;
+if (!view) return;
+if (state.textContent !== view.text) setText(state, view.text);
+if (view.html !== null) { rows.hidden = false; setHTML(rows, view.html); }
+}
+async function r1CapRun(host) {
+if (R1_CAP_STATE.busy) return;
+R1_CAP_STATE.busy = true; R1_CAP_STATE.error = null;
+document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+try {
+const payload = await API.post('/api/r1/storage/capacity/refresh', {});
+const snapshot = r1CapSnapshot(payload);
+if (!snapshot) throw new Error('request_receipt_invalid');
+R1_CAP_STATE.result = snapshot;
+} catch (error) {
+const status = error && error.status;
+R1_CAP_STATE.error = status === 409 ? '刷新未完成：已有刷新正在进行，请稍候。'
+: status === 401 ? '刷新未完成：需要登录后再刷新。'
+: status === 403 ? '刷新未完成：当前会话没有操作权限。'
+: error && error.message === 'request_receipt_invalid' ? '刷新未完成：回执无法确认，未当作成功。'
+: '刷新未完成：请求失败，请稍后重试。';
+} finally {
+R1_CAP_STATE.busy = false;
+document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+}
+if (R1_CAP_STATE.result && !R1_CAP_STATE.error) {
+try { if (typeof Poll !== 'undefined' && Poll.run) await Poll.run('overview'); } catch (_) { /* 保留旧展示 */ }
+document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+}
+}
+function r1CapMount() {
+const body = document.querySelector('#sheetBody');
+if (!body) return;
+const anchor = body.querySelector('[data-ref="r1Smart"]');
+if (!anchor) return;
+let host = body.querySelector('[data-ref="r1Cap"]');
+if (!host) {
+anchor.insertAdjacentHTML('afterend', r1CapCardHTML());
+host = body.querySelector('[data-ref="r1Cap"]');
+if (!host) return;
+host.querySelector('[data-ref="r1CapGo"]').addEventListener('click', () => { void r1CapRun(host); });
+}
+r1CapSync(host);
+}
+(function r1CapWatch() {
+const body = document.querySelector('#sheetBody');
+if (!body) { document.addEventListener('DOMContentLoaded', r1CapWatch, { once: true }); return; }
+let muted = false;
+const run = () => { if (muted) return; muted = true; try { r1CapMount(); } finally { setTimeout(() => { muted = false; }, 0); } };
+run();
+new MutationObserver(run).observe(body, { childList: true, subtree: true });
+})();
+const R1_FILL = { epoch: 0, attempted: false, inflight: false, relevant: false,
+last: null, owner: null, ownerPending: null, unauthorized: false };
+const R1_FILL_STATUS = { refreshed: true, failed: true, unavailable: true,
+identity_changed: true, cached: true, skipped_standby: true };
+function r1FillRelevant() {
+if (typeof document !== 'undefined' && document.hidden) return false;
+const page = (typeof S !== 'undefined' && S && S.page) || '';
+if (page === 'overview' || page === 'storage') return true;
+return typeof sheetCtx !== 'undefined' && !!sheetCtx && sheetCtx.type === 'disk';
+}
+function r1FillCapacityValid(row) {
+if (!r1CapIsStamp(row.capacity_sampled_at)) return false;
+const status = typeof row.capacity_status === 'string' ? row.capacity_status : '';
+if (['partial', 'identity_changed', 'failed', 'unavailable'].includes(status)) return false;
+const total = row.total, used = row.used;
+return typeof total === 'number' && Number.isFinite(total) && total > 0
+&& typeof used === 'number' && Number.isFinite(used) && used >= 0;
+}
+function r1FillSmartValid(row) {
+if (row.smart_fresh !== true) return false;
+const temp = row.temp_c != null ? row.temp_c : row.temp;
+if (typeof temp === 'number' && Number.isFinite(temp) && temp >= -40 && temp <= 200) return true;
+return row.smart_available === true;
+}
+function r1FillMissing() {
+const rows = (typeof disksOf === 'function' && typeof S !== 'undefined' && S && S.o) ? disksOf(S.o) : [];
+if (!rows.length) return false;
+return rows.some(row => {
+if (!row || typeof row.name !== 'string') return false;
+if (!r1FillCapacityValid(row)) return true;
+if (row.name.startsWith('mmcblk')) return false;
+return !r1FillSmartValid(row);
+});
+}
+function r1FillReset() {
+R1_FILL.epoch += 1;
+R1_FILL.attempted = false;
+}
+function r1FillReceipt(payload) {
+if (!payload || typeof payload !== 'object' || payload.ok !== true) return null;
+if (payload.force !== false) return null;
+if (payload.status !== 'complete' && payload.status !== 'partial') return null;
+if (!r1CapIsStamp(payload.started_at) || !r1CapIsStamp(payload.finished_at)) return null;
+if (payload.finished_at < payload.started_at) return null;
+const section = (value, key) => {
+if (!value || typeof value !== 'object' || value.ok !== true) return null;
+if (key === 'smart' && value.force !== false) return null;
+if (value.status !== 'complete' && value.status !== 'partial') return null;
+if (!r1CapIsStamp(value.started_at) || !r1CapIsStamp(value.finished_at)) return null;
+if (value.finished_at < value.started_at) return null;
+if (!Array.isArray(value.results) || value.results.length > 128) return null;
+const seen = new Set();
+for (const row of value.results) {
+if (!row || typeof row !== 'object') return null;
+if (!Object.prototype.hasOwnProperty.call(R1_FILL_STATUS, row.status)) return null;
+if (!Object.prototype.hasOwnProperty.call(row, 'reason')) return null;
+if (row.reason !== null && (typeof row.reason !== 'string' || row.reason.length > 64)) return null;
+if (!Object.prototype.hasOwnProperty.call(row, 'sampled_at')) return null;
+if (row.sampled_at !== null && !r1CapIsStamp(row.sampled_at)) return null;
+if (key === 'smart') {
+if (typeof row.device !== 'string' || !/^[A-Za-z0-9_.:-]{1,32}$/.test(row.device)) return null;
+if (seen.has('d:' + row.device)) return null;
+seen.add('d:' + row.device);
+} else {
+if (typeof row.mount_id !== 'number' || !Number.isInteger(row.mount_id) || row.mount_id <= 0) return null;
+if (seen.has('m:' + row.mount_id)) return null;
+seen.add('m:' + row.mount_id);
+}
+}
+return true;
+};
+if (!section(payload.smart, 'smart')) return null;
+if (!section(payload.capacity, 'capacity')) return null;
+return { force: payload.force, status: payload.status,
+finished_at: payload.finished_at };
+}
+function r1FillOwner() {
+if (R1_FILL.owner !== null) return Promise.resolve(R1_FILL.owner);
+if (R1_FILL.ownerPending) return R1_FILL.ownerPending;
+R1_FILL.ownerPending = API.get('/api/auth/session').then(data => {
+const d = data || {};
+let owner;
+if (typeof d.owner_authorized === 'boolean') owner = d.owner_authorized === true;
+else owner = d.logged_in === true
+|| (d.auth_mode === 'password' && d.auth_required === false && d.authorized === true);
+R1_FILL.owner = owner;
+if (!owner) R1_FILL.unauthorized = true;
+return owner;
+}).catch(() => { R1_FILL.owner = false; R1_FILL.unauthorized = true; return false; })
+.finally(() => { R1_FILL.ownerPending = null; });
+return R1_FILL.ownerPending;
+}
+function r1FillTick() {
+if (R1_FILL.inflight || R1_FILL.attempted) return;
+if (!r1FillRelevant() || !r1FillMissing()) return;
+R1_FILL.attempted = true;
+R1_FILL.inflight = true;
+const ticket = {};
+R1_FILL.ticket = ticket;
+const release = () => {
+if (R1_FILL.ticket === ticket) { R1_FILL.ticket = null; R1_FILL.inflight = false; }
+};
+r1FillOwner().then(owner => {
+if (!owner) return;
+if (typeof document !== 'undefined' && document.hidden) return;  // 认证期间已离开：不发
+if (!R1_FILL.relevant) return;
+const epoch = R1_FILL.epoch;
+R1_FILL.attempted = true;
+return API.post('/api/r1/storage/fill', {}).then(async payload => {
+if (epoch !== R1_FILL.epoch) return;      // 旧响应不投影新周期
+const receipt = r1FillReceipt(payload);
+if (!receipt) return;                     // 畸形：不投影、本周期不重试
+R1_FILL.last = receipt;
+try { await Poll.run('overview'); } catch (_) { /* 保留旧展示 */ }
+if (epoch !== R1_FILL.epoch) return;
+await r1SmartReloadBatches(payload.smart.results.map(row => row.device));
+if (epoch !== R1_FILL.epoch) return;
+document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => r1SmartUpdateSnapshot(card));
+document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+}).catch(error => {
+if (epoch === R1_FILL.epoch && error && (error.status === 401 || error.status === 403)) {
+R1_FILL.unauthorized = true;
+R1_FILL.owner = false;
+}
+});
+}).catch(() => { /* 认证失败：本周期不重试 */ })
+.finally(release);   // 覆盖整个 owner+POST 生命周期，任何分支都释放
+}
+function r1FillWatch() {
+const relevant = r1FillRelevant();
+if (relevant && !R1_FILL.relevant) r1FillReset();
+R1_FILL.relevant = relevant;
+if (relevant) r1FillTick();
+}
+if (typeof document !== 'undefined') document.addEventListener('visibilitychange', r1FillWatch);
+if (typeof Poll !== 'undefined' && Poll.add) {
+Poll.add('r1FillWatch', async () => { r1FillWatch(); }, 1000);
+}
 let uiBootReady = false, uiPending = false, uiTimer = 0;
 const uiPayload = () => ({ theme: UI.theme, accent: UI.accent, dotMatrix: UI.dotMatrix, motion: UI.motion, fontScale: UI.fontScale, range: UI.range, layoutVersion: LAYOUT_VERSION, layout: UI.layout, hidden: UI.hidden, thresholds: TH, ignored: UI.ignored || [] });
 function saveUI() {

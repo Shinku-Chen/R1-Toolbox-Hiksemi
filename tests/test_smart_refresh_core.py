@@ -8,6 +8,7 @@ the production SMART/cache/lifecycle logic under test.
 import copy
 import importlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,6 +23,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 insights = importlib.import_module('insights')
+device_info = importlib.import_module('device_info')
+TemperatureSources = importlib.import_module('temperature_sources').TemperatureSources
 panel_module = importlib.import_module('fnm_compat')
 PRIVATE = 'SMART-PRIVATE-SERIAL-PATH-EXCEPTION-SENTINEL'
 
@@ -150,6 +153,71 @@ class SmartRefreshCoreTests(unittest.TestCase):
         self.assertGreaterEqual(count[0], 2)
         self.assertEqual(self.calls, [])
 
+    def test_startup_rounds_snapshots_and_control_never_open_disk_temperature_attributes(self):
+        sensor = self.folder / 'device/hwmon/hwmon4'
+        self.write(sensor / 'name', 'drivetemp')
+        for name in ('temp1_input', 'temp1_max', 'temp1_crit', 'temp1_label'):
+            self.write(sensor / name, 41000)
+        alias = self.sys / 'class/hwmon/hwmon4'
+        self.write(alias / 'name', 'drivetemp')
+        for name in ('temp1_input', 'temp1_max', 'temp1_crit', 'temp1_label'):
+            self.write(alias / name, 41000)
+        cpu = self.sys / 'class/hwmon/hwmon5'
+        self.write(cpu / 'name', 'coretemp')
+        self.write(cpu / 'temp1_input', 55000)
+        twice, attempts = threading.Event(), []
+        original_disks, rounds = self.collector._disks, [0]
+        original_open, original_text = Path.open, device_info._Reader.text
+
+        def guard(path):
+            if Path(path).name.startswith('temp') and Path(path).parent in (sensor, alias):
+                attempts.append(str(path))
+                raise AssertionError('passive disk temperature attribute read')
+
+        def open_file(path, *args, **kwargs):
+            guard(path)
+            return original_open(path, *args, **kwargs)
+
+        def read(reader, path, *args, **kwargs):
+            guard(path)
+            return original_text(reader, path, *args, **kwargs)
+
+        def disk_round():
+            result = original_disks()
+            rounds[0] += 1
+            if rounds[0] >= 2:
+                twice.set()
+            else:
+                self.collector._refresh['disks'].set()
+            return result
+
+        with mock.patch.object(Path, 'open', open_file), \
+                mock.patch.object(device_info.os, 'O_NONBLOCK', getattr(os, 'O_NONBLOCK', 0), create=True), \
+                mock.patch.object(device_info._Reader, 'text', read), \
+                mock.patch.object(self.collector, '_disks', side_effect=disk_round):
+            self.collector.start()
+            try:
+                self.assertTrue(twice.wait(timeout=2))
+                sources = TemperatureSources(self.collector, self.sys, clock=lambda: self.now)
+                for _ in range(3):
+                    self.collector._collect_slow()
+                    self.collector.snapshot()
+                    self.assertEqual(sources.cpu_guard(), 55)
+                    self.now += 2
+            finally:
+                self.collector.stop()
+        self.assertEqual(attempts, [])
+        self.assertGreaterEqual(rounds[0], 2)
+        self.assertEqual(self.calls, [])
+
+    def test_snapshot_discards_legacy_sysfs_temperature_even_in_same_lifetime(self):
+        self.publish_disks()
+        self.collector._state['disks']['items'][0].update(temp_c=88, temperature_source='sysfs')
+        disk = self.collector.snapshot()['disks']['items'][0]
+        self.assertIsNone(disk['temp_c'])
+        self.assertEqual(disk['temperature_source'], 'smart')
+        self.assertEqual(self.calls, [])
+
     def test_default_explicit_refresh_is_standby_aware_and_projects_real_cache(self):
         result = self.refresh()
         self.assert_receipt(result, {'sda': 'refreshed'})
@@ -228,12 +296,12 @@ class SmartRefreshCoreTests(unittest.TestCase):
         self.assertIsNone(row['smart_temperature_c'])
         self.assertEqual(len(self.calls), 1)
 
-    def test_sysfs_temperature_does_not_make_expired_smart_health_fresh(self):
+    def test_sysfs_temperature_never_fills_expired_manual_smart_cache(self):
         self.refresh()
         self.write(self.folder / 'device/hwmon/hwmon4/temp1_input', '41000\n')
         self.now += 31
         row = self.row()
-        self.assertEqual(row['temp_c'], 41)
+        self.assertIsNone(row['temp_c'])
         self.assertIsNone(row['health']['passed'])
         self.assertIsNone(row['smart_temperature_c'])
         self.assertEqual(len(self.calls), 1)
@@ -620,12 +688,13 @@ class SmartRefreshCoreTests(unittest.TestCase):
         self.assertEqual(private['smart_sampled_at'], sampled_at)
         self.assertEqual(len(self.calls), 1)
 
-    def test_snapshot_does_not_rebind_old_sysfs_temperature_to_replacement_disk(self):
+    def test_snapshot_does_not_rebind_old_metadata_or_smart_to_replacement_disk(self):
         self.write(self.folder / 'device/hwmon/hwmon4/temp1_input', '41000\n')
         self.refresh()
         self.publish_disks()
         original = self.collector.snapshot()['disks']['items'][0]
-        self.assertEqual(original['temp_c'], 41)
+        self.assertEqual(original['temp_c'], 37)
+        self.assertEqual(original['model'], 'Fixture physical disk')
         self.folder.rename(self.sys / 'block/replaced-fixture')
         self.folder = self.block('sda', '8:0', 'new-disk-without-hwmon')
         self.assertEqual(self.collector.snapshot()['disks']['items'], [],
@@ -645,23 +714,22 @@ class SmartRefreshCoreTests(unittest.TestCase):
         self.write(self.folder / 'device/model', 'Replacement physical disk\n')
         self.write(self.folder / 'size', '2000000\n')
 
-    def test_row_temperature_read_cannot_bind_old_measurement_to_new_lifetime(self):
-        self.write(self.folder / 'device/hwmon/hwmon4/temp1_input', '41000\n')
-        original = self.collector._disk_temperature
+    def test_row_size_read_cannot_bind_old_measurement_to_new_lifetime(self):
+        original = insights._integer
         replaced = [False]
 
-        def read_then_replace(name, folder):
-            measured = original(name, folder)
-            if name == 'sda' and not replaced[0]:
-                self.assertEqual(measured, 41)
+        def read_then_replace(path, *args, **kwargs):
+            measured = original(path, *args, **kwargs)
+            if Path(path) == self.folder / 'size' and not replaced[0]:
+                self.assertEqual(measured, 1000000)
                 replaced[0] = True
                 self.replace_during_row_sample()
             return measured
 
-        with mock.patch.object(self.collector, '_disk_temperature', side_effect=read_then_replace):
+        with mock.patch.object(insights, '_integer', side_effect=read_then_replace):
             rows = self.publish_disks()
         self.assertTrue(replaced[0])
-        self.assertEqual(rows, [], 'the row anchor must precede the temperature read')
+        self.assertEqual(rows, [], 'the row anchor must precede the size read')
         self.assertNotIn('sda', self.collector._disk_name_context)
         replacement = self.publish_disks()[0]
         self.assertEqual(replacement['model'], 'Replacement physical disk')
@@ -714,13 +782,13 @@ class SmartRefreshCoreTests(unittest.TestCase):
         self.assertNotIn('sda', self.collector._disk_verified_serials)
         self.assertEqual(self.calls, [])
 
-    def test_stable_same_lifetime_sysfs_row_preserves_real_temperature_and_metadata(self):
+    def test_stable_same_lifetime_row_preserves_metadata_without_passive_temperature(self):
         self.write(self.folder / 'device/hwmon/hwmon4/temp1_input', '41000\n')
         identity = self.collector._disk_identity('sda', self.folder)
         rows = self.publish_disks()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['stable_identity'], identity)
-        self.assertEqual(rows[0]['temp_c'], 41)
+        self.assertIsNone(rows[0]['temp_c'])
         self.assertEqual(rows[0]['model'], 'Fixture physical disk')
         self.assertEqual(rows[0]['size_bytes'], 1000000 * 512)
         self.assertNotIn('_lifecycle', rows[0])
@@ -747,20 +815,20 @@ class SmartRefreshCoreTests(unittest.TestCase):
 
     def test_old_background_enumeration_cannot_prune_newly_refreshed_disk_cache(self):
         # _disks captures its real sorted sysfs list before reading per-device
-        # temperatures. Insert a new physical disk and an explicit refresh at
+        # size. Insert a new physical disk and an explicit refresh at
         # that boundary; no real thread scheduling or SMART process is needed.
-        original = self.collector._disk_temperature
+        original = insights._integer
         inserted = [False]
         receipts = []
 
-        def add_after_enumeration(name, folder):
-            if not inserted[0]:
+        def add_after_enumeration(path, *args, **kwargs):
+            if Path(path) == self.folder / 'size' and not inserted[0]:
                 inserted[0] = True
                 self.block('sdb', '8:16', 'disk-added-after-old-enumeration')
                 receipts.append(self.refresh())
-            return original(name, folder)
+            return original(path, *args, **kwargs)
 
-        with mock.patch.object(self.collector, '_disk_temperature', side_effect=add_after_enumeration):
+        with mock.patch.object(insights, '_integer', side_effect=add_after_enumeration):
             old_round = self.collector._disks()
         self.assertEqual([item['id'] for item in old_round['items']], ['sda'])
         self.assert_receipt(receipts[0], {'sda': 'refreshed', 'sdb': 'refreshed'})

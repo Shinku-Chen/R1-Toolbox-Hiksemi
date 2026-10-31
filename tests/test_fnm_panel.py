@@ -384,6 +384,42 @@ class MappingTests(unittest.TestCase):
         (self.panel.proc_root / 'self/mountinfo').unlink()
         self.assertEqual(self.panel._disk_summary(), (None, None, None))
 
+    def test_manual_capacity_stamp_is_preserved_by_repeated_overview_reads(self):
+        basic = Monitor().snapshot()
+        basic['disks'][0].update(capacity_sampled_at=100.25,
+                                 capacity_source='manual_statvfs_cache', capacity_status='cached')
+        self.panel.monitor.snapshot = lambda: copy.deepcopy(basic)
+        with mock.patch.object(compat.os, 'statvfs', create=True,
+                               side_effect=AssertionError('GET must not measure a filesystem')) as probe:
+            for _ in range(3):
+                row = self.panel.overview()['disks_detail'][0]
+                self.assertEqual(row['total'], 4 * 10 ** 12)
+                self.assertEqual(row['used'], 10 ** 12)
+                self.assertEqual(row['percent'], 25.0)
+                self.assertEqual(row['capacity_sampled_at'], 100.25)
+                self.assertEqual(row['capacity_source'], 'manual_statvfs_cache')
+                self.assertEqual(row['capacity_status'], 'cached')
+            probe.assert_not_called()
+
+    def test_unknown_or_invalidated_capacity_keeps_physical_size_and_null_usage(self):
+        basic = Monitor().snapshot()
+        basic['disks'][0].update(total_bytes=None, used_bytes=None, usage_percent=None,
+                                 capacity_sampled_at=None, capacity_source='manual_statvfs_cache')
+        self.panel.monitor.snapshot = lambda: copy.deepcopy(basic)
+        for status in ('unknown', 'identity_changed'):
+            with self.subTest(status=status):
+                basic['disks'][0]['capacity_status'] = status
+                overview = self.panel.overview()
+                row = overview['disks_detail'][0]
+                self.assertGreater(row['size'], 0)
+                self.assertIsNone(row['total'])
+                self.assertIsNone(row['used'])
+                self.assertIsNone(row['percent'])
+                self.assertIsNone(row['capacity_sampled_at'])
+                self.assertEqual(row['capacity_source'], 'manual_statvfs_cache')
+                self.assertEqual(row['capacity_status'], status)
+                self.assertIsNone(overview['disk_total'])
+
     def test_fan_policy_rpm_keeps_both_verified_channels(self):
         cached = Insights().snapshot()
         cached['device']['fans'] = []

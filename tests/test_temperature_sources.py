@@ -1,6 +1,7 @@
 """Control temperature tests use real collector snapshots and fixture sysfs only."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'runtime'))
@@ -103,6 +105,44 @@ class TemperatureTests(unittest.TestCase):
         self.assertEqual(row['sampled_monotonic'], 100)
         self.now += 0.5
         self.assertEqual(self.sources.cpu_guard(), 70)
+
+    @unittest.skipIf(os.name == 'nt', 'requires Linux sysfs symlinks')
+    def test_disk_hwmon_alias_cannot_become_a_control_temperature(self):
+        disk, _ = self.disk()
+        alias, _ = self.hwmon(6, 'coretemp', 'platform/opaque-disk-sensor', 99000)
+        (alias / 'device').symlink_to(disk, target_is_directory=True)
+        self.write(alias / 'temp1_crit', 100000)
+        self.hwmon(7, 'coretemp', 'platform/coretemp.0', 53000)
+        original = self.sources._text
+
+        def read(path):
+            if Path(path).parent.name == 'hwmon6':
+                self.assertFalse(Path(path).name.startswith('temp'))
+            return original(path)
+
+        with mock.patch.object(self.sources, '_text', side_effect=read):
+            self.assertEqual(self.sources.cpu_guard(), 53)
+            self.assertEqual(len(self.sources.snapshot()), 1)
+        self.assertEqual(self.calls, [])
+
+    def test_manual_disk_temperature_expires_at_exactly_thirty_seconds(self):
+        folder = self.sys / 'block/sda'
+        for name, value in (('size', 1000000), ('dev', '8:0'),
+                            ('queue/rotational', 1), ('device/model', 'Fixture HDD'),
+                            ('device/serial', 'serial-a')):
+            self.write(folder / name, value)
+        initial = self.collect_disks()[0]
+        sampled = initial['sampled_monotonic']
+        self.assertEqual(initial['temperature_c'], 40)
+        self.now += 29.999
+        self.assertEqual(self.sources.snapshot()[0]['temperature_c'], 40)
+        self.now = sampled + 30
+        row = self.sources.snapshot()[0]
+        self.assertIsNone(row['temperature_c'])
+        self.assertEqual(row['status'], 'unavailable')
+        self.assertEqual(row['sampled_monotonic'], sampled)
+        self.assertEqual(row['max_age_seconds'], 30)
+        self.assertEqual(len(self.calls), 1)
 
     def test_malformed_missing_and_unphysical_are_not_fake_zero(self):
         folder, _ = self.hwmon()

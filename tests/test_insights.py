@@ -249,7 +249,7 @@ class InsightsTests(unittest.TestCase):
         value = self.collector.snapshot()
         self.assertIn("docker", value["containers"]["reason"])
         self.assertIn("virsh", value["vms"]["reason"])
-        self.assertIn("手动", value["disks"]["items"][0]["health"]["reason"])
+        self.assertEqual(value["disks"]["items"][0]["health"]["reason"], "尚无有效的 SMART 观测缓存")
         self.assertEqual(self.calls, [])
 
     def test_smart_standby_command_never_wakes_disk_and_is_cached(self):
@@ -734,14 +734,15 @@ class InsightsTests(unittest.TestCase):
         self.assertTrue(disk["smart_available"])
         self.assertEqual(disk["temp_c"], 48)
 
-    def test_nvme_temperature_prefers_hwmon_and_excludes_pseudo_disks(self):
+    def test_nvme_temperature_uses_only_manual_smart_cache_and_excludes_pseudo_disks(self):
         self.block("nvme0n1", temp=42000)
         self.block("loop0")
         self.block("dm-0")
         self.respond("smartctl", ["-n", "standby", "-j", "-a", "/dev/nvme0n1"], {"nvme_smart_health_information_log": {"temperature": 90, "critical_warning": 0}})
         disks = self.collector._disks()["items"]
         self.assertEqual(len(disks), 1)
-        self.assertEqual(disks[0]["temp_c"], 42)
+        self.assertEqual(disks[0]["temp_c"], 90)
+        self.assertEqual(disks[0]['temperature_source'], 'smart')
         self.assertTrue(disks[0]["health"]["passed"])
         self.assertEqual(disks[0]["size_bytes"], 512000000)
 

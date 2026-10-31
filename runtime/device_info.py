@@ -281,13 +281,102 @@ def _cpu(reader, proc, sys):
     }
 
 
+def _sysfs_sensor_path(path, sys_root):
+    """Resolve bounded sysfs links, rejecting an outside target before following it."""
+    root = Path(os.path.abspath(sys_root))
+    try:
+        pending = list(Path(os.path.abspath(path)).relative_to(root).parts)
+        current, links = root, 0
+        for _ in range(256):
+            if not pending:
+                return current
+            candidate = current / pending.pop(0)
+            if stat.S_ISLNK(os.lstat(candidate).st_mode):
+                links += 1
+                if links > 32:
+                    return None
+                link = os.readlink(candidate)
+                if os.name == 'nt' and link.startswith('\\\\?\\'):
+                    link = link[4:]
+                target = Path(os.path.abspath(current / link))
+                pending = list(target.relative_to(root).parts) + pending
+                current = root
+            else:
+                current = candidate
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return None
+
+
+def disk_sensor_roots(sys_root):
+    """Disk/controller associations from directory/link metadata only, never attributes."""
+    roots = set()
+    base = _sysfs_sensor_path(Path(sys_root) / 'block', sys_root)
+    if base is None:
+        return ()
+    try:
+        with os.scandir(base) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 128:
+                    break
+                if not re.fullmatch(r'(?:sd[a-z]+|hd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', entry.name):
+                    continue
+                physical = _sysfs_sensor_path(base / entry.name, sys_root)
+                device = _sysfs_sensor_path(base / entry.name / 'device', sys_root)
+                roots.update(path for path in (physical, device) if path is not None)
+                # SCSI disk hwmon can be a sibling of block/sdX below its device.
+                if (physical is not None and physical.parent.name == 'block'
+                        and re.fullmatch(r'\d+:\d+:\d+:\d+', physical.parent.parent.name)):
+                    roots.add(physical.parent.parent)
+    except OSError:
+        pass
+    return tuple(roots)
+
+
+def sysfs_sensor_names(path, pattern, sys_root, limit=64):
+    """List fixed sensor metadata inside sysfs without following outside links."""
+    base = _sysfs_sensor_path(path, sys_root)
+    if base is None:
+        return []
+    names = []
+    try:
+        with os.scandir(base) as entries:
+            for index, entry in enumerate(entries):
+                if index >= _SCAN_LIMIT or len(names) >= limit:
+                    break
+                if re.fullmatch(pattern, entry.name) and _sysfs_sensor_path(base / entry.name, sys_root) is not None:
+                    names.append(entry.name)
+    except OSError:
+        pass
+    return sorted(names)
+
+
+def is_disk_temperature_source(folder, driver, sys_root, disk_roots=None):
+    """Exclude disk hwmon/thermal aliases before opening any temperature or limit."""
+    if driver.strip().lower() in ('nvme', 'drivetemp'):
+        return True
+    physical = _sysfs_sensor_path(folder, sys_root)
+    if physical is None:
+        return True
+    device = _sysfs_sensor_path(Path(folder) / 'device', sys_root)
+    if device is None and os.path.lexists(Path(folder) / 'device'):
+        return True  # An unresolved association cannot safely become a CPU source.
+    roots = disk_sensor_roots(sys_root) if disk_roots is None else disk_roots
+    return any(path == root or root in path.parents
+               for path in (physical, device) if path is not None for root in roots)
+
+
 def _sensors(reader, sys):
     thermal, fans = [], []
     base = sys / "class/hwmon"
-    for name in reader.names(base, r"hwmon\d+", 64):
+    disk_roots = disk_sensor_roots(sys)
+    for name in sysfs_sensor_names(base, r"hwmon\d+", sys):
         root = base / name
-        driver = reader.text(root / "name", 128) or name
-        for attribute in reader.names(root, r"temp\d+_input", 64):
+        driver_path = _sysfs_sensor_path(root / 'name', sys)
+        driver = (reader.text(driver_path, 128) if driver_path is not None else None) or name
+        temperatures = ([] if is_disk_temperature_source(root, driver, sys, disk_roots)
+                        else sysfs_sensor_names(root, r"temp\d+_input", sys))
+        for attribute in temperatures:
             channel = attribute[:-6]
             thermal.append({
                 "id": f"{name}:{channel}", "driver": driver, "channel": channel,
@@ -314,12 +403,16 @@ def _sensors(reader, sys):
                 break
         if len(thermal) >= _ITEM_LIMIT and len(fans) >= _ITEM_LIMIT:
             break
-    for name in reader.names(sys / "class/thermal", r"thermal_zone\d+", 64):
+    for name in sysfs_sensor_names(sys / "class/thermal", r"thermal_zone\d+", sys):
         if len(thermal) >= _ITEM_LIMIT:
             break
         root = sys / "class/thermal" / name
+        driver_path = _sysfs_sensor_path(root / 'type', sys)
+        driver = (reader.text(driver_path, 128) if driver_path is not None else None) or name
+        if is_disk_temperature_source(root, driver, sys, disk_roots):
+            continue
         thermal.append({"id": name, "driver": "thermal", "channel": name,
-                        "label": reader.text(root / "type", 128) or name,
+                        "label": driver,
                         "celsius": reader.number(root / "temp", -100, 250, 1000),
                         "max_celsius": None, "critical_celsius": None, "source": "thermal"})
     return thermal[:_ITEM_LIMIT], fans[:_ITEM_LIMIT]

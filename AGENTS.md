@@ -56,9 +56,14 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 
 这些是产品红线，不是建议：
 
+- 风扇冷启动恢复旧 SMART serial 来源时，只为有效 active policy 已选摘要建立温控用途映射；当前同代 sysfs／udev 元数据须唯一且无冲突，已有合法 owner SMART／身份缓存仅增拒绝证据，不代替缺失元数据。不可扫描 SMART 找盘，不全局换 stable_identity／文件根／Token ID，不扩完整 SN 或 raw。测量与目录消费复核实际通道、policy epoch、collector 调度 epoch、磁盘生命周期；撤销后旧映射不能被新策略复用，同 ID 自然恢复时去重，重复／冲突／换盘仍未知并保持保护。
+- 冷启动用途映射与温度须按同一设备代次投影，不能仅凭 sdX 拼接两次快照；有界内核库存须与发布库存完整对应，截断、漏项或无法核验时拒绝该用途映射，不能把前 128 行当作唯一性证明。控制循环在采目录前和取得控制锁后核同一 policy epoch，期间重配／撤销后丢旧目录，不以旧授权来源驱动新策略。保留真实样本时间、待机跳过与缺测保护，不宣称连续身份锁。
 - 不绕过风扇接管预检：必须核验原厂温控二进制、唯一进程、字符设备与已加载驱动身份；不伪造 RPM，不盲扫 I²C，不停转风扇，不用目标百分比冒充实测转速。
-- SMART 不得自动采集：启动、后台库存、网页／小屏／详情、被动诊断、健康与温控只读合法新鲜缓存；测量值三十秒过期、身份失效或缺测为 `null`／`unknown`。仅所有者显式 `POST /api/r1/storage/smart/refresh` 可刷新，严格 `{"force":false}` 或 `{"force":true}`；默认使用 `smartctl -n standby -j -a`，休眠跳过，保护不支持保持不可用，不自动强制。`force:true` 仅本次省略 `-n`，须明确可能唤盘，不持久化。保留同源／JSON／CSRF、SMART 来源串行锁与缓存锁、三十秒批次绝对时限、单命令至多三秒、逐盘前后设备生命周期及逐步／结束前撤权丢整轮；不授 Bearer、MCP、小屏令牌或开发白名单，不接设备／路径／命令参数、不启动自检。磁盘库存须在读取任何盘字段前捕获可信生命周期，行采样后及发布前复核；采样中换盘整行丢弃，不给新身份拼接旧 sysfs 温度、型号或名称。固定逐盘回执见 `docs/smart-refresh.md`。
+- SMART 在无人查看且无有效风扇硬盘需求时不采：启动、库存、任意 GET、被动诊断与健康只读合法新鲜缓存；三十秒过期、身份失效或缺测为 `null`／`unknown`。所有者手动 `POST /api/r1/storage/smart/refresh` 保留严格 `{"force":false}` 或 `{"force":true}`；普通固定 `smartctl -n standby -j -a`，休眠跳过，保护不支持保持不可用，不自动强制。`force:true` 仅本次省略 `-n`，须明确可能唤盘，不持久化。手动接口仍保留同源／JSON／CSRF、SMART 来源串行锁与缓存锁、三十秒批次绝对时限、单命令至多三秒、逐盘设备生命周期及撤权丢整轮；不授 Bearer、MCP、小屏令牌或开发白名单，不接设备／路径／命令参数、不启动自检。磁盘库存读取任何盘字段前捕获可信生命周期，行采样后及发布前复核；采样中换盘整行丢弃，不给新身份拼接旧型号或名称。前台和风扇受限例外见下文及 `docs/smart-refresh.md`。
 - 功耗只显示 RAPL 实测的 CPU 封装；不估算整机功耗，不把封装功耗当整机功耗。
+- 后台磁盘监控仅用内核元数据和合法缓存：启动、周期采样、GET／被动诊断不读取磁盘 hwmon 温度及阈值（含 nvme、drivetemp 和关联别名），不对 `/drives` 挂载执行 statvfs、realpath 或 stat，不改用空间扫描；CPU／主板、风扇与身份／名称库存继续。磁盘温度只用同代三十秒 SMART 缓存，不续期或放宽风扇缺测保护。所有者手动容量 `POST /api/r1/storage/capacity/refresh {}` 保留，元数据测量可能唤盘，不宣称跳过休眠；前台缺测补齐另须可信非待机依据。两者复用真实挂载／设备复核、非排队锁和绝对窗口，拒 FUSE／未知／冲突。容量不持久化、不在启动初始化；按真实 mount ID、设备代次、target／root／fs 身份绑定，卸载／替换／重挂／身份不明即拒旧。GET 保留 `capacity_sampled_at` 原时刻，`capacity_source:manual_statvfs_cache` 是兼容来源标识，也包括前台按需快照，不表示一定手动。真实挂载 FD 仅采集／提交短暂持有，缓存不得长期 pin 用户挂载；内核挂载事件和身份复核保守失效，证明不足即丢历史值，不宣传原子路径锁。详见 `docs/capacity-refresh.md`。
+- 前台缺测固定使用 Web 所有者 `POST /api/r1/storage/fill {}` 或独立本机小屏令牌 `POST /api/storage/fill {}`，授权不互换，不接 force／盘路径，GET 永远被动。相关页面可见且缺有效缓存才发，每个可见周期最多一次，离页／hidden／屏保不再发；失败／休眠／unsupported／busy 不因轮询重试。仅普通 SMART，同代负结果三十秒复用；容量已有缓存不测，缺测且有可信非待机依据才测。风扇温度授权仅来自有效 active_config 和实际 active 温控通道所选硬盘，采前／发布前重验策略与盘代次，撤销立即停；与手动／前台共用锁，不采容量、不扩完整 SN、不放宽三十秒缺测保护。灯光策略本身不授额外后台采集权。
+- 会话状态 `owner_authorized` 仅按真实 `panel_authorized(headers, peer)` 的 password／pair／open 结果提供布尔 UI 提示；保留 authorized／dev_mode 原语义及判断顺序，不能以开发窗口开启排除正常所有者，也不能以提示取代 POST 的实时 owner／Bearer／CSRF／代次检查。旧服务兼容仅 logged_in:true 或 password＋auth_required:false＋authorized:true，缺明确证明的旧 pair 只读缓存。
 - 默认 `password` 模式首次无口令，网页监控与管理直接可用；设置并开启口令后需登录会话。显式 `pair` 模式兼容原五位一次性配对流程。两种模式均保留同源／JSON／CSRF、操作确认和 5 秒可取消电源操作；小屏控制令牌不得发给网页。
 - 部署/升级必须复用原 Docker 项目与 `r1-toolbox-data` 数据卷；不删除卷、不使用 `down -v`。删除部署后正常重启可恢复官方显示。
 - 未知读数保持 `null` / `--`，不用 0 或猜测填补；不可用的能力隐藏或标注原因，不生成占位卡片。

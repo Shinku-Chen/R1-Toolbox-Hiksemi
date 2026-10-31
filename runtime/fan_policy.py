@@ -4,9 +4,11 @@ The browser edits rules; this service samples and applies them independently.
 Hardware is accessed only through the injected native and official adapters.
 """
 import copy
+from contextlib import contextmanager
 import json
 import math
 import os
+import re
 from pathlib import Path
 import stat
 import tempfile
@@ -103,7 +105,8 @@ def observed_sources(rows, now):
         stamp, limit = row["sampled_monotonic"], row["max_age_seconds"]
         age = now - stamp if _finite(stamp) and 0 <= stamp <= now else None
         row["age_seconds"] = age
-        row["fresh"] = bool(age is not None and _finite(limit) and 0 < limit <= 300 and age <= limit)
+        row["fresh"] = bool(age is not None and _finite(limit) and 0 < limit <= 300
+                            and (age < limit if row['kind'] == 'disk' else age <= limit))
         temperature = row["temperature_c"]
         if not _finite(temperature) or not -40 <= temperature <= 150:
             row["temperature_c"] = None
@@ -168,9 +171,38 @@ def decide(policy, rows, previous=None):
     return {**base, "level": level, "target_percent": duty, "reason": "所选有效来源取最高温；低于低温静音，两阈值间普通，高于高温全速"}
 
 
+class _DiskTemperatureDemand:
+    """Revocable grant from an applied temperature policy, not a Web owner."""
+    def __init__(self, controller, epoch, settings, sources, channels):
+        self.controller, self.epoch = controller, epoch
+        self.settings, self.sources, self.channels = settings, frozenset(sources), frozenset(channels)
+        self.revoked = False
+
+    def authorized(self):
+        controller = self.controller
+        with controller.lock:
+            valid = (not self.revoked and controller._smart_policy_epoch == self.epoch
+                     and controller.active_config == self.settings
+                     and not controller.busy and not controller.stop_event.is_set()
+                     and controller._live_temperature_channels() == self.channels)
+            if not valid:
+                self.revoked = True
+            return valid
+
+    @contextmanager
+    def publication_guard(self):
+        # Serialize the last policy/version check and cache publication against
+        # release/reconfigure. Hardware and device identity still need rechecks.
+        with self.controller.lock:
+            yield
+
+
 class FanPolicyController:
-    def __init__(self, state_dir, sources, adapter, *, histor=None, clock=None, interval=1):
+    def __init__(self, state_dir, sources, adapter, *, histor=None, clock=None, interval=1,
+                 smart_collector=None):
         self.state_dir, self.sources, self.adapter = Path(state_dir), sources, adapter
+        self.smart_collector = smart_collector
+        self._smart_policy_epoch = 0
         self.histor = histor
         self.clock, self.interval = clock or time.monotonic, interval
         self.lock = threading.RLock()
@@ -282,8 +314,12 @@ class FanPolicyController:
                     "last_error": self.last_error, "recovery_confirmed": recovery_confirmed}
 
     def tick(self):
+        with self.lock:
+            epoch = self._smart_policy_epoch
         catalog = observed_sources(self.sources.snapshot(), self.clock())
         with self.lock:
+            if self._smart_policy_epoch != epoch:
+                return
             self.catalog = catalog
             busy = self.busy
         if not busy:
@@ -291,9 +327,50 @@ class FanPolicyController:
         if not self.control_lock.acquire(blocking=False):
             return
         try:
-            self._control_tick(catalog)
+            self._control_tick(catalog, epoch)
         finally:
             self.control_lock.release()
+        self._request_disk_temperatures()
+
+    def _live_temperature_channels(self):
+        """Applied, freshly acknowledged channels with actual native ownership."""
+        now = self.clock()
+        wanted = {name for name in CHANNELS if self.channels[name]['active']
+                  and self.active_config['channels'][name]['mode'] == 'temperature'
+                  and _finite(self.channels[name].get('applied_monotonic'))
+                  and 0 <= now - self.channels[name]['applied_monotonic'] <= 5}
+        if not wanted:
+            return frozenset()
+        # A native handoff/preflight must not hold the one-second fan loop
+        # behind an optional SMART grant check.
+        native_lock = getattr(self.adapter, 'lock', None)
+        if native_lock is not None and not native_lock.acquire(blocking=False):
+            return frozenset()
+        try:
+            state = self.adapter.snapshot()
+            if not isinstance(state, dict) or state.get('phase') != 'active':
+                return frozenset()
+            return frozenset(wanted.intersection(state.get('active_channels', [])))
+        except Exception:
+            return frozenset()
+        finally:
+            if native_lock is not None:
+                native_lock.release()
+
+    def _request_disk_temperatures(self):
+        if self.smart_collector is None:
+            return
+        with self.lock:
+            if self.busy or self.stop_event.is_set():
+                return
+            channels = self._live_temperature_channels()
+            sources = {source for name in channels for source in self.active_config['channels'][name]['sources']
+                       if re.fullmatch(r'disk:(?:wwn|serial|physical):[0-9a-f]{24}', source)}
+            if not sources:
+                return
+            demand = _DiskTemperatureDemand(self, self._smart_policy_epoch,
+                                            copy.deepcopy(self.active_config), sources, channels)
+        self.smart_collector.request_policy_smart(demand)
 
     def _fault(self, reason):
         restored = True
@@ -302,6 +379,7 @@ class FanPolicyController:
         except Exception:
             restored = False
         with self.lock:
+            self._smart_policy_epoch += 1
             self.channels = {name: self._vendor_state() for name in CHANNELS}
             if not restored:
                 for state in self.channels.values():
@@ -314,11 +392,16 @@ class FanPolicyController:
             except (OSError, ValueError):
                 self.settings_error = "控制已中止，但停用状态未能保存；请检查设置数据卷"
 
-    def _control_tick(self, catalog):
+    def _control_tick(self, catalog, epoch):
         # A capability probe can wait behind a native handoff. Recalculate age
         # at the decision boundary rather than extending a pre-probe sample.
         catalog = observed_sources(catalog, self.clock())
         with self.lock:
+            # Source collection can overlap a completed reapply, even when the
+            # selected source IDs are unchanged. The new grant cannot consume
+            # a catalog collected for the preceding policy generation.
+            if self._smart_policy_epoch != epoch:
+                return
             self.catalog = catalog
             if self.busy or self.stop_event.is_set() or not any(item["active"] for item in self.channels.values()):
                 return
@@ -448,6 +531,7 @@ class FanPolicyController:
                     self.adapter.write({name: 255 for name in wanted})
             with self.lock:
                 self._save(self.config, config, bool(wanted))
+                self._smart_policy_epoch += 1
                 self.active_config = copy.deepcopy(config)
                 self.active_on_boot = bool(wanted)
                 if states is not None:
@@ -469,6 +553,7 @@ class FanPolicyController:
                 restored = False
             detail = str(error).strip().replace(chr(10), " ")[:500] if type(error) in (ValueError, RuntimeError) else ""
             with self.lock:
+                self._smart_policy_epoch += 1
                 self.channels = {name: self._vendor_state() for name in CHANNELS}
                 if not restored:
                     for state in self.channels.values():
@@ -577,6 +662,7 @@ class FanPolicyController:
                     _require(not any(item["mode"] != "vendor" for item in apply_target["channels"].values())
                              or capability.get("available") is True, "当前设备尚不满足独立调速条件；配置已保存，未接管")
                     self.busy = True
+                    self._smart_policy_epoch += 1
                     self.worker = threading.Thread(target=self._apply_worker,
                                                    args=(copy.deepcopy(apply_target), apply_official),
                                                    daemon=True, name="r1-fan-policy-apply")
@@ -632,6 +718,7 @@ class FanPolicyController:
         if self.active_on_boot:
             with self.lock:
                 self.busy = True
+                self._smart_policy_epoch += 1
                 # Native modes persist in the vendor's configuration. Boot
                 # recovery must not overwrite a newer official-app selection.
                 self.worker = threading.Thread(target=self._apply_worker, args=(copy.deepcopy(self.active_config), False),
@@ -642,6 +729,8 @@ class FanPolicyController:
 
     def stop(self):
         self.stop_event.set()
+        with self.lock:
+            self._smart_policy_epoch += 1
         for thread in (self.thread, self.worker):
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=15)

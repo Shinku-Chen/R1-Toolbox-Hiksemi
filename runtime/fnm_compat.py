@@ -726,17 +726,36 @@ class FnmonitorPanel:
             total = used = 0
             measured = False
             measured_devices = set()
+            capacity_entries = []
             for mount in disk_mounts:
                 entry = _dict(basic.get(mount))
                 filesystem = self._mount_devices.get(mount)
                 if filesystem is not None and filesystem in measured_devices:
                     continue
+                capacity_entries.append(entry)
                 if _number(entry.get('total_bytes')) is not None and _number(entry.get('used_bytes')) is not None:
                     total += entry['total_bytes']
                     used += entry['used_bytes']
                     measured = True
                     if filesystem is not None:
                         measured_devices.add(filesystem)
+            # This is a dated manual measurement, independent of the fast
+            # overview timestamp. Multiple partitions retain the oldest sample
+            # and explicitly mark incomplete coverage rather than imply live IO.
+            capacity_stamps = [_number(entry.get('capacity_sampled_at'), 0)
+                               for entry in capacity_entries]
+            capacity_stamps = [value for value in capacity_stamps if value is not None and value > 0]
+            capacity_complete = (bool(capacity_entries) and all(
+                entry.get('capacity_status') == 'cached'
+                and (_number(entry.get('capacity_sampled_at'), 0) or 0) > 0
+                and _number(entry.get('total_bytes'), 1) is not None
+                and _number(entry.get('used_bytes'), 0) is not None
+                for entry in capacity_entries))
+            capacity_status = ('cached' if measured and capacity_complete else 'partial' if measured
+                               else 'identity_changed' if any(entry.get('capacity_status') == 'identity_changed'
+                                                              for entry in capacity_entries)
+                               else 'unavailable' if any(entry.get('capacity_status') == 'unavailable'
+                                                        for entry in capacity_entries) else 'unknown')
             size = _number(item.get('size_bytes'), 0) or _number(physical.get('bytes'), 0)
             rpm = physical.get('rotational')
             media = ('HDD' if rpm == 1 else 'SSD' if rpm == 0 else '')
@@ -755,6 +774,8 @@ class FnmonitorPanel:
                 'size': size, 'total': total if measured else None,
                 'used': used if measured else None,
                 'percent': used / total * 100 if measured and total > 0 else None,
+                'capacity_sampled_at': min(capacity_stamps) if capacity_stamps else None,
+                'capacity_source': 'manual_statvfs_cache', 'capacity_status': capacity_status,
                 'mounts': disk_mounts, 'volume': volume, 'volume_label': volume_label, 'slot': None,
                 'rpm': media, 'kind': 'nvme' if name.startswith('nvme') else media.lower(),
                 'temp': _number(item.get('temp_c'), -40, 200),

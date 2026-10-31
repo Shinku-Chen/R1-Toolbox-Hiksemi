@@ -179,11 +179,13 @@ class ServiceTests(unittest.TestCase):
         statvfs = mock.Mock(return_value=stats)
         disks = service.read_disks(self.proc, statvfs=statvfs)
         self.assertEqual({disk["mount"] for disk in disks}, {"/drives/data", "/drives/archive disk"})
-        self.assertEqual(statvfs.call_count, 2)
+        self.assertEqual(statvfs.call_count, 0)
         for disk in disks:
-            self.assertEqual(disk["total_bytes"], 100 * 4096)
-            self.assertEqual(disk["used_bytes"], 75 * 4096)
-            self.assertEqual(disk["usage_percent"], 75)
+            self.assertIsNone(disk["total_bytes"])
+            self.assertIsNone(disk["used_bytes"])
+            self.assertIsNone(disk["usage_percent"])
+            self.assertIsNone(disk['capacity_sampled_at'])
+            self.assertEqual(disk['capacity_source'], 'manual_statvfs_cache')
 
     def start_api(self):
         monitor = types.SimpleNamespace(snapshot=lambda: self.sampler.sample())
@@ -550,6 +552,94 @@ class ServiceTests(unittest.TestCase):
                     os.environ, {"R1_WEB_PORT": port, "R1_WEB_BIND": host}):
                 with self.assertRaises(ValueError):
                     self.real_web_factory(None, None)
+
+
+class ScreenStorageFillTests(unittest.TestCase):
+    """Independent screen token, explicit requests, and server epoch fencing."""
+    def setUp(self):
+        self.monitor = types.SimpleNamespace(stopped=threading.Event(), snapshot=lambda: {})
+        self.web = types.SimpleNamespace(storage_fill=mock.Mock(return_value={'ok': True, 'force': False}))
+        self.server = service.make_http_server(self.monitor, port=0, control_token='screen-secret', web_config=self.web)
+        thread = threading.Thread(target=lambda: self.server.serve_forever(poll_interval=.01), daemon=True)
+        thread.start()
+        def close():
+            self.server.shutdown()
+            self.server.server_close()
+            thread.join(2)
+        self.addCleanup(close)
+
+    def request(self, body=b'{}', *, headers=None, route='/api/storage/fill', method='POST'):
+        values = {'Origin': 'null', 'X-R1-Token': 'screen-secret', 'Content-Type': 'application/json'}
+        values.update(headers or {})
+        values = {key: value for key, value in values.items() if value is not None}
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=2)
+        try:
+            connection.request(method, route, body=body, headers=values)
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), json.loads(response.read() or b'{}')
+        finally:
+            connection.close()
+
+    def test_explicit_empty_request_uses_screen_authorizer_and_passive_get_does_not(self):
+        status, headers, value = self.request()
+        self.assertEqual(status, 200)
+        self.assertEqual(value, {'ok': True, 'force': False})
+        current = self.web.storage_fill.call_args.kwargs['authorizer']
+        self.assertTrue(current())
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.web.storage_fill.reset_mock()
+        self.request(method='GET', body=None)
+        self.web.storage_fill.assert_not_called()
+
+    def test_owner_bearer_missing_token_or_origin_never_authorizes_screen_fill(self):
+        for headers in ({'X-R1-Token': None}, {'X-R1-Token': 'owner-cookie'},
+                        {'Authorization': 'Bearer SENTINEL'}, {'Origin': None}, {'Origin': 'http://example.invalid'}):
+            with self.subTest(headers=headers):
+                self.assertEqual(self.request(headers=headers)[0], 403)
+        self.web.storage_fill.assert_not_called()
+
+    def test_strict_object_and_no_query_or_proxy_fields(self):
+        for body in (b'[]', b'null', b'{"force":false}', b'{"path":"/drives/PRIVATE"}',
+                     b'{"action":"refresh"}', b'{"x":1,"x":2}', b'bad'):
+            with self.subTest(body=body):
+                self.assertEqual(self.request(body)[0], 400)
+        self.assertEqual(self.request(route='/api/storage/fill?force=true')[0], 400)
+        self.assertEqual(self.request(headers={'Content-Type': 'text/plain'})[0], 415)
+        self.web.storage_fill.assert_not_called()
+
+    def test_stop_during_collection_discards_result_and_latches_old_guard(self):
+        def fill(*, authorizer):
+            self.assertTrue(authorizer())
+            self.server._close_storage()
+            self.assertFalse(authorizer())
+            self.server.storage_closed = False
+            self.assertFalse(authorizer())
+            return {'ok': True, 'PRIVATE_SENTINEL': 1}
+        self.web.storage_fill.side_effect = fill
+        status, _, value = self.request()
+        self.assertEqual(status, 403)
+        self.assertNotIn('PRIVATE_SENTINEL', json.dumps(value))
+
+    def test_monitor_stop_revokes_screen_authority(self):
+        self.monitor.stopped.set()
+        self.assertEqual(self.request()[0], 403)
+        self.web.storage_fill.assert_not_called()
+
+    def test_safe_error_mapping_does_not_export_exception_text(self):
+        for reason, code in (('busy', 409), ('timeout', 503), ('unavailable', 503), ('authorization_denied', 403)):
+            self.web.storage_fill.side_effect = service.CapacityRefreshError(reason)
+            status, _, value = self.request()
+            self.assertEqual(status, code)
+            self.assertEqual(value['reason'], reason)
+        self.web.storage_fill.side_effect = RuntimeError('PRIVATE_SENTINEL')
+        self.assertEqual(self.request()[2], {'ok': False, 'reason': 'unavailable'})
+
+    def test_preflight_allows_only_local_origin_and_fixed_token_headers(self):
+        headers = {'Access-Control-Request-Method': 'POST',
+                   'Access-Control-Request-Headers': 'Content-Type, X-R1-Token'}
+        self.assertEqual(self.request(method='OPTIONS', body=None, headers=headers)[0], 204)
+        headers['Access-Control-Request-Headers'] = 'Authorization'
+        self.assertEqual(self.request(method='OPTIONS', body=None, headers=headers)[0], 403)
 
 
 if __name__ == "__main__":

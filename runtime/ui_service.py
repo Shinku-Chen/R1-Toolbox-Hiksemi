@@ -7,9 +7,11 @@ actions can adjust supported hardware, manage workloads and request host power.
 """
 
 import argparse
+import array
 import copy
 import datetime
 import errno
+import hashlib
 import http.server
 import json
 import math
@@ -17,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import signal
 import socket
 import stat
@@ -175,37 +178,316 @@ def unescape_mount_field(text):
     return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), text)
 
 
-def read_disks(proc_root, statvfs=None):
-    statvfs = statvfs or os.statvfs
-    text = read_text(Path(proc_root) / "self/mountinfo")
-    disks, seen = [], set()
-    if text is None:
-        return disks
-    for line in text.splitlines():
-        parts = line.split(" - ", 1)
-        if len(parts) != 2:
-            continue
-        fields, extra = parts[0].split(), parts[1].split()
-        if len(fields) < 6 or len(extra) < 2:
-            continue
-        mount = unescape_mount_field(fields[4])
-        if not mount.startswith("/drives/") or fields[2] in seen:
-            continue
-        if extra[0] in ("tmpfs", "devtmpfs", "proc", "sysfs", "overlay", "squashfs"):
-            continue
-        seen.add(fields[2])
-        entry = {"mount": mount, "total_bytes": None, "used_bytes": None, "usage_percent": None}
+_CAPACITY_FILESYSTEMS = frozenset(('ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'ntfs3', 'exfat', 'vfat'))
+_CAPACITY_SOURCE = 'manual_statvfs_cache'
+_CAPACITY_WINDOW = 12.0
+_CAPACITY_DRIVES_ROOT = '/drives'
+
+
+class CapacityRefreshError(RuntimeError):
+    """Safe fixed reason for the owner HTTP adapter; never expose OS errors."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _CapacityMountWatch:
+    """Namespace event proof only; this proc FD never pins a user filesystem."""
+
+    def __init__(self, proc_root):
+        self.descriptor = None
+        if not sys.platform.startswith('linux') or not hasattr(select, 'poll'):
+            raise CapacityRefreshError('unavailable')
+        self.namespace = Path(proc_root) / 'self/ns/mnt'
         try:
-            stats = statvfs(mount)
-            block_size = stats.f_frsize or stats.f_bsize
-            total = stats.f_blocks * block_size
-            used = (stats.f_blocks - stats.f_bfree) * block_size
-            if total > 0 and 0 <= used <= total:
-                entry.update(total_bytes=total, used_bytes=used, usage_percent=used / total * 100)
-        except (OSError, ValueError, OverflowError):
-            pass
-        disks.append(entry)
-    return sorted(disks, key=lambda entry: entry["mount"])
+            self.identity = os.readlink(self.namespace)
+            if not re.fullmatch(r'mnt:\[[1-9][0-9]*\]', self.identity):
+                raise ValueError()
+            self.descriptor = os.open(Path(proc_root) / 'self/mountinfo',
+                                      os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+            if not stat.S_ISREG(os.fstat(self.descriptor).st_mode):
+                raise ValueError()
+            self.poller = select.poll()
+            self.poller.register(self.descriptor, select.POLLPRI | select.POLLERR)
+            if self.changed():
+                raise ValueError()
+        except (OSError, ValueError):
+            self.close()
+            raise CapacityRefreshError('unavailable') from None
+
+    def changed(self):
+        try:
+            return (self.descriptor is None or os.readlink(self.namespace) != self.identity
+                    or bool(self.poller.poll(0)))
+        except (OSError, ValueError):
+            return True
+
+    def close(self):
+        if self.descriptor is not None:
+            os.close(self.descriptor)
+            self.descriptor = None
+
+
+def _capacity_read(path, limit):
+    """Read kernel metadata to bounded EOF, including short proc/sys reads."""
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
+                             | getattr(os, 'O_CLOEXEC', 0))
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        chunks, size = [], 0
+        while True:
+            chunk = os.read(descriptor, min(16384, limit + 1 - size))
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                return None
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            return None
+        return b''.join(chunks).decode('utf-8', 'strict')
+    except (OSError, ValueError, UnicodeError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _capacity_device(sys_root, device):
+    """Identity of a real sysfs block lifetime; never inspect a /drives path."""
+    try:
+        base = Path(sys_root).resolve(strict=True)
+        link = base / 'dev/block' / device
+        link_before = link.lstat()
+        target = link.resolve(strict=True)
+        if base not in target.parents or 'virtual' in target.relative_to(base).parts:
+            return None
+        # Partitions are bound to their parent physical device as well.
+        before = target.stat()
+        if not stat.S_ISDIR(before.st_mode):
+            return None
+        partition = _capacity_read(target / 'partition', 64)
+        if partition is not None and not re.fullmatch(r'[1-9][0-9]{0,9}\n?', partition):
+            return None
+        physical = target.parent if partition is not None else target
+        if not re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+)', physical.name):
+            return None
+        parent_before = physical.stat()
+        if not stat.S_ISDIR(parent_before.st_mode):
+            return None
+        declared = _capacity_read(target / 'dev', 64)
+        parent_dev = _capacity_read(physical / 'dev', 64)
+        diskseq = _capacity_read(physical / 'diskseq', 64)
+        if declared is None or declared.strip() != device or parent_dev is None:
+            return None
+        if not re.fullmatch(r'[0-9]{1,7}:[0-9]{1,7}', parent_dev.strip()):
+            return None
+        if diskseq is not None and not re.fullmatch(r'[1-9][0-9]{0,19}\n?', diskseq):
+            return None
+        after, parent_after = target.stat(), physical.stat()
+        link_after = link.lstat()
+        def generation(value):
+            return (value.st_dev, value.st_ino, value.st_ctime_ns)
+        if (generation(before), generation(parent_before), generation(link_before)) != (
+                generation(after), generation(parent_after), generation(link_after)):
+            return None
+        if link.resolve(strict=True) != target:
+            return None
+        return (str(target), str(physical), generation(link_before), generation(before),
+                generation(parent_before), parent_dev.strip(), diskseq.strip() if diskseq else None, physical.name)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _capacity_inventory(proc_root, sys_root):
+    """Only bounded mountinfo/sysfs metadata, never stat/resolve mount targets."""
+    text = _capacity_read(Path(proc_root) / 'self/mountinfo', 262144)
+    if text is None or '\x00' in text:
+        return [], False
+    lines = text.splitlines()
+    if len(lines) > 4096:
+        return [], False
+    entries, mounts, seen_ids, devices = [], [], set(), {}
+    for line in lines:
+        parts = line.split(' - ')
+        if len(parts) != 2:
+            return [], False
+        fields, extra = parts[0].split(), parts[1].split()
+        if (len(fields) < 6 or len(extra) < 3 or not re.fullmatch(r'[1-9][0-9]{0,9}', fields[0])
+                or not re.fullmatch(r'[0-9]{1,10}', fields[1])):
+            return [], False
+        mount_id = int(fields[0])
+        if mount_id in seen_ids:
+            return [], False
+        seen_ids.add(mount_id)
+        mount, root = unescape_mount_field(fields[4]), unescape_mount_field(fields[3])
+        mounts.append((mount_id, int(fields[1]), mount, root, fields, extra, line))
+    parents = {item[0]: item[1] for item in mounts}
+    targets = {}
+    for item in mounts:
+        targets.setdefault(item[2], []).append(item[0])
+    for mount_id, parent_id, mount, root, fields, extra, line in mounts:
+        if not mount.startswith(_CAPACITY_DRIVES_ROOT + '/') or root != '/':
+            continue
+        components = mount.split('/')[1:]
+        if (any(part in ('', '.', '..') for part in components) or len(mount.encode()) > 4096
+                or any(ord(char) < 32 or ord(char) == 127 for char in mount)):
+            return [], False
+        if extra[0] in ('tmpfs', 'devtmpfs', 'proc', 'sysfs', 'overlay', 'squashfs'):
+            continue
+        if len(entries) >= 128:
+            return [], False
+        row = {'mount_id': mount_id, 'mount': mount, 'device': fields[2], 'root': root,
+               'filesystem': extra[0], 'source': unescape_mount_field(extra[1]), '_key': None,
+               '_reason': 'unsupported_filesystem', '_device_name': None}
+        if re.fullmatch(r'[1-9][0-9]{0,6}:[0-9]{1,7}', fields[2]) and extra[0] in _CAPACITY_FILESYSTEMS:
+            identity = _capacity_device(sys_root, fields[2])
+            row['_reason'] = 'device_identity_unavailable'
+            if identity is not None:
+                # Include mount options/parentage, so an observed remount is
+                # not silently treated as the previous capacity generation.
+                material = (line, identity)
+                row['_key'] = hashlib.sha256(json.dumps(material, ensure_ascii=True).encode()).hexdigest()
+                row['_reason'] = None
+                row['_device_name'] = identity[-1]
+        # Two full-root aliases or stacked targets are ambiguous; none may
+        # inherit a cache entry simply because their device number matches.
+        ancestors, current = set(), parent_id
+        while current in parents and current not in ancestors:
+            ancestors.add(current)
+            current = parents[current]
+        # Even an ignored FUSE/subdirectory bind may shadow an old target.
+        # Require every enclosing mount in this namespace to be a real
+        # ancestor, and reject stacked names without opening either target.
+        obscured = len(targets[mount]) != 1 or any(
+            target != mount and (target == '/' or mount.startswith(target.rstrip('/') + '/'))
+            and any(identity not in ancestors for identity in identities)
+            for target, identities in targets.items())
+        previous = devices.get(fields[2])
+        if previous is not None or obscured:
+            row['_key'], row['_reason'] = None, 'identity_changed'
+            if previous is not None:
+                previous['_key'], previous['_reason'] = None, 'identity_changed'
+        devices[fields[2]] = row
+        entries.append(row)
+    if _capacity_read(Path(proc_root) / 'self/mountinfo', 262144) != text:
+        return [], False
+    return sorted(entries, key=lambda row: row['mount']), True
+
+
+def _capacity_projection(entries, cache):
+    rows = []
+    for entry in entries:
+        row = {'mount': entry['mount'], 'mount_id': entry['mount_id'],
+               'total_bytes': None, 'used_bytes': None, 'usage_percent': None,
+               'capacity_sampled_at': None, 'capacity_source': _CAPACITY_SOURCE,
+               'capacity_status': 'unknown' if entry['_key'] else 'unavailable'}
+        record = cache.get(entry['mount_id'])
+        if record is not None:
+            if entry['_key'] and record['key'] == entry['_key']:
+                row.update(record['values'])
+                row.update(capacity_sampled_at=record['sampled_at'], capacity_status='cached')
+            else:
+                row['capacity_status'] = 'identity_changed'
+        rows.append(row)
+    return rows
+
+
+def read_disks(proc_root, statvfs=None, *, sys_root='/sys', capacity_cache=None):
+    """Passive inventory/cache only. Legacy statvfs injection never runs."""
+    entries, _ = _capacity_inventory(proc_root, sys_root)
+    return _capacity_projection(entries, capacity_cache or {})
+
+
+def _capacity_fd_mount(descriptor, proc_root='/proc'):
+    text = _capacity_read(Path(proc_root) / 'self/fdinfo' / str(descriptor), 4096)
+    found = re.findall(r'^mnt_id:\s*([1-9][0-9]*)$', text or '', re.M)
+    if len(found) != 1:
+        raise CapacityRefreshError('identity_changed')
+    return int(found[0])
+
+
+def _capacity_measure_entry(entry, deadline, proc_root='/proc', sys_root='/sys', *, keep_handle=False):
+    """Explicit worker only: no-follow real mount FD before/after fstatvfs."""
+    def current():
+        if time.monotonic() >= deadline:
+            raise CapacityRefreshError('timeout')
+        rows, complete = _capacity_inventory(proc_root, sys_root)
+        if not complete or not entry['_key'] or not any(
+                row['mount_id'] == entry['mount_id'] and row['_key'] == entry['_key'] for row in rows):
+            raise CapacityRefreshError('identity_changed')
+    current()
+    if not sys.platform.startswith('linux') or not hasattr(os, 'fstatvfs'):
+        raise CapacityRefreshError('unavailable')
+    parts = entry['mount'].split('/')[1:]
+    if (not entry['mount'].startswith(_CAPACITY_DRIVES_ROOT + '/')
+            or any(part in ('', '.', '..') for part in parts)):
+        raise CapacityRefreshError('identity_changed')
+    descriptors = []
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        descriptors.append(os.open('/', flags))
+        for part in parts:
+            if time.monotonic() >= deadline:
+                raise CapacityRefreshError('timeout')
+            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+        descriptor = descriptors[-1]
+        before = os.fstat(descriptor)
+        wanted = tuple(int(value) for value in entry['device'].split(':'))
+        if (not stat.S_ISDIR(before.st_mode) or (os.major(before.st_dev), os.minor(before.st_dev)) != wanted
+                or _capacity_fd_mount(descriptor, proc_root) != entry['mount_id']):
+            raise CapacityRefreshError('identity_changed')
+        current()
+        stats = os.fstatvfs(descriptor)
+        after = os.fstat(descriptor)
+        if ((before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode)) !=
+                (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+                or _capacity_fd_mount(descriptor, proc_root) != entry['mount_id']):
+            raise CapacityRefreshError('identity_changed')
+        current()
+        block = stats.f_frsize or stats.f_bsize
+        total, used = stats.f_blocks * block, (stats.f_blocks - stats.f_bfree) * block
+        if not (type(total) is int and type(used) is int and 0 < total <= 2**63 - 1 and 0 <= used <= total):
+            raise CapacityRefreshError('invalid_measurement')
+        values = {'total_bytes': total, 'used_bytes': used, 'usage_percent': used / total * 100}
+        # The real mount FD lives only through measurement and commit checks.
+        # Cached values retain a proc namespace event watch, never this FD.
+        return (values, os.dup(descriptor)) if keep_handle else values
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _capacity_worker_main():
+    """Private subprocess protocol; public APIs never accept worker arguments."""
+    anchor, channel = None, None
+    try:
+        raw = sys.stdin.buffer.read(16385)
+        if len(raw) > 16384:
+            raise ValueError()
+        request = json.loads(raw)
+        if set(request) != {'entry', 'deadline', 'channel'} or type(request['channel']) is not int:
+            raise ValueError()
+        channel = socket.socket(fileno=request['channel'])
+        value, anchor = _capacity_measure_entry(request['entry'], request['deadline'], keep_handle=True)
+        channel.sendmsg([b'1'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [anchor]))])
+        result = {'ok': True, 'values': value}
+    except CapacityRefreshError as error:
+        result = {'ok': False, 'reason': error.reason}
+    except Exception:
+        result = {'ok': False, 'reason': 'probe_failed'}
+    finally:
+        if anchor is not None:
+            os.close(anchor)
+        if channel is not None:
+            channel.close()
+    print(json.dumps(result, allow_nan=False), flush=True)
+    return 0
 
 
 def empty_status():
@@ -230,6 +512,479 @@ class StatusSampler:
         self.clock = clock or time.monotonic
         self.previous_cpu = None
         self.previous_network = None
+        self._capacity_lock = threading.RLock()
+        self._capacity_refresh_lock = threading.Lock()
+        self._capacity_cache = {}
+        self._capacity_negative = {}
+        self._capacity_watch = None
+        self._capacity_mount_epoch = 0
+        self._capacity_observed_keys = None
+        self._capacity_worker = None
+        self._capacity_reaper = None
+        self._capacity_epoch = 0
+        self._capacity_closed = False
+
+    def capacity_snapshot(self):
+        """Recheck kernel identities immediately, independent of the 2s sample."""
+        with self._capacity_lock:
+            self._capacity_reap_exited()
+            entries, complete = _capacity_inventory(self.proc_root, self.sys_root)
+            previous = set(self._capacity_cache)
+            self._capacity_check_watch()
+            # Observing an unmount/incomplete scan irrevocably discards the old
+            # record; a later same-name mount cannot revive it.
+            self._capacity_reconcile(entries, complete)
+            rows = _capacity_projection(entries, self._capacity_cache)
+            for row in rows:
+                if row['mount_id'] in previous and row['mount_id'] not in self._capacity_cache:
+                    row['capacity_status'] = 'identity_changed'
+            return rows
+
+    def _capacity_replace_cache(self, records):
+        """Caller holds the lock; records contain numbers, not mounted FS FDs."""
+        self._capacity_cache = records
+
+    def _capacity_invalidate(self):
+        self._capacity_mount_epoch += 1
+        self._capacity_cache = {}
+        self._capacity_negative = {}
+
+    def _capacity_check_watch(self, *, create=False):
+        """Any event or loss of proof rejects all namespace-derived values."""
+        watch = self._capacity_watch
+        if watch is not None and watch.changed():
+            self._capacity_invalidate()
+            watch.close()
+            self._capacity_watch = None
+        if self._capacity_watch is None:
+            if self._capacity_cache or self._capacity_negative:
+                self._capacity_invalidate()
+            if create:
+                self._capacity_watch = _CapacityMountWatch(self.proc_root)
+        return self._capacity_watch is not None
+
+    def _capacity_reconcile(self, entries, complete):
+        """An observed detach is permanent for an old cache, even if it returns."""
+        active = {row['mount_id']: row['_key'] for row in entries if row['_key']} if complete else {}
+        with self._capacity_lock:
+            if self._capacity_observed_keys is not None and active != self._capacity_observed_keys:
+                self._capacity_invalidate()
+            self._capacity_observed_keys = active
+            self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
+                                          if active.get(key) == value['key']})
+            keys = set(active.values())
+            self._capacity_negative = {key: value for key, value in self._capacity_negative.items()
+                                       if key in keys and value[0] > time.monotonic()}
+        return active
+
+    def start_capacity(self):
+        with self._capacity_lock:
+            self._capacity_epoch += 1
+            self._capacity_closed = False
+            self._capacity_replace_cache({})
+            self._capacity_negative = {}
+            self._capacity_mount_epoch += 1
+            self._capacity_observed_keys = None
+            if self._capacity_watch is not None:
+                self._capacity_watch.close()
+                self._capacity_watch = None
+
+    def close_capacity(self):
+        with self._capacity_lock:
+            self._capacity_epoch += 1
+            self._capacity_closed = True
+            self._capacity_replace_cache({})
+            self._capacity_negative = {}
+            self._capacity_mount_epoch += 1
+            self._capacity_observed_keys = None
+            if self._capacity_watch is not None:
+                self._capacity_watch.close()
+                self._capacity_watch = None
+            worker = self._capacity_worker
+            if worker is not None and worker.poll() is None:
+                # SIGKILL may remain pending during an uninterruptible kernel
+                # call. Keep this handle and reject another batch until exit.
+                try:
+                    worker.kill()
+                except OSError:
+                    pass
+            if worker is not None and worker.poll() is not None:
+                for stream in (worker.stdin, worker.stdout):
+                    if stream is not None:
+                        stream.close()
+                self._capacity_worker = None
+            elif worker is not None:
+                self._capacity_schedule_reap(worker)
+
+    def _capacity_probe(self, entry, deadline, authorized):
+        """Bound the request, not the kernel: a lingering worker stays busy."""
+        authorized()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CapacityRefreshError('timeout')
+        if not sys.platform.startswith('linux') or not hasattr(socket, 'SCM_RIGHTS'):
+            raise CapacityRefreshError('unavailable')
+        channel, child_channel = socket.socketpair()
+        channel.setblocking(False)
+        try:
+            worker = subprocess.Popen(
+                [sys.executable, '-B', os.path.abspath(__file__), '--capacity-worker'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                start_new_session=True, pass_fds=(child_channel.fileno(),))
+        except OSError:
+            channel.close()
+            child_channel.close()
+            raise CapacityRefreshError('unavailable') from None
+        with self._capacity_lock:
+            self._capacity_worker = worker
+        anchor, transferred = None, False
+        try:
+            request = json.dumps({'entry': entry, 'deadline': deadline,
+                                  'channel': child_channel.fileno()}, ensure_ascii=True).encode()
+            child_channel.close()
+            if len(request) > 4096:
+                raise CapacityRefreshError('unavailable')
+            authorized()
+            if time.monotonic() >= deadline:
+                raise CapacityRefreshError('timeout')
+            worker.stdin.write(request)
+            worker.stdin.close()
+            while worker.poll() is None:
+                authorized()
+                if time.monotonic() >= deadline:
+                    raise CapacityRefreshError('timeout')
+                threading.Event().wait(min(.02, max(0, deadline - time.monotonic())))
+            authorized()
+            if time.monotonic() >= deadline:
+                raise CapacityRefreshError('timeout')
+            raw = worker.stdout.read(4097)
+            if len(raw) > 4096 or worker.returncode != 0:
+                raise CapacityRefreshError('probe_failed')
+            result = json.loads(raw)
+            if type(result) is not dict or type(result.get('ok')) is not bool:
+                raise ValueError()
+            if not result['ok']:
+                reason = result.get('reason')
+                if reason not in ('timeout', 'identity_changed', 'unavailable', 'invalid_measurement', 'probe_failed'):
+                    reason = 'probe_failed'
+                raise CapacityRefreshError(reason)
+            values = result.get('values')
+            if type(values) is not dict or set(values) != {'total_bytes', 'used_bytes', 'usage_percent'}:
+                raise ValueError()
+            total, used, percent = (values[key] for key in ('total_bytes', 'used_bytes', 'usage_percent'))
+            if (type(total) is not int or type(used) is not int or not 0 < total <= 2**63 - 1
+                    or not 0 <= used <= total or type(percent) not in (int, float)
+                    or not math.isfinite(percent) or percent != used / total * 100):
+                raise ValueError()
+            marker, ancillary, flags, _ = channel.recvmsg(1, socket.CMSG_SPACE(array.array('i').itemsize))
+            handles = array.array('i')
+            for level, kind, payload in ancillary:
+                if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                    handles.frombytes(payload[:len(payload) - len(payload) % handles.itemsize])
+            if (marker != b'1' or flags or len(ancillary) != 1 or len(handles) != 1
+                    or ancillary[0][:2] != (socket.SOL_SOCKET, socket.SCM_RIGHTS)):
+                for handle in handles:
+                    os.close(handle)
+                raise ValueError()
+            anchor = handles[0]
+            os.set_inheritable(anchor, False)
+            if _capacity_fd_mount(anchor, self.proc_root) != entry['mount_id']:
+                raise CapacityRefreshError('identity_changed')
+            authorized()
+            if time.monotonic() >= deadline:
+                raise CapacityRefreshError('timeout')
+            transferred = True
+            return values, anchor
+        except (ValueError, TypeError, UnicodeError, OSError):
+            raise CapacityRefreshError('probe_failed') from None
+        finally:
+            channel.close()
+            child_channel.close()
+            if anchor is not None and not transferred:
+                os.close(anchor)
+            if worker.poll() is None:
+                try:
+                    worker.kill()
+                except OSError:
+                    pass
+            if worker.poll() is not None:
+                for stream in (worker.stdin, worker.stdout):
+                    if stream is not None:
+                        stream.close()
+                with self._capacity_lock:
+                    if self._capacity_worker is worker:
+                        self._capacity_worker = None
+            else:
+                self._capacity_schedule_reap(worker)
+
+    def _capacity_schedule_reap(self, worker):
+        """One daemon waits for an already-killed worker; no sampling or retry."""
+        def reap():
+            try:
+                worker.wait()
+            except OSError:
+                return
+            finally:
+                with self._capacity_lock:
+                    if worker.poll() is not None:
+                        for stream in (worker.stdin, worker.stdout):
+                            if stream is not None:
+                                stream.close()
+                        if self._capacity_worker is worker:
+                            self._capacity_worker = None
+                    if self._capacity_reaper is threading.current_thread():
+                        self._capacity_reaper = None
+        with self._capacity_lock:
+            if self._capacity_reaper is None:
+                reaper = None
+                try:
+                    reaper = threading.Thread(target=reap, name='r1-capacity-reap', daemon=True)
+                    self._capacity_reaper = reaper
+                    reaper.start()
+                except RuntimeError:
+                    # Thread resource exhaustion must not leave a permanent
+                    # busy sentinel. A live worker still prevents overlap;
+                    # passive snapshots can reap it after its real exit.
+                    if self._capacity_reaper is reaper:
+                        self._capacity_reaper = None
+                    self._capacity_reap_exited()
+
+    def _capacity_reap_exited(self):
+        """Nonblocking waitpid/pipe cleanup only; never probes a filesystem."""
+        with self._capacity_lock:
+            worker = self._capacity_worker
+            if self._capacity_reaper is not None or worker is None or worker.poll() is None:
+                return
+            for stream in (worker.stdin, worker.stdout):
+                if stream is not None:
+                    stream.close()
+            self._capacity_worker = None
+
+    def refresh_capacity(self, *, authorizer=None):
+        return self._refresh_capacity(authorizer=authorizer)
+
+    def refresh_capacity_missing(self, *, authorizer=None, eligibility=None):
+        """Foreground fill only: active same-lifetime disks and missing cache."""
+        return self._refresh_capacity(authorizer=authorizer, eligibility=eligibility, missing=True)
+
+    def _refresh_capacity(self, *, authorizer=None, eligibility=None, missing=False):
+        """One explicit owner batch; only verified same-lifetime results commit."""
+        if not self._capacity_refresh_lock.acquire(blocking=False):
+            raise CapacityRefreshError('busy')
+        started, deadline = time.time(), time.monotonic() + _CAPACITY_WINDOW
+        denied, pending, negative, results, committed = False, {}, {}, [], False
+        mount_generation, batch_changed = None, False
+        with self._capacity_lock:
+            epoch = self._capacity_epoch
+
+        def authorized():
+            nonlocal denied
+            if denied:
+                raise CapacityRefreshError('authorization_denied')
+            try:
+                valid = authorizer is not None and bool(authorizer())
+            except Exception:
+                valid = False
+            if not valid:
+                denied = True
+                raise CapacityRefreshError('authorization_denied')
+            with self._capacity_lock:
+                if self._capacity_closed or epoch != self._capacity_epoch:
+                    raise CapacityRefreshError('unavailable')
+
+        def permitted(entry):
+            authorized()
+            try:
+                reason = eligibility(entry['_device_name']) if callable(eligibility) else 'power_state_unverified'
+            except Exception:
+                reason = 'power_state_unverified'
+            authorized()
+            return reason if reason in (None, 'standby') else 'power_state_unverified'
+
+        def skipped(row, reason):
+            row.update(status='skipped_standby' if reason == 'standby' else 'unavailable',
+                       reason=reason, sampled_at=None)
+
+        def close_pending(record):
+            anchor = record.pop('anchor', None)
+            if anchor is not None:
+                os.close(anchor)
+
+        def check_batch():
+            authorized()
+            with self._capacity_lock:
+                self._capacity_check_watch()
+                if mount_generation != self._capacity_mount_epoch or self._capacity_watch is None:
+                    raise CapacityRefreshError('identity_changed')
+
+        def observed(entries, complete):
+            nonlocal batch_changed
+            with self._capacity_lock:
+                self._capacity_check_watch()
+            active = self._capacity_reconcile(entries, complete)
+            batch_changed = batch_changed or (mount_generation is not None and (
+                mount_generation != self._capacity_mount_epoch or self._capacity_watch is None))
+            for row in results:
+                record = pending.get(row['mount_id'])
+                if record is not None and (batch_changed or active.get(row['mount_id']) != record['key']):
+                    close_pending(pending.pop(row['mount_id']))
+                    row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
+            return active
+
+        try:
+            authorized()
+            with self._capacity_lock:
+                self._capacity_check_watch(create=True)
+            if missing:
+                self.capacity_snapshot()
+                authorized()
+            with self._capacity_lock:
+                if self._capacity_reaper is not None:
+                    raise CapacityRefreshError('busy')
+                worker = self._capacity_worker
+                if worker is not None:
+                    if worker.poll() is None:
+                        raise CapacityRefreshError('busy')
+                    for stream in (worker.stdin, worker.stdout):
+                        if stream is not None:
+                            stream.close()
+                    self._capacity_worker = None
+            entries, complete = _capacity_inventory(self.proc_root, self.sys_root)
+            observed(entries, complete)
+            authorized()
+            if not complete or self._capacity_watch is None:
+                with self._capacity_lock:
+                    self._capacity_replace_cache({})
+                raise CapacityRefreshError('unavailable')
+            mount_generation = self._capacity_mount_epoch
+            for entry in entries:
+                authorized()
+                if time.monotonic() >= deadline:
+                    raise CapacityRefreshError('timeout')
+                row = {'mount_id': entry['mount_id'], 'status': 'unavailable',
+                       'reason': entry['_reason'], 'sampled_at': None}
+                results.append(row)
+                if batch_changed:
+                    row.update(status='identity_changed', reason='identity_changed')
+                    continue
+                if not entry['_key']:
+                    if entry['_reason'] == 'identity_changed':
+                        row['status'] = 'identity_changed'
+                    continue
+                if missing:
+                    with self._capacity_lock:
+                        cached = self._capacity_cache.get(entry['mount_id'])
+                        failure = self._capacity_negative.get(entry['_key'])
+                    if cached is not None and cached['key'] == entry['_key']:
+                        row.update(status='cached', reason=None, sampled_at=cached['sampled_at'])
+                        continue
+                    reason = permitted(entry)
+                    if reason is not None:
+                        skipped(row, reason)
+                        continue
+                    if failure is not None and failure[0] > time.monotonic():
+                        row.update(status=failure[1], reason=failure[2], sampled_at=failure[3])
+                        continue
+                try:
+                    values, anchor = self._capacity_probe(entry, deadline, check_batch)
+                    # Register ownership immediately, so a revoked/changed
+                    # source also closes the freshly transferred mount pin.
+                    pending[entry['mount_id']] = {'key': entry['_key'], 'values': values,
+                                                  'anchor': anchor, 'sampled_at': None}
+                    authorized()
+                    current, valid = _capacity_inventory(self.proc_root, self.sys_root)
+                    observed(current, valid)
+                    authorized()
+                    if batch_changed or not valid or not any(item['mount_id'] == entry['mount_id']
+                                            and item['_key'] == entry['_key'] for item in current):
+                        raise CapacityRefreshError('identity_changed')
+                    if time.monotonic() >= deadline:
+                        raise CapacityRefreshError('timeout')
+                    if missing:
+                        reason = permitted(entry)
+                        if reason is not None:
+                            close_pending(pending.pop(entry['mount_id']))
+                            skipped(row, reason)
+                            continue
+                    sampled_at = time.time()
+                    pending[entry['mount_id']]['sampled_at'] = sampled_at
+                    row.update(status='refreshed', reason=None, sampled_at=sampled_at)
+                except CapacityRefreshError as error:
+                    record = pending.pop(entry['mount_id'], None)
+                    if record is not None:
+                        close_pending(record)
+                    if error.reason == 'identity_changed':
+                        with self._capacity_lock:
+                            self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
+                                                          if key != entry['mount_id']})
+                    if error.reason in ('authorization_denied', 'timeout', 'busy') or (error.reason == 'unavailable' and not missing):
+                        raise
+                    row.update(status='identity_changed' if error.reason == 'identity_changed' else
+                               ('unavailable' if error.reason == 'unavailable' else 'failed'),
+                               reason=error.reason)
+                    if missing and error.reason != 'identity_changed':
+                        negative[entry['_key']] = (time.monotonic() + 30, row['status'], row['reason'], row['sampled_at'])
+            authorized()
+            with self._capacity_lock:
+                current, complete = _capacity_inventory(self.proc_root, self.sys_root)
+                active = observed(current, complete)
+                authorized()
+                if time.monotonic() >= deadline:
+                    raise CapacityRefreshError('timeout')
+                for row in results:
+                    record = pending.get(row['mount_id'])
+                    entry = next(item for item in entries if item['mount_id'] == row['mount_id'])
+                    if record is not None and missing:
+                        reason = permitted(entry)
+                        if reason is not None:
+                            close_pending(pending.pop(row['mount_id']))
+                            skipped(row, reason)
+                            record = None
+                    if record is not None and active.get(row['mount_id']) != record['key']:
+                        close_pending(pending.pop(row['mount_id']))
+                        row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
+                    if row['status'] == 'cached' and (batch_changed or active.get(row['mount_id']) != entry['_key']):
+                        row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
+                # Real filesystem handles are strictly temporary. Release
+                # before commit, then prove no namespace event/identity change.
+                for record in pending.values():
+                    close_pending(record)
+                authorized()
+                current, complete = _capacity_inventory(self.proc_root, self.sys_root)
+                active = observed(current, complete)
+                authorized()
+                retained = {key: value for key, value in self._capacity_cache.items()
+                            if active.get(key) == value['key']}
+                retained.update(pending)
+                authorized()
+                if time.monotonic() >= deadline:
+                    raise CapacityRefreshError('timeout')
+                self._capacity_replace_cache(retained)
+                try:
+                    # Recheck after publication while readers remain locked
+                    # out; failed grants discard all values from this batch.
+                    authorized()
+                    self._capacity_check_watch()
+                    if not batch_changed and (mount_generation != self._capacity_mount_epoch or self._capacity_watch is None):
+                        raise CapacityRefreshError('unavailable')
+                    if time.monotonic() >= deadline:
+                        raise CapacityRefreshError('timeout')
+                except CapacityRefreshError:
+                    self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
+                                                  if key not in pending})
+                    pending.clear()
+                    raise
+                committed = True
+                if not batch_changed:
+                    self._capacity_negative.update({key: value for key, value in negative.items() if key in set(active.values())})
+            successful = ('refreshed', 'cached', 'skipped_standby') if missing else ('refreshed', 'cached')
+            return {'ok': True, 'status': 'complete' if all(row['status'] in successful for row in results) else 'partial',
+                    'started_at': started, 'finished_at': time.time(), 'results': results}
+        finally:
+            if not committed:
+                for record in pending.values():
+                    close_pending(record)
+            self._capacity_refresh_lock.release()
 
     def sample(self):
         status = empty_status()
@@ -258,7 +1013,7 @@ class StatusSampler:
                     tx_bytes_per_sec=(counters[1] - old_tx) / elapsed,
                 )
         self.previous_network = (iface, *counters, now) if counters is not None else None
-        status["disks"] = read_disks(self.proc_root)
+        status["disks"] = self.capacity_snapshot()
         status["available"] = ticks is not None or status["memory"]["total_bytes"] is not None or status["uptime_seconds"] is not None
         return status
 
@@ -288,13 +1043,29 @@ class StatusMonitor:
         with self.lock:
             if self.updated_at is None or time.monotonic() - self.updated_at > max(6, self.interval * 3):
                 return empty_status()
-            return copy.deepcopy(self.status)
+            value = copy.deepcopy(self.status)
+        project = getattr(self.sampler, 'capacity_snapshot', None)
+        if callable(project):
+            value['disks'] = project()
+        return value
+
+    def refresh_capacity(self, *, authorizer=None):
+        return self.sampler.refresh_capacity(authorizer=authorizer)
+
+    def refresh_capacity_missing(self, *, authorizer=None, eligibility=None):
+        return self.sampler.refresh_capacity_missing(authorizer=authorizer, eligibility=eligibility)
 
     def start(self):
+        start = getattr(self.sampler, 'start_capacity', None)
+        if callable(start):
+            start()
         self.thread.start()
 
     def stop(self):
         self.stopped.set()
+        close = getattr(self.sampler, 'close_capacity', None)
+        if callable(close):
+            close()
         self.thread.join(timeout=0.25)
 
 
@@ -369,6 +1140,9 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             self.send_json(200, value, origin)
 
         def do_POST(self):
+            if urllib.parse.urlsplit(self.path).path == '/api/storage/fill':
+                self.storage_fill()
+                return
             if controller is None or not control_token:
                 self.reject_method()
                 return
@@ -462,8 +1236,67 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 # Keep privileged command output and paths out of the browser.
                 self.send_json(500, {"ok": False, "error": "操作未完成，请检查宿主服务日志"}, origin)
 
-        def send_json(self, code, value, origin=None):
+        def storage_fill(self):
+            """Screen-only explicit fill; never reuse owner/Bearer authority."""
+            valid, origin = self.request_origin()
+            if not valid:
+                return
+            supplied = self.headers.get('X-R1-Token', '')
+            if (origin is None or self.headers.get('Authorization') is not None or not control_token
+                    or not secrets.compare_digest(supplied.encode('utf8'), control_token.encode('utf8'))):
+                self.send_json(403, {'ok': False, 'reason': 'authorization_denied'}, origin)
+                return
+            if self.path != '/api/storage/fill':
+                self.send_json(400, {'ok': False, 'reason': 'invalid_request'}, origin)
+                return
+            if web_config is None or not callable(getattr(web_config, 'storage_fill', None)):
+                self.send_json(503, {'ok': False, 'reason': 'unavailable'}, origin)
+                return
+            length = self.headers.get('Content-Length', '')
+            if (self.headers.get('Transfer-Encoding') is not None or not length.isascii()
+                    or not length.isdigit() or len(length) > 2 or not 0 < int(length) <= 64):
+                self.send_json(400, {'ok': False, 'reason': 'invalid_request'}, origin)
+                return
+            if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
+                self.send_json(415, {'ok': False, 'reason': 'invalid_request'}, origin)
+                return
+            try:
+                payload = json.loads(self.rfile.read(int(length)))
+                if type(payload) is not dict or payload:
+                    raise ValueError()
+            except (ValueError, UnicodeError):
+                self.send_json(400, {'ok': False, 'reason': 'invalid_request'}, origin)
+                return
+            with self.server.storage_guard:
+                epoch = self.server.storage_epoch
+            denied = False
+            def current():
+                nonlocal denied
+                with self.server.storage_guard:
+                    active = not self.server.storage_closed and epoch == self.server.storage_epoch
+                stopped = getattr(monitor, 'stopped', None)
+                active = active and not (stopped is not None and stopped.is_set())
+                denied = denied or not active
+                return not denied
+            try:
+                if not current():
+                    raise CapacityRefreshError('authorization_denied')
+                value = web_config.storage_fill(authorizer=current)
+                if not current():
+                    raise CapacityRefreshError('authorization_denied')
+                self.send_json(200, value, origin, authorizer=current)
+            except Exception as error:
+                reason = getattr(error, 'reason', 'unavailable')
+                if reason not in ('authorization_denied', 'busy', 'timeout', 'unavailable'):
+                    reason = 'unavailable'
+                self.send_json(403 if reason == 'authorization_denied' else 409 if reason == 'busy' else 503,
+                               {'ok': False, 'reason': reason}, origin)
+
+        def send_json(self, code, value, origin=None, *, authorizer=None):
             body = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if authorizer is not None and not authorizer():
+                self.send_json(403, {'ok': False, 'reason': 'authorization_denied'}, origin)
+                return
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -493,7 +1326,8 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",") if part.strip()}
             can_read = route in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config", "/api/fan-policy",
                                  "/api/light-policy", "/api/monitoring", "/api/history") and method == "GET" and not headers
-            can_control = (route == "/api/action" and controller is not None and control_token
+            can_control = ((route == "/api/action" and controller is not None
+                            or route == '/api/storage/fill' and web_config is not None) and control_token
                            and method == "POST" and headers <= {"content-type", "x-r1-token"})
             if (
                 origin is None or not allowed_origin(origin, self.server.server_port)
@@ -521,6 +1355,24 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
     class LocalServer(http.server.ThreadingHTTPServer):
         daemon_threads = True
         allow_reuse_address = True
+
+        def __init__(self, *args, **kwargs):
+            self.storage_guard = threading.RLock()
+            self.storage_epoch, self.storage_closed = 0, False
+            super().__init__(*args, **kwargs)
+
+        def _close_storage(self):
+            with self.storage_guard:
+                self.storage_closed = True
+                self.storage_epoch += 1
+
+        def shutdown(self):
+            self._close_storage()
+            super().shutdown()
+
+        def server_close(self):
+            self._close_storage()
+            super().server_close()
 
         def get_request(self):
             connection, address = super().get_request()
@@ -567,7 +1419,8 @@ def create_fan_policy(controller, insights):
     native = FanNativeAdapter(controller.state_dir, "/run/r1-toolbox/fan-control",
                               guard_path=Path(__file__).resolve().parent / "fan_guard.so",
                               histor=controller.histor, allow_writes=True)
-    return FanPolicyController(controller.state_dir, TemperatureSources(insights), native, histor=controller.histor)
+    return FanPolicyController(controller.state_dir, TemperatureSources(insights), native,
+                               histor=controller.histor, smart_collector=insights)
 
 
 def create_light_policy(controller, fan_policy):
@@ -862,6 +1715,8 @@ def run_resident_service(frontend=None, port=PORT, controller=None, insights=Non
 
 
 def main(argv=None):
+    if (sys.argv[1:] if argv is None else argv) == ['--capacity-worker']:
+        return _capacity_worker_main()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, default=Path("/screen/squashfs-root"), help="宿主解包版 AppImage 目录")
     parser.add_argument("--port", type=int, default=PORT, help="本机只读状态端口（默认 18731）")

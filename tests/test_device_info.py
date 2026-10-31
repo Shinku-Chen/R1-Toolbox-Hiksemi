@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -202,6 +203,114 @@ class DeviceInfoTests(unittest.TestCase):
         self.assertIsNone(data["fans"][0]["pwm"])
         self.assertTrue(data["capabilities"]["fan_rpm"])
         self.assertFalse(data["capabilities"]["fan_pwm"])
+
+    def test_disk_driver_temperature_and_thresholds_are_not_opened_but_fans_remain(self):
+        for index, driver in enumerate(('nvme', 'drivetemp')):
+            folder = self.sys / 'class/hwmon' / ('hwmon' + str(index))
+            self.write(folder / 'name', driver)
+            for attribute in ('temp1_input', 'temp1_label', 'temp1_max', 'temp1_crit'):
+                self.write(folder / attribute, '43000')
+            self.write(folder / 'fan1_input', 1200 + index)
+        original = device_info._Reader.text
+
+        def read(reader, path, *args, **kwargs):
+            self.assertFalse(Path(path).name.startswith('temp'), 'disk attributes must not be opened')
+            return original(reader, path, *args, **kwargs)
+
+        # Windows lacks this flag; fixture files are regular and Linux keeps its real flag.
+        with patch.object(device_info.os, 'O_NONBLOCK', getattr(os, 'O_NONBLOCK', 0), create=True), \
+                patch.object(device_info._Reader, 'text', read):
+            data = self.collect()
+        self.assertEqual(data['thermal'], [])
+        self.assertEqual([row['rpm'] for row in data['fans']], [1200, 1201])
+
+    def test_portable_metadata_link_identifies_disk_alias_without_matching_sibling_cpu(self):
+        device = self.sys / 'block/sda/device'
+        device.mkdir(parents=True)
+        alias, cpu = self.sys / 'class/hwmon/hwmon2', self.sys / 'class/hwmon/hwmon3'
+        alias.mkdir(parents=True)
+        cpu.mkdir()
+        link = alias / 'device'
+        original = os.lstat
+
+        def metadata(path, *args, **kwargs):
+            if Path(path) == link:
+                return type('LinkMetadata', (), {'st_mode': stat.S_IFLNK})()
+            return original(path, *args, **kwargs)
+
+        with patch.object(device_info.os, 'lstat', side_effect=metadata), \
+                patch.object(device_info.os, 'readlink', return_value=str(device)):
+            roots = device_info.disk_sensor_roots(self.sys)
+            self.assertTrue(device_info.is_disk_temperature_source(alias, 'coretemp', self.sys, roots))
+            self.assertFalse(device_info.is_disk_temperature_source(cpu, 'coretemp', self.sys, roots))
+
+    def test_portable_outside_sensor_link_is_rejected_before_external_metadata(self):
+        link, outside = self.sys / 'alias', self.root / 'drives/private-fixture'
+        original = os.lstat
+
+        def metadata(path, *args, **kwargs):
+            path = Path(path)
+            self.assertFalse(path == outside or outside in path.parents)
+            if path == link:
+                return type('LinkMetadata', (), {'st_mode': stat.S_IFLNK})()
+            return original(path, *args, **kwargs)
+
+        with patch.object(device_info.os, 'lstat', side_effect=metadata), \
+                patch.object(device_info.os, 'readlink', return_value=str(outside)):
+            self.assertIsNone(device_info._sysfs_sensor_path(link, self.sys))
+
+    @unittest.skipIf(os.name == 'nt', 'requires Linux sysfs topology and symlinks')
+    def test_disk_sysfs_topology_excludes_aliases_without_excluding_sibling_cpu(self):
+        disk = self.sys / 'devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0'
+        block = disk / 'block/sda'
+        self.write(block / 'size', 1000)
+        (self.sys / 'block').mkdir()
+        (self.sys / 'block/sda').symlink_to(block, target_is_directory=True)
+        alias = disk / 'hwmon/hwmon3'
+        self.write(alias / 'name', 'coretemp')
+        self.write(alias / 'temp1_input', 99000)
+        self.write(alias / 'temp1_crit', 100000)
+        cpu = self.sys / 'devices/pci0000:00/platform/coretemp.0/hwmon/hwmon4'
+        self.write(cpu / 'name', 'coretemp')
+        self.write(cpu / 'temp1_input', 52000)
+        (self.sys / 'class/hwmon').mkdir(parents=True)
+        (self.sys / 'class/hwmon/hwmon3').symlink_to(alias, target_is_directory=True)
+        (self.sys / 'class/hwmon/hwmon4').symlink_to(cpu, target_is_directory=True)
+        original = device_info._Reader.text
+
+        def read(reader, path, *args, **kwargs):
+            if Path(path).parent.name == 'hwmon3':
+                self.assertFalse(Path(path).name.startswith('temp'))
+            return original(reader, path, *args, **kwargs)
+
+        with patch.object(device_info._Reader, 'text', read):
+            data = self.collect()
+        self.assertEqual([row['celsius'] for row in data['thermal']], [52])
+
+    @unittest.skipIf(os.name == 'nt', 'requires Linux sysfs symlinks')
+    def test_disk_device_link_marks_an_unrelated_hwmon_alias(self):
+        device = self.sys / 'block/sda/device'
+        device.mkdir(parents=True)
+        folder = self.sys / 'class/hwmon/hwmon8'
+        self.write(folder / 'name', 'opaque-temperature-driver')
+        (folder / 'device').symlink_to(device, target_is_directory=True)
+        self.write(folder / 'temp1_input', 61000)
+        self.assertEqual(self.collect()['thermal'], [])
+
+    @unittest.skipIf(os.name == 'nt', 'requires Linux sysfs symlinks')
+    def test_sensor_metadata_resolution_rejects_outside_target_before_following_it(self):
+        outside = self.root / 'drives/private-fixture'
+        outside.mkdir(parents=True)
+        link = self.sys / 'device-alias'
+        link.symlink_to(outside, target_is_directory=True)
+        original = os.lstat
+
+        def metadata(path, *args, **kwargs):
+            self.assertNotEqual(Path(path), outside)
+            return original(path, *args, **kwargs)
+
+        with patch.object(device_info.os, 'lstat', side_effect=metadata):
+            self.assertIsNone(device_info._sysfs_sensor_path(link, self.sys))
 
     def test_fan_invalid_readings_do_not_become_fake_zero_or_control_capability(self):
         root = self.sys / "class/hwmon/hwmon1"

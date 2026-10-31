@@ -11,11 +11,12 @@ import re
 import threading
 import time
 
+from device_info import _sysfs_sensor_path, disk_sensor_roots, is_disk_temperature_source, sysfs_sensor_names
+
 CPU_DRIVERS = frozenset(('coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'cpu-thermal'))
 CPU_ZONE_TYPES = frozenset(('x86_pkg_temp', 'cpu-thermal', 'cpu_thermal', 'cpu', 'soc_thermal'))
-DISK_DRIVERS = frozenset(('nvme', 'drivetemp'))
 SYSFS_MAX_AGE = 3
-SMART_MAX_AGE = 90
+SMART_MAX_AGE = 30
 
 
 def _number(value, minimum=-40, maximum=150):
@@ -35,11 +36,7 @@ class TemperatureSources:
         self.known_disks = {}
 
     def _inside(self, path):
-        try:
-            path = path.resolve()
-            return path == self.sys_root or self.sys_root in path.parents
-        except (OSError, ValueError, RuntimeError):
-            return False
+        return _sysfs_sensor_path(path, self.sys_root) is not None
 
     def _text(self, path):
         if not self._inside(path):
@@ -60,8 +57,10 @@ class TemperatureSources:
     def _physical(self, folder):
         """Keep physical topology, never hwmonN or thermal_zoneN numbering."""
         try:
-            physical = folder / 'device'
-            resolved = physical.resolve() if physical.exists() else folder.resolve()
+            resolved = (_sysfs_sensor_path(folder / 'device', self.sys_root)
+                        or _sysfs_sensor_path(folder, self.sys_root))
+            if resolved is None:
+                return ''
             relative = resolved.relative_to(self.sys_root)
             parts = [part for part in relative.parts
                      if part not in ('hwmon', 'thermal')
@@ -84,16 +83,20 @@ class TemperatureSources:
 
     def _read_sysfs(self, now):
         rows = []
-        for folder in sorted((self.sys_root / 'class/hwmon').glob('hwmon*'))[:64]:
+        disk_roots = disk_sensor_roots(self.sys_root)
+        base = self.sys_root / 'class/hwmon'
+        for name in sysfs_sensor_names(base, r'hwmon\d+', self.sys_root):
+            folder = base / name
             if not self._inside(folder):
                 continue
             driver = self._text(folder / 'name') or 'unknown'
-            if driver.lower() in DISK_DRIVERS:
-                # Storage uses the existing slow, non-waking SMART worker.
+            if is_disk_temperature_source(folder, driver, self.sys_root, disk_roots):
+                # Disk temperatures come only from the explicit SMART cache.
                 continue
             kind = 'cpu' if driver.lower() in CPU_DRIVERS else 'board'
             physical = self._physical(folder)
-            for path in sorted(folder.glob('temp*_input'))[:32]:
+            for attribute in sysfs_sensor_names(folder, r'temp\d+_input', self.sys_root, 32):
+                path = folder / attribute
                 match = re.fullmatch(r'(temp[0-9]+)_input', path.name)
                 if not match:
                     continue
@@ -104,14 +107,19 @@ class TemperatureSources:
                 rows.append(self._row(identity, driver + ' · ' + label, kind, temperature,
                                       now if temperature is not None else None, SYSFS_MAX_AGE,
                                       self._temperature(folder / (channel + '_crit'), critical=True)))
-        for folder in sorted((self.sys_root / 'class/thermal').glob('thermal_zone*'))[:64]:
+        base = self.sys_root / 'class/thermal'
+        for name in sysfs_sensor_names(base, r'thermal_zone\d+', self.sys_root):
+            folder = base / name
             if not self._inside(folder):
                 continue
             driver = self._text(folder / 'type') or 'unknown'
+            if is_disk_temperature_source(folder, driver, self.sys_root, disk_roots):
+                continue
             kind = 'cpu' if driver.lower() in CPU_ZONE_TYPES else 'board'
             temperature = self._temperature(folder / 'temp')
             critical = []
-            for path in sorted(folder.glob('trip_point_*_type'))[:32]:
+            for attribute in sysfs_sensor_names(folder, r'trip_point_\d+_type', self.sys_root, 32):
+                path = folder / attribute
                 if self._text(path) == 'critical':
                     value = self._temperature(path.with_name(path.name[:-4] + 'temp'), critical=True)
                     if value is not None:
@@ -135,17 +143,41 @@ class TemperatureSources:
                 items = []
         except Exception:
             items = []
+        try:
+            project = getattr(self.insights, 'policy_temperature_aliases', None)
+            projection = project() if callable(project) else {}
+            blocked = set(projection.get('unavailable_sources', [])) if isinstance(projection, dict) else set()
+            controlled = set(projection.get('controlled_sources', [])) if isinstance(projection, dict) else set()
+            policy_items = projection.get('items', []) if isinstance(projection, dict) else []
+            if not isinstance(policy_items, list):
+                policy_items = []
+        except Exception:
+            blocked, controlled, policy_items = set(), set(), []
         active = set()
         rows = []
-        for item in items[:128]:
+        for item in items[:128] + policy_items[:64]:
             if not isinstance(item, dict):
                 continue
             stable = item.get('stable_identity')
             identified = isinstance(stable, str) and bool(re.fullmatch(r'(?:wwn|serial|physical):[0-9a-f]{24}', stable))
             model = item.get('model') if isinstance(item.get('model'), str) else '存储设备'
             identity = 'disk:' + stable if identified else 'disk:unidentified:' + hashlib.sha256(model.encode()).hexdigest()[:24]
+            policy_source = item.get('policy_source_id')
+            if isinstance(policy_source, str) and re.fullmatch(r'disk:serial:[0-9a-f]{24}', policy_source):
+                identity, identified = policy_source, True
+            elif identity in controlled:
+                # Selected serial rows have a private same-lifecycle projection.
+                # An independently copied public snapshot cannot supply them.
+                continue
             sampled = item.get('smart_sampled_monotonic')
-            fresh = identified and self._fresh(sampled, now, SMART_MAX_AGE)
+            device = item.get('device', '')
+            suffix = ' · ' + device if isinstance(device, str) and re.fullmatch(r'/dev/(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', device) else ''
+            user_name = item.get('user_name')
+            if not isinstance(user_name, str) or not 0 < len(user_name) <= 128 or any(
+                    ord(char) < 32 or ord(char) == 127 for char in user_name):
+                user_name = None
+            fresh = (identified and identity not in blocked
+                     and self._fresh(sampled, now, SMART_MAX_AGE) and now - sampled < SMART_MAX_AGE)
             temperature = _number(item.get('smart_temperature_c')) if fresh else None
             status = 'unavailable'
             if fresh and item.get('smart_status') == 'standby' and item.get('standby') is True:
@@ -154,12 +186,6 @@ class TemperatureSources:
                 status = 'ok'
             else:
                 temperature = None
-            device = item.get('device', '')
-            suffix = ' · ' + device if isinstance(device, str) and re.fullmatch(r'/dev/(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+|vd[a-z]+|xvd[a-z]+)', device) else ''
-            user_name = item.get('user_name')
-            if not isinstance(user_name, str) or not 0 < len(user_name) <= 128 or any(
-                    ord(char) < 32 or ord(char) == 127 for char in user_name):
-                user_name = None
             row = self._row(identity, '磁盘 · ' + (user_name or model or '存储设备')[:128] + suffix, 'disk', temperature,
                             sampled if type(sampled) in (int, float) and 0 <= sampled <= now and math.isfinite(sampled) else None,
                             SMART_MAX_AGE, _number(item.get('temperature_critical_c'), minimum=40), status)
