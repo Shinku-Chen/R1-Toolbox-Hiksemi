@@ -53,6 +53,13 @@ class MediaProbeHTTPTests(unittest.TestCase):
             return_value={'schema_version': 1, 'categories': {}})
         self.business = business_patch.start()
         self.addCleanup(business_patch.stop)
+        self.transcode_result = {'schema_version': 1, 'available': True, 'status': 'ok',
+                                 'reason': 'definitions_available', 'steps': {},
+                                 'tv_player': {'playback': 'hls', 'labels': ['原画', '高清']}}
+        transcode_patch = mock.patch.object(web_config, 'collect_transcode_probe',
+                                            return_value=self.transcode_result)
+        self.transcode = transcode_patch.start()
+        self.addCleanup(transcode_patch.stop)
         environment = {'R1_WEB_AUTH_MODE': 'password', 'R1_DEV_NO_PAIRING': '1',
                        'R1_DEV_ALLOW_IPS': '127.0.0.1', 'R1_DEV_MINUTES': '60',
                        'R1_DEV_ALLOW_COMMANDS': '0'}
@@ -116,6 +123,7 @@ class MediaProbeHTTPTests(unittest.TestCase):
     def assert_no_sources(self):
         self.probe.assert_not_called()
         self.batch.assert_not_called()
+        self.transcode.assert_not_called()
         self.insights.snapshot.assert_not_called()
         self.insights.storage_name_diagnostics.assert_not_called()
         self.business.assert_not_called()
@@ -411,6 +419,77 @@ class MediaProbeHTTPTests(unittest.TestCase):
         self.assertEqual(403, status)
         self.assertNotIn('never-disclose', json.dumps(value))
         self.assert_no_sources()
+
+    def test_transcode_probe_passes_one_admin_file_path_to_one_fixed_collector(self):
+        path = '/drives/sda/Users/admin/Movies/fixture.mkv'
+        status, _, value = self.request({'action': 'probe_transcode', 'path': path,
+                                         'confirm': True})
+        self.assertEqual(status, 200)
+        self.assertIs(value['ok'], True)
+        self.assertEqual(value['transcode'], self.transcode_result)
+        self.assertEqual(self.transcode.call_count, 1)
+        called = self.transcode.call_args
+        self.assertEqual(called.args, (path,))
+        self.assertEqual(set(called.kwargs), {'authorizer'})
+        self.assertTrue(called.kwargs['authorizer']('video_capacity', {}, {}))
+        self.probe.assert_not_called()
+        self.batch.assert_not_called()
+        self.business.assert_not_called()
+        self.assert_no_controls()
+
+    def test_transcode_probe_rejects_every_other_path_or_body(self):
+        bodies = ({'action': 'probe_transcode'},
+                  {'action': 'probe_transcode', 'path': ''},
+                  {'action': 'probe_transcode', 'path': 1},
+                  {'action': 'probe_transcode', 'path': None},
+                  {'action': 'probe_transcode', 'path': '/etc/passwd'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/public/x.mkv'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/../x.mkv'},
+                  {'action': 'probe_transcode', 'path': 'relative/x.mkv'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv',
+                   'sharpness': 'high'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv',
+                   'offset': 0},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv',
+                   'terminal': 'private-terminal'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv'},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv',
+                   'confirm': False},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv',
+                   'confirm': 1},
+                  {'action': 'probe_transcode', 'path': '/drives/sda/Users/admin/x.mkv',
+                   'confirm': True, 'force': True})
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual(self.request(body)[0], 400)
+        self.assert_no_sources()
+
+    def test_transcode_probe_shares_the_media_lock_with_the_other_probes(self):
+        path = '/drives/sda/Users/admin/Movies/fixture.mkv'
+        self.assertTrue(self.server.media_probe_lock.acquire(blocking=False))
+        try:
+            status, _, value = self.request({'action': 'probe_transcode', 'path': path,
+                                             'confirm': True})
+            self.assertEqual(status, 409)
+            self.assertIs(value['ok'], False)
+        finally:
+            self.server.media_probe_lock.release()
+        self.assertFalse(self.server.media_probe_lock.locked())
+        self.assertEqual(self.request({'action': 'probe_transcode', 'path': path,
+                                       'confirm': True})[0], 200)
+        self.transcode.assert_called_once()
+
+    def test_transcode_probe_discards_result_when_window_expires(self):
+        def expire(*args, **kwargs):
+            self.server.dev_until = time.time() - 1
+            self.assertFalse(kwargs['authorizer']('video_capacity', {}, {}))
+            return {'private-marker': 'never-disclose', 'available': True}
+        with mock.patch.object(web_config, 'collect_transcode_probe', side_effect=expire):
+            status, _, value = self.request({'action': 'probe_transcode',
+                'path': '/drives/sda/Users/admin/Movies/fixture.mkv', 'confirm': True})
+        self.assertEqual(status, 403)
+        self.assertNotIn('never-disclose', json.dumps(value))
 
 
 if __name__ == '__main__':

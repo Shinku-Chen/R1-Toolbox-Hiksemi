@@ -41,7 +41,7 @@ class BundleTests(unittest.TestCase):
         for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
                      'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py', 'disk_names.py', 'vendor_device.py',
                      'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py', 'download_operations.py', 'vendor_media_operations.py', 'vendor_business_transport.py', 'native_capability_specs.py', 'vendor_native_capabilities.py',
-                     'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
+                     'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py', 'vendor_transcode_probe.py',
                      'vendor_media_snapshot.py', 'vendor_app_probe.py', 'vendor_storage_probe.py',
                      'api_monitoring.py', 'api_access.py', 'api_permissions.py', 'api_contracts.py', 'api_docker_projects.py', 'api_docker_operations.py', 'api_docker_deployment.py', 'api_file_operations.py', 'api_file_provider.py', 'api_file_executor.py', 'api_file_write_backend.py', 'api_file_mutations.py', 'api_file_mutation_authority.py', 'api_file_native_index.py', 'api_file_native_index_reader.py', 'api_file_native_recycle.py', 'api_file_transfers.py', 'api_file_readiness.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py', 'media_sort_plugin.py', 'media_sort_plugin_rules.py',
                      'network_access.py', 'service_settings.py', 'screen_manager.py'):
@@ -87,6 +87,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn('runtime/vendor_media_auth.py', files)
         self.assertIn('runtime/vendor_media_probe.py', files)
         self.assertIn('runtime/vendor_media_batch.py', files)
+        self.assertIn('runtime/vendor_transcode_probe.py', files)
         self.assertIn('runtime/vendor_media_snapshot.py', files)
         self.assertIn('runtime/vendor_app_probe.py', files)
         self.assertIn('runtime/vendor_storage_probe.py', files)
@@ -280,6 +281,127 @@ class BundleTests(unittest.TestCase):
                     {'UI_MODE': 'invalid'}, {'NEW_HTML': '/data/index.html'}):
             with self.subTest(env=env), self.assertRaises(ValueError):
                 self.runtime.select_mode(env)
+
+    def test_real_bundle_closure_covers_every_runtime_import(self):
+        """The shipped bundle must import cleanly:每层 import 都在包内或标准库。"""
+        output = Path(tempfile.mkdtemp(prefix='r1-ui-bundle-real-'))
+        self.addCleanup(self.recycle_path, output)
+        digest = builder.build_bundle(ROOT, output=output)
+        archive = output / 'ui-bundle.tar'
+        runtime = load_actions()
+        manifest, files = runtime.read_bundle(archive, digest)
+        self.assertEqual(set(manifest['files']), set(files) - {'manifest.json'})
+        self.assertIn('runtime/vendor_transcode_probe.py', files)
+        self.assertIn('runtime/vendor_business_transport.py', files)
+        # web_config 无条件 import 该模块；若它不在 manifest，闭包检查必须失败。
+        self.assertIn('vendor_transcode_probe', module_imports(files['runtime/web_config.py']))
+
+        closure, missing = runtime_import_closure(files)
+        self.assertEqual(missing, [])
+        self.assertIn('vendor_transcode_probe', closure)
+        self.assertIn('vendor_business_transport', closure)
+
+        # 受控导入：只用解包出来的 RAM 缓存内容导入网页模块，证明依赖闭包真实可导入。
+        extracted = output / 'extracted'
+        extracted.mkdir()
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(extracted)
+        environment = dict(os.environ, PYTHONPATH=str(extracted / 'runtime'), PYTHONDONTWRITEBYTECODE='1')
+        completed = subprocess.run(
+            [sys.executable, '-B', '-c', 'import web_config, vendor_transcode_probe'],
+            cwd=str(extracted), env=environment, capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
+        self.assertFalse(any(extracted.rglob('__pycache__')))
+
+    def test_real_bundle_rejects_an_unexpected_runtime_module(self):
+        """Manifest 齐全且哈希正确时，额外模块仍必须被 RAM 允许清单拒绝。"""
+        output = Path(tempfile.mkdtemp(prefix='r1-ui-bundle-extra-'))
+        self.addCleanup(self.recycle_path, output)
+        digest = builder.build_bundle(ROOT, output=output)
+        archive = output / 'ui-bundle.tar'
+        with tarfile.open(archive) as bundle:
+            members = [(member, bundle.extractfile(member).read()) for member in bundle]
+        manifest = json.loads(dict((m.name, d) for m, d in members)['manifest.json'])
+        payload = b'print("unexpected")\n'
+        manifest['files']['runtime/vendor_unexpected_extra.py'] = hashlib.sha256(payload).hexdigest()
+        manifest_data = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode() + b'\n'
+        members = [(m, manifest_data if m.name == 'manifest.json' else d) for m, d in members]
+        for member, data in members:
+            member.size = len(data)
+        info = tarfile.TarInfo('runtime/vendor_unexpected_extra.py')
+        info.size = len(payload)
+        members.insert(-1, (info, payload))
+        with tarfile.open(archive, 'w') as bundle:
+            for member, data in members:
+                bundle.addfile(member, io.BytesIO(data))
+        # 重算改动后归档的真实摘要：拒绝必须来自允许清单，而不是外层 SHA 不匹配。
+        mutated = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.assertNotEqual(mutated, digest)
+        with self.assertRaises(ValueError) as raised:
+            load_actions().read_bundle(archive, mutated)
+        message = str(raised.exception)
+        self.assertIn('runtime/vendor_unexpected_extra.py', message)
+        self.assertNotIn('SHA256', message)
+        # 沿用旧摘要时只证明外层哈希校验，用来固定两条拒绝边界的区别。
+        with self.assertRaises(ValueError) as stale:
+            load_actions().read_bundle(archive, digest)
+        self.assertIn('SHA256', str(stale.exception))
+
+    def test_closure_detects_a_missing_module_even_in_a_deferred_branch(self):
+        """反例：不允许闭包把未打包的 import 静默跳过。"""
+        files = {
+            'runtime/ui_service.py': b'import web_config\n',
+            'runtime/web_config.py': (b'import vendor_missing\n'
+                                      b'def later():\n'
+                                      b'    import vendor_deferred\n'),
+        }
+        closure, missing = runtime_import_closure(files)
+        self.assertEqual(closure, {'ui_service', 'web_config'})
+        self.assertEqual(missing, ['vendor_deferred', 'vendor_missing'])
+
+    def recycle_path(self, path):
+        if sys.platform == 'darwin' and (Path.home() / '.Trash').is_dir():
+            shutil.move(str(path), str(Path.home() / '.Trash' / path.name))
+        else:
+            print('测试临时目录已保留：', path)
+
+
+def runtime_import_closure(files):
+    """Resolve the runtime import closure of the shipped web modules.
+
+    返回 `(closure, missing)`：`missing` 记录**所有**被 import 过的名字中既不在
+    bundle 内、也不属于标准库的部分，因此函数内的延迟导入同样会被检出，不会被
+    静默跳过。
+    """
+    import ast  # noqa: F401  (保留在函数内，避免模块导入期依赖)
+    bundled = {name.split('/')[-1][:-3] for name in files
+               if name.startswith('runtime/') and name.endswith('.py')}
+    pending = {'ui_service', 'web_config'}
+    closure = set()
+    requested = set()
+    while pending:
+        name = pending.pop()
+        if name in closure or name not in bundled:
+            continue
+        closure.add(name)
+        for imported in module_imports(files['runtime/' + name + '.py']):
+            requested.add(imported)
+            if imported in bundled:
+                pending.add(imported)
+    missing = sorted(requested - bundled - set(sys.stdlib_module_names))
+    return closure, missing
+
+
+def module_imports(source):
+    """Collect absolute module names imported by one bundled runtime file."""
+    import ast
+    names = set()
+    for node in ast.walk(ast.parse(source.decode('utf-8'))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split('.')[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module.split('.')[0])
+    return names
 
 
 if __name__ == '__main__':

@@ -100,7 +100,7 @@ MCP 默认关闭，启用后客户端仍须使用独立 Token。API 管理提供
 
 局域网 AI 常规接入使用“API 管理”的独立 MCP／REST Token，不依赖本节开发窗口。网页所有者授权与机器 Token 分开，开发白名单不能创建或管理 Token；完整用法见[MCP 与 API 管理](mcp-api.md)。
 
-原厂媒体的按需测试使用 `POST /api/dev/media`，固定请求为 `{"action":"probe"}`（相册识别）或 `{"action":"probe_all"}`（七类媒体状态）。它在宿主内只读复用已有管理员会话并逐项查询首帧，开发者白名单可直接发起，令牌与相册标识不返回网页；原厂查询可能写完成状态，因此不纳入自动被动快照。详细范围见[媒体验证](media-probe.md)。
+原厂媒体的按需测试使用 `POST /api/dev/media`，固定请求为 `{"action":"probe"}`（相册识别）或 `{"action":"probe_all"}`（七类媒体状态）；播放清晰度诊断使用 `{"action":"probe_transcode","path":"/drives/<disk>/Users/admin/...","confirm":true}`。诊断只显式发送三个固定 getter；原厂可能读取媒体、写 `user.md5` 并唤盘，不显式发起播放、停止或设置写入。宿主复用已有管理员会话，凭据与原始路径不出宿主，保持有效开发白名单与媒体锁，不纳入被动快照。服务端观测、电视端静态推导与实际播放分别标记。详细范围见[媒体验证](media-probe.md)。
 
 需要白名单 IP 直接检测时，使用统一 `POST /api/dev/diagnostics`：在开发模式有效窗口内可免登录查询目录或采集设备、存储、业务与风扇只读现场，不需要命令开关。它和上述媒体按需测试是本节口令要求的明确例外，原有诊断和控制接口保持原授权；同源、JSON、CSRF 校验继续生效。请求示例与返回语义见[开发者白名单检测](dev-diagnostics.md)。
 

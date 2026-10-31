@@ -28,6 +28,8 @@ from fan_diagnostics import FanDiagnostics
 from vendor_business import collect_business_diagnostics
 from vendor_media_probe import collect_media_probe
 from vendor_media_batch import collect_media_batch
+from vendor_transcode_probe import (collect_transcode_probe,
+                                    validate_path as validate_transcode_path)
 from vendor_media_snapshot import record_media_snapshot
 from vendor_app_probe import collect_application_probe
 from vendor_app_diagnostics import record_application_snapshot
@@ -1176,8 +1178,14 @@ class WebConfigServer:
         """
         if not self._dev_authorized(ip):
             return 403, {'ok': False, 'error': '媒体测试未启用、已过期或客户端不在白名单'}, None
-        if not isinstance(body, dict) or body not in ({'action': 'probe'}, {'action': 'probe_all'}, {'action': 'probe_business', 'confirm': True}):
-            return 400, {'ok': False, 'error': '仅支持固定媒体 probe、probe_all 或确认后的 probe_business，不接受账号、令牌或路径参数'}, None
+        fixed = ({'action': 'probe'}, {'action': 'probe_all'}, {'action': 'probe_business', 'confirm': True})
+        transcode = (isinstance(body, dict) and set(body) == {'action', 'path', 'confirm'}
+                     and body.get('action') == 'probe_transcode'
+                     and type(body.get('path')) is str)
+        if not isinstance(body, dict) or (body not in fixed and not transcode):
+            return 400, {'ok': False, 'error': '仅支持固定媒体 probe、probe_all、确认后的 probe_business 或带 confirm 的 probe_transcode，不接受账号、令牌或任意路径参数'}, None
+        if body['action'] == 'probe_transcode' and body.get('confirm') is not True:
+            return 400, {'ok': False, 'error': '清晰度排障会触发原厂 getter 条件性读取媒体内容并写 user.md5 元数据，请显式确认后再执行'}, None
         if body['action'] == 'probe_business' and body.get('confirm') is not True:
             return 400, {'ok': False, 'error': '业务检测需要明确确认可能的原厂状态更新与磁盘唤醒。'}, None
         if not self.media_probe_lock.acquire(blocking=False):
@@ -1189,6 +1197,17 @@ class WebConfigServer:
                 if not self._dev_authorized(ip):
                     return 403, {'ok': False, 'error': '开发窗口已失效，未返回业务检测结果'}, None
                 return 200, {'ok': True, 'probe': value}, None
+            if body['action'] == 'probe_transcode':
+                try:
+                    path = validate_transcode_path(body['path'])
+                except ValueError:
+                    return 400, {'ok': False, 'error': '转码档位诊断只接受 /drives/<disk>/Users/admin/ 下的绝对路径，拒绝空段、.／..、反斜杠、控制字符、相对路径与其它盘根；仅做字符串形式校验，不判断末段是文件还是目录'}, None
+                value = collect_transcode_probe(
+                    path,
+                    authorizer=lambda operation, parameters, native_body: self._dev_authorized(ip))
+                if not self._dev_authorized(ip):
+                    return 403, {'ok': False, 'error': '开发窗口已失效，未返回清晰度档位结果'}, None
+                return 200, {'ok': True, 'transcode': value}, None
             if body['action'] == 'probe_all':
                 value = collect_media_batch()
                 receipt = self._save_media_snapshot(value, 'batch')

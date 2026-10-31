@@ -4,7 +4,7 @@
 
 这个授权只适用于本接口。原有 `/api/dev/storage`、`/api/dev/business`、`/api/dev/fan` 和 `/api/dev/exec` 保持各自的授权规则。风扇接管重试、配置修改、应用控制和电源操作不属于本接口的检测项目。
 
-媒体签名验证另用明确发起的 `POST /api/dev/media`，请求 `{"action":"probe"}` 验证相册识别，或 `{"action":"probe_all"}` 逐项验证七类媒体状态；它会访问原厂媒体数据库并可能写完成状态，不会随本页的被动快照自动执行。见[媒体验证](media-probe.md)。
+媒体签名验证另用明确发起的 `POST /api/dev/media`，请求 `{"action":"probe"}` 验证相册识别，或 `{"action":"probe_all"}` 逐项验证七类媒体状态；它会访问原厂媒体数据库并可能写完成状态，不会随本页的被动快照自动执行。播放清晰度诊断使用 `{"action":"probe_transcode","path":"/drives/<disk>/Users/admin/...","confirm":true}`，固定查询能力、开关和档位；原厂 getter 可能读取影片、写 `user.md5` 并唤盘，不显式发送播放、停止或开关设置。路径只作字符串形式校验，无法判断末段是否文件，不授予本地文件访问。见[媒体验证](media-probe.md)。
 
 新增业务目录检测使用同一路由及严格请求 `{"action":"probe_business","confirm":true}`，只依次查询普通相册、共享相册、影视库三个固定目录，各一次，逐项隔离错误；不创建相册、不修改影视库、不创建或撤销分享。它可能触发原厂初始化、共享修复及磁盘唤醒，必须明确确认，结果标记 `native_query_may_update_state` 与 `may_wake_disks`；不加入默认检测、业务后台轮询或旧媒体缓存。没有账号、令牌、对象、路径或任意 action 输入，详见[媒体业务执行器](media-business-operations.md)。
 

@@ -25,7 +25,7 @@ def build_bundle(root=ROOT, output=None, native_guard=None):
                **{'runtime/' + name: root / 'runtime' / name
                   for name in ('ui_service.py', 'toolbox.py', 'insights.py', 'disk_names.py', 'device_info.py', 'vendor_device.py', 'histor.py', 'web_config.py',
                                'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py',
-                               'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py',
+                               'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py', 'vendor_transcode_probe.py',
                                'vendor_media_snapshot.py', 'vendor_app_probe.py', 'vendor_storage_probe.py',
                                'api_monitoring.py', 'api_access.py', 'api_permissions.py', 'api_contracts.py', 'api_docker_projects.py', 'api_docker_operations.py', 'api_docker_deployment.py', 'api_file_operations.py', 'api_file_provider.py', 'api_file_executor.py', 'api_file_write_backend.py', 'api_file_mutations.py', 'api_file_mutation_authority.py', 'api_file_native_index.py', 'api_file_native_index_reader.py', 'api_file_native_recycle.py', 'api_file_transfers.py', 'api_file_readiness.py', 'api_file_roots.py', 'mcp_service.py', 'integration_api.py', 'media_sort_plugin.py', 'media_sort_plugin_rules.py',
                                'network_access.py', 'service_settings.py', 'screen_manager.py',

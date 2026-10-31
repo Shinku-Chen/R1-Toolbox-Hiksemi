@@ -10,7 +10,7 @@
 | `POST /api/r1/business/refresh` | 网页所有者显式采集，固定 `{"source":"applications"}` 或 `{"source":"media"}`。同源、JSON、CSRF；拒绝 Bearer 与开发白名单代替所有者授权 |
 | `POST /api/dev/business` | 保留原开发窗口、实际来源白名单、命令开关与已启用口令会话要求；只接受 `{"action":"snapshot"}` |
 | `POST /api/dev/diagnostics` | 有效开发白名单可免登录检测，固定 `{"action":"snapshot","checks":["business"]}`，复用被动采集器与并发锁 |
-| `POST /api/dev/media` | 保留显式 `probe`／`probe_all` 授权与媒体共享锁，结果同时保存到 Toolbox 媒体快照 |
+| `POST /api/dev/media` | 保留显式 `probe`／`probe_all` 授权与媒体共享锁，结果保存到 Toolbox 媒体快照；`probe_transcode` 须 `confirm:true`，复用同一锁查询播放能力、开关和档位，不写快照。其受限 admin 路径仅作原厂参数，原厂可能读媒体、写 `user.md5` 并唤盘，详见[媒体验证](media-probe.md) |
 
 不接受任意命令、URL、路径、端口、原厂动作、用户、令牌或任务标识，不开放 CORS。媒体一次批量最坏约 81 秒，客户端允许至少 90 秒；前端超时后不自动重复原厂查询。
 

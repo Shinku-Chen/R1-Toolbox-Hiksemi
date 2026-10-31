@@ -48,7 +48,13 @@ OPERATIONS = MappingProxyType({
     'album_delete': ('/rest/1.1/album', 'delete_custom_album', 'GET', True),
     'backup_task_halt': ('/rest/1.1/task', 'set_task_status', 'GET', True),
     'auto_backup_disable': ('/rest/1.1/config', 'set_auto_backup', 'GET', True),
+    # 固定转码诊断 getter；TV 会省略不适用的开关查询，原厂内部可能读内容/写元数据。
+    'video_capacity': ('/rest/1.1/config', 'get_all_capacity', 'GET', False),
+    'transcode_switch': ('/rest/1.1/config', 'get_trvideo_switch', 'GET', False),
+    'offline_video_path': ('/rest/1.1/config', 'get_offlinevideo_path', 'GET', False),
 })
+_PROFILES = ('raw', 'high', 'mid', 'low')
+MAX_MEDIA_PATH = 1024
 _REASONS = frozenset((
     'unsupported_operation', 'invalid_parameters', 'authorization_denied',
     'confirmation_required', 'busy', 'credential_unavailable',
@@ -63,6 +69,8 @@ _REASONS = frozenset((
     'catalog_version_changed', 'package_contract_unverified', 'installation_plan_changed',
     'idempotency_required', 'idempotency_conflict', 'idempotency_capacity',
 ))
+# 只读诊断与其它调用方共用的公开原因词表。
+REASONS = _REASONS
 
 
 class BusinessTransportError(ValueError):
@@ -102,6 +110,41 @@ def _album_id(value):
     return value
 
 
+def media_path(value):
+    """Absolute vendor media path inside the audited admin data boundary.
+
+    This is string validation only: nothing is opened, stat-ed or resolved here,
+    so it grants no local file access. The caller passes the value to the vendor
+    as a query parameter; the vendor applies its own lookup rules.
+    """
+    if type(value) is not str or not 10 <= len(value) <= MAX_MEDIA_PATH:
+        raise BusinessTransportError('invalid_parameters')
+    if value != value.strip() or '\\' in value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise BusinessTransportError('invalid_parameters')
+    parts = value.split('/')
+    # ['', 'drives', <disk>, 'Users', 'admin', ...] 且至少一个子路径。
+    if (len(parts) < 6 or parts[0] or parts[1] != 'drives' or parts[3] != 'Users'
+            or parts[4] != 'admin'):
+        raise BusinessTransportError('invalid_parameters')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', parts[2]):
+        raise BusinessTransportError('invalid_parameters')
+    if any(part in ('', '.', '..') for part in parts[1:]):
+        raise BusinessTransportError('invalid_parameters')
+    return value
+
+
+def _profile(value):
+    if type(value) is not str or value not in _PROFILES:
+        raise BusinessTransportError('invalid_parameters')
+    return value
+
+
+def _terminal(value):
+    if type(value) is not str or re.fullmatch(r'[A-Za-z0-9._:-]{1,64}', value) is None:
+        raise BusinessTransportError('invalid_parameters')
+    return value
+
+
 def _validate(operation, parameters, body):
     """Return detached canonical values before authorizing or reading auth DB."""
     if type(operation) is not str or operation not in OPERATIONS:
@@ -111,7 +154,8 @@ def _validate(operation, parameters, body):
     params, payload = dict(parameters), dict(body)
     if operation in ('albums_list', 'shared_albums_list', 'movie_libraries_list',
                      'backup_tasks_list', 'auto_backup_get', 'nas_users_list',
-                     'device_name_get', 'nas_ai_get', 'module_inventory'):
+                     'device_name_get', 'nas_ai_get', 'module_inventory',
+                     'transcode_switch'):
         valid = not params and not payload
     elif operation == 'albums_create':
         valid = set(params) == {'album_name'} and not payload
@@ -185,6 +229,20 @@ def _validate(operation, parameters, body):
         if valid:
             valid = type(params['disk_type']) is str and params['disk_type'] in ('udisk_a', 'sd')
             params = {'disk_type': params['disk_type'], 'status': _integer(params['status'], 0, 0)}
+    elif operation == 'video_capacity':
+        # 固定 0：只要能力摘要，不按文件展开。
+        valid = set(params) <= {'capacity_detail'} and not payload
+        if valid:
+            params = {'capacity_detail': _integer(params.get('capacity_detail', 0), 0, 0)}
+    elif operation == 'offline_video_path':
+        valid = not payload and set(params) == {
+            'video_capability', 'path', 'offset', 'sharpness', 'terminal'}
+        if valid:
+            params = {'video_capability': _integer(params['video_capability'], 1, 1),
+                      'path': media_path(params['path']),
+                      'offset': _integer(params['offset'], 0, 2 ** 31 - 1),
+                      'sharpness': _profile(params['sharpness']),
+                      'terminal': _terminal(params['terminal'])}
     else:
         # Application mutations stay unavailable until their audited contract.
         raise BusinessTransportError('unsupported_application_contract')

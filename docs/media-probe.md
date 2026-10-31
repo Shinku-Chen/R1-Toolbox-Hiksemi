@@ -1,6 +1,6 @@
 # 原厂相册识别实机验证
 
-`POST /api/dev/media` 在宿主内部只读复用管理员已有会话，对固定原厂媒体状态接口进行签名查询，仅返回首帧数据和验证状态。它用于明确发起的实机验证，不属于自动轮询或 `/api/dev/diagnostics` 的被动快照。原有 `probe` 验证相册识别，`probe_all` 逐项验证下表七类状态。
+`POST /api/dev/media` 在宿主内部只读复用管理员已有会话，对固定原厂媒体状态接口进行签名查询，仅返回首帧数据和验证状态。它用于明确发起的实机验证，不属于自动轮询或 `/api/dev/diagnostics` 的被动快照。原有 `probe` 验证相册识别，`probe_all` 逐项验证下表七类状态，`probe_transcode` 诊断转码能力与单个文件的清晰度档位。
 
 ## 请求与授权
 
@@ -13,7 +13,7 @@ const response = await fetch('/api/dev/media', {
 console.log(await response.json());
 ```
 
-接口仅接受 `{"action":"probe"}` 或 `{"action":"probe_all"}`，需要 `R1_DEV_NO_PAIRING=1`、精确实际客户端 `R1_DEV_ALLOW_IPS` 和有效 `R1_DEV_MINUTES` 窗口。开发者白名单授权可直接测试，不依赖浏览器登录或 `R1_DEV_ALLOW_COMMANDS`；同源、JSON 和 CSRF 校验继续生效。没有公开 GET、CORS 或任意参数转发。
+接口仅接受 `{"action":"probe"}`、`{"action":"probe_all"}`、`{"action":"probe_transcode","path":"..."}` 或 `{"action":"probe_business","confirm":true}`，需要 `R1_DEV_NO_PAIRING=1`、精确实际客户端 `R1_DEV_ALLOW_IPS` 和有效 `R1_DEV_MINUTES` 窗口。开发者白名单授权可直接测试，不依赖浏览器登录或 `R1_DEV_ALLOW_COMMANDS`；同源、JSON 和 CSRF 校验继续生效。没有公开 GET、CORS 或任意参数转发。
 
 请求不能指定用户、SQL、文件路径、令牌、原厂动作、地址或端口。同一时间只接受一个测试，重复请求返回 `409`。控制、风扇重试及原有诊断接口的授权不变。
 
@@ -63,6 +63,201 @@ HTTP `200`、外层 `ok:true` 表示测试请求已处理。应继续检查 `pro
 令牌读取是只读操作，但原厂相册状态查询本身可能初始化用户资源、访问媒体数据库、上报计数或写识别完成标记。该接口按需调用，不宣传为全程无副作用的后台采集。它不调用正常登录，因此不走登录 handler 的校时逻辑；不发送媒体扫描、重新识别或其他控制动作。
 
 批量验证还可能触发 OCR 完成事件和共享相册完成标记；原厂共享列表 getter 在数据库故障时有修复／重新打开资源的内部路径。刮削扩展的 `refresh_status` 下游实现未包含在固件中，其内部写入与聚合语义仍未知。Toolbox 只发固定状态请求，不额外调用修复、扫描、导入、重试或取消动作。这些接口不得加入被动快照轮询。
+
+## 转码能力与清晰度档位诊断
+
+本节针对电视播放器的清晰度切换。影视列表另有“清晰度／解码”筛选，后者的“解码”实际表示杜比视界、HDR、SDR 等动态范围分类；候选列表不足时客户端会隐藏筛选项。该列表的候选数据与显示条件不由 `probe_transcode` 验证，不能把播放接口的拒绝码直接当成列表筛选故障的原因。
+
+电视端播放器的每条门槛要分开看，不能概括成「任一不满足就只原画」：
+
+- `cap_transcode_video` 不为 1（客户端本地机型判断 + 该能力位）→ `buildVideoPath` 直接走原画并把清晰度入口设为不可见；
+- `videoSwitchOpen` 为 `false`（只有 `cap_tr_video_switch_v1 == 1` 且查询返回 `code = 0, mode = 0` 才会是 `false`）→ 同样走原画并隐藏入口；
+- 确定的传输失败 → `AbilityConfig$2.onFailure` 置 `videoSwitchOpen=true`；非零 `code` 且 `mode` 可解析为整数时，`onSuccess` 的非零码分支也置 true。二者只是客户端回退，不是服务端开关已开启的观测；
+- 成功响应 `code=0` 但 `mode` 非法或缺失 → `onSuccess` 在 `0x0070` 跳到 `0x0088`，或进入 JSON 异常 catch，保留旧客户端状态，**不能**当作 `onFailure` 置 true。没有旧状态证据时保持 `switch_state_unknown`；
+- `cap_tr_video_switch_v1 != 1` → 客户端根本不发 `get_trvideo_switch`，`videoSwitchOpen` 保持默认 `true`；
+- 档位拒绝码 `-5402` 有已审计的不支持分支；其它非零码不套用该分支，不推断播放、菜单或切换支持状态。
+
+因此，服务端开关观测、确定的客户端回退和未知的旧客户端状态要分开看。通用 HTTP wrapper 对错误 envelope 的解析格式敏感，不能仅凭非零 `code` 且无有效 `mode` 就断言触发了 `onFailure`。
+
+```javascript
+const response = await fetch('/api/dev/media', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json', 'X-FNM-Request': '1'},
+  body: JSON.stringify({action: 'probe_transcode',
+    path: '/drives/sda/Users/admin/Movies/example.mkv',
+    confirm: true})
+});
+console.log(await response.json());
+```
+
+请求体必须恰好是这三个字段（`confirm` 必须为 `true`，缺失或 `false` 直接 `400` 且不发任何原厂请求）。确认针对的是本动作的真实副作用：如右侧审计所述，`get_offlinevideo_path` 在返回档位前可能实际读取媒体内容并写入 `user.md5` 扩展属性；这不是无副作用的浏览接口。`path` 必须是 `/drives/<disk>/Users/admin/` 下的绝对路径，并拒绝空段、`.`／`..`、反斜杠、控制字符、非字符串、相对路径以及其它盘根或 `Users`／`admin` 之外的位置。这是**纯字符串形式校验**：宿主不打开、不 `stat`、不解析，不产生任何文件访问授权，该值只作为原厂查询参数；因此它**无法判断末段是文件还是目录**，`/drives/sda/Users/admin/Movies` 这类无尾斜线的目录路径同样会通过，文案不得宣称能拒绝目录。
+
+| 步骤 | 固定原厂请求 | 公开投影 |
+|---|---|---|
+| `capability` | `GET /rest/1.1/config` `action=get_all_capacity&capacity_detail=0` | 仅 `cap_transcode_video`、`cap_tr_video_switch_v1` 两个已审计能力位，以及未识别／畸形条目计数 |
+| `switch` | `GET /rest/1.1/config` `action=get_trvideo_switch` | `mode`（0 关、1 开）与 `open`；不返回原文 |
+| `capacity` | `GET /rest/1.1/config` `action=get_offlinevideo_path&video_capability=1&path=<urlencode>&offset=0&sharpness=raw&terminal=<固定标识>` | 规范化 `status`／`ready`、固定档位枚举及字段状态、宽高／码率／帧率、`codec_type`（仅 `video` 或 null）、音轨／字幕条数；路径只报告存在性 |
+
+每次原厂请求都在 `steps.<step>` 给出 `native_code`（仅安全整数，不返回 `msg`／路径／原文）；HTTP 200 只表示请求已处理，业务是否成功要看该步 `ok` 与 `native_code`。
+
+存在但非法的 `code`（布尔值、字符串、null 或超出安全整数范围）固定失败为 `native_code_invalid`，不能当成无 code 的成功。仅 `get_all_capacity` 的 `capacity_list` 数组，以及档位 getter 的 `capabilities` 对象／非空 `video_720p` 结构允许确实缺省 code；开关 getter 不接受无 code 的成功。
+
+`profile`／`offlineprofile` 只接受 `raw`、`high`、`mid`、`low`、`origin` 的严格逗号组合；其它值为 null，并标记 `missing`／`invalid`。明确空串与非法值分开，后者不能触发 720p 补档或 HLS 推导。自由文本 `name`／`codec_name` 不返回，未知 profile 不作标签或原码透传。`status` 仅输出 `ready`／`other`／null，非 ready 的原始字符串不返回。缺失音轨／字幕数组计数为 null，明确空数组才是 0。
+
+固定参数不由调用方选择：`offset=0`、`sharpness=raw`、`video_capability=1`，`terminal` 使用固定的非会话标识。路径、原厂原始路径、`hash_path`、原始错误文本、令牌和会话标识都不出现在返回中；`request.path_sha256_prefix` 只用于把结果和上次请求对上。
+
+**与电视流程的差异**：电视端只在 `cap_tr_video_switch_v1 == 1` 时请求开关，而本诊断固定三次都发；能力位为 0 时 `request.switch_query_in_tv_flow=false`、`extra_getters_not_in_tv_flow=["transcode_switch"]`。该能力位未知／冲突时两者保持 null，不猜电视端是否会查询。
+
+**证据分层**：`evidence` 分开记录服务端观测（`server_capability`、`server_switch_state`）、客户端分支（`client_switch_branch`、`client_switch_fallback`）与播放（`playback_source` 固定 `tv_dex_branch_inference`、`playback_observed` 固定 `false`）。本接口从不拉流，因此不能说 HLS 已经真实启动或菜单一定出现。
+
+响应形状（节选：原厂拒绝了档位查询，客户端旧开关状态仍未知）：
+
+```json
+{"ok": true, "transcode": {
+  "schema_version": 1, "available": true, "status": "partial",
+  "reason": "video_capability_query_unsupported",
+  "request": {"offset": 0, "sharpness": "raw", "terminal": "0000…", "path_sha256_prefix": "…"},
+  "steps": {"capacity": {"ok": false, "reason": "native_request_rejected", "http_status": 200, "native_code": -5402}},
+  "capability": {"structure": "ok", "entries": 3,
+                 "values": {"cap_transcode_video": 1, "cap_tr_video_switch_v1": 1},
+                 "states": {"cap_transcode_video": "enabled", "cap_tr_video_switch_v1": "enabled"},
+                 "unknown_entries": 1, "malformed_entries": 0,
+                 "duplicate_entries": 0, "conflicting_entries": 0},
+  "switch": null,
+  "capacity": {"code": -5402, "structure": "rejected", "ready": null},
+  "definitions": null,
+  "tv_player": {"definition_menu_visible": null, "playback": null, "labels": [],
+                "reason": "video_capability_query_unsupported",
+                "switch_state": "unknown_previous_client_state",
+                "switch_client_fallback": null,
+                "capacity_error_branch": {"native_code": -5402, "supports_switch": false, "conditional": true, "observed": false},
+                "playback_observed": false, "requires_tv_model_whitelist": true},
+  "evidence": {"server_capability": "enabled", "server_switch_state": null,
+               "client_switch_branch": "unknown_previous_client_state",
+               "client_switch_fallback": null,
+               "playback_source": "tv_dex_branch_inference",
+               "playback_observed": false},
+  "explicit_getter_only": true, "may_read_media_content": true,
+  "may_write_media_xattrs": true, "may_wake_disks": true,
+  "getter_effects_fully_audited": false, "playback_observed": false,
+  "notes": ["…"]}}
+```
+
+### 副作用审计：条件性读内容 + 写元数据 + 唤盘
+
+静态审计（emhistor `402964bb…`，`V6.3.3 Build_260907`）给出的固定调用链：
+
+- `get_offlinevideo_path` 在 `0x24bb08` 对 `video_capability` 做 `atoi`，非 0 时在 `0x24bbb9`
+  先发 `-5402`；发送链 `183964`→`183c50`→`951c94` 用 `request+0x18` 做首次发送去重，
+  之后的 720p JSON 不能覆盖它。电视与当前诊断都发 `video_capability=1`，因此该分支可达。
+- 更早的授权／路径门通过后才进入上述分支；本条只对该形态成立，不外推到所有固件或全部查询。
+- 该 getter 在返回前会走 `tr_video_md5`→`wr_md5_generate`：没有有效 `user.md5` 缓存时
+  实际 `fopen`／`fread` 媒体（最多 64×1 MiB），随后 `setxattr(user.md5)` 写扩展属性。
+  因此调用**可能读取媒体内容、写入元数据并唤盘**；我方不直接读内容，不代表调用链不读。
+- 其它 getter 的副作用（是否建任务、改库）仍未完整审计，不能声称「只有以上效果」。
+
+结果固定标记 `explicit_getter_only:true`、`may_read_media_content:true`、
+`may_write_media_xattrs:true`、`may_wake_disks:true`、`getter_effects_fully_audited:false`，
+不再使用 `read_only_query`。本动作只接受显式请求，与其它媒体检测共用锁并受绝对窗口限制，
+不进入被动快照、后台轮询或 MCP。
+
+### 结构与档位：三个容器分支必须分开
+
+`capacity` 保留原厂响应的结构证据，不能把「`capabilities` 为 null」与「`capabilities`
+是对象但没有可用 `video` 行」合并：
+
+| 字段 | 取值 | 含义 |
+|---|---|---|
+| `capabilities_state` | `object`／`null`／`invalid` | 响应里 `capabilities` 是对象、缺失或为 null、还是类型不对 |
+| `video_state` | `list`／`empty`／`null`／`invalid` | `capabilities.video` 是非空数组、空数组、缺失／null、还是类型不对 |
+| `first_profile_state` | `valid`／`empty`／`missing`／`invalid`／`absent` | 首个视频行的审计档位字段状态；坏首行不由后续行替代 |
+
+按 `classes.dex` SHA-256 `fd7af59c…` 的 `onCapacityResult` 固定引用推导档位：
+
+1. `capabilities == null`：`0x006e` 跳到 `0x016c`，`0x0170` 不跳，落到 `0x0174`
+   的 `video_720p` 检查，有值才在 `0x0184` 追加一档「标清」（独立 fallback）。
+2. `capabilities` 是对象但 `video` 缺失／null／空数组：`0x007a`／`0x008e` 跳到
+   `0x016c`，`0x0170` 因对象非空跳到 `0x0196`，**不追加任何档位**。
+3. `capabilities.video[0]` 存在：`profile` 非空且不含 `origin` 时按逗号拆分；
+   随后（`0x0124` 结束后仍落入 `0x0126`，不是二选一）用 `0x013e` 的
+   `contains("mid")` 与 `0x0146` 的跳转决定是否追加：不含 `mid` 且
+   `video_720p` 非空才追加「标清」。首个 `profile` 为空时走自己的 fallback，
+   同样只看 `video_720p`。
+
+因此：`high`＋720p → 原画／高清／标清；`origin`＋720p → 原画／标清；
+`origin,mid`＋720p → 原画（含 mid 时原厂跳过追加）；`capabilities={}` 或
+`video` 缺失／null／空数组＋720p → 只有原画。非法数组类型、坏首行或未识别档位不返回原文，记 `unmapped_profile_count` 与 `profile_metadata_unknown`，档位列表为空、播放方式未知。
+
+### 播放方式：与档位数量无关，缺证据时为 null
+
+`tv_player.playback` 单独按 DEX 推导，**不能**用「档位列表长度 > 1」当 HLS 证据：
+
+- `0x0196` 未就绪（`status != "ready"`）→ 跳到 `0x0222`：播原始文件或离线 720p，
+  记为 `playback:"original"`、`reason:"original_fallback"`。
+- 已就绪时 `0x01a6` 若 `capabilities == null` 直接到 `0x0310` 返回，绕过
+  `0x01e0` 的 `isPlayM3U8=true` 与 `0x0212` 的 m3u8 构建，因此 `playback` 与
+  `definition_menu_visible` 保持 `null`，原因 `capacity_structure_missing`。
+- 已就绪、元数据符合固定 schema 且 `capabilities` 是对象 → 仅推导 TV 会尝试构建 m3u8，记 `playback:"hls"`；列表只有
+  「原画」时原因记为 `hls_without_alternatives`，多档时 `definitions_available`。
+
+### 判读顺序（把原因缩到一段）
+
+1. `capability_unknown`：能力结构缺失／畸形，或同一能力名出现矛盾值
+   （`conflicting_entries`）。**不能**据此说设备不支持。
+2. `device_reports_no_video_transcode_capability`：只有 `cap_transcode_video`
+   明确为 0 才给这个结论。
+3. `switch_state = fallback_open_unverified`：仅确定的传输失败，或非零 code 且整数 mode 的客户端分支会置 true；`switch_client_fallback` 分别标 `open_on_failure`／`open_on_native_rejection`。服务端状态仍未观测。成功响应的无效／缺失 mode 记 `switch_state_unknown`，不推导已开启或 HLS。
+4. `transcode_switch_closed`：开关明确为 0。
+5. `capacity_query_failed`／`capacity_status_unknown`：档位查询失败或 `status`
+   缺失。
+5a. `video_capability_query_unsupported`（原厂 `code=-5402`）：`video_capability != 0`
+    时原厂固定先回 `-5402`，电视端据此清空档位、`cantSupport=true`、raw 也
+    `isPlayM3U8=false`，点击清晰度提示「该视频不支持切换清晰度」。这是静态因果推导
+    （`HSPlayerActivity.onGetCapacityError` `code_off 0x45bfc8`），不是本机实测。
+5b. `capacity_query_rejected`：其它非 0 原厂码只保留安全整数 `native_code`；`definitions` 为 null，播放／菜单／支持切换均为 null，`status=partial`，不套用 -5402 的不支持分支。开关未知时 -5402 仍保留真实码和条件性 `capacity_error_branch`，不宣称旧客户端开关已开。
+6. `capacity_structure_missing`／`capacity_structure_invalid`：就绪但
+   `capabilities` 不是对象，播放方式未知。
+7. `original_fallback`／`hls_without_alternatives`／`definitions_available`：
+   已得出播放结论。
+
+顶层 `status` 由真实依赖推导：`ok`（已得出结论）、`partial`（能力位已知但后续缺
+证据）、`unknown`（能力位本身未知）、`denied`（撤权）；`available` 只在能力位可
+判定时为 `true`。`steps` 逐项给出 `ok`／`reason`／`http_status`。
+
+每一步前后及发布前重新调用实时授权，首次失效立即停止后续 getter，并锁定本轮拒绝；即使随后重新授权也不复活旧结果。拒绝结果 `steps={}`，路径摘要、业务投影与 `evidence` 全部清空。HTTP 发送前已有的开发窗口复核仍保留。
+
+### 用一次结果排除候选
+
+| 观察 | 可以排除 | 仍需别的证据 |
+|---|---|---|
+| `capability_unknown` | 只能排除「本接口已给出结论」 | 能力结构、固件版本、该机型是否支持转码 |
+| `device_reports_no_video_transcode_capability` | NAS 侧不提供视频转码能力 | 是否可通过设置／升级开启 |
+| `switch_state = fallback_open_unverified` | 客户端会继续（`onFailure` 回落 true） | 服务端开关真实状态、默认值来源 |
+| `transcode_switch_closed` | 转码被关闭 | 关闭是配置还是策略 |
+| `capacity_query_failed` | 该路径上的档位查询失败 | 失败是权限、路径、还是后端 |
+| `capacity_status_unknown` | — | 原厂 `status` 语义与就绪条件 |
+| `capacity_structure_missing` | NAS 未返回可播放的 m3u8 结构 | 编码格式、后端能力、客户端白名单 |
+| `video_capability_query_unsupported`（`-5402`） | 该请求形态下 NAS 不提供可切换档位，TV 会提示不支持 | 其它固件／请求形态、真实播放 |
+| `original_fallback` | 仅推导 TV 走非 HLS 分支（状态非 ready） | 未就绪的成因、真实播放情况 |
+| `definitions_available`／`hls_without_alternatives` | 仅静态推导 TV 会尝试 HLS | 服务端开关仍可能未知、转码引擎、编码支持、机型白名单、真实拉流；不能据此排除 NAS 侧原因 |
+
+### 本接口不能证明、仍需实机或别的证据
+
+- 电视端机型白名单（`R1`／`R1X`／`SR1` 等）在客户端本地判断，固定标记
+  `requires_tv_model_whitelist:true`。
+- 具体编码格式是否被转码后端支持、硬解／硬编是否可用：本接口只回原厂档位与
+  流参数，不能据此断言可转码或不可转码。
+- 原厂是否真的启动了 HLS 会话、字节流是否可播：本接口不发送
+  `play_hls_video`／`stop_hls_video`，也没有拉流证据。
+- getter 的**全部**副作用：`get_offlinevideo_path` 的条件性内容读取与 `user.md5` 写入已由静态审计确认，
+  其它 getter 是否建任务、改库仍未完整审计，固定标记 `getter_effects_fully_audited:false`。
+- 原厂静态能力表（`capacity-rows.json`：`cap_transcode_video=1`、`cap_tr_video_switch_v1=0`、
+  `cap_web_transcode_video=1`）只是固件常量，不等于实机返回，也不能代替 `get_all_capacity` 的实测值。
+- DEX 归属：`classes.dex`（SHA-256 `fd7af59c…`）含 `HSPlayerActivity`；
+  `classes2.dex` 含 `AbilityConfig`／`AbilityConfig$2` 与 `VideoDefinitionHelper`
+  （`app-methods.txt` 行 3385／5900／5953／5980，`code_off` `0x222edc`／`0x2228c4`／
+  `0x2228e8`／`0x222a98`／`0x222ab0`）。不得把 classes2 的方法归到 `fd7af59c…`。
+- 电视端实际菜单与播放：受客户端版本、连接模式（SADP／云）与本地机型判断影响。
 
 ## Toolbox 自有媒体快照
 
