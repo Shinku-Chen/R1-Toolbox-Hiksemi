@@ -12,11 +12,13 @@ Bearer Token、MCP、开发白名单及小屏令牌不授予此手动接口。�
 
 **这项手动刷新会读取文件系统元数据，可能唤盘。**它不具备 SMART `-n standby` 的跳过合同，也不会顺带运行 SMART。普通 SMART、强制 SMART 和手动容量刷新是不同操作。
 
-## 可见页面缺测补齐
+## Web 进入刷新与缺测补齐
+
+Web 进入存储页、磁盘详情或从 hidden 恢复该视图时，以所有者 `POST /api/r1/storage/refresh {}` 请求一次本次温度、状态和容量。即使已有合法容量快照，也仅对本批普通 SMART 独立确认非待机且同代的目标重新测量；既有成功缓存、refreshed 标签及 standby:null 均不能单独授权 statvfs。待机返回 `skipped_standby`／`standby`，电源不明返回 `unavailable`／`power_state_unverified`，保留仍合法的旧容量与原 sampled_at，不造新采样时间。换盘或挂载失效仍丢弃旧值。请求不接受 view、盘名、路径或 force，响应形状与下述 fill 相同；原手动容量接口不变。
 
 Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌的 `POST /api/storage/fill`。两者严格接受 `{}`，不能传 force、盘名、路径或命令；Web 与小屏授权不互换。完整分段回执见 [SMART 按需刷新](smart-refresh.md)。
 
-只有相关页面可见且没有有效缓存才发请求，每个可见周期最多尝试一次；离页、网页隐藏或屏保后不再发新请求。服务器无页面租约采集器，轮询 GET 不触发补齐。容量已有合法快照返回 `cached` 并保留原采样时间。缺测只对本轮普通 SMART 已确认非待机且身份仍一致的目标测量；待机返回 `skipped_standby`／`standby`，无法确认则 `unavailable`／`power_state_unverified`。这些判断是附加拒绝门，不替代原挂载和设备复核，也不保证采样后磁盘仍维持同一电源状态。
+上述 fill 仅供概览和本机小屏相关页面在没有有效缓存时补齐，每个可见周期最多尝试一次；离页、网页隐藏或屏保后不再发新请求。服务器无页面租约采集器，轮询 GET 不触发补齐。fill 的容量已有合法快照返回 `cached` 并保留原采样时间。缺测只对本轮普通 SMART 已确认非待机且身份仍一致的目标测量；待机返回 `skipped_standby`／`standby`，无法确认则 `unavailable`／`power_state_unverified`。这些判断是附加拒绝门，不替代原挂载和设备复核，也不保证采样后磁盘仍维持同一电源状态。
 
 同代失败短暂复用负结果，防止多个页面反复制造测量；可见周期结束或刷新失败不启用后台重试。风扇的条件性温度采集绝不触发容量测量。
 

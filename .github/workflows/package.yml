@@ -47,6 +47,7 @@ jobs:
           node tests/check_interactions.cjs
           node tests/check_web_config.cjs
           node tests/check_smart_refresh.cjs
+          node tests/check_storage_refresh_entry.cjs
           node tests/check_small_screen_fill.cjs
           node tests/check_storage_fill_http.cjs
           node tests/check_api_management.cjs

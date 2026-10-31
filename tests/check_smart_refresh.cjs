@@ -210,6 +210,26 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
           body: JSON.stringify({ ...base, ...(modes[authMode] || modes.owner) }) });
       } finally { authActive -= 1; }
     });
+    const refreshPosts = [];
+    let refreshMode = 'normal';
+    await page.route('**/api/r1/storage/refresh', async route => {
+      const request = route.request();
+      refreshPosts.push({ method: request.method(), headers: request.headers(), body: request.postData() || '' });
+      if (refreshMode === 'busy') return await route.fulfill({ status: 409, contentType: 'application/json',
+        body: JSON.stringify({ ok: false, reason: 'busy' }) });
+      if (refreshMode === 'standby') return await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: true, force: false, status: 'complete', started_at: NOW - 2, finished_at: NOW,
+          smart: { ok: true, force: false, status: 'complete', started_at: NOW - 2, finished_at: NOW,
+                   results: [{ device: 'sda', status: 'skipped_standby', reason: 'standby', sampled_at: null }] },
+          capacity: { ok: true, status: 'complete', started_at: NOW - 2, finished_at: NOW,
+                      results: [{ mount_id: 101, status: 'skipped_standby', reason: 'standby', sampled_at: null }] } }) });
+      return await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: true, force: false, status: 'complete', started_at: NOW - 2, finished_at: NOW,
+          smart: { ok: true, force: false, status: 'complete', started_at: NOW - 2, finished_at: NOW,
+                   results: [{ device: 'sda', status: 'refreshed', reason: null, sampled_at: NOW }] },
+          capacity: { ok: true, status: 'complete', started_at: NOW - 2, finished_at: NOW,
+                      results: [{ mount_id: 101, status: 'refreshed', reason: null, sampled_at: NOW }] } }) });
+    });
     await page.route('**/api/r1/storage/fill', async route => {
       const request = route.request();
       fillActive += 1;
@@ -260,8 +280,50 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
       Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
       document.dispatchEvent(new Event('visibilitychange'));
     });
+    const refreshBeforeStorage = refreshPosts.length;
     await page.locator('#pageSeg button[data-page="storage"]').click();
     await page.waitForSelector('#layout-storage .bay[data-sheet="disk/sda"]', { timeout: 10000 });
+    // 进入 storage 页本身即一次主动 refresh（即使缓存有效），并用严格 {}。
+    await page.waitForTimeout(1200);
+    const refreshAtStorage = refreshPosts.length;
+    check('进入 storage 页触发一次 refresh', refreshAtStorage === refreshBeforeStorage + 1
+      && refreshPosts.slice(-1).every(row => row.method === 'POST' && row.body === '{}'));
+
+    // 每次进入不同 disk 详情各自一次 refresh；停留不重复；hidden 返回再形成新周期。
+    let baseRefresh = refreshPosts.length;
+    await openDisk('sda');
+    await page.waitForTimeout(900);
+    check('进入 disk/sda 详情刷新一次', refreshPosts.length === baseRefresh + 1);
+    await page.waitForTimeout(2200);
+    check('停留 disk/sda 不重复刷新', refreshPosts.length === baseRefresh + 1);
+    baseRefresh = refreshPosts.length;
+    await closeSheet();
+    await page.waitForTimeout(900);
+    check('关闭磁盘详情返回 storage 再刷新一次', refreshPosts.length === baseRefresh + 1);
+    baseRefresh = refreshPosts.length;
+    await openDisk('sdb');
+    await page.waitForTimeout(900);
+    check('换到 disk/sdb 再刷新一次', refreshPosts.length === baseRefresh + 1);
+    baseRefresh = refreshPosts.length;
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.waitForTimeout(900);
+    check('hidden 返回同一 disk 再次刷新', refreshPosts.length === baseRefresh + 1);
+    await closeSheet();
+    await page.waitForTimeout(900);
+    refreshMode = 'busy';
+    baseRefresh = refreshPosts.length;
+    await openDisk('sda');
+    await page.waitForTimeout(900);
+    check('busy 仍只尝试一次', refreshPosts.length === baseRefresh + 1);
+    await page.waitForTimeout(2200);
+    check('busy 不自动重试', refreshPosts.length === baseRefresh + 1);
+    refreshMode = 'normal';
+    await closeSheet();
 
     // 先让两块盘都留下旧缓存（8），再从 sda 发起一次批量刷新。
     await openDisk('sda');
@@ -270,6 +332,8 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
     await openDisk('sdb');
     await page.evaluate(() => { if (typeof Poll !== 'undefined' && Poll.run) Poll.run('overview'); });
     await page.waitForTimeout(2600);
+    // 容量卡由 MutationObserver 在 SMART 卡之后异步挂载，先等挂载再读文本，避免时序竞态。
+    await page.waitForSelector('#sheetBody [data-ref="r1CapNote"]', { timeout: 10000 });
     check('无容量样本盘显示尚未采集', (await page.textContent('#sheetBody [data-ref="r1CapNote"]')).includes('尚未采集容量'));
     capState.sdb = { stamp: NOW - 3600, used: 500, total: 2000, status: 'ok' };
     await waitTable(OLD);
@@ -293,15 +357,16 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
     check('缓存投影更新不追加容量 POST', capPosts.length === capBase);
     await closeSheet();
     await openDisk('sda');
+    await waitTable(OLD); // Entry refresh invalidates the detail cache; wait for its passive GET as well.
     check('两盘旧缓存均为 8', (await tableText()).includes(String(OLD)));
-    check('打开详情零请求', posts.length === 0);
+    check('打开详情不追加手动 SMART 请求', posts.length === 0);
     check('默认未勾选强制', await page.isChecked('#sheetBody [data-ref="r1SmartForce"]') === false);
     check('提示后台不自动补采', (await page.textContent('#sheetBody [data-ref="r1Smart"]')).includes('后台不会自动补采'));
     const snapshotNote = await page.textContent('#sheetBody [data-ref="r1SmartSnapshot"]');
     check('展示被动缓存采样时间并声明非实时',
       snapshotNote.includes('SMART 快照，非实时') && snapshotNote.includes('采样于')
       && !snapshotNote.includes('采样时间未知') && !snapshotNote.includes('观测已过期'));
-    check('打开详情仍是零 POST', posts.length === 0);
+    check('打开详情仍无手动 SMART POST', posts.length === 0);
 
     await page.click('#sheetBody [data-ref="r1SmartGo"]');
     await waitIdle();
@@ -323,7 +388,7 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
     await openDisk('sdb');
     await waitTable(NEW);
     check('批量失效覆盖其它盘', (await tableText()).includes(String(NEW)));
-    check('查看另一盘仍只有一次 POST', posts.length === 1);
+    check('查看另一盘仍只有一次手动 SMART POST', posts.length === 1);
 
     // 强制刷新：默认未勾选，勾选只改提示，刷新后复位。
     await page.check('#sheetBody [data-ref="r1SmartForce"]');
@@ -341,7 +406,7 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
       return button && !button.disabled;
     }, null, { timeout: 8000 });
     await waitCard();
-    check('容量按钮存在且零 POST', capPosts.length === 0
+    check('容量按钮存在且无手动容量 POST', capPosts.length === 0
       && await page.isVisible('#sheetBody [data-ref="r1CapGo"]'));
     await page.evaluate(async () => {
       if (typeof Poll === 'undefined' || !Poll.run) return;
@@ -412,7 +477,7 @@ function smartDetail(raw, { sampledAt = NOW - 3600, fresh = true } = {}) {
       && await page.isDisabled('#sheetBody [data-ref="r1SmartForce"]'));
     await closeSheet();
     await openDisk('sda');
-    check('切盘不追加请求', posts.length === busyBase + 1);
+    check('切盘不追加手动 SMART 请求', posts.length === busyBase + 1);
     await waitIdle();
     const currentDevice = await page.evaluate(() =>
       document.querySelector('#sheetBody [data-ref="r1Smart"]')?.dataset.device || '');

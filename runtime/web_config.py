@@ -92,6 +92,7 @@ PANEL_POST_ROUTES = frozenset((
     '/api/r1/storage/smart/refresh',
     '/api/r1/storage/capacity/refresh',
     '/api/r1/storage/fill',
+    '/api/r1/storage/refresh',
 ))
 MACHINE_ROUTES = frozenset(('/mcp', '/api/integration/status', '/api/integration/action',
                             '/api/integration/capabilities'))
@@ -107,7 +108,8 @@ MEDIA_SORT_POST_ROUTES = frozenset(('/api/plugins/media-sort/probe', '/api/plugi
 SMART_REFRESH_ROUTE = '/api/r1/storage/smart/refresh'
 CAPACITY_REFRESH_ROUTE = '/api/r1/storage/capacity/refresh'
 STORAGE_FILL_ROUTE = '/api/r1/storage/fill'
-MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES | MEDIA_SORT_POST_ROUTES | frozenset((SMART_REFRESH_ROUTE, CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE))
+STORAGE_REFRESH_ROUTE = '/api/r1/storage/refresh'
+MANAGEMENT_POST_ROUTES = ACCESS_POST_ROUTES | SERVICE_POST_ROUTES | PROJECT_POST_ROUTES | FILE_AUTHORITY_POST_ROUTES | MEDIA_SORT_POST_ROUTES | frozenset((SMART_REFRESH_ROUTE, CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE))
 OWNER_READ_ROUTES = frozenset(('/api/access', '/api/access/contracts', '/api/access/file-readiness',
                                '/api/services', '/api/docker/projects', '/api/docker/projects/catalog',
                                '/api/docker/deployments', '/api/docker/deployments/catalog', '/api/files/authority',
@@ -1075,7 +1077,7 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip='', *, media_sort_current=None,
                     smart_refresh_current=None, capacity_refresh_current=None,
-                    storage_fill_current=None, media_debug_current=None):
+                    storage_fill_current=None, storage_refresh_current=None, media_debug_current=None):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route in MANAGEMENT_POST_ROUTES and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
@@ -1083,6 +1085,8 @@ class WebConfigServer:
             return self._capacity_refresh_post(body, headers, ip, current=capacity_refresh_current)
         if route == STORAGE_FILL_ROUTE:
             return self._storage_fill_post(body, headers, ip, current=storage_fill_current)
+        if route == STORAGE_REFRESH_ROUTE:
+            return self._storage_fill_post(body, headers, ip, current=storage_refresh_current, refresh=True)
         if route == '/api/r1/business/refresh':
             return self._business_refresh_post(body, headers, ip)
         if route == '/api/dev/diagnostics':
@@ -1237,6 +1241,19 @@ class WebConfigServer:
         A successful ordinary SMART sample is an additional prerequisite for
         measuring missing capacity. GET and object construction never call here.
         """
+        return self._storage_foreground(authorizer=authorizer, refresh=False)
+
+    def storage_refresh(self, *, authorizer):
+        """Refresh a visible owner disk page using this round's ordinary power proof.
+
+        Positive caches do not consume a new page entry. This Web-only path
+        shares the fill lock and grant lifetime, without granting force or a
+        caller-selected device. Local screen callers retain storage_fill.
+        """
+        return self._storage_foreground(authorizer=authorizer, refresh=True)
+
+    def _storage_foreground(self, *, authorizer, refresh):
+        """One fixed orchestration and revocation latch for both foreground modes."""
         revoked = False
 
         def current():
@@ -1259,15 +1276,20 @@ class WebConfigServer:
             raise StorageFillError('busy')
         try:
             require_current()
-            fill = getattr(self.insights, 'fill_smart_missing', None)
-            eligible = getattr(self.insights, 'capacity_fill_eligibility', None)
-            capacity = getattr(self.monitor, 'refresh_capacity_missing', None)
+            fill = getattr(self.insights, 'refresh_smart_visible' if refresh else 'fill_smart_missing', None)
+            eligible = getattr(self.insights, 'capacity_visible_eligibility' if refresh else 'capacity_fill_eligibility', None)
+            capacity = getattr(self.monitor, 'refresh_capacity_visible' if refresh else 'refresh_capacity_missing', None)
             if not all(callable(method) for method in (fill, eligible, capacity)):
                 raise StorageFillError('unavailable')
             started = time.time()
             smart = fill(authorizer=current)
             require_current()
-            measured = capacity(authorizer=current, eligibility=eligible)
+            # The visible refresh binds capacity to the exact receipt object
+            # and private lifecycle proof from this ordinary SMART round.
+            eligibility = eligible(smart) if refresh else eligible
+            if not callable(eligibility):
+                raise StorageFillError('unavailable')
+            measured = capacity(authorizer=current, eligibility=eligibility)
             require_current()
             return {'ok': True, 'force': False,
                     'status': 'partial' if any(part.get('status') == 'partial'
@@ -1277,24 +1299,25 @@ class WebConfigServer:
         finally:
             self._storage_fill_lock.release()
 
-    def _storage_fill_post(self, body, headers, ip, *, current=None):
+    def _storage_fill_post(self, body, headers, ip, *, current=None, refresh=False):
         """Owner-only foreground request; caller cannot select disks or force."""
+        operation = '刷新' if refresh else '补齐'
         current = current or self._capacity_authorizer(headers, ip)
         if not current():
             return 403, {'ok': False, 'reason': 'authorization_denied',
-                         'error': '页面补齐需要当前网页登录授权'}, None
+                          'error': f'页面{operation}需要当前网页登录授权'}, None
         if type(body) is not dict or body:
             return 400, {'ok': False, 'reason': 'invalid_parameters',
-                         'error': '页面补齐仅接受空对象，不接受强制刷新或磁盘路径'}, None
+                          'error': f'页面{operation}仅接受空对象，不接受强制刷新或磁盘路径'}, None
         try:
-            value = self.storage_fill(authorizer=current)
+            value = self.storage_refresh(authorizer=current) if refresh else self.storage_fill(authorizer=current)
         except Exception as error:
             reason = getattr(error, 'reason', None)
             errors = {'busy': (409, '已有存储采集正在进行'),
                       'authorization_denied': (403, '网页登录授权已失效，已丢弃结果'),
-                      'timeout': (503, '页面补齐超时'),
+                      'timeout': (503, f'页面{operation}超时'),
                       'stopping': (503, '服务正在停止，未发布新结果')}
-            status, message = errors.get(reason, (503, '页面补齐当前不可用'))
+            status, message = errors.get(reason, (503, f'页面{operation}当前不可用'))
             return status, {'ok': False, 'reason': reason if reason in errors else 'unavailable',
                             'error': message}, None
         if not current():
@@ -2377,7 +2400,7 @@ class WebConfigServer:
                     if not self.valid(post=True, panel=panel):
                         return
                     if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/dev/files/write-preflight', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (
-                            parsed.query or parsed.fragment or route in (CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE)
+                            parsed.query or parsed.fragment or route in (CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE)
                             and ('?' in self.path or '#' in self.path)):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
@@ -2403,7 +2426,7 @@ class WebConfigServer:
                         try:
                             guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
                                      if route in MEDIA_SORT_POST_ROUTES or route == SMART_REFRESH_ROUTE else None)
-                            if route in (CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE):
+                            if route in (CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE):
                                 guard = outer._capacity_authorizer(
                                     self.headers, self.client_address[0], generation=self.media_sort_generation)
                             if (route == '/api/dev/media' and isinstance(body, dict)
@@ -2417,8 +2440,10 @@ class WebConfigServer:
                                                                         if route == SMART_REFRESH_ROUTE else
                                                                          {'capacity_refresh_current': guard}
                                                                          if route == CAPACITY_REFRESH_ROUTE else
-                                                                         {'storage_fill_current': guard}
-                                                                         if route == STORAGE_FILL_ROUTE else
+                                                                          {'storage_fill_current': guard}
+                                                                          if route == STORAGE_FILL_ROUTE else
+                                                                          {'storage_refresh_current': guard}
+                                                                          if route == STORAGE_REFRESH_ROUTE else
                                                                         {'media_sort_current': guard} if guard else {}),
                                                                      **({'media_debug_current': media_debug_current}
                                                                         if developer_guard else {}))

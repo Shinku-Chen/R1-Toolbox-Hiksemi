@@ -1,14 +1,22 @@
 # SMART 按需刷新与缓存
 
-Toolbox 在无人查看相关页面、且没有已启用的风扇硬盘温控需求时不主动采集磁盘温度或容量。启动、库存、任意 GET、被动诊断和健康评估只消费合法缓存，不因缺测自动探盘。相关页面可显式补齐缺测；实际启用的风扇策略可只为所选硬盘维持温度缓存。所有自动采集均普通 `-n standby`，休眠跳过，绝不自动 force。缺失、过期、设备代次不符或失败保持 `null`／`unknown`／`--`，不能把未知解释为健康、低温或休眠。
+Toolbox 在无人查看相关页面、且没有已启用的风扇硬盘温控需求时不主动采集磁盘温度或容量。启动、库存、任意 GET、被动诊断和健康评估只消费合法缓存，不因缺测自动探盘。Web 进入存储页、磁盘详情或恢复显示该视图时显式刷新一次；概览和本机小屏仍只补缺测。实际启用的风扇策略可只为所选硬盘维持温度缓存。所有自动采集均普通 `-n standby`，休眠跳过，绝不自动 force。缺失、过期、设备代次不符或失败保持 `null`／`unknown`／`--`，不能把未知解释为健康、低温或休眠。
 
-## 可见页面补齐
+## Web 磁盘视图进入刷新
+
+所有者固定 `POST /api/r1/storage/refresh`，严格 `{}`，沿用同源／JSON／CSRF、实际 owner 代次及响应序列化前后守卫；拒绝 Authorization、URL 参数和所有额外字段，不接受 force、view、设备或路径。本机令牌、开发白名单、Bearer 与 MCP 不获得该权限，也没有新的小屏刷新路由。
+
+Web 进入存储页、打开磁盘详情或从 hidden 回到该视图时显式发送一次。即使 SMART 缓存仍新鲜，也重新普通采集温度和状态；同代待机／失败等负结果可在三十秒内复用，避免快速切页反复探盘。离页或隐藏后不发新请求；失败和 busy 不排队、不重试，服务器不建立页面租约或后台刷新任务。
+
+完成回执与下述 fill 的 nested smart／capacity 结构相同，顶层 `force:false`。本次容量是否可测，由服务端绑定本次私有 SMART 收据与当前设备代次的依据决定：必须独立确认非待机，不能把 `standby:null`、单纯 refreshed 或历史成功视作证据。符合时重新测量已有容量快照；待机返回 `skipped_standby`／`standby`，电源不明返回 `unavailable`／`power_state_unverified`，均不执行 statvfs。合法旧容量可保留原值和原 sampled_at；这不代表本次刷新成功，也不延长旧温度／健康鲜度。换盘仍丢弃旧值。多段采集不是可回滚事务，不能用后段失败宣称前段未发生。
+
+## 概览和小屏缺测补齐
 
 网页固定 `POST /api/r1/storage/fill`，严格 `{}`，要求当前所有者和同源／JSON／CSRF；登录开启却没有有效会话时只能展示缓存。本机小屏固定 `POST /api/storage/fill`，使用原独立 `X-R1-Token`、本地 Origin 和服务生命周期，不借用网页登录授权，令牌不发给 Web。两条路由都拒绝 force、盘名、路径、命令及 URL 参数。
 
 Web 以 `GET /api/auth/session` 的布尔 `owner_authorized` 判断是否显示自动补齐资格；该字段只委托当前 `panel_authorized` 的 password／pair／open 结果。不能用 `authorized && !dev_mode` 推断所有者：开发窗口可与正常所有者同时开启，pair 也可能在旧 authorized:false 时有效。旧服务没有此字段时，仅 logged_in:true，或 auth_mode:password、auth_required:false 且 authorized:true 可作兼容提示；旧 pair 无明确证明时只显示缓存。提示不授操作权，POST 仍独立检查 Bearer、同源／JSON／CSRF、当前授权和服务代次，撤权后旧提示不能继续使用。
 
-UI 只在磁盘容量／温度相关页面可见且缓存缺失时请求，每个可见周期最多一次。已有有效数据不重复请求；离页、Web 隐藏或屏保后不发新请求。休眠、不支持、失败和 busy 都结束本周期自动尝试，不因两秒 GET 或重绘循环重试。服务器没有无人查看仍运行的页面租约采集器。
+上述 fill 只在概览或小屏磁盘容量／温度相关页面可见且缓存缺失时请求，每个可见周期最多一次。已有有效数据不重复请求；离页、Web 隐藏或屏保后不发新请求。休眠、不支持、失败和 busy 都结束本周期自动尝试，不因两秒 GET 或重绘循环重试。Web 存储页和磁盘详情改用前述 refresh，不受 fill 的正缓存命中规则限制。服务器没有无人查看仍运行的页面租约采集器。
 
 完成回执形态：`{ok:true,force:false,status,started_at,finished_at,smart:{ok:true,force:false,status,started_at,finished_at,results:[...]},capacity:{ok:true,status,started_at,finished_at,results:[...]}}`。两段保留各自固定行结构，SMART 行标签为 device，容量行标签为 mount_id。有效命中增加 `status:cached`、reason:null 和原 sampled_at；负结果同代三十秒复用原状态／原因／采样时间，不能伪造新采样。普通 SMART 的 `skipped_standby`／`standby` 是跳过；容量缺测在待机时同样跳过，无法取得可信非待机证据则 unavailable／power_state_unverified。两段任一 partial 则总状态 partial；ok 仅表示批次处理完毕。
 
@@ -82,7 +90,7 @@ HTTP `200` 表示这批操作已处理，不代表每块盘都已取得 SMART �
 
 ## 新鲜度与使用范围
 
-SMART 测量值、健康和温度只在采样后至多三十秒且设备生命周期仍有效时使用。页面请求、库存刷新或健康评估不会更新时间戳。过期后可保留历史采样记录，但当前测量／健康仍为未知，不能把历史值重新包装成新样本。
+SMART 测量值、健康和温度只在采样后至多三十秒且设备生命周期仍有效时使用。GET、缓存命中、库存刷新或健康评估不会更新时间戳；只有新的合法采集才产生新样本时刻。过期后可保留历史采样记录，但当前测量／健康仍为未知，不能把历史值重新包装成新样本。Web 进入刷新失败时，也不能继续把此前仍新鲜的成功测量冒充本次状态。
 
 磁盘库存的一整行也绑定同一生命周期：读取内核 size、介质类型、型号及其它元数据前先捕获可信设备代次，行采样结束及发布前再次核对。采样中或两轮之间换盘时丢弃旧行，等待下一次正常元数据采样；不能把旧盘的温度、型号或名称归到同名新盘。磁盘 hwmon 温度和阈值不再被后台、库存或温控读取，包括 nvme、drivetemp 与关联磁盘的别名；磁盘温度只来自合法 SMART 缓存。CPU／主板传感器和风扇仍采集。
 

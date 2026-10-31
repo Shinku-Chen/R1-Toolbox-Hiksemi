@@ -11,9 +11,9 @@ Deliberate limits, matching the project's rules:
 * Unknown readings are ``None`` (the panel prints ``--``), never zero.
 * Power is only reported when RAPL provides a real CPU package reading; there is
   no whole-machine estimate.
-* SMART detail only projects dated explicit-refresh cache. Background sampling
-  and opening pages never run SMART. The manual default requests standby skip;
-  device detection/unsupported power modes may still wake a disk.
+* GET and SMART detail only project dated cache. Page entry may separately POST
+  an owner-authorized ordinary refresh; idle monitoring never triggers SMART.
+  Ordinary refresh requests standby skip, with no absolute no-wake guarantee.
 * fnOS-only integrations (iDRAC, RAID cards, the app centre, the self-updater)
   report themselves unavailable instead of pretending to exist.  Weather uses
   Open-Meteo instead of the fnOS weather provider.

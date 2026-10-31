@@ -539,10 +539,11 @@ class CapacityCoreTests(unittest.TestCase):
                  'started_at': time.time(), 'finished_at': time.time(),
                  'results': [{'device': 'sdb', 'status': 'skipped_standby',
                               'reason': 'standby', 'sampled_at': None}]}
-        web = types.SimpleNamespace(_storage_fill_lock=threading.Lock(),
-            insights=types.SimpleNamespace(fill_smart_missing=lambda **_: smart,
-                                            capacity_fill_eligibility=lambda _: 'standby'),
-            monitor=service.StatusMonitor(self.sampler))
+        web = object.__new__(web_config.WebConfigServer)
+        web._storage_fill_lock = threading.Lock()
+        web.insights = types.SimpleNamespace(fill_smart_missing=lambda **_: smart,
+                                             capacity_fill_eligibility=lambda _: 'standby')
+        web.monitor = service.StatusMonitor(self.sampler)
         with mock.patch.object(self.sampler, '_capacity_probe') as probe:
             result = web_config.WebConfigServer.storage_fill(web, authorizer=lambda: True)
         probe.assert_not_called()
@@ -550,6 +551,163 @@ class CapacityCoreTests(unittest.TestCase):
         self.assertEqual(result['capacity']['status'], 'complete')
         self.assertEqual(result['capacity']['results'][0]['status'], 'skipped_standby')
         self.assertEqual(result['capacity']['results'][0]['reason'], 'standby')
+
+    def test_visible_capacity_ignores_positive_cache_and_delegates_exact_grants(self):
+        self.refresh()
+        old = dict(self.sampler._capacity_cache[11])
+        self.values = dict(self.values, used_bytes=102400, usage_percent=25.0)
+        authorizer, eligibility = lambda: True, mock.Mock(return_value=None)
+        monitor = service.StatusMonitor(self.sampler)
+        with mock.patch.object(self.sampler, '_capacity_probe', side_effect=self.probe) as probe, \
+                mock.patch.object(service.time, 'time', return_value=old['sampled_at'] + 5):
+            result = monitor.refresh_capacity_visible(authorizer=authorizer, eligibility=eligibility)
+        probe.assert_called_once()
+        self.assertEqual(result['results'][0]['status'], 'refreshed')
+        self.assertEqual(self.sampler.capacity_snapshot()[0]['usage_percent'], 25)
+        self.assertEqual(self.sampler.capacity_snapshot()[0]['capacity_sampled_at'], old['sampled_at'] + 5)
+        self.assertGreaterEqual(eligibility.call_count, 3)
+
+    def test_visible_standby_unknown_or_failure_preserves_historical_capacity(self):
+        self.refresh()
+        original = self.sampler.capacity_snapshot()[0]
+        for reason, expected in (('standby', 'skipped_standby'), ('power_state_unverified', 'unavailable')):
+            with self.subTest(reason=reason), mock.patch.object(self.sampler, '_capacity_probe') as probe:
+                result = self.sampler.refresh_capacity_visible(authorizer=lambda: True, eligibility=lambda _: reason)
+            probe.assert_not_called()
+            self.assertEqual(result['results'][0]['status'], expected)
+            self.assertEqual(result['results'][0]['sampled_at'], original['capacity_sampled_at'])
+            self.assertEqual(self.sampler.capacity_snapshot()[0], original)
+        with mock.patch.object(self.sampler, '_capacity_probe', side_effect=service.CapacityRefreshError('probe_failed')):
+            result = self.sampler.refresh_capacity_visible(authorizer=lambda: True, eligibility=lambda _: None)
+        self.assertEqual(result['results'][0]['status'], 'failed')
+        self.assertEqual(result['results'][0]['sampled_at'], original['capacity_sampled_at'])
+        self.assertEqual(self.sampler.capacity_snapshot()[0], original)
+        with mock.patch.object(self.sampler, '_capacity_probe') as probe:
+            repeated = self.sampler.refresh_capacity_visible(authorizer=lambda: True, eligibility=lambda _: None)
+        probe.assert_not_called()
+        self.assertEqual(repeated['results'], result['results'])
+
+    def test_visible_receipt_does_not_attach_history_to_changed_identity(self):
+        self.refresh()
+        original = self.sampler.capacity_snapshot()[0]
+        def eligibility(_):
+            self.generation += 1
+            return 'standby'
+        with mock.patch.object(self.sampler, '_capacity_probe') as probe:
+            result = self.sampler.refresh_capacity_visible(authorizer=lambda: True, eligibility=eligibility)
+        probe.assert_not_called()
+        self.assertEqual(result['results'][0]['status'], 'identity_changed')
+        self.assertIsNone(result['results'][0]['sampled_at'])
+        self.assertIsNone(self.sampler.capacity_snapshot()[0]['total_bytes'])
+
+    def test_visible_power_revocation_discards_entire_round(self):
+        self.refresh()
+        before = dict(self.sampler._capacity_cache[11])
+        active = [True]
+        def eligibility(_):
+            active[0] = False
+            return None
+        with mock.patch.object(self.sampler, '_capacity_probe') as probe:
+            with self.assertRaises(service.CapacityRefreshError) as caught:
+                self.sampler.refresh_capacity_visible(authorizer=lambda: active[0], eligibility=eligibility)
+        self.assertEqual(caught.exception.reason, 'authorization_denied')
+        probe.assert_not_called()
+        self.assertEqual(self.sampler._capacity_cache[11], before)
+
+    def test_visible_postpublication_revocation_or_timeout_restores_valid_history(self):
+        for failure in ('authorization_denied', 'timeout'):
+            with self.subTest(failure=failure):
+                self.refresh()
+                original = self.sampler.capacity_snapshot()[0]
+                saved_values = dict(self.values)
+                self.values = dict(self.values, used_bytes=102400, usage_percent=25.0)
+                state, clock = [True], [time.monotonic()]
+                replace = self.sampler._capacity_replace_cache
+                def publish(records):
+                    replace(records)
+                    if records and records.get(11, {}).get('values', {}).get('usage_percent') == 25:
+                        if failure == 'authorization_denied':
+                            state[0] = False
+                        else:
+                            clock[0] += 20
+                with mock.patch.object(self.sampler, '_capacity_probe', side_effect=self.probe), \
+                        mock.patch.object(self.sampler, '_capacity_replace_cache', side_effect=publish), \
+                        mock.patch.object(service.time, 'monotonic', side_effect=lambda: clock[0]):
+                    with self.assertRaises(service.CapacityRefreshError) as caught:
+                        self.sampler.refresh_capacity_visible(authorizer=lambda: state[0], eligibility=lambda _: None)
+                self.assertEqual(caught.exception.reason, failure)
+                self.assertEqual(self.sampler.capacity_snapshot()[0], original)
+                self.values = saved_values
+
+    def test_visible_postpublication_failure_cannot_restore_identity_invalidated_history(self):
+        self.refresh()
+        self.values = dict(self.values, used_bytes=102400, usage_percent=25.0)
+        replace = self.sampler._capacity_replace_cache
+        def publish(records):
+            replace(records)
+            if records and records.get(11, {}).get('values', {}).get('usage_percent') == 25:
+                self.watch.changed.return_value = True
+        with mock.patch.object(self.sampler, '_capacity_probe', side_effect=self.probe), \
+                mock.patch.object(self.sampler, '_capacity_replace_cache', side_effect=publish):
+            with self.assertRaises(service.CapacityRefreshError):
+                self.sampler.refresh_capacity_visible(authorizer=lambda: True, eligibility=lambda _: None)
+        self.assertFalse(self.sampler._capacity_cache)
+
+    def visible_combination(self, response):
+        """Actual root Web/SMART/capacity chain; only commands and worker fake."""
+        import test_smart_refresh_core as smart_fixture
+        with mock.patch.object(sys, 'path', [str(ROOT / 'runtime')] + sys.path):
+            import web_config
+        case = smart_fixture.SmartRefreshCoreTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.block('sdb', '8:16', 'disk-b')
+        case.refresh()
+        case.behavior = response
+        web = object.__new__(web_config.WebConfigServer)
+        web._storage_fill_lock = threading.Lock()
+        web.insights = case.collector
+        web.monitor = service.StatusMonitor(self.sampler)
+        return web, case
+
+    def test_actual_web_visible_chain_refreshes_both_positive_caches(self):
+        import test_smart_refresh_core as smart_fixture
+        self.refresh()
+        response = {'power_mode': {'string': 'ACTIVE or IDLE'}, **smart_fixture.SmartRefreshCoreTests.good_response(48)}
+        web, case = self.visible_combination((0, response))
+        self.values = dict(self.values, used_bytes=102400, usage_percent=25.0)
+        with mock.patch.object(self.sampler, '_capacity_probe', side_effect=self.probe) as probe:
+            result = web.storage_refresh(authorizer=lambda: True)
+        self.assertEqual(len(case.calls), 4)  # Two real fixture disks, old + new ordinary queries.
+        self.assertTrue(all(call[0][1:3] == ['-n', 'standby'] for call in case.calls))
+        probe.assert_called_once()
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['capacity']['results'][0]['status'], 'refreshed')
+        self.assertEqual(self.sampler.capacity_snapshot()[0]['usage_percent'], 25)
+
+    def test_actual_web_standby_unknown_and_failure_cannot_measure_capacity(self):
+        import subprocess
+        import test_smart_refresh_core as smart_fixture
+        for response, status, reason in (
+                ((2, {'power_mode': {'string': 'STANDBY'}}), 'skipped_standby', 'standby'),
+                ((0, {'power_mode': {'string': 'UNKNOWN'}, **smart_fixture.SmartRefreshCoreTests.good_response()}),
+                 'unavailable', 'power_state_unverified'),
+                (subprocess.TimeoutExpired('fake-command', 3), 'unavailable', 'power_state_unverified')):
+            with self.subTest(status=status, reason=reason):
+                self.refresh()
+                old = self.sampler.capacity_snapshot()[0]
+                web, case = self.visible_combination(response)
+                before = case.collector.smart_cached('sdb')
+                with mock.patch.object(self.sampler, '_capacity_probe') as probe:
+                    result = web.storage_refresh(authorizer=lambda: True)
+                probe.assert_not_called()
+                row = result['capacity']['results'][0]
+                self.assertEqual((row['status'], row['reason']), (status, reason))
+                self.assertEqual(row['sampled_at'], old['capacity_sampled_at'])
+                self.assertEqual(self.sampler.capacity_snapshot()[0], old)
+                self.assertIsNone(case.collector.smart_cached('sdb')['smart_temperature_c'])
+                if status != 'skipped_standby':
+                    self.assertEqual(case.collector.smart_cached('sdb')['smart_sampled_at'], before['smart_sampled_at'])
 
     def test_eligibility_rechecked_after_measurement_and_before_commit(self):
         for sequence in ([None, 'standby'], [None, None, 'power_state_unverified']):

@@ -7364,7 +7364,9 @@ const [type, ...rest] = sheetCtx.key.split('/');
 if (type !== 'disk' || !rest.length) return null;
 try { return decodeURIComponent(rest.join('/')); } catch (_) { return rest.join('/'); }
 }
-async function r1SmartReloadBatches(devices) {
+async function r1SmartReloadBatches(devices, currentGuard = () => true) {
+if (!currentGuard()) return;
+const context = typeof sheetCtx !== 'undefined' ? sheetCtx : null;
 const seen = new Set();
 for (const device of devices) {
 if (typeof device !== 'string' || !device || seen.has(device)) continue;
@@ -7372,10 +7374,10 @@ seen.add(device);
 try { if (S && S.smartDetail) delete S.smartDetail[device]; } catch (_) { /* ignore */ }
 }
 const visible = r1SmartVisibleDisk();
-if (!visible || !seen.has(visible)) return;   // 已关闭抽屉或切到别的类型：不抢回导航
+if (!visible || !seen.has(visible) || !currentGuard()) return;
 try { if (typeof loadSmartDetail === 'function') await loadSmartDetail(visible); } catch (_) { /* keep unknown */ }
 const now = r1SmartVisibleDisk();
-if (now !== visible) return;                  // 读取期间用户已切走
+if (!currentGuard() || sheetCtx !== context || now !== visible) return;
 if (typeof closeSheet === 'function' && typeof openSheet === 'function') {
 closeSheet(true);
 openSheet('disk/' + encodeURIComponent(visible), true);  // fromRoute：不改 history
@@ -7634,9 +7636,9 @@ const R1_FILL_STATUS = { refreshed: true, failed: true, unavailable: true,
 identity_changed: true, cached: true, skipped_standby: true };
 function r1FillRelevant() {
 if (typeof document !== 'undefined' && document.hidden) return false;
+if (typeof sheetCtx !== 'undefined' && sheetCtx) return false;
 const page = (typeof S !== 'undefined' && S && S.page) || '';
-if (page === 'overview' || page === 'storage') return true;
-return typeof sheetCtx !== 'undefined' && !!sheetCtx && sheetCtx.type === 'disk';
+return page === 'overview';
 }
 function r1FillCapacityValid(row) {
 if (!r1CapIsStamp(row.capacity_sampled_at)) return false;
@@ -7722,33 +7724,36 @@ return R1_FILL.ownerPending;
 }
 function r1FillTick() {
 if (R1_FILL.inflight || R1_FILL.attempted) return;
+if (typeof R1_REFRESH !== 'undefined' && R1_REFRESH.inflight) return;
 if (!r1FillRelevant() || !r1FillMissing()) return;
 R1_FILL.attempted = true;
 R1_FILL.inflight = true;
 const ticket = {};
 R1_FILL.ticket = ticket;
 const release = () => {
-if (R1_FILL.ticket === ticket) { R1_FILL.ticket = null; R1_FILL.inflight = false; }
+if (R1_FILL.ticket !== ticket) return;
+R1_FILL.ticket = null; R1_FILL.inflight = false;
+r1StorageWatch();
 };
 r1FillOwner().then(owner => {
 if (!owner) return;
-if (typeof document !== 'undefined' && document.hidden) return;  // 认证期间已离开：不发
-if (!R1_FILL.relevant) return;
+if (!r1FillRelevant()) return;
 const epoch = R1_FILL.epoch;
+const current = () => R1_FILL.ticket === ticket && R1_FILL.epoch === epoch && r1FillRelevant();
 R1_FILL.attempted = true;
 return API.post('/api/r1/storage/fill', {}).then(async payload => {
-if (epoch !== R1_FILL.epoch) return;      // 旧响应不投影新周期
+if (!current()) return;
 const receipt = r1FillReceipt(payload);
 if (!receipt) return;                     // 畸形：不投影、本周期不重试
 R1_FILL.last = receipt;
-try { await Poll.run('overview'); } catch (_) { /* 保留旧展示 */ }
-if (epoch !== R1_FILL.epoch) return;
-await r1SmartReloadBatches(payload.smart.results.map(row => row.device));
-if (epoch !== R1_FILL.epoch) return;
+try { await r1StorageReloadOverview(current); } catch (_) { /* 保留旧展示 */ }
+if (!current()) return;
+await r1SmartReloadBatches(payload.smart.results.map(row => row.device), current);
+if (!current()) return;
 document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => r1SmartUpdateSnapshot(card));
 document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
 }).catch(error => {
-if (epoch === R1_FILL.epoch && error && (error.status === 401 || error.status === 403)) {
+if (current() && error && (error.status === 401 || error.status === 403)) {
 R1_FILL.unauthorized = true;
 R1_FILL.owner = false;
 }
@@ -7762,7 +7767,86 @@ if (relevant && !R1_FILL.relevant) r1FillReset();
 R1_FILL.relevant = relevant;
 if (relevant) r1FillTick();
 }
-if (typeof document !== 'undefined') document.addEventListener('visibilitychange', r1FillWatch);
+async function r1StorageReloadOverview(current) {
+const overview = await API.get('/api/overview');
+if (!current()) return;
+delete overview.config;
+S.o = overview;
+renderNow();
+}
+const R1_REFRESH = { epoch: 0, inflight: false, ticket: null, key: null, attempted: null, last: null };
+function r1RefreshKey() {
+if (typeof document !== 'undefined' && document.hidden) return null;
+if (typeof sheetCtx !== 'undefined' && sheetCtx) {
+const disk = r1SmartVisibleDisk();
+return disk ? 'disk:' + disk : null;
+}
+const page = (typeof S !== 'undefined' && S && S.page) || '';
+return page === 'storage' ? 'storage' : null;
+}
+function r1RefreshEnter(key) {
+R1_REFRESH.epoch += 1;
+R1_REFRESH.key = key;
+R1_REFRESH.attempted = null;
+}
+function r1RefreshTick() {
+const key = r1RefreshKey();
+if (R1_REFRESH.key !== key) r1RefreshEnter(key);
+if (!key || R1_REFRESH.inflight || R1_REFRESH.attempted === R1_REFRESH.epoch || R1_FILL.inflight) return;
+R1_REFRESH.attempted = R1_REFRESH.epoch;
+R1_REFRESH.inflight = true;
+const epoch = R1_REFRESH.epoch;
+const ticket = { epoch, key };
+R1_REFRESH.ticket = ticket;
+const current = () => R1_REFRESH.ticket === ticket && R1_REFRESH.epoch === epoch
+&& r1RefreshKey() === key;
+const release = () => {
+if (R1_REFRESH.ticket !== ticket) return;
+R1_REFRESH.ticket = null; R1_REFRESH.inflight = false;
+r1StorageWatch();
+};
+r1FillOwner().then(owner => {
+if (!owner) return;
+if (!current()) return;
+return API.post('/api/r1/storage/refresh', {}).then(async payload => {
+if (!current()) return;
+const receipt = r1FillReceipt(payload);
+if (!receipt) return;                    // 畸形：本进入周期不重试
+R1_REFRESH.last = receipt;
+try { await r1StorageReloadOverview(current); } catch (_) { /* 保留旧展示 */ }
+if (!current()) return;
+await r1SmartReloadBatches(payload.smart.results.map(row => row.device), current);
+if (!current()) return;
+document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => r1SmartUpdateSnapshot(card));
+document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+}).catch(error => {
+if (current() && error && (error.status === 401 || error.status === 403)) {
+R1_FILL.unauthorized = true;
+R1_FILL.owner = false;
+}
+});
+}).catch(() => {}).finally(release);
+}
+function r1RefreshWatch() { r1RefreshTick(); }
+function r1StorageWatch() { r1RefreshWatch(); r1FillWatch(); }
+(function r1StorageEntryWatch() {
+if (typeof document === 'undefined') return;
+['visibilitychange', 'click', 'keydown'].forEach(name => document.addEventListener(name, r1StorageWatch));
+['popstate', 'hashchange'].forEach(name => window.addEventListener(name, r1StorageWatch));
+if (typeof MutationObserver !== 'undefined') {
+const observer = new MutationObserver(r1StorageWatch);
+['page-overview', 'page-storage'].forEach(id => {
+const node = document.getElementById(id);
+if (node) observer.observe(node, { attributes: true, attributeFilter: ['hidden'] });
+});
+const sheet = document.getElementById('sheet'), body = document.getElementById('sheetBody');
+if (sheet) observer.observe(sheet, { attributes: true, attributeFilter: ['class'] });
+if (body) observer.observe(body, { childList: true });
+}
+})();
+if (typeof Poll !== 'undefined' && Poll.add) {
+Poll.add('r1RefreshWatch', async () => { r1RefreshWatch(); }, 1000);
+}
 if (typeof Poll !== 'undefined' && Poll.add) {
 Poll.add('r1FillWatch', async () => { r1FillWatch(); }, 1000);
 }

@@ -767,12 +767,16 @@ class StatusSampler:
         """Foreground fill only: active same-lifetime disks and missing cache."""
         return self._refresh_capacity(authorizer=authorizer, eligibility=eligibility, missing=True)
 
-    def _refresh_capacity(self, *, authorizer=None, eligibility=None, missing=False):
+    def refresh_capacity_visible(self, *, authorizer=None, eligibility=None):
+        """Remeasure positive cache only with this visible batch's power proof."""
+        return self._refresh_capacity(authorizer=authorizer, eligibility=eligibility, missing=True, visible=True)
+
+    def _refresh_capacity(self, *, authorizer=None, eligibility=None, missing=False, visible=False):
         """One explicit owner batch; only verified same-lifetime results commit."""
         if not self._capacity_refresh_lock.acquire(blocking=False):
             raise CapacityRefreshError('busy')
         started, deadline = time.time(), time.monotonic() + _CAPACITY_WINDOW
-        denied, pending, negative, results, committed = False, {}, {}, [], False
+        denied, pending, negative, results, history, committed = False, {}, {}, [], {}, False
         mount_generation, batch_changed = None, False
         with self._capacity_lock:
             epoch = self._capacity_epoch
@@ -803,7 +807,7 @@ class StatusSampler:
 
         def skipped(row, reason):
             row.update(status='skipped_standby' if reason == 'standby' else 'unavailable',
-                       reason=reason, sampled_at=None)
+                       reason=reason, sampled_at=history.get(row['mount_id']) if visible else None)
 
         def close_pending(record):
             anchor = record.pop('anchor', None)
@@ -828,6 +832,8 @@ class StatusSampler:
                 record = pending.get(row['mount_id'])
                 if record is not None and (batch_changed or active.get(row['mount_id']) != record['key']):
                     close_pending(pending.pop(row['mount_id']))
+                    row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
+                if visible and row['mount_id'] in history and batch_changed:
                     row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
             return active
 
@@ -875,7 +881,9 @@ class StatusSampler:
                     with self._capacity_lock:
                         cached = self._capacity_cache.get(entry['mount_id'])
                         failure = self._capacity_negative.get(entry['_key'])
-                    if cached is not None and cached['key'] == entry['_key']:
+                    if visible and cached is not None and cached['key'] == entry['_key']:
+                        history[entry['mount_id']] = cached['sampled_at']
+                    if not visible and cached is not None and cached['key'] == entry['_key']:
                         row.update(status='cached', reason=None, sampled_at=cached['sampled_at'])
                         continue
                     reason = permitted(entry)
@@ -883,7 +891,8 @@ class StatusSampler:
                         skipped(row, reason)
                         continue
                     if failure is not None and failure[0] > time.monotonic():
-                        row.update(status=failure[1], reason=failure[2], sampled_at=failure[3])
+                        row.update(status=failure[1], reason=failure[2],
+                                   sampled_at=history.get(entry['mount_id'], failure[3]) if visible else failure[3])
                         continue
                 try:
                     values, anchor = self._capacity_probe(entry, deadline, check_batch)
@@ -921,7 +930,8 @@ class StatusSampler:
                         raise
                     row.update(status='identity_changed' if error.reason == 'identity_changed' else
                                ('unavailable' if error.reason == 'unavailable' else 'failed'),
-                               reason=error.reason)
+                               reason=error.reason,
+                               sampled_at=history.get(entry['mount_id']) if visible and error.reason != 'identity_changed' else None)
                     if missing and error.reason != 'identity_changed':
                         negative[entry['_key']] = (time.monotonic() + 30, row['status'], row['reason'], row['sampled_at'])
             authorized()
@@ -943,7 +953,8 @@ class StatusSampler:
                     if record is not None and active.get(row['mount_id']) != record['key']:
                         close_pending(pending.pop(row['mount_id']))
                         row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
-                    if row['status'] == 'cached' and (batch_changed or active.get(row['mount_id']) != entry['_key']):
+                    if (row['status'] == 'cached' or visible and row['sampled_at'] is not None) and (
+                            batch_changed or active.get(row['mount_id']) != entry['_key']):
                         row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
                 # Real filesystem handles are strictly temporary. Release
                 # before commit, then prove no namespace event/identity change.
@@ -959,6 +970,7 @@ class StatusSampler:
                 authorized()
                 if time.monotonic() >= deadline:
                     raise CapacityRefreshError('timeout')
+                previous_cache = dict(self._capacity_cache)
                 self._capacity_replace_cache(retained)
                 try:
                     # Recheck after publication while readers remain locked
@@ -970,8 +982,12 @@ class StatusSampler:
                     if time.monotonic() >= deadline:
                         raise CapacityRefreshError('timeout')
                 except CapacityRefreshError:
-                    self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
-                                                  if key not in pending})
+                    self._capacity_check_watch()
+                    historical = ({key: value for key, value in previous_cache.items()
+                                   if active.get(key) == value['key']}
+                                  if self._capacity_watch is not None
+                                  and mount_generation == self._capacity_mount_epoch else {})
+                    self._capacity_replace_cache(historical)
                     pending.clear()
                     raise
                 committed = True
@@ -1054,6 +1070,9 @@ class StatusMonitor:
 
     def refresh_capacity_missing(self, *, authorizer=None, eligibility=None):
         return self.sampler.refresh_capacity_missing(authorizer=authorizer, eligibility=eligibility)
+
+    def refresh_capacity_visible(self, *, authorizer=None, eligibility=None):
+        return self.sampler.refresh_capacity_visible(authorizer=authorizer, eligibility=eligibility)
 
     def start(self):
         start = getattr(self.sampler, 'start_capacity', None)

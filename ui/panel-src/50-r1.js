@@ -2424,7 +2424,9 @@ function r1SmartVisibleDisk() {
   try { return decodeURIComponent(rest.join('/')); } catch (_) { return rest.join('/'); }
 }
 /** 成功后失效本批次所有前端 detail 缓存；只为当前可见盘 GET 已经存在的被动缓存并重绘。 */
-async function r1SmartReloadBatches(devices) {
+async function r1SmartReloadBatches(devices, currentGuard = () => true) {
+  if (!currentGuard()) return;
+  const context = typeof sheetCtx !== 'undefined' ? sheetCtx : null;
   const seen = new Set();
   for (const device of devices) {
     if (typeof device !== 'string' || !device || seen.has(device)) continue;
@@ -2432,10 +2434,11 @@ async function r1SmartReloadBatches(devices) {
     try { if (S && S.smartDetail) delete S.smartDetail[device]; } catch (_) { /* ignore */ }
   }
   const visible = r1SmartVisibleDisk();
-  if (!visible || !seen.has(visible)) return;   // 已关闭抽屉或切到别的类型：不抢回导航
+  if (!visible || !seen.has(visible) || !currentGuard()) return;
   try { if (typeof loadSmartDetail === 'function') await loadSmartDetail(visible); } catch (_) { /* keep unknown */ }
   const now = r1SmartVisibleDisk();
-  if (now !== visible) return;                  // 读取期间用户已切走
+  // 名称相同不代表同次进入：A→B→A 后不能重建新的 A 抽屉。
+  if (!currentGuard() || sheetCtx !== context || now !== visible) return;
   if (typeof closeSheet === 'function' && typeof openSheet === 'function') {
     closeSheet(true);
     openSheet('disk/' + encodeURIComponent(visible), true);  // fromRoute：不改 history
@@ -2711,9 +2714,10 @@ const R1_FILL_STATUS = { refreshed: true, failed: true, unavailable: true,
                          identity_changed: true, cached: true, skipped_standby: true };
 function r1FillRelevant() {
   if (typeof document !== 'undefined' && document.hidden) return false;
+  // 磁盘抽屉（含 overview 上的）由进入刷新负责，不能与 fill 各发一次。
+  if (typeof sheetCtx !== 'undefined' && sheetCtx) return false;
   const page = (typeof S !== 'undefined' && S && S.page) || '';
-  if (page === 'overview' || page === 'storage') return true;
-  return typeof sheetCtx !== 'undefined' && !!sheetCtx && sheetCtx.type === 'disk';
+  return page === 'overview';
 }
 /** 有效容量：时间 + 非部分/身份变化状态 + 可用 total/used。 */
 function r1FillCapacityValid(row) {
@@ -2805,35 +2809,38 @@ function r1FillOwner() {
 }
 function r1FillTick() {
   if (R1_FILL.inflight || R1_FILL.attempted) return;
+  if (typeof R1_REFRESH !== 'undefined' && R1_REFRESH.inflight) return;
   if (!r1FillRelevant() || !r1FillMissing()) return;
   R1_FILL.attempted = true;
   R1_FILL.inflight = true;
   const ticket = {};
   R1_FILL.ticket = ticket;
   const release = () => {
-    if (R1_FILL.ticket === ticket) { R1_FILL.ticket = null; R1_FILL.inflight = false; }
+    if (R1_FILL.ticket !== ticket) return;
+    R1_FILL.ticket = null; R1_FILL.inflight = false;
+    r1StorageWatch();
   };
   r1FillOwner().then(owner => {
     if (!owner) return;
-    if (typeof document !== 'undefined' && document.hidden) return;  // 认证期间已离开：不发
-    if (!R1_FILL.relevant) return;
+    if (!r1FillRelevant()) return;
     const epoch = R1_FILL.epoch;
+    const current = () => R1_FILL.ticket === ticket && R1_FILL.epoch === epoch && r1FillRelevant();
     /* 认证可跨可见周期；实际 POST 消耗当前周期的唯一尝试，负结果也不再重试。 */
     R1_FILL.attempted = true;
     return API.post('/api/r1/storage/fill', {}).then(async payload => {
-      if (epoch !== R1_FILL.epoch) return;      // 旧响应不投影新周期
+      if (!current()) return;
       const receipt = r1FillReceipt(payload);
       if (!receipt) return;                     // 畸形：不投影、本周期不重试
       R1_FILL.last = receipt;
-      try { await Poll.run('overview'); } catch (_) { /* 保留旧展示 */ }
-      if (epoch !== R1_FILL.epoch) return;
+      try { await r1StorageReloadOverview(current); } catch (_) { /* 保留旧展示 */ }
+      if (!current()) return;
       /* 失效本批详情并只读当前盘的服务端缓存；不再采集，也不抢回已离开的抽屉。 */
-      await r1SmartReloadBatches(payload.smart.results.map(row => row.device));
-      if (epoch !== R1_FILL.epoch) return;
+      await r1SmartReloadBatches(payload.smart.results.map(row => row.device), current);
+      if (!current()) return;
       document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => r1SmartUpdateSnapshot(card));
       document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
     }).catch(error => {
-      if (epoch === R1_FILL.epoch && error && (error.status === 401 || error.status === 403)) {
+      if (current() && error && (error.status === 401 || error.status === 403)) {
         R1_FILL.unauthorized = true;
         R1_FILL.owner = false;
       }
@@ -2847,7 +2854,94 @@ function r1FillWatch() {
   R1_FILL.relevant = relevant;
   if (relevant) r1FillTick();
 }
-if (typeof document !== 'undefined') document.addEventListener('visibilitychange', r1FillWatch);
+/** A foreground completion owns this GET only until its entry ends; the normal Poll stays passive. */
+async function r1StorageReloadOverview(current) {
+  const overview = await API.get('/api/overview');
+  if (!current()) return;
+  delete overview.config;
+  S.o = overview;
+  renderNow();
+}
+/* ---- 进入磁盘页／磁盘详情的主动刷新：即使缓存有效也发一次；不周期轮询 ----
+   合同：POST /api/r1/storage/refresh，严格 {}；回执与 fill 同形，顶层 force:false。
+   每次进入（含 hidden 后返回）重置本进入周期；停留不重复，负结果不重试。 */
+const R1_REFRESH = { epoch: 0, inflight: false, ticket: null, key: null, attempted: null, last: null };
+/** 当前消费页的进入 key：磁盘详情优先，其次 storage 页；磁盘用现有 sheetCtx.key（含盘名）。 */
+function r1RefreshKey() {
+  if (typeof document !== 'undefined' && document.hidden) return null;
+  if (typeof sheetCtx !== 'undefined' && sheetCtx) {
+    const disk = r1SmartVisibleDisk();
+    return disk ? 'disk:' + disk : null;
+  }
+  const page = (typeof S !== 'undefined' && S && S.page) || '';
+  return page === 'storage' ? 'storage' : null;
+}
+/** 进入/离开都形成新单调 epoch；A→B→A 时旧 A 的响应也因 epoch 不同被丢弃。 */
+function r1RefreshEnter(key) {
+  R1_REFRESH.epoch += 1;
+  R1_REFRESH.key = key;
+  R1_REFRESH.attempted = null;
+}
+function r1RefreshTick() {
+  const key = r1RefreshKey();
+  if (R1_REFRESH.key !== key) r1RefreshEnter(key);
+  if (!key || R1_REFRESH.inflight || R1_REFRESH.attempted === R1_REFRESH.epoch || R1_FILL.inflight) return;
+  R1_REFRESH.attempted = R1_REFRESH.epoch;
+  R1_REFRESH.inflight = true;
+  const epoch = R1_REFRESH.epoch;
+  const ticket = { epoch, key };
+  R1_REFRESH.ticket = ticket;
+  const current = () => R1_REFRESH.ticket === ticket && R1_REFRESH.epoch === epoch
+    && r1RefreshKey() === key;
+  const release = () => {
+    if (R1_REFRESH.ticket !== ticket) return;
+    R1_REFRESH.ticket = null; R1_REFRESH.inflight = false;
+    r1StorageWatch();
+  };
+  r1FillOwner().then(owner => {
+    if (!owner) return;
+    if (!current()) return;
+    return API.post('/api/r1/storage/refresh', {}).then(async payload => {
+      if (!current()) return;
+      const receipt = r1FillReceipt(payload);
+      if (!receipt) return;                    // 畸形：本进入周期不重试
+      R1_REFRESH.last = receipt;
+      try { await r1StorageReloadOverview(current); } catch (_) { /* 保留旧展示 */ }
+      if (!current()) return;
+      await r1SmartReloadBatches(payload.smart.results.map(row => row.device), current);
+      if (!current()) return;
+      document.querySelectorAll('[data-ref="r1Smart"]').forEach(card => r1SmartUpdateSnapshot(card));
+      document.querySelectorAll('[data-ref="r1Cap"]').forEach(card => r1CapSync(card));
+    }).catch(error => {
+      if (current() && error && (error.status === 401 || error.status === 403)) {
+        R1_FILL.unauthorized = true;
+        R1_FILL.owner = false;
+      }
+    });
+  }).catch(() => {}).finally(release);
+}
+function r1RefreshWatch() { r1RefreshTick(); }
+/** Stock routing mutates state synchronously but uses pushState/replaceState without hashchange. */
+function r1StorageWatch() { r1RefreshWatch(); r1FillWatch(); }
+(function r1StorageEntryWatch() {
+  if (typeof document === 'undefined') return;
+  ['visibilitychange', 'click', 'keydown'].forEach(name => document.addEventListener(name, r1StorageWatch));
+  ['popstate', 'hashchange'].forEach(name => window.addEventListener(name, r1StorageWatch));
+  // Observe final DOM state, not every internal close/open: SMART redraw of the same key is not entry.
+  if (typeof MutationObserver !== 'undefined') {
+    const observer = new MutationObserver(r1StorageWatch);
+    ['page-overview', 'page-storage'].forEach(id => {
+      const node = document.getElementById(id);
+      if (node) observer.observe(node, { attributes: true, attributeFilter: ['hidden'] });
+    });
+    const sheet = document.getElementById('sheet'), body = document.getElementById('sheetBody');
+    if (sheet) observer.observe(sheet, { attributes: true, attributeFilter: ['class'] });
+    if (body) observer.observe(body, { childList: true });
+  }
+})();
+if (typeof Poll !== 'undefined' && Poll.add) {
+  Poll.add('r1RefreshWatch', async () => { r1RefreshWatch(); }, 1000);
+}
 if (typeof Poll !== 'undefined' && Poll.add) {
   Poll.add('r1FillWatch', async () => { r1FillWatch(); }, 1000);
 }

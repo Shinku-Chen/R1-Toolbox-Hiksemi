@@ -249,6 +249,11 @@ class InsightsCollector:
         # lifetime, so visible-page fills do not repeatedly wake/query failures.
         self._smart_measurements = {}
         self._smart_attempts = {}
+        self._smart_batch_sequence = 0
+        # Explicit visible refreshes supersede old measurement verdicts without
+        # adding serial/raw authority or changing their historical cache bytes.
+        self._smart_visible_observations = {}
+        self._smart_visible_batch = None
         self._smart_refresh_lock = threading.Lock()
         self._smart_policy_worker = None
         self._smart_epoch = 0
@@ -288,6 +293,7 @@ class InsightsCollector:
         with self._lock:
             self._smart_epoch += 1
             self._smart_policy_aliases = {}
+            self._smart_visible_batch = None
         for event in self._refresh.values():
             event.set()
         for thread in self._threads:
@@ -820,6 +826,7 @@ class InsightsCollector:
         with self._lock:
             manual = copy.deepcopy(self._smart_cache.get(name))
             automatic = copy.deepcopy(self._smart_measurements.get(name))
+            visible = copy.deepcopy(self._smart_visible_observations.get(name))
         records = [row for row in (manual, automatic) if row and len(row) == 3 and row[2] == identity]
         fresh = [row for row in records if self._smart_record_fresh(row, identity)]
         cached = (manual if manual in fresh else max(fresh or records,
@@ -828,7 +835,7 @@ class InsightsCollector:
                 or self._smart_context(name) != identity):
             result = self._unknown_smart()
             result['health']['reason'] = '尚无有效的 SMART 观测缓存'
-            return result
+            return self._visible_smart_projection(name, result, visible, identity)
         result = cached[1]
         if manual and len(manual) == 3 and manual[2] == identity and cached is not manual:
             # An already owner-authorized identity may survive an expired
@@ -847,9 +854,44 @@ class InsightsCollector:
             # Attribute rows contain measurements too. Keep raw data only in
             # the private identity cache, never in a stale public detail view.
             result.pop('smart_data', None)
+        return self._visible_smart_projection(name, result, visible, identity)
+
+    def _visible_smart_projection(self, name, result, visible, identity):
+        """A later explicit failure cannot leave an old fresh temperature live."""
+        with self._lock:
+            visible = copy.deepcopy(self._smart_visible_observations.get(name))
+        if not visible or identity is None or visible['identity'] != identity:
+            return result
+        if self._smart_context(name) != identity:
+            return self._unknown_smart()
+        value = visible['value']
+        if value is not None:
+            result.update(copy.deepcopy(value))
+            stamp = _finite(value.get('smart_sampled_monotonic'))
+            fresh = stamp is not None and 0 <= self.clock() - stamp < SMART_CACHE_SECONDS
+            result.update(smart_fresh=fresh, fresh=fresh)
+            with self._lock:
+                unchanged = self._smart_visible_observations.get(name) == visible
+            if fresh and unchanged and self._smart_context(name) == identity:
+                with self._lock:
+                    unchanged = self._smart_visible_observations.get(name) == visible
+            else:
+                unchanged = False
+            if unchanged:
+                result.pop('smart_data', None)
+                return result
+        # Keep the original sample date on a failed attempt. Its status and
+        # readings are unknown now; an attempt date is not a new measurement.
+        result.update(smart_available=False, standby=None, temp_c=None, smart_temperature_c=None,
+                      temperature_critical_c=None, smart_fresh=False, fresh=False,
+                      smart_status='unavailable' if value is None else 'stale',
+                      health={'passed': None, 'reason': '本次 SMART 刷新未取得有效测量'})
+        if value is None:
+            result.update(visible.get('history', {}))
+        result.pop('smart_data', None)
         return result
 
-    def _probe_smart(self, name, *, force=False, timeout=3, measurement_only=False):
+    def _probe_smart(self, name, *, force=False, timeout=3, measurement_only=False, require_power_state=False):
         """The sole SMART command path, behind the shared batch grant and lock."""
         result = self._unknown_smart()
         arguments = ([] if force else ['-n', 'standby']) + ['-j', '-a', '/dev/' + name]
@@ -934,6 +976,12 @@ class InsightsCollector:
                 if unsafe_power:
                     status, reason = 'unavailable', 'power_mode_unverified'
                     result = self._unknown_smart()
+                if require_power_state and not standby:
+                    active = re.fullmatch(r'(?:active(?:\s+or\s+idle)?|idle)(?:\s+mode)?', power.strip(), re.I)
+                    if active and status == 'refreshed':
+                        # This explicit parser proof, never bool(None), is the
+                        # new visible batch's non-standby capacity prerequisite.
+                        result['standby'] = False
             except (ValueError, TypeError, AttributeError):
                 result["health"]["reason"] = "SMART 返回了无效数据"
                 status, reason = 'failed', 'invalid_response'
@@ -960,6 +1008,48 @@ class InsightsCollector:
     def fill_smart_missing(self, authorizer=None):
         """Owner-explicit fixed fill: ordinary standby-safe reads on cache misses."""
         return self._smart_batch(False, authorizer, missing_only=True)
+
+    def refresh_smart_visible(self, *, authorizer=None):
+        """Reread ordinary SMART even with positive cache; no force/raw/serial."""
+        return self._smart_batch(False, authorizer, missing_only=True, visible=True)
+
+    def capacity_visible_eligibility(self, receipt):
+        """Return a private grant bound to this exact returned visible batch.
+
+        Copies, prior receipts, later attempts and stop/start cannot renew it.
+        The callback is an extra denial gate, not a mount/device authority.
+        """
+        with self._lock:
+            batch = self._smart_visible_batch
+            captured = batch if batch is not None and batch['receipt'] is receipt else None
+
+        def eligible(name):
+            if captured is None:
+                return 'power_state_unverified'
+            with self._lock:
+                current = self._smart_visible_batch
+                proof = copy.deepcopy(captured['proofs'].get(name))
+                attempt = copy.deepcopy(self._smart_attempts.get(name))
+                observation = copy.deepcopy(self._smart_visible_observations.get(name))
+                valid = (current is captured and captured['epoch'] == self._smart_epoch and not self._stop.is_set())
+            if not valid or not proof or not attempt or not observation:
+                return 'power_state_unverified'
+            identity = self._smart_context(name)
+            if (identity is None or proof['identity'] != identity or attempt['identity'] != identity
+                    or observation['identity'] != identity or observation['batch'] != captured['sequence']
+                    or attempt.get('sequence') != proof['sequence']
+                    or attempt['stamp'] != proof['stamp']
+                    or not 0 <= self.clock() - proof['stamp'] < SMART_CACHE_SECONDS):
+                return 'power_state_unverified'
+            reason = proof['reason']
+            with self._lock:
+                unchanged = (self._smart_visible_batch is captured and self._smart_epoch == captured['epoch']
+                             and self._smart_attempts.get(name) == attempt
+                             and self._smart_visible_observations.get(name) == observation)
+            if not unchanged or self._stop.is_set() or self._smart_context(name) != identity:
+                return 'power_state_unverified'
+            return reason
+        return eligible
 
     def _smart_record_fresh(self, record, identity):
         return bool(record and len(record) == 3 and record[2] == identity
@@ -1185,7 +1275,7 @@ class InsightsCollector:
             return result
 
     def _smart_batch(self, force, authorizer, *, missing_only=False, policy_demand=None,
-                     collector_epoch=None):
+                     collector_epoch=None, visible=False):
         """Explicit bounded batch, fixed devices only; force is never persisted.
 
         All results/cache writes are private until the final grant and device
@@ -1213,9 +1303,14 @@ class InsightsCollector:
         if not self._smart_refresh_lock.acquire(blocking=False):
             raise SmartRefreshError('busy')
         started, deadline, pending, results = time.time(), self.clock() + SMART_REFRESH_TIMEOUT, {}, []
-        attempts, identities = {}, {}
+        attempts, identities, visible_values = {}, {}, {}
         try:
             authorized()
+            with self._lock:
+                self._smart_batch_sequence += 1
+                sequence = self._smart_batch_sequence
+                if visible:
+                    self._smart_visible_batch = None
             bindings, aliases = self._policy_disk_bindings(policy_demand) if policy_demand is not None else ({}, {})
             targets = (list(dict.fromkeys(bindings.values())) if policy_demand is not None else
                        [(folder.name, None) for folder in sorted((self.sys_root / 'block').glob('*'))[:128]])
@@ -1235,15 +1330,21 @@ class InsightsCollector:
                         cached = any(self._smart_record_fresh(record, identity) for record in (
                             self._smart_cache.get(name), self._smart_measurements.get(name)))
                         previous = copy.deepcopy(self._smart_attempts.get(name))
-                    if cached:
+                    if cached and not visible:
                         value = self._smart(name, identity)
                         row.update(status='skipped_standby' if value.get('standby') is True else 'cached',
                                    reason='standby' if value.get('standby') is True else None,
                                    sampled_at=value.get('smart_sampled_at'))
                         continue
                     if (previous and previous['identity'] == identity
-                            and 0 <= self.clock() - previous['stamp'] < SMART_CACHE_SECONDS):
+                            and 0 <= self.clock() - previous['stamp'] < SMART_CACHE_SECONDS
+                            and (not visible or previous['row']['status'] not in ('refreshed', 'cached'))):
                         row.update(previous['row'])
+                        if visible and row['status'] == 'skipped_standby':
+                            value = self._unknown_smart()
+                            value.update(standby=True, smart_status='standby',
+                                         smart_sampled_monotonic=previous['stamp'], smart_sampled_at=row['sampled_at'])
+                            visible_values[name] = value
                         continue
                 if name.startswith('mmcblk'):
                     row['reason'] = 'smart_unsupported'
@@ -1253,7 +1354,7 @@ class InsightsCollector:
                     row.update(status='failed', reason='timeout')
                     continue
                 value, status, reason = self._probe_smart(name, force=force, timeout=min(3.0, remaining),
-                                                        measurement_only=missing_only)
+                                                        measurement_only=missing_only, require_power_state=visible)
                 authorized()
                 if self._smart_context(name) != identity:
                     row.update(status='identity_changed', reason='identity_changed')
@@ -1264,7 +1365,9 @@ class InsightsCollector:
                 row.update(status=status, reason=reason, sampled_at=value['smart_sampled_at'])
                 if not force:
                     attempts[name] = {'identity': identity, 'stamp': value['smart_sampled_monotonic'],
-                                      'row': copy.deepcopy(row), 'nonstandby': status == 'refreshed'}
+                                      'row': copy.deepcopy(row),
+                                      'nonstandby': status == 'refreshed' and (not visible or value.get('standby') is False),
+                                      'sequence': sequence}
                 if status in ('refreshed', 'skipped_standby'):
                     if missing_only:
                         value = {key: copy.deepcopy(value.get(key)) for key in (
@@ -1272,6 +1375,8 @@ class InsightsCollector:
                             'smart_sampled_monotonic', 'smart_sampled_at', 'smart_status',
                             'temperature_critical_c')}
                     pending[name] = (value['smart_sampled_monotonic'], value, identity)
+                    if visible:
+                        visible_values[name] = copy.deepcopy(value)
             authorized()
             publication = policy_demand.publication_guard() if policy_demand is not None else nullcontext()
             with self._lock, publication:
@@ -1310,6 +1415,45 @@ class InsightsCollector:
                     for row in results:
                         if row['device'] in pending:
                             row.update(status='failed', reason='timeout', sampled_at=None)
+                # A successful newer actual command supersedes a visible
+                # verdict; cache-only fill/policy hits do not revive old data.
+                observations = {name: record for name, record in self._smart_visible_observations.items()
+                                if self._smart_context(name) == record['identity']}
+                for name in pending:
+                    if not visible and self.clock() < deadline:
+                        observations.pop(name, None)
+                proofs = {}
+                if visible:
+                    for row in results:
+                        name, identity = row['device'], identities.get(row['device'])
+                        if identity is None or self._smart_context(name) != identity:
+                            observations.pop(name, None)
+                            continue
+                        value = visible_values.get(name) if row['status'] in ('refreshed', 'skipped_standby') else None
+                        attempt = kept_attempts.get(name)
+                        history = [record for record in (self._smart_cache.get(name), self._smart_measurements.get(name))
+                                   if record and len(record) == 3 and record[2] == identity and _finite(record[0]) is not None]
+                        historical = max(history, key=lambda record: record[0], default=None)
+                        dates = ({key: historical[1].get(key) for key in ('smart_sampled_at', 'smart_sampled_monotonic')}
+                                 if historical is not None else {})
+                        observations[name] = {'identity': identity, 'batch': sequence,
+                                              'value': copy.deepcopy(value), 'history': dates}
+                        if attempt and attempt['identity'] == identity:
+                            reason = ('standby' if row['status'] == 'skipped_standby' else
+                                      None if (row['status'] == 'refreshed' and value is not None
+                                               and value.get('standby') is False and attempt.get('sequence') == sequence)
+                                      else 'power_state_unverified')
+                            proofs[name] = {'identity': identity, 'sequence': attempt.get('sequence'),
+                                            'stamp': attempt['stamp'], 'reason': reason}
+                authorized()
+                if self.clock() >= deadline:
+                    for row in results:
+                        if row['device'] in pending:
+                            row.update(status='failed', reason='timeout', sampled_at=None)
+                        if visible and row['device'] in observations:
+                            observations[row['device']]['value'] = None
+                        if row['device'] in proofs:
+                            proofs[row['device']]['reason'] = 'power_state_unverified'
                 else:
                     cache = {name: retained[name] for name in keys[:128]}
                     if missing_only:
@@ -1320,11 +1464,15 @@ class InsightsCollector:
                     if policy_demand is not None:
                         self._smart_policy_aliases = ({'demand': policy_demand, 'epoch': epoch, 'bindings': aliases}
                             if any(source.startswith('disk:serial:') for source in policy_demand.sources) else {})
+                self._smart_visible_observations = dict(list(observations.items())[-128:])
+                result = {'ok': True, 'force': force, 'status': 'complete' if all(
+                    row['status'] in ('refreshed', 'skipped_standby', 'cached') for row in results) else 'partial',
+                    'started_at': started, 'finished_at': time.time(), 'results': results}
+                if visible:
+                    self._smart_visible_batch = {'receipt': result, 'sequence': sequence, 'epoch': epoch, 'proofs': proofs}
             # snapshot() reprojects this cache immediately. Do not wake the
             # names worker: its normal storage snapshot is a separate source.
-            return {'ok': True, 'force': force, 'status': 'complete' if all(
-                row['status'] in ('refreshed', 'skipped_standby', 'cached') for row in results) else 'partial',
-                'started_at': started, 'finished_at': time.time(), 'results': results}
+            return result
         finally:
             self._smart_refresh_lock.release()
 
