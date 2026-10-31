@@ -195,8 +195,392 @@ class MediaSortProcessDiagnosticsTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(row))
         self.assertNotIn('/audited/scraper', json.dumps(row))
 
+    def test_exact_vendor_0777_runs_the_real_hash_gate_before_arguments(self):
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+        result, error, row = self.fixture.run()
+        self.assertIsNone(error)
+        self.assertIsNotNone(result)
+        self.assertGreater(self.fixture.reads, 0)
+        self.assertEqual(row['stages']['exe_file']['observations']['mode'], 0o777)
+        self.assertTrue(row['stages']['elf']['observations']['hash_matches'])
+        for stage in PROCESS_STAGES:
+            self.assertEqual(row['stages'][stage]['status'], 'passed', row)
+        self.assertNotIn(SECRET, json.dumps(row))
+
+    def test_vendor_0777_bad_hash_stops_arguments_and_all_database_dependencies(self):
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+        self.fixture.binary = b'FAIL'
+        result, error, row = self.fixture.run()
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+        self.assertEqual(row['stages']['exe_file']['status'], 'passed')
+        self.assert_failed(row, 'elf')
+        self.assertEqual(row['stages']['elf']['reason_code'], 'elf_hash_mismatch')
+        self.assertEqual(row['stages']['cmdline']['status'], 'not_run')
+
+    def test_vendor_0777_retains_owner_type_link_and_exact_size_requirements(self):
+        cases = (({'st_uid': 1000}, 'exe_file'),
+                 ({'st_nlink': 2}, 'exe_file'),
+                 ({'st_mode': stat.S_IFDIR | 0o777}, 'exe_file'),
+                 ({'st_size': 5}, 'elf'))
+        for changes, stage in cases:
+            with self.subTest(changes=changes):
+                self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                for name, value in changes.items():
+                    setattr(self.fixture.info, name, value)
+                self.fixture.reads = 0
+                result, error, row = self.fixture.run()
+                self.assertIsNone(result)
+                self.assertIsNotNone(error)
+                self.assert_failed(row, stage)
+                self.assertEqual(row['stages']['cmdline']['status'], 'not_run')
+                self.assertEqual(self.fixture.reads, 0)
+
+    def test_expected_sources_rehash_both_legacy_and_vendor_modes_with_or_without_observer(self):
+        for mode in (0o600, 0o777):
+            for observed in (False, True):
+                with self.subTest(mode=oct(mode), observer=observed):
+                    self.fixture.info = file_stat(st_mode=stat.S_IFREG | mode)
+                    expected = plugin._process(self.fixture.root, 41, self.fixture.guard)
+                    before = self.fixture.reads
+                    observer = plugin._Diagnostics().process(41) if observed else None
+                    actual = plugin._process(self.fixture.root, 41, self.fixture.guard,
+                                             expected=expected, observer=observer)
+                    self.assertEqual(actual, expected)
+                    self.assertGreater(self.fixture.reads, before)
+                    if observer is not None:
+                        self.assertTrue(observer.value['stages']['elf']['observations']['hash_matches'])
+
+    def test_expected_source_same_metadata_cannot_hide_changed_executable_bytes(self):
+        # A deliberately fixed fstat facade separates content proof from the
+        # metadata-change gate. No real filesystem immutability is assumed.
+        for mode in (0o600, 0o777):
+            for observed in (False, True):
+                with self.subTest(mode=oct(mode), observer=observed):
+                    self.fixture.info = file_stat(st_mode=stat.S_IFREG | mode)
+                    self.fixture.binary = b'TEST'
+                    expected = plugin._process(self.fixture.root, 41, self.fixture.guard)
+                    self.fixture.binary = b'FAIL'
+                    before = self.fixture.reads
+                    observer = plugin._Diagnostics().process(41) if observed else None
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.fixture.root, 41, self.fixture.guard,
+                                        expected=expected, observer=observer)
+                    self.assertEqual(caught.exception.reason, 'elf_hash_mismatch')
+                    self.assertGreater(self.fixture.reads, before)
+                    if observer is not None:
+                        self.assert_failed(observer.value, 'elf')
+                        self.assertEqual(observer.value['stages']['cmdline']['status'], 'not_run')
+
+    def test_expected_identity_and_link_mismatch_reject_before_reading_elf_bytes(self):
+        for change in ('inode', 'link'):
+            for observed in (False, True):
+                with self.subTest(change=change, observer=observed):
+                    self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                    self.fixture.link = '/audited/scraper'
+                    expected = plugin._process(self.fixture.root, 41, self.fixture.guard)
+                    if change == 'inode':
+                        self.fixture.info.st_ino += 1
+                    else:
+                        self.fixture.link = '/audited/replaced-scraper'
+                    before = self.fixture.reads
+                    observer = plugin._Diagnostics().process(41) if observed else None
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.fixture.root, 41, self.fixture.guard,
+                                        expected=expected, observer=observer)
+                    self.assertEqual(caught.exception.reason, 'identity_changed')
+                    self.assertEqual(self.fixture.reads, before)
+
+    def test_expected_pid_or_start_change_stops_hash_and_argument_read_before_revalidation(self):
+        self.fixture.make_process(42)
+        for change in ('start', 'pid'):
+            for observed in (False, True):
+                with self.subTest(change=change, observer=observed):
+                    write_stat(self.fixture.folder, start=123)
+                    self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                    expected = plugin._process(self.fixture.root, 41, self.fixture.guard)
+                    if change == 'start':
+                        write_stat(self.fixture.folder, start=124)
+                    pid = 42 if change == 'pid' else 41
+                    observer = plugin._Diagnostics().process(pid) if observed else None
+                    before = self.fixture.reads
+                    with mock.patch.object(plugin, '_read', wraps=plugin._read) as read:
+                        with self.assertRaises(plugin.MediaSortError) as caught:
+                            plugin._process(self.fixture.root, pid, self.fixture.guard,
+                                            expected=expected, observer=observer)
+                    self.assertEqual(caught.exception.reason, 'identity_changed')
+                    self.assertEqual(self.fixture.reads, before)
+                    self.assertFalse(any(Path(call.args[0]).name == 'cmdline'
+                                         for call in read.call_args_list))
+                    if observer is not None:
+                        self.assertEqual(observer.value['status'], 'identity_changed')
+                        self.assertEqual(observer.value['stages']['cmdline']['status'], 'not_run')
+                        self.assertTrue(all(observer.value['stages'][stage]['status'] == 'not_run'
+                                            for stage in DATABASE_STAGES))
+
+    def test_vendor_0777_hash_metadata_changes_reject_with_or_without_observer(self):
+        for field, replacement in (('st_ino', 9002), ('st_mtime_ns', 2),
+                                   ('st_ctime_ns', 2), ('st_size', 5)):
+            for observed in (False, True):
+                with self.subTest(field=field, observer=observed):
+                    self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                    observer = plugin._Diagnostics().process(41) if observed else None
+                    changed = []
+
+                    def mutate(block):
+                        changed.append(block)
+                        setattr(self.fixture.info, field, replacement)
+
+                    read_hook = elf_read_hook(self.fixture.read, self.fixture.fstat,
+                                              (7, 9001), mutate)
+                    with mock.patch.object(self.fixture.os, 'read', side_effect=read_hook):
+                        with self.assertRaises(plugin.MediaSortError) as caught:
+                            plugin._process(self.fixture.root, 41, self.fixture.guard,
+                                            observer=observer)
+                    self.assertEqual(changed, [b'TEST'])
+                    self.assertEqual(caught.exception.reason, 'identity_changed')
+                    if observer is not None:
+                        self.assertTrue(all(observer.value['stages'][stage]['status'] == 'not_run'
+                                            for stage in DATABASE_STAGES))
+
+    def test_vendor_0777_fresh_proc_exe_descriptor_cannot_replace_unchanged_hashed_fd(self):
+        # Both readlink calls retain the same spelling and the hashed FD keeps
+        # every field. Only reopening proc/exe exposes the replacement inode.
+        for observed in (False, True):
+            with self.subTest(observer=observed):
+                self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                original = copy.copy(self.fixture.info)
+                replacement = file_stat(st_mode=stat.S_IFREG | 0o777, st_ino=9002)
+                observer = plugin._Diagnostics().process(41) if observed else None
+                self.fixture.position = 0
+                with mock.patch.object(self.fixture.os, 'open', side_effect=[9001, 9002]) as opened, \
+                        mock.patch.object(self.fixture.os, 'fstat', side_effect=lambda fd:
+                                          original if fd == 9001 else replacement):
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.fixture.root, 41, self.fixture.guard, observer=observer)
+                self.assertEqual(opened.call_count, 2)
+                self.assertEqual(caught.exception.reason, 'identity_changed')
+                if observer is not None:
+                    self.assertTrue(all(observer.value['stages'][stage]['status'] == 'not_run'
+                                        for stage in DATABASE_STAGES))
+
+    def test_opened_cached_vendor_source_bad_hash_stops_before_chain_and_sidecars(self):
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+        expected = plugin._process(self.fixture.root, 41, self.fixture.guard)
+        source = plugin._Source(expected[6], (expected,))
+        self.fixture.binary = b'FAIL'
+        unchanged = plugin._stable(self.fixture.info) + (
+            self.fixture.info.st_size, self.fixture.info.st_mtime_ns,
+            self.fixture.info.st_ctime_ns)
+        self.assertEqual(unchanged, expected[3])
+        with mock.patch.object(plugin._Opened, '_open_chain') as chain, \
+                mock.patch.object(plugin._Opened, '_sidecars') as sidecars:
+            with self.assertRaises(plugin.MediaSortError) as caught:
+                plugin._Opened(self.fixture.root, source, self.fixture.guard)
+        self.assertEqual(caught.exception.reason, 'elf_hash_mismatch')
+        chain.assert_not_called()
+        sidecars.assert_not_called()
+
+    def test_apply_and_revert_cached_vendor_source_rehash_before_any_database_or_rule_access(self):
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+        expected = plugin._process(self.fixture.root, 41, self.fixture.guard)
+        source = plugin._Source(expected[6], (expected,))
+        value = plugin.MediaSortPlugin(self.fixture.root, root=self.fixture.root)
+        self.addCleanup(value.close)
+        candidate_id, version = 'a' * 32, 'b' * 64
+        value._sources[candidate_id] = source
+        self.fixture.binary = b'FAIL'
+        for operation in (value.apply, value.revert):
+            with self.subTest(operation=operation.__name__):
+                with mock.patch.object(plugin._Opened, '_open_chain') as chain, \
+                        mock.patch.object(plugin._Opened, '_sidecars') as sidecars, \
+                        mock.patch.object(plugin._Opened, 'connect') as opened_connect, \
+                        mock.patch.object(plugin.sqlite3, 'connect') as sqlite_connect, \
+                        mock.patch.object(value, '_backup') as backup, \
+                        mock.patch.object(plugin.rules, 'install') as install, \
+                        mock.patch.object(plugin.rules, 'remove') as remove:
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        operation(candidate_id, version, confirmed=True, current=lambda: True)
+                self.assertEqual(caught.exception.reason, 'elf_hash_mismatch')
+                for dependent in (chain, sidecars, opened_connect, sqlite_connect,
+                                  backup, install, remove):
+                    dependent.assert_not_called()
+
+    def test_opened_revalidates_every_vendor_process_before_database_chain_then_sidecars(self):
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+        self.fixture.make_process(42)
+        process = plugin._process
+        expected = tuple(process(self.fixture.root, pid, self.fixture.guard) for pid in (41, 42))
+        source = plugin._Source(expected[0][6], expected)
+        events = []
+
+        def revalidate(root, pid, guard, **kwargs):
+            self.assertEqual(kwargs['expected'], expected[pid - 41])
+            actual = process(root, pid, guard, **kwargs)
+            events.append(('process', pid))
+            return actual
+
+        with mock.patch.object(plugin, '_process', side_effect=revalidate), \
+                mock.patch.object(plugin._Opened, '_open_chain',
+                                  side_effect=lambda *_args: events.append(('chain',))), \
+                mock.patch.object(plugin._Opened, '_sidecars',
+                                  side_effect=lambda: events.append(('sidecars',)) or {}):
+            with plugin._Opened(self.fixture.root, source, self.fixture.guard):
+                pass
+        self.assertEqual(events, [('process', 41), ('process', 42), ('chain',), ('sidecars',)])
+
+    def test_constructor_source_observer_attributes_hash_uid_and_pid_failures_without_sql(self):
+        cases = (('hash', 'elf', 'elf', 'elf_hash_mismatch', 'rejected'),
+                 ('uid', 'uid', 'uid', 'uid_not_root', 'rejected'),
+                 ('pid', 'elf', 'process_final', 'identity_changed', 'identity_changed'))
+        for failure, error_stage, failed_stage, reason, status in cases:
+            with self.subTest(failure=failure):
+                self.fixture.binary = b'TEST'
+                self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                write_stat(self.fixture.folder, start=123)
+                (self.fixture.folder / 'status').write_bytes(b'Uid:\t0\t0\t0\t0\n')
+                diagnostics = plugin._Diagnostics()
+                record = diagnostics.process(41)
+                expected = plugin._process(self.fixture.root, 41, self.fixture.guard,
+                                           observer=record)
+                source = plugin._Source(expected[6], (expected,))
+                if failure == 'hash':
+                    self.fixture.binary = b'FAIL'
+                elif failure == 'uid':
+                    (self.fixture.folder / 'status').write_bytes(b'Uid:\t0\t1000\t0\t0\n')
+                else:
+                    write_stat(self.fixture.folder, start=124)
+                # This is the constructor boundary itself: there is no caller
+                # db_chain/publication phase to repair missing attribution.
+                with plugin._observe_source(diagnostics, source), \
+                        mock.patch.object(plugin._Opened, '_open_chain') as chain, \
+                        mock.patch.object(plugin._Opened, '_sidecars') as sidecars, \
+                        mock.patch.object(plugin.sqlite3, 'connect') as connect:
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._Opened(self.fixture.root, source, self.fixture.guard)
+                for dependent in (chain, sidecars, connect):
+                    dependent.assert_not_called()
+                self.assertEqual(caught.exception.stage, error_stage)
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual(caught.exception._media_sort_pid, 41)
+                self.assertEqual(record.value['status'], status)
+                self.assertEqual(record.value['stages'][failed_stage]['status'], 'failed')
+                self.assertEqual(record.value['stages'][failed_stage]['reason_code'], reason)
+                self.assertEqual(record.value['stages'][failed_stage]['observations'], {})
+                self.assertEqual(diagnostics.first_failure(), (failed_stage, reason))
+                for stage in DATABASE_STAGES:
+                    self.assertEqual(record.value['stages'][stage]['status'], 'not_run')
+                self.assertNotIn(SECRET, json.dumps(diagnostics.snapshot()) + str(caught.exception))
+
+    def test_constructor_shared_source_rejection_changes_only_the_actual_process_record(self):
+        second = self.fixture.make_process(42)
+        cases = (('hash', 'elf', 'elf_hash_mismatch', 'rejected'),
+                 ('uid', 'uid', 'uid_not_root', 'rejected'),
+                 ('pid', 'process_final', 'identity_changed', 'identity_changed'))
+        for failure, failed_stage, reason, status in cases:
+            with self.subTest(failure=failure):
+                self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+                self.fixture.binary = b'TEST'
+                write_stat(second, start=123)
+                (second / 'status').write_bytes(b'Uid:\t0\t0\t0\t0\n')
+                diagnostics = plugin._Diagnostics()
+                processes = tuple(plugin._process(
+                    self.fixture.root, pid, self.fixture.guard, observer=diagnostics.process(pid))
+                    for pid in (41, 42))
+                source = plugin._Source(processes[0][6], processes)
+                before = {row['pid']: row for row in diagnostics.snapshot()['processes']}
+                if failure == 'uid':
+                    (second / 'status').write_bytes(b'Uid:\t0\t1000\t0\t0\n')
+                elif failure == 'pid':
+                    write_stat(second, start=124)
+
+                def open_executable(path, *args, **kwargs):
+                    self.fixture.binary = (b'FAIL' if failure == 'hash' and Path(path).parent.name == '42'
+                                           else b'TEST')
+                    return self.fixture.open(path, *args, **kwargs)
+
+                with plugin._observe_source(diagnostics, source), \
+                        mock.patch.object(self.fixture.os, 'open', side_effect=open_executable), \
+                        mock.patch.object(plugin._Opened, '_open_chain') as chain, \
+                        mock.patch.object(plugin._Opened, '_sidecars') as sidecars, \
+                        mock.patch.object(plugin.sqlite3, 'connect') as connect:
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._Opened(self.fixture.root, source, self.fixture.guard)
+                for dependent in (chain, sidecars, connect):
+                    dependent.assert_not_called()
+                self.assertEqual(caught.exception._media_sort_pid, 42)
+                after = {row['pid']: row for row in diagnostics.snapshot()['processes']}
+                self.assertEqual(after[41]['status'], before[41]['status'])
+                self.assertEqual(after[41]['start_ticks'], before[41]['start_ticks'])
+                for stage in PROCESS_STAGES + DATABASE_STAGES:
+                    self.assertEqual(after[41]['stages'][stage]['status'],
+                                     before[41]['stages'][stage]['status'])
+                    self.assertEqual(after[41]['stages'][stage]['observations'],
+                                     before[41]['stages'][stage]['observations'])
+                self.assertEqual(after[42]['status'], status)
+                self.assertEqual(after[42]['stages'][failed_stage]['status'], 'failed')
+                self.assertEqual(after[42]['stages'][failed_stage]['reason_code'], reason)
+                self.assertEqual(diagnostics.first_failure(), (failed_stage, reason))
+                for stage in DATABASE_STAGES:
+                    self.assertEqual(after[42]['stages'][stage]['status'], 'not_run')
+                self.assertNotIn(SECRET, json.dumps(diagnostics.snapshot()))
+
+    def test_second_alias_constructor_preserves_prior_db_phases_but_records_new_elf_rejection(self):
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
+        diagnostics = plugin._Diagnostics()
+        record = diagnostics.process(41)
+        expected = plugin._process(self.fixture.root, 41, self.fixture.guard, observer=record)
+        source = plugin._Source(expected[6], (expected,))
+        alias = plugin._Source('synthetic-alias/scraper.db', (expected,))
+        entries = []
+
+        def validated_chain(*_args):
+            # Synthetic successful production phases model a first alias's
+            # already retained proof; no DB or SQL is opened by this fixture.
+            with plugin._phase('db_chain'):
+                entries.append('chain')
+                plugin._note('db_chain', depth=2, main_header=True)
+
+        def validated_sidecars():
+            with plugin._phase('sidecars'):
+                entries.append('sidecars')
+                plugin._note('sidecars', wal_present=False, shm_present=False,
+                             journal_present=False)
+            return {}
+
+        with mock.patch.object(plugin._Opened, '_open_chain', side_effect=validated_chain) as chain, \
+                mock.patch.object(plugin._Opened, '_sidecars', side_effect=validated_sidecars) as sidecars, \
+                mock.patch.object(plugin.sqlite3, 'connect') as connect:
+            with plugin._observe_source(diagnostics, source):
+                with plugin._Opened(self.fixture.root, source, self.fixture.guard):
+                    pass
+            before = copy.deepcopy(record.value['stages'])
+            self.assertEqual(entries, ['chain', 'sidecars'])
+            self.fixture.binary = b'FAIL'
+            # Exactly the second alias constructor's _observe_source tuple,
+            # without an unrelated outer phase to hide the attribution gap.
+            with plugin._observe_source(diagnostics, alias):
+                with self.assertRaises(plugin.MediaSortError) as caught:
+                    plugin._Opened(self.fixture.root, alias, self.fixture.guard)
+        chain.assert_called_once()
+        sidecars.assert_called_once()
+        connect.assert_not_called()
+        self.assertEqual(caught.exception.stage, 'elf')
+        self.assertEqual(caught.exception.reason, 'elf_hash_mismatch')
+        self.assertEqual(record.value['status'], 'rejected')
+        self.assertEqual(record.value['stages']['elf']['status'], 'failed')
+        self.assertEqual(record.value['stages']['elf']['observations'], {})
+        self.assertEqual(diagnostics.first_failure(), ('elf', 'elf_hash_mismatch'))
+        for stage in ('db_chain', 'sidecars'):
+            self.assertEqual(before[stage]['status'], 'passed')
+            self.assertEqual(record.value['stages'][stage], before[stage])
+        for stage in ('sqlite_fd', 'schema', 'json1', 'artifacts', 'publication'):
+            self.assertEqual(record.value['stages'][stage]['status'], 'not_run')
+        self.assertNotIn(SECRET, json.dumps(diagnostics.snapshot()))
+
     def test_hash_read_generation_race_rejects_with_and_without_observer(self):
         real_identity, real_read, real_fstat = plugin._kernel_identity, os.read, os.fstat
+        self.fixture.info = file_stat(st_mode=stat.S_IFREG | 0o777)
         self.assertIs(vendor_runtime.os, os)
         self.assertIs(plugin._read, vendor_runtime._read)
         self.assertIs(real_identity, vendor_runtime._kernel_identity)
@@ -343,6 +727,9 @@ class MediaSortProcessDiagnosticsTests(unittest.TestCase):
     def test_executable_file_type_owner_mode_and_links_gate_hash(self):
         cases = ({'st_mode': stat.S_IFDIR | 0o600}, {'st_uid': 1000},
                  {'st_mode': stat.S_IFREG | 0o620}, {'st_mode': stat.S_IFREG | 0o602},
+                 {'st_mode': stat.S_IFREG | 0o666}, {'st_mode': stat.S_IFREG | 0o775},
+                 {'st_mode': stat.S_IFREG | 0o1777}, {'st_mode': stat.S_IFREG | 0o2777},
+                 {'st_mode': stat.S_IFREG | 0o4777},
                  {'st_nlink': 2})
         for changes in cases:
             with self.subTest(changes=changes):
@@ -526,6 +913,7 @@ class MediaSortProcessDiagnosticsTests(unittest.TestCase):
         self.assertEqual(after[41], before[41])
         self.assertEqual(after[42]['stages']['uid']['status'], 'failed')
         self.assertEqual(after[42]['stages']['uid']['observations'], {})
+        self.assertEqual(after[42]['status'], 'rejected')
         self.assertEqual(after[41]['stages']['uid']['observations']['effective_uid'], 0)
         self.assertEqual(diagnostics.first_failure()[0], 'uid')
         encoded = json.dumps(diagnostics.snapshot())
@@ -1140,6 +1528,35 @@ class MediaSortDiagnosticLinuxChainTests(unittest.TestCase):
             with self.subTest(stage=stage):
                 self.assertEqual(stages[stage]['status'], 'passed', stages)
         self.assertNotIn(str(self.binary), json.dumps(state['diagnostics']))
+
+    def test_real_vendor_0777_probe_completes_hash_database_and_publication(self):
+        self.binary.chmod(0o777)
+        before = self.database.read_bytes()
+        state = self.probe()
+        self.assertEqual(state['status'], 'ready')
+        self.assertEqual(state['candidates'][0]['state'], 'disabled')
+        self.assertEqual(state['diagnostics']['publication']['status'], 'passed')
+        stages = self.stages(state)
+        self.assertEqual(stages['exe_file']['observations']['mode'], 0o777)
+        self.assertTrue(stages['elf']['observations']['hash_matches'])
+        for stage in PROCESS_STAGES + DATABASE_STAGES:
+            self.assertEqual(stages[stage]['status'], 'passed', stages)
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_real_vendor_0777_bad_hash_never_opens_database_dependencies(self):
+        self.binary.chmod(0o777)
+        self.binary.write_bytes(b'FAIL')
+        with mock.patch.object(plugin, '_Opened') as opened:
+            state = self.probe()
+        opened.assert_not_called()
+        self.assertEqual(state['status'], 'unavailable')
+        self.assertEqual(state['candidates'], [])
+        stages = self.stages(state)
+        self.assertEqual(stages['elf']['status'], 'failed')
+        self.assertEqual(stages['elf']['reason_code'], 'elf_hash_mismatch')
+        self.assertEqual(stages['cmdline']['status'], 'not_run')
+        for stage in DATABASE_STAGES:
+            self.assertEqual(stages[stage]['status'], 'not_run', stages)
 
     def test_no_follow_main_link_failure_leaves_dependent_database_stages_not_run(self):
         original = self.database.with_name('original.sqlite3')

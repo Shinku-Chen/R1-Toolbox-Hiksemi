@@ -208,6 +208,87 @@ class MediaSortProcessLinuxTests(unittest.TestCase):
         self.binary.write_bytes(b'FAIL')
         self.assert_unavailable()
 
+    def test_real_vendor_0777_hash_passes_and_expected_reads_the_executable_again(self):
+        self.binary.chmod(0o777)
+        expected = self.process()
+        self.assertEqual(expected[3][5], 0o777)
+        for observed in (False, True):
+            with self.subTest(observer=observed):
+                reads = []
+                info = self.binary.stat()
+                read_hook = elf_read_hook(os.read, os.fstat,
+                                          (info.st_dev, info.st_ino), reads.append)
+                observer = plugin._Diagnostics().process(41) if observed else None
+                with mock.patch.object(plugin.os, 'read', side_effect=read_hook):
+                    actual = plugin._process(self.root, 41, self.guard,
+                                             expected=expected, observer=observer)
+                self.assertEqual(actual, expected)
+                self.assertEqual(reads, [b'TEST'])
+
+    def test_real_vendor_0777_wrong_hash_and_wrong_size_still_reject(self):
+        self.binary.chmod(0o777)
+        for content in (b'FAIL', b'larger fixture'):
+            with self.subTest(content_length=len(content)):
+                self.binary.write_bytes(content)
+                self.assert_unavailable()
+
+    def test_real_vendor_0777_extra_link_and_other_writable_modes_reject(self):
+        for mode in (0o666, 0o775, 0o1777, 0o2777, 0o4777):
+            with self.subTest(mode=oct(mode)):
+                self.binary.chmod(mode)
+                self.assert_unavailable()
+        self.binary.chmod(0o777)
+        os.link(self.binary, self.root / 'extra-vendor-executable-link')
+        self.assert_unavailable()
+
+    def test_real_vendor_0777_link_replacement_during_hash_rejects_old_descriptor(self):
+        self.binary.chmod(0o777)
+        alternative = self.root / 'replacement-executable'
+        alternative.write_bytes(b'TEST')
+        alternative.chmod(0o777)
+        binary_info = self.binary.stat()
+        for observed in (False, True):
+            with self.subTest(observer=observed):
+                (self.folder / 'exe').unlink()
+                (self.folder / 'exe').symlink_to(self.binary)
+                changes = []
+
+                def replace(block):
+                    changes.append(block)
+                    (self.folder / 'exe').unlink()
+                    (self.folder / 'exe').symlink_to(alternative)
+
+                read_hook = elf_read_hook(os.read, os.fstat,
+                                          (binary_info.st_dev, binary_info.st_ino), replace)
+                observer = plugin._Diagnostics().process(41) if observed else None
+                with mock.patch.object(plugin.os, 'read', side_effect=read_hook):
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.root, 41, self.guard, observer=observer)
+                self.assertEqual(changes, [b'TEST'])
+                self.assertEqual(caught.exception.code, 'unavailable')
+                self.assertEqual(caught.exception.reason, 'identity_changed')
+
+    def test_real_vendor_0777_metadata_mutation_during_hash_rejects(self):
+        for observed in (False, True):
+            with self.subTest(observer=observed):
+                self.binary.write_bytes(b'TEST')
+                self.binary.chmod(0o777)
+                info = self.binary.stat()
+                changes = []
+
+                def mutate(block):
+                    changes.append(block)
+                    self.binary.chmod(0o775)
+
+                read_hook = elf_read_hook(os.read, os.fstat,
+                                          (info.st_dev, info.st_ino), mutate)
+                observer = plugin._Diagnostics().process(41) if observed else None
+                with mock.patch.object(plugin.os, 'read', side_effect=read_hook):
+                    with self.assertRaises(plugin.MediaSortError) as caught:
+                        plugin._process(self.root, 41, self.guard, observer=observer)
+                self.assertEqual(changes, [b'TEST'])
+                self.assertEqual(caught.exception.reason, 'identity_changed')
+
     def test_wrong_size_rejected(self):
         self.binary.write_bytes(b'larger fixture')
         self.assert_unavailable()
@@ -270,6 +351,7 @@ class MediaSortProcessLinuxTests(unittest.TestCase):
 
     def test_pid_generation_change_during_real_hash_read_is_rejected(self):
         real_read, real_identity = plugin.os.read, plugin._kernel_identity
+        self.binary.chmod(0o777)
         binary_identity = (self.binary.stat().st_dev, self.binary.stat().st_ino)
         for observed in (False, True):
             with self.subTest(observer=observed):

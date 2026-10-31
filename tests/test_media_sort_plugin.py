@@ -123,9 +123,17 @@ class MediaSortCacheAndSchemaTests(unittest.TestCase):
         good = dict(st_mode=stat.S_IFREG | 0o600, st_nlink=1, st_uid=0)
         plugin._regular(SimpleNamespace(**good))
         for change in ({'st_uid': 1000}, {'st_nlink': 2},
-                       {'st_mode': stat.S_IFREG | 0o666}, {'st_mode': stat.S_IFLNK | 0o600}):
+                       {'st_mode': stat.S_IFREG | 0o666},
+                       {'st_mode': stat.S_IFREG | 0o777},
+                       {'st_mode': stat.S_IFREG | 0o775}, {'st_mode': stat.S_IFLNK | 0o600}):
             with self.subTest(change=change), self.assertRaises(plugin.MediaSortError):
                 plugin._regular(SimpleNamespace(**{**good, **change}))
+
+    def test_private_backup_permission_contract_has_no_scraper_exception(self):
+        from types import SimpleNamespace
+        for mode in (0o755, 0o775, 0o777):
+            with self.subTest(mode=oct(mode)), self.assertRaises(plugin.MediaSortError):
+                plugin._owned(SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=0), 0o077)
 
 
 class MediaSortPortableTransactionTests(unittest.TestCase):
@@ -370,6 +378,40 @@ class MediaSortFilesystemTests(unittest.TestCase):
         self.addCleanup(backup.close)
         self.assertEqual(backup.execute('SELECT path FROM metadata').fetchone()[0],
                          '["synthetic-a","synthetic-b"]')
+
+    def test_writable_database_and_sidecars_do_not_inherit_executable_exception(self):
+        for mode in (0o777, 0o775):
+            with self.subTest(kind='database', mode=oct(mode)):
+                self.database.chmod(mode)
+                result = self.value.probe(current=self.current)
+                self.assertEqual(result['status'], 'unavailable')
+                self.assertFalse(any(row['can_apply'] for row in result['candidates']))
+                self.database.chmod(0o600)
+            for suffix in ('-wal', '-shm', '-journal'):
+                with self.subTest(kind=suffix, mode=oct(mode)):
+                    sidecar = Path(str(self.database) + suffix)
+                    sidecar.write_bytes(b'')
+                    sidecar.chmod(mode)
+                    try:
+                        result = self.value.probe(current=self.current)
+                        self.assertEqual(result['status'], 'unavailable')
+                        self.assertFalse(any(row['can_apply'] for row in result['candidates']))
+                    finally:
+                        sidecar.unlink()
+
+    def test_writable_private_backup_directory_aborts_before_rule_install(self):
+        row = self.candidate()
+        directory = self.state / 'media-sort-backups'
+        directory.mkdir(mode=0o700)
+        directory.chmod(0o777)
+        with mock.patch.object(plugin.rules, 'install') as install:
+            with self.assertRaises(plugin.MediaSortError) as error:
+                self.apply(row)
+            self.assertEqual(error.exception.code, 'backup_failed')
+            install.assert_not_called()
+        self.assertEqual(list(directory.iterdir()), [])
+        with closing(sqlite3.connect(self.database)) as con:
+            self.assertEqual(plugin.rules.owned_artifacts(con), 'disabled')
 
     def test_failed_install_rolls_back_all_plugin_objects(self):
         row = self.candidate()

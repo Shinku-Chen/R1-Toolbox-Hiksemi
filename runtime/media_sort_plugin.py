@@ -192,6 +192,10 @@ def _phase(stage):
             if isinstance(error, MediaSortError) and error.reason == 'identity_changed':
                 observer.changed()
                 continue
+            if actual in _PROCESS_STAGES and observer.value['status'] != 'identity_changed':
+                # A later source check supersedes discovery's accepted status.
+                # Keep other processes and earlier real DB observations intact.
+                observer.value['status'] = 'rejected'
             entry = observer.value['stages'][actual]
             if entry['status'] != 'failed':
                 if origin_pid is not None:
@@ -242,6 +246,20 @@ def _regular(value):
 def _owned(value, mask=0o022):
     if value.st_uid != 0 or value.st_mode & mask:
         raise MediaSortError('unavailable')
+
+
+def _scraper_executable(value):
+    """Permit only the audited scraper's exact vendor 0777 layout before hashing.
+
+    This exception is never used for databases, sidecars or private backups.
+    A permitted descriptor still needs the fixed size/hash and lifecycle gates.
+    """
+    if stat.S_IMODE(value.st_mode) != 0o777:
+        _regular(value)
+        return
+    if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+        raise MediaSortError('unavailable')
+    _owned(value, mask=0)
 
 
 @dataclass(frozen=True)
@@ -360,7 +378,7 @@ def _process(root, pid, guard, *, expected=None, observer=None):
             _note('exe_file', regular=stat.S_ISREG(value.st_mode), uid=value.st_uid,
                   gid=value.st_gid, mode=stat.S_IMODE(value.st_mode), nlink=value.st_nlink,
                   size=value.st_size)
-            _regular(value)
+            _scraper_executable(value)
             return _stable(value) + (value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
         binary = checked('exe_file', file_gate)
@@ -372,23 +390,35 @@ def _process(root, pid, guard, *, expected=None, observer=None):
             _note('elf', size_matches=size_matches)
             if not size_matches:
                 raise MediaSortError('unavailable', reason='elf_size_mismatch')
-            if expected is None:
-                digest, read_bytes = hashlib.sha256(), 0
-                while True:
-                    guard()
-                    block = os.read(descriptor, min(65536, _ELF_SIZE + 1 - read_bytes))
-                    if not block:
-                        break
-                    read_bytes += len(block)
-                    if read_bytes > _ELF_SIZE:
-                        raise MediaSortError('unavailable', reason='identity_changed')
-                    digest.update(block)
-                matches = digest.hexdigest() == _SHA
-                _note('elf', hash_matches=matches)
-                if not matches:
-                    raise MediaSortError('unavailable', reason='elf_hash_mismatch')
-            elif binary != expected[3] or executable != expected[2]:
+            if expected is not None and ((pid, identity[2]) != expected[:2]
+                                         or binary != expected[3] or executable != expected[2]):
+                if observer is not None:
+                    observer.changed()
                 raise MediaSortError('unavailable', reason='identity_changed')
+
+            # A writable vendor ELF cannot rely on the first probe's digest.
+            # Revalidate this real descriptor and PID around every hash, also
+            # for expected sources used by probe publication/apply/revert.
+            generation()
+            before = os.fstat(descriptor)
+            if _stable(before) + (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != binary:
+                if observer is not None:
+                    observer.changed()
+                raise MediaSortError('unavailable', reason='identity_changed')
+            digest, read_bytes = hashlib.sha256(), 0
+            while True:
+                guard()
+                block = os.read(descriptor, min(65536, _ELF_SIZE + 1 - read_bytes))
+                if not block:
+                    break
+                read_bytes += len(block)
+                if read_bytes > _ELF_SIZE:
+                    raise MediaSortError('unavailable', reason='identity_changed')
+                digest.update(block)
+            matches = read_bytes == _ELF_SIZE and digest.hexdigest() == _SHA
+            _note('elf', hash_matches=matches)
+            if not matches:
+                raise MediaSortError('unavailable', reason='elf_hash_mismatch')
             after = os.fstat(descriptor)
             unchanged = _stable(after) + (after.st_size, after.st_mtime_ns, after.st_ctime_ns) == binary
             _note('elf', file_unchanged=unchanged)
@@ -396,8 +426,25 @@ def _process(root, pid, guard, *, expected=None, observer=None):
                 if observer is not None:
                     observer.changed()
                 raise MediaSortError('unavailable', reason='identity_changed')
-            if observer is not None:
-                generation()
+            guard()
+            if os.readlink(folder / 'exe') != executable:
+                if observer is not None:
+                    observer.changed()
+                raise MediaSortError('unavailable', reason='identity_changed')
+            # Binding the current proc link to a fresh FD also rejects a switch
+            # to another inode while the hashed descriptor stays unchanged.
+            verification_fd = os.open(folder / 'exe', os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                current = os.fstat(verification_fd)
+                unchanged = _stable(current) + (current.st_size, current.st_mtime_ns,
+                                                current.st_ctime_ns) == binary
+            finally:
+                os.close(verification_fd)
+            if not unchanged:
+                if observer is not None:
+                    observer.changed()
+                raise MediaSortError('unavailable', reason='identity_changed')
+            generation()
 
         # Namespace/root checks are independent observations; failing them never
         # grants a trusted source. Untrusted UID or file metadata forbids bytes.
@@ -528,6 +575,11 @@ class _Opened:
         self.root, self.source, self.guard = root, source, guard
         self.fds, self.nodes, self.mutating, self.created_sidecars = [], [], False, set()
         try:
+            # A cached source must pass its current executable gates before any
+            # dependent database/sidecar is opened, including apply and revert.
+            with _phase('process_final'):
+                for process in source.processes:
+                    _process(root, process[0], guard, expected=process)
             self._open_chain(root, source, guard)
             self.sidecars = self._sidecars()
         except Exception:
