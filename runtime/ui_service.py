@@ -234,6 +234,18 @@ def _capacity_observation(evidence=None, *, owner=None):
             dict.update(evidence, complete=False, reason='observer_error')
 
 
+def _capacity_observe_guarded(owner, operation, *args, **kwargs):
+    """Isolate a replaced/failing observer entry, without catching business work."""
+    try:
+        return owner._capacity_observe(operation, *args, **kwargs)
+    except Exception:
+        try:
+            owner._capacity_observation_errors += 1
+        except Exception:
+            pass
+        return None
+
+
 class _CapacityEntries(list):
     """The inventory result carries its own observation across interleaving calls."""
     def __init__(self, entries, observation):
@@ -270,6 +282,16 @@ class _CapacityHistoryRows(list):
         self.capacity_observations = _CapacityHistoryData(observations)
 
 
+class _CapacityAttemptResult(dict):
+    """Private evidence correlation; copying/JSON never grants a capability."""
+    def __init__(self, value, attempt_id=None):
+        super().__init__(value)
+        self.capacity_attempt_id = attempt_id
+
+    def __deepcopy__(self, memo):
+        return copy.deepcopy(dict(self), memo)
+
+
 class _CapacityHistoryReceipt(dict):
     """Unpublished candidate; only the real response publisher may finalize."""
     def __init__(self, value, instance, epoch, mount_epoch, batch, deadline, records):
@@ -277,6 +299,7 @@ class _CapacityHistoryReceipt(dict):
         self.instance, self.epoch, self.mount_epoch = instance, epoch, mount_epoch
         self.batch, self.deadline, self.records = batch, deadline, _CapacityHistoryData(records)
         self.finalized = False
+        self.capacity_attempt_id = None
 
     def __deepcopy__(self, memo):
         # Copying a public receipt never copies its private publication right
@@ -845,52 +868,255 @@ def _capacity_fd_mount(descriptor, proc_root='/proc'):
     return int(found[0])
 
 
-def _capacity_measure_entry(entry, deadline, proc_root='/proc', sys_root='/sys', *, keep_handle=False):
+_CAPACITY_WORKER_PHASES = ('inventory_before', 'path', 'fd_before', 'inventory_opened',
+                           'measure', 'fd_after', 'inventory_after', 'transfer')
+_CAPACITY_WORKER_REASONS = frozenset((None, 'timeout', 'inventory_incomplete', 'key_mismatch',
+    'platform_unavailable', 'path_invalid', 'fd_not_directory', 'device_mismatch',
+    'fd_mount_unavailable', 'mount_mismatch', 'metadata_changed', 'measurement_failed',
+    'invalid_measurement', 'observer_error', 'inventory_failed', 'fd_open_failed',
+    'fd_stat_failed', 'fd_duplicate_failed', 'scm_send_failed'))
+_CAPACITY_WORKER_FIELDS = frozenset(('expected_mount_id', 'actual_mount_id', 'expected_device',
+    'actual_device', 'expected_key', 'actual_key', 'inventory_complete', 'matched', 'executed', 'fd_checked',
+    'comparison_performed', 'actual_key_observed', 'actual_key_null', 'before_digest', 'after_digest'))
+
+
+def _capacity_worker_step(observer, phase, status, reason=None, observations=None):
+    """Private best-effort evidence; never re-read metadata or affect a gate."""
+    if observer is None:
+        return
+    try:
+        observer(phase, {'status': status, 'reason': reason,
+                         'observations': observations() if callable(observations) else observations or {}})
+    except Exception:
+        try:
+            observer(phase, {'status': 'not_run', 'reason': 'observer_error', 'observations': {}})
+        except Exception:
+            pass
+
+
+def _capacity_worker_stat_digest(value):
+    # These three attributes were already consumed by the real FD predicate.
+    return _capacity_digest('worker-fd', (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode)))
+
+
+def _capacity_worker_trace():
+    return {'schema': 1, 'observation_status': 'observed', 'steps': {
+        phase: {'status': 'not_run', 'reason': None, 'observations': {}}
+        for phase in _CAPACITY_WORKER_PHASES}}
+
+
+def _capacity_worker_diagnostic(value):
+    """Validate the bounded private worker carrier without trusting free text."""
+    if (type(value) is not dict or set(value) != {'schema', 'observation_status', 'steps'}
+            or type(value['schema']) is not int or value['schema'] != 1):
+        raise ValueError('worker_observation_invalid')
+    state, steps = value['observation_status'], value['steps']
+    if state not in ('observed', 'observer_error', 'size_exceeded') or type(steps) is not dict:
+        raise ValueError('worker_observation_invalid')
+    if state != 'observed' and not steps:
+        return value
+    if state == 'size_exceeded':
+        raise ValueError('worker_observation_invalid')
+    if set(steps) != set(_CAPACITY_WORKER_PHASES):
+        raise ValueError('worker_observation_invalid')
+    for step in steps.values():
+        if (type(step) is not dict or set(step) != {'status', 'reason', 'observations'}
+                or step['status'] not in ('passed', 'failed', 'not_run')
+                or step['reason'] not in _CAPACITY_WORKER_REASONS):
+            raise ValueError('worker_observation_invalid')
+        fields = step['observations']
+        if type(fields) is not dict or not set(fields) <= _CAPACITY_WORKER_FIELDS:
+            raise ValueError('worker_observation_invalid')
+        for name, item in fields.items():
+            if name in ('expected_mount_id', 'actual_mount_id'):
+                valid = type(item) is int and 0 < item <= 2**53 - 1
+            elif name in ('expected_device', 'actual_device'):
+                valid = type(item) is str and re.fullmatch(r'[0-9]{1,7}:[0-9]{1,7}', item)
+            elif name in ('expected_key', 'actual_key', 'before_digest', 'after_digest'):
+                valid = type(item) is str and re.fullmatch(r'[0-9a-f]{64}', item)
+            else:
+                valid = type(item) is bool
+            if not valid:
+                raise ValueError('worker_observation_invalid')
+    return value
+
+
+def _capacity_worker_encode(result, diagnostic, encoded):
+    """A diagnostic encoding failure cannot replace the original business JSON."""
+    try:
+        checked = _capacity_worker_diagnostic(diagnostic)
+        candidate = json.dumps(dict(result, diagnostic=checked), allow_nan=False)
+        # print adds one newline; the parent's 4096-byte gate includes it.
+        if len(candidate.encode('utf-8')) + 1 > 4096:
+            candidate = json.dumps(dict(result, diagnostic={'schema': 1,
+                'observation_status': 'size_exceeded', 'steps': {}}), allow_nan=False)
+        return candidate if len(candidate.encode('utf-8')) + 1 <= 4096 else encoded
+    except Exception:
+        return encoded
+
+
+def _capacity_worker_forward(sampler, value, mount_id):
+    """Promote only validated private observations; never a business proof."""
+    try:
+        checked = _capacity_worker_diagnostic(value)
+    except Exception:
+        sampler._capacity_attempt_step('worker_inventory', mount_id=mount_id, status='not_run',
+            reason='not_observed' if value is None else 'observer_error', observations={})
+        return
+    if not checked['steps']:
+        sampler._capacity_attempt_step('worker_inventory', mount_id=mount_id, status='not_run',
+            reason=checked['observation_status'], observations={})
+        return
+    for phase in _CAPACITY_WORKER_PHASES:
+        step = checked['steps'][phase]
+        stage = ('worker_inventory' if phase.startswith('inventory_') or phase == 'path'
+                 else 'worker_' + phase)
+        sampler._capacity_attempt_step(stage, mount_id=mount_id, status=step['status'],
+            reason=step['reason'], observations=dict(step['observations'], phase=phase))
+
+
+def _capacity_measure_entry(entry, deadline, proc_root='/proc', sys_root='/sys', *, keep_handle=False,
+                            observer=None):
     """Explicit worker only: no-follow real mount FD before/after fstatvfs."""
-    def current():
+    def observe(phase, status, reason=None, observations=None):
+        try:
+            _capacity_worker_step(observer, phase, status, reason, observations)
+        except Exception:
+            if observer is not None:
+                try:
+                    observer(phase, {'status': 'not_run', 'reason': 'observer_error', 'observations': {}})
+                except Exception:
+                    pass
+    def current(phase):
         if time.monotonic() >= deadline:
+            observe(phase, 'failed', 'timeout')
             raise CapacityRefreshError('timeout')
-        rows, complete = _capacity_inventory(proc_root, sys_root)
-        if not complete or not entry['_key'] or not any(
-                row['mount_id'] == entry['mount_id'] and row['_key'] == entry['_key'] for row in rows):
+        try:
+            rows, complete = _capacity_inventory(proc_root, sys_root)
+        except Exception:
+            observe(phase, 'failed', 'inventory_failed')
+            raise
+        compared, seen, actual_key = False, False, None
+        def matches(row):
+            nonlocal compared, seen, actual_key
+            compared = True
+            if row['mount_id'] != entry['mount_id']:
+                return False
+            seen, actual_key = True, row['_key']
+            return actual_key == entry['_key']
+        matched = complete and entry['_key'] and any(matches(row) for row in rows)
+        def fields():
+            value = {'expected_mount_id': entry['mount_id'], 'expected_key': entry['_key'],
+                'inventory_complete': bool(complete), 'matched': bool(matched),
+                'comparison_performed': compared, 'actual_key_observed': seen,
+                'actual_key_null': seen and actual_key is None}
+            if type(actual_key) is str and re.fullmatch(r'[0-9a-f]{64}', actual_key):
+                value['actual_key'] = actual_key
+            return value
+        observe(phase, 'passed' if matched else 'failed', None if matched else
+                ('inventory_incomplete' if not complete else 'key_mismatch'),
+                fields)
+        if not matched:
             raise CapacityRefreshError('identity_changed')
-    current()
+    current('inventory_before')
     if not sys.platform.startswith('linux') or not hasattr(os, 'fstatvfs'):
+        observe('path', 'failed', 'platform_unavailable')
         raise CapacityRefreshError('unavailable')
     parts = entry['mount'].split('/')[1:]
     if (not entry['mount'].startswith(_CAPACITY_DRIVES_ROOT + '/')
             or any(part in ('', '.', '..') for part in parts)):
+        observe('path', 'failed', 'path_invalid')
         raise CapacityRefreshError('identity_changed')
+    observe('path', 'passed')
     descriptors = []
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-        descriptors.append(os.open('/', flags))
-        for part in parts:
-            if time.monotonic() >= deadline:
-                raise CapacityRefreshError('timeout')
-            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+        try:
+            descriptors.append(os.open('/', flags))
+            for part in parts:
+                if time.monotonic() >= deadline:
+                    observe('fd_before', 'failed', 'timeout')
+                    raise CapacityRefreshError('timeout')
+                descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+        except CapacityRefreshError:
+            raise
+        except Exception:
+            observe('fd_before', 'failed', 'fd_open_failed')
+            raise
         descriptor = descriptors[-1]
-        before = os.fstat(descriptor)
+        try:
+            before = os.fstat(descriptor)
+        except Exception:
+            observe('fd_before', 'failed', 'fd_stat_failed')
+            raise
         wanted = tuple(int(value) for value in entry['device'].split(':'))
-        if (not stat.S_ISDIR(before.st_mode) or (os.major(before.st_dev), os.minor(before.st_dev)) != wanted
-                or _capacity_fd_mount(descriptor, proc_root) != entry['mount_id']):
+        if not stat.S_ISDIR(before.st_mode):
+            observe('fd_before', 'failed', 'fd_not_directory', {'fd_checked': False})
             raise CapacityRefreshError('identity_changed')
-        current()
-        stats = os.fstatvfs(descriptor)
-        after = os.fstat(descriptor)
+        actual_device = (os.major(before.st_dev), os.minor(before.st_dev))
+        if actual_device != wanted:
+            observe('fd_before', 'failed', 'device_mismatch', lambda: {
+                'expected_device': entry['device'], 'actual_device': '%s:%s' % actual_device,
+                'before_digest': _capacity_worker_stat_digest(before), 'fd_checked': False})
+            raise CapacityRefreshError('identity_changed')
+        try:
+            actual_mount = _capacity_fd_mount(descriptor, proc_root)
+        except Exception:
+            observe('fd_before', 'failed', 'fd_mount_unavailable', {'fd_checked': True})
+            raise
+        observe('fd_before', 'passed' if actual_mount == entry['mount_id'] else 'failed',
+            None if actual_mount == entry['mount_id'] else 'mount_mismatch', lambda: {
+                'expected_mount_id': entry['mount_id'], 'actual_mount_id': actual_mount,
+                'expected_device': entry['device'], 'actual_device': '%s:%s' % actual_device,
+                'before_digest': _capacity_worker_stat_digest(before), 'fd_checked': True})
+        if actual_mount != entry['mount_id']:
+            raise CapacityRefreshError('identity_changed')
+        current('inventory_opened')
+        try:
+            stats = os.fstatvfs(descriptor)
+        except Exception:
+            observe('measure', 'failed', 'measurement_failed', {'executed': True})
+            raise
+        observe('measure', 'passed', observations={'executed': True})
+        try:
+            after = os.fstat(descriptor)
+        except Exception:
+            observe('fd_after', 'failed', 'fd_stat_failed')
+            raise
         if ((before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode)) !=
-                (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
-                or _capacity_fd_mount(descriptor, proc_root) != entry['mount_id']):
+                (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))):
+            observe('fd_after', 'failed', 'metadata_changed', lambda: {
+                'before_digest': _capacity_worker_stat_digest(before),
+                'after_digest': _capacity_worker_stat_digest(after), 'fd_checked': False})
             raise CapacityRefreshError('identity_changed')
-        current()
+        try:
+            actual_mount = _capacity_fd_mount(descriptor, proc_root)
+        except Exception:
+            observe('fd_after', 'failed', 'fd_mount_unavailable', {'fd_checked': True})
+            raise
+        observe('fd_after', 'passed' if actual_mount == entry['mount_id'] else 'failed',
+            None if actual_mount == entry['mount_id'] else 'mount_mismatch', lambda: {
+                'expected_mount_id': entry['mount_id'], 'actual_mount_id': actual_mount,
+                'before_digest': _capacity_worker_stat_digest(before),
+                'after_digest': _capacity_worker_stat_digest(after), 'fd_checked': True})
+        if actual_mount != entry['mount_id']:
+            raise CapacityRefreshError('identity_changed')
+        current('inventory_after')
         block = stats.f_frsize or stats.f_bsize
         total, used = stats.f_blocks * block, (stats.f_blocks - stats.f_bfree) * block
         if not (type(total) is int and type(used) is int and 0 < total <= 2**63 - 1 and 0 <= used <= total):
+            observe('measure', 'failed', 'invalid_measurement', {'executed': True})
             raise CapacityRefreshError('invalid_measurement')
         values = {'total_bytes': total, 'used_bytes': used, 'usage_percent': used / total * 100}
         # The real mount FD lives only through measurement and commit checks.
         # Cached values retain a proc namespace event watch, never this FD.
-        return (values, os.dup(descriptor)) if keep_handle else values
+        if keep_handle:
+            try:
+                return values, os.dup(descriptor)
+            except Exception:
+                observe('transfer', 'failed', 'fd_duplicate_failed')
+                raise
+        return values
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
@@ -899,6 +1125,23 @@ def _capacity_measure_entry(entry, deadline, proc_root='/proc', sys_root='/sys',
 def _capacity_worker_main():
     """Private subprocess protocol; public APIs never accept worker arguments."""
     anchor, channel = None, None
+    diagnostic = None
+    try:
+        diagnostic = _capacity_worker_trace()
+    except Exception:
+        pass
+    def observe(phase, step):
+        try:
+            diagnostic['steps'][phase] = step
+            if step['reason'] == 'observer_error':
+                diagnostic['observation_status'] = 'observer_error'
+        except Exception:
+            pass
+    def record(phase, status, reason=None, observations=None):
+        try:
+            _capacity_worker_step(observe, phase, status, reason, observations)
+        except Exception:
+            observe(phase, {'status': 'not_run', 'reason': 'observer_error', 'observations': {}})
     try:
         raw = sys.stdin.buffer.read(16385)
         if len(raw) > 16384:
@@ -907,8 +1150,14 @@ def _capacity_worker_main():
         if set(request) != {'entry', 'deadline', 'channel'} or type(request['channel']) is not int:
             raise ValueError()
         channel = socket.socket(fileno=request['channel'])
-        value, anchor = _capacity_measure_entry(request['entry'], request['deadline'], keep_handle=True)
-        channel.sendmsg([b'1'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [anchor]))])
+        value, anchor = _capacity_measure_entry(request['entry'], request['deadline'], keep_handle=True,
+                                                observer=observe)
+        try:
+            channel.sendmsg([b'1'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i', [anchor]))])
+        except Exception:
+            record('transfer', 'failed', 'scm_send_failed', {'executed': True})
+            raise
+        record('transfer', 'passed', observations={'executed': True})
         result = {'ok': True, 'values': value}
     except CapacityRefreshError as error:
         result = {'ok': False, 'reason': error.reason}
@@ -919,7 +1168,12 @@ def _capacity_worker_main():
             os.close(anchor)
         if channel is not None:
             channel.close()
-    print(json.dumps(result, allow_nan=False), flush=True)
+    encoded = json.dumps(result, allow_nan=False)
+    try:
+        encoded = _capacity_worker_encode(result, diagnostic, encoded)
+    except Exception:
+        pass
+    print(encoded, flush=True)
     return 0
 
 
@@ -935,6 +1189,865 @@ def empty_status():
         "network": {"interface": None, "ipv4": None, "rx_bytes_per_sec": None, "tx_bytes_per_sec": None},
         "disks": [],
     }
+
+
+class _CapacityAttemptStore:
+    """Keep four distinct attempts; evidence never grants a business permission.
+
+    Missing row phases mean not_run, never passed. A repeated phase replaces its
+    latest observation (counted), but cannot replace the attempt's first rejection.
+    Clock values are optional caller observations, not inferred by this store.
+    """
+    ROW_STAGES = ('initial_key', 'eligibility', 'worker_request', 'worker_inventory',
+                  'worker_fd_before', 'worker_measure', 'worker_fd_after', 'worker_transfer',
+                  'parent_scm', 'parent_watch', 'post_probe_inventory',
+                  'final_inventory', 'post_fd_release', 'commit')
+    BATCH_STAGES = ('begin', 'inventory', 'watch', 'epoch', 'authorization',
+                    'deadline', 'row_rewrite', 'rollback', 'finish')
+    HISTORY_STAGES = ('candidate', 'web_return', 'json_before', 'json_after', 'write', 'finalize', 'prune')
+    WORKER_PHASES = ('inventory_before', 'path', 'fd_before', 'inventory_opened',
+                     'measure', 'fd_after', 'inventory_after', 'transfer', 'initial',
+                     'cache_match', 'ordering', 'before_publish', 'rollback', 'published')
+    STATUSES = ('passed', 'failed', 'not_run')
+    FINAL_STATUSES = ('complete', 'partial', 'failed', 'cancelled', 'stale')
+    ORIGINS = ('web_owner_refresh', 'web_owner_fill', 'web_owner_capacity', 'local_screen_fill', 'unknown')
+    SOURCES = ('visible_refresh', 'missing_fill', 'explicit_refresh', 'get_projection',
+               'sample', 'start', 'close', 'unknown')
+    REASONS = frozenset(('identity_changed', 'authorization_denied', 'timeout', 'busy',
+                        'probe_failed', 'invalid_measurement', 'unavailable', 'standby',
+                        'power_state_unverified', 'unclassified_reason', 'not_observed',
+                        'epoch_changed', 'mount_epoch_changed', 'watch_missing',
+                        'mount_event', 'namespace_changed', 'descriptor_lost', 'watch_error',
+                        'inventory_incomplete', 'inventory_changed', 'key_changed',
+                        'device_changed', 'row_missing', 'source_changed', 'closed',
+                        'worker_protocol_invalid', 'carrier_too_large', 'short_read',
+                        'fd_missing', 'fd_changed', 'fd_type_invalid', 'mount_id_changed',
+                        'scm_count_invalid', 'worker_failed', 'transport_failed',
+                        'candidate_missing', 'candidate_stale', 'newer_batch_published',
+                        'no_successful_rows', 'historical_pruned', 'observer_error'))
+    REASONS |= frozenset(('key_mismatch', 'platform_unavailable', 'path_invalid', 'fd_not_directory',
+                         'device_mismatch', 'fd_mount_unavailable', 'mount_mismatch', 'metadata_changed',
+                         'measurement_failed', 'inventory_failed', 'fd_open_failed', 'fd_stat_failed',
+                         'fd_duplicate_failed', 'scm_send_failed', 'request_limit', 'message_invalid',
+                         'size_exceeded'))
+    REASONS |= frozenset(('batch_changed', 'inventory_missing', 'lifecycle_changed',
+                         'binding_changed', 'no_pending', 'sequence_exhausted',
+                         'binding_unverified', 'already_finalized', 'cache_changed',
+                         'superseded', 'publication_error', 'rolled_back', 'exception',
+                         'unsupported_filesystem'))
+    REASONS |= frozenset(('encoding_unavailable', 'transport_error', 'response_error',
+                         'response_not_written', 'response_rejected', 'publisher_unavailable',
+                         'publication_rejected', 'publication_result_unobserved'))
+    REASONS |= frozenset(('response_limit', 'worker_exit', 'response_json_invalid', 'response_shape_invalid',
+                         'response_values_invalid', 'worker_timeout', 'worker_identity_changed',
+                         'worker_unavailable', 'worker_invalid_measurement', 'worker_probe_failed'))
+    BOOLS = frozenset(('checked', 'complete', 'key_equal', 'identity_equal', 'epoch_equal',
+                      'mount_epoch_equal', 'namespace_equal', 'watch_present', 'worker_ok',
+                      'fd_received', 'fd_regular', 'fd_directory', 'fd_same', 'committed',
+                      'authorized', 'current', 'closed', 'sent', 'written', 'published',
+                      'inventory_complete', 'directory', 'fd_check_run', 'identity_unchanged',
+                      'guard_passed', 'write_completed', 'publisher_called', 'send_attempted',
+                      'matched', 'executed', 'fd_checked', 'serialized', 'comparison_performed',
+                      'actual_key_observed', 'actual_key_null'))
+    COUNTS = frozenset(('expected_mount_id', 'actual_mount_id', 'expected_epoch', 'actual_epoch',
+                       'expected_mount_epoch', 'actual_mount_epoch', 'inventory_count',
+                       'eligible_count', 'pending_count', 'positive_count', 'removed_count',
+                       'refreshed_count', 'failed_count', 'skipped_count', 'unavailable_count',
+                       'bytes_received', 'carrier_bytes', 'scm_count', 'row_count',
+                       'expected_batch', 'actual_batch', 'before_count', 'after_count',
+                       'expected_capacity_epoch', 'actual_capacity_epoch', 'inventory_seq',
+                       'expected_major', 'expected_minor', 'actual_major', 'actual_minor',
+                       'watch_mask', 'request_bytes', 'response_bytes', 'fd_count',
+                       'ancillary_count', 'flags', 'exit_code', 'records_count',
+                       'candidate_count', 'history_batch', 'current_count'))
+    COUNTS |= frozenset(('bytes', 'expected_device', 'actual_device'))
+    DIGESTS = frozenset(('expected_key_digest', 'actual_key_digest',
+                        'expected_identity_digest', 'actual_identity_digest', 'inventory_digest',
+                        'expected_key', 'actual_key', 'before_digest', 'after_digest'))
+    ENUMS = {'phase': WORKER_PHASES,
+             'watch_reason': ('unchanged', 'descriptor_lost', 'namespace_changed', 'mount_event',
+                              'watch_error', 'changed_unclassified', 'observer_error', 'not_observed'),
+             'result_status': ('refreshed', 'cached', 'failed', 'unavailable', 'identity_changed',
+                               'skipped_standby', 'complete', 'partial', 'rolled_back', 'not_observed'),
+             'code': tuple(sorted(REASONS))}
+    # Every phase has an exact producer field set. Optional clock values belong
+    # to begin/finish, not a catch-all observation dictionary on every phase.
+    COMMON = frozenset()
+    INVENTORY_FIELDS = frozenset(('inventory_complete', 'inventory_count', 'inventory_seq',
+                                 'expected_key_digest', 'actual_key_digest', 'actual_identity_digest', 'phase'))
+    FD_FIELDS = frozenset(('expected_mount_id', 'actual_mount_id', 'expected_major', 'expected_minor',
+                          'actual_major', 'actual_minor', 'directory', 'fd_check_run',
+                          'identity_unchanged', 'fd_received', 'fd_same', 'expected_device',
+                          'actual_device', 'matched', 'executed', 'fd_checked', 'before_digest', 'after_digest'))
+    WATCH_FIELDS = frozenset(('expected_capacity_epoch', 'actual_capacity_epoch',
+                             'expected_mount_epoch', 'actual_mount_epoch', 'watch_present',
+                             'watch_reason', 'watch_mask', 'epoch_equal', 'mount_epoch_equal'))
+    _ALLOWED = {
+        'initial_key': frozenset(('inventory_complete', 'inventory_count', 'inventory_seq', 'actual_key_digest', 'actual_identity_digest', 'actual_mount_epoch')),
+        'eligibility': frozenset(),
+        'worker_request': frozenset(('response_bytes', 'bytes', 'send_attempted')),
+        'worker_inventory': frozenset(('expected_mount_id', 'expected_key', 'actual_key', 'inventory_complete', 'matched', 'phase', 'comparison_performed', 'actual_key_observed', 'actual_key_null')),
+        'worker_fd_before': frozenset(('expected_mount_id', 'actual_mount_id', 'expected_device', 'actual_device', 'before_digest', 'fd_checked', 'phase')),
+        'worker_measure': frozenset(('executed', 'phase')),
+        'worker_fd_after': frozenset(('expected_mount_id', 'actual_mount_id', 'before_digest', 'after_digest', 'fd_checked', 'phase')),
+        'worker_transfer': frozenset(('executed', 'phase')),
+        'parent_scm': frozenset(('fd_count', 'expected_mount_id', 'actual_mount_id', 'fd_checked')),
+        'parent_watch': WATCH_FIELDS - frozenset(('epoch_equal', 'mount_epoch_equal')),
+        'post_probe_inventory': INVENTORY_FIELDS | frozenset(('expected_mount_epoch', 'actual_mount_epoch')),
+        'final_inventory': INVENTORY_FIELDS | frozenset(('expected_mount_epoch', 'actual_mount_epoch')),
+        'post_fd_release': INVENTORY_FIELDS | frozenset(('expected_mount_epoch', 'actual_mount_epoch')),
+        'commit': frozenset(('result_status',)),
+        'begin': frozenset(),
+        'inventory': frozenset(),
+        'watch': WATCH_FIELDS - frozenset(('epoch_equal', 'mount_epoch_equal')),
+        'epoch': frozenset(('expected_capacity_epoch', 'actual_capacity_epoch')),
+        'authorization': frozenset(),
+        'deadline': frozenset(),
+        'row_rewrite': frozenset(),
+        'rollback': frozenset(('result_status',)),
+        'finish': frozenset(),
+        'candidate': frozenset(('candidate_count', 'history_batch', 'expected_capacity_epoch', 'expected_mount_epoch')),
+        'web_return': frozenset(('guard_passed', 'code')),
+        'json_before': frozenset(('guard_passed', 'code')),
+        'json_after': frozenset(('guard_passed', 'code', 'serialized')),
+        'write': frozenset(('code', 'write_completed')),
+        'finalize': frozenset(('phase', 'expected_capacity_epoch', 'actual_capacity_epoch', 'expected_mount_epoch',
+                               'actual_mount_epoch', 'guard_passed', 'publisher_called', 'published', 'code',
+                               'records_count', 'history_batch')),
+        'prune': frozenset(('expected_mount_id', 'expected_key_digest', 'actual_key_digest',
+                            'expected_identity_digest', 'actual_identity_digest', 'actual_capacity_epoch',
+                            'actual_mount_epoch', 'removed_count')),
+    }
+    SUMMARY_FIELDS = frozenset(('code',))
+    PHASES_BY_STAGE = {'worker_inventory': ('inventory_before', 'path', 'inventory_opened', 'inventory_after'),
+                      'worker_fd_before': ('fd_before',), 'worker_measure': ('measure',),
+                      'worker_fd_after': ('fd_after',), 'worker_transfer': ('transfer',),
+                      'finalize': ('initial', 'cache_match', 'ordering', 'before_publish', 'rollback', 'published')}
+    MAX_ATTEMPTS, MAX_ROWS = 4, 128
+    BENIGN_REASONS = frozenset(('unsupported_filesystem', 'power_state_unverified', 'standby'))
+    _MAX_COUNTER = (1 << 31) - 1
+    _MAX_ID = (1 << 63) - 1
+
+    def __init__(self):
+        self._next = 0
+        self.reset()
+
+    def reset(self):
+        """Start/close reset without reusing IDs in the same store instance."""
+        self._attempts = {}
+        self._first = self._last = self._latest = self._removal = None
+        self._dropped = self._evicted = self._errors = 0
+        previous = getattr(self, '_lifecycle', 0)
+        self._disabled = getattr(self, '_disabled', False) or previous >= self._MAX_ID
+        self._lifecycle = min(previous + 1, self._MAX_ID)
+        if self._disabled:
+            self._bad()
+
+    @staticmethod
+    def _number(value, decimal=False):
+        if type(value) is int and 0 <= value < (1 << 64):
+            return str(value) if decimal or value > (1 << 53) - 1 else value
+        return None
+
+    @staticmethod
+    def _clock(value):
+        if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1e15:
+            return value
+        return None
+
+    def _bad(self, count=1):
+        self._errors = min(self._MAX_COUNTER, self._errors + count)
+
+    def _observations(self, value, allowed=None):
+        result = {}
+        if type(value) is not dict:
+            self._bad()
+            return result
+        for key, item in value.items():
+            valid = False
+            if allowed is not None and key not in allowed:
+                self._bad()
+                continue
+            if item is None and key in self.BOOLS | self.COUNTS | self.DIGESTS | self.COMMON | set(self.ENUMS):
+                result[key] = None
+                continue
+            if key in self.BOOLS and type(item) is bool:
+                result[key], valid = item, True
+            elif key in ('expected_device', 'actual_device') and type(item) is str and re.fullmatch(r'[0-9]{1,7}:[0-9]{1,7}', item):
+                result[key], valid = item, True
+            elif key in self.COUNTS and key not in ('expected_device', 'actual_device') and self._number(item) is not None:
+                result[key], valid = self._number(item), True
+            elif key in self.DIGESTS and type(item) is str and re.fullmatch(r'[0-9a-f]{64}', item):
+                result[key], valid = item, True
+            elif key in ('sampled_mono', 'sampled_at') and self._clock(item) is not None:
+                result[key], valid = item, True
+            elif key in self.ENUMS and type(item) is str and item in self.ENUMS[key]:
+                result[key], valid = item, True
+            elif key == 'code' and type(item) is int and 100 <= item <= 599:
+                result[key], valid = item, True
+            if not valid:
+                self._bad()
+        return result
+
+    def _event(self, stage, status, reason, observations):
+        if status not in self.STATUSES:
+            self._bad()
+            return None
+        if reason is not None and (type(reason) is not str or reason not in self.REASONS):
+            reason = 'unclassified_reason'
+            self._bad()
+        errors = self._errors
+        value = {'status': status, 'reason': reason,
+                 'observations': self._observations(observations, self._ALLOWED.get(stage, frozenset()))}
+        phase = value['observations'].get('phase')
+        if phase is not None and phase not in self.PHASES_BY_STAGE.get(stage, ()):
+            del value['observations']['phase']
+            self._bad()
+        if errors != self._errors:
+            value['observation_status'] = 'observer_error'
+        return value
+
+    def _trim(self):
+        active = [key for key, item in self._attempts.items() if item['status'] == 'running']
+        order = [self._first, self._last] + active[-1:] + [self._latest]
+        order += sorted(self._attempts, key=int, reverse=True)
+        keep = []
+        for key in order:
+            if key in self._attempts and key not in keep and len(keep) < self.MAX_ATTEMPTS:
+                keep.append(key)
+        for key in tuple(self._attempts):
+            if key not in keep:
+                del self._attempts[key]
+                self._evicted = min(self._MAX_COUNTER, self._evicted + 1)
+
+    def begin(self, epoch, mount_epoch, origin, source, *, sampled_mono=None, sampled_at=None):
+        if self._disabled or self._next >= self._MAX_ID:
+            self._disabled = True
+            self._bad()
+            self._dropped = min(self._MAX_COUNTER, self._dropped + 1)
+            return None
+        self._next += 1
+        key = str(self._next)
+        if origin not in self.ORIGINS or source not in self.SOURCES:
+            self._bad()
+        value = {'id': key, 'lifecycle': str(self._lifecycle), 'epoch': self._number(epoch, True),
+                 'mount_epoch': self._number(mount_epoch, True),
+                 'origin': origin if origin in self.ORIGINS else 'unknown',
+                 'source': source if source in self.SOURCES else 'unknown', 'status': 'running',
+                 'started_mono': self._clock(sampled_mono), 'started_at': self._clock(sampled_at),
+                 'rows': {}, 'phases': {}, 'history': {}, 'first_rejection': None, 'first_history_rejection': None,
+                 'rows_dropped': 0, 'phase_replacements': 0}
+        self._attempts[key] = value
+        self._trim()
+        return key
+
+    def row(self, key, mount_id, metadata=None):
+        return self._row(key, mount_id, metadata) is not None
+
+    def _row(self, key, mount_id, metadata=None):
+        value = self._attempts.get(key)
+        if value is None or type(mount_id) is not int or not 0 < mount_id <= 9999999999:
+            self._bad()
+            return None
+        rid = str(mount_id)
+        if rid not in value['rows']:
+            if len(value['rows']) == self.MAX_ROWS:
+                value['rows_dropped'] = min(self._MAX_COUNTER, value['rows_dropped'] + 1)
+                self._dropped = min(self._MAX_COUNTER, self._dropped + 1)
+                return None
+            value['rows'][rid] = {'mount_id': mount_id, 'metadata': {}, 'phases': {},
+                                  'first_rejection': None, 'final_disposition': None}
+        row = value['rows'][rid]
+        if metadata is not None:
+            if type(metadata) is not dict:
+                self._bad()
+                return row
+            for name, item in metadata.items():
+                if name == 'mount_id' and type(item) is int and item == mount_id:
+                    continue
+                valid = (name == 'device_name' and type(item) is str and len(item) <= 255 and
+                         re.fullmatch(r'(?:sd[a-z]+[0-9]{0,10}|nvme[0-9]{1,10}n[0-9]{1,10}(?:p[0-9]{1,10})?|mmcblk[0-9]{1,10}(?:p[0-9]{1,10})?)', item))
+                valid = valid or (name in ('device', 'major_minor') and type(item) is str and re.fullmatch(r'[0-9]{1,10}:[0-9]{1,10}', item))
+                valid = valid or (name in ('key_digest', 'identity_digest') and type(item) is str and re.fullmatch(r'[0-9a-f]{64}', item))
+                if valid:
+                    if name in row['metadata'] and row['metadata'][name] != item:
+                        self._bad()  # Never splice a second row identity into old evidence.
+                    else:
+                        row['metadata'][name] = item
+                else:
+                    self._bad()
+        return row
+
+    def step(self, key, stage, mount_id=None, status='passed', reason=None, observations=None):
+        value = self._attempts.get(key)
+        allowed = self.BATCH_STAGES if mount_id is None else self.ROW_STAGES
+        if value is None or stage not in allowed:
+            self._bad()
+            return
+        row = None if mount_id is None else self._row(key, mount_id)
+        if mount_id is not None and row is None:
+            return
+        event = self._event(stage, status, reason, observations or {})
+        if event is None:
+            return
+        phases = value['phases'] if row is None else row['phases']
+        phase = event['observations'].get('phase')
+        slot = stage + '/' + phase if phase else stage
+        if slot in phases:
+            value['phase_replacements'] = min(self._MAX_COUNTER, value['phase_replacements'] + 1)
+        phases[slot] = event
+        if status == 'failed':
+            if row is not None and row['first_rejection'] is None:
+                row['first_rejection'] = {'stage': stage, 'phase': phase, **copy.deepcopy(event)}
+            if reason not in self.BENIGN_REASONS:
+                if value['first_rejection'] is None:
+                    value['first_rejection'] = {'stage': stage, 'phase': phase, 'mount_id': mount_id, **copy.deepcopy(event)}
+                self._first = self._first or key
+                self._last = key
+        if row is not None and stage == 'commit':
+            row['final_disposition'] = {'status': status, 'reason': event['reason'],
+                                        'result_status': event['observations'].get('result_status', 'not_observed')}
+        self._trim()
+
+    def finish(self, key, status, *, observations=None, sampled_mono=None, sampled_at=None,
+               epoch=None, mount_epoch=None):
+        value = self._attempts.get(key)
+        if value is None or status not in self.FINAL_STATUSES:
+            self._bad()
+            return
+        changed = ((epoch is not None and self._number(epoch, True) != value['epoch']) or
+                   (mount_epoch is not None and self._number(mount_epoch, True) != value['mount_epoch']))
+        value.update(status='stale' if changed else status,
+                     finished_mono=self._clock(sampled_mono), finished_at=self._clock(sampled_at),
+                     summary=self._observations(observations or {}, self.SUMMARY_FIELDS))
+        if changed:
+            self.step(key, 'epoch', status='failed', reason='epoch_changed')
+        if status in ('failed', 'cancelled') and value['first_rejection'] is None:
+            reason = (observations or {}).get('code')
+            self.step(key, 'finish', status='failed', reason=reason if reason in self.REASONS else 'not_observed')
+        self._latest = str(max(int(key), int(self._latest or 0)))
+        self._trim()
+
+    def history(self, key, event, status, reason=None, observations=None):
+        value = self._attempts.get(key)
+        if value is None or event not in self.HISTORY_STAGES:
+            self._bad()
+            return
+        item = self._event(event, status, reason, observations or {})
+        if item is None:
+            return
+        phase = item['observations'].get('phase')
+        value['history'][event + '/' + phase if phase else event] = item
+        if status == 'failed' and value['first_history_rejection'] is None:
+            value['first_history_rejection'] = {'stage': event, 'phase': phase, **copy.deepcopy(item)}
+        if status == 'failed' and reason not in self.BENIGN_REASONS:
+            if value['first_rejection'] is None:
+                value['first_rejection'] = {'stage': event, 'phase': phase, 'mount_id': None, **copy.deepcopy(item)}
+            self._first = self._first or key
+            self._last = key
+        removed = item['observations'].get('removed_count', 0)
+        if self._removal is None and type(removed) is int and removed > 0:
+            self._removal = {'attempt_id': key, 'event': event, 'epoch': value['epoch'],
+                             'mount_epoch': value['mount_epoch'], 'lifecycle': value['lifecycle'], **copy.deepcopy(item)}
+        self._trim()
+
+    def snapshot(self):
+        """RAM-only deep copy; stage orders define explicit absent/not_run semantics."""
+        value = copy.deepcopy({'schema': 1, 'lifecycle': str(self._lifecycle),
+                              'observation_status': 'observer_error' if self._errors else 'complete',
+                              'sequence_exhausted': self._disabled,
+                              'observation_errors': self._errors, 'evicted_attempts': self._evicted,
+                              'rows_dropped': self._dropped, 'max_attempts': self.MAX_ATTEMPTS,
+                              'max_rows': self.MAX_ROWS, 'missing_stage_status': 'not_run',
+                              'row_stage_order': list(self.ROW_STAGES), 'batch_stage_order': list(self.BATCH_STAGES),
+                              'history_stage_order': list(self.HISTORY_STAGES),
+                              'worker_phase_order': list(self.WORKER_PHASES),
+                              'phase_limits_by_stage': {key: list(item) for key, item in self.PHASES_BY_STAGE.items()},
+                              'first_rejected_since_lifecycle': self._first, 'first_rejected_id': self._first,
+                              'last_rejected': self._last,
+                              'latest_completed': self._latest,
+                              'first_historical_removal': self._removal,
+                              'attempts': sorted(self._attempts.values(), key=lambda item: int(item['id']))})
+        # Detach original observations before the fixed, pure wire codec runs.
+        stages = self.ROW_STAGES + self.BATCH_STAGES + self.HISTORY_STAGES
+        fields = tuple(sorted(self.BOOLS | self.COUNTS | self.DIGESTS | self.COMMON | set(self.ENUMS)))
+        value['phase_columns'] = ['stage', 'subphase', 'status', 'reason', 'observations', 'observation_error']
+        value['stage_values'] = list(stages)
+        value['status_values'] = list(self.STATUSES)
+        value['reason_values'] = [None] + sorted(self.REASONS)
+        value['observation_fields'] = list(fields)
+        value['observation_layouts'] = [[fields.index(name) for name in sorted(self._ALLOWED[stage])]
+                                         for stage in stages]
+        value['metadata_fields'] = ['device', 'device_name', 'major_minor', 'key_digest', 'identity_digest']
+        def pack(phases):
+            result = []
+            for slot, event in phases.items():
+                stage, _, phase = slot.partition('/')
+                stage_index = stages.index(stage)
+                result.append([stage_index, self.WORKER_PHASES.index(phase) if phase else None,
+                               self.STATUSES.index(event['status']), value['reason_values'].index(event['reason']),
+                               event['observations'],
+                               event.get('observation_status') == 'observer_error'])
+            return result
+        for attempt in value['attempts']:
+            attempt['phases'] = pack(attempt['phases'])
+            attempt['history'] = pack(attempt['history'])
+            for row in attempt['rows'].values():
+                if row['first_rejection'] is not None:
+                    rejection = row['first_rejection']
+                    slot = rejection['stage'] + '/' + rejection['phase'] if rejection['phase'] else rejection['stage']
+                    row['first_rejection'] = pack({slot: rejection})[0]
+                row['phases'] = pack(row['phases'])
+        return _capacity_attempt_encode(value)
+
+
+class _CapacityAttemptCodec:
+    """Closed RAM-evidence codec; it never reads a clock, file or collector.
+
+    The 32-digit codec stress ceiling does not change the Store's u64 input
+    contract. A rejected document is not partial evidence or permission.
+    """
+    ENCODING = 'fixed_fields_v2_b36_b64digest'
+    DIGITS = '0123456789abcdefghijklmnopqrstuvwxyz'
+    B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+    LABEL = r'(?:sd[a-z]+[0-9]{0,10}|nvme[0-9]{1,10}n[0-9]{1,10}(?:p[0-9]{1,10})?|mmcblk[0-9]{1,10}(?:p[0-9]{1,10})?)'
+    METADATA = ('device', 'device_name', 'major_minor', 'key_digest', 'identity_digest')
+    LOGICAL_COLUMNS = ['stage', 'subphase', 'status', 'reason', 'observations', 'observation_error']
+    WIRE_COLUMNS = ['slot', 'status_error_flags', 'reason', 'observations']
+    WIRE_LIMIT, LOGICAL_LIMIT = 5 * 1024 * 1024, 20 * 1024 * 1024
+    MAX_DIGESTS, MAX_STRINGS = 16400, 3584
+
+    def __init__(self):
+        self.store = _CapacityAttemptStore
+        self.stages = self.store.ROW_STAGES + self.store.BATCH_STAGES + self.store.HISTORY_STAGES
+        self.fields = sorted(self.store.BOOLS | self.store.COUNTS | self.store.DIGESTS | set(self.store.ENUMS))
+        self.reasons = [None] + sorted(self.store.REASONS)
+        self.layouts = [[self.fields.index(name) for name in sorted(self.store._ALLOWED[stage])]
+                        for stage in self.stages]
+        self.slots = {category: [[self.stages.index(stage), phase]
+                      for stage in stages for phase in (None, *(self.store.WORKER_PHASES.index(item)
+                          for item in self.store.PHASES_BY_STAGE.get(stage, ())))]
+                      for category, stages in (('row', self.store.ROW_STAGES),
+                          ('batch', self.store.BATCH_STAGES), ('history', self.store.HISTORY_STAGES))}
+        self.constants = {'schema': 1, 'max_attempts': 4, 'max_rows': 128,
+            'missing_stage_status': 'not_run', 'row_stage_order': list(self.store.ROW_STAGES),
+            'batch_stage_order': list(self.store.BATCH_STAGES), 'history_stage_order': list(self.store.HISTORY_STAGES),
+            'worker_phase_order': list(self.store.WORKER_PHASES),
+            'phase_limits_by_stage': {key: list(item) for key, item in self.store.PHASES_BY_STAGE.items()},
+            'stage_values': list(self.stages), 'status_values': list(self.store.STATUSES),
+            'reason_values': self.reasons, 'observation_fields': self.fields,
+            'observation_layouts': self.layouts, 'metadata_fields': list(self.METADATA)}
+        self.hashes, self.hash_indices, self.strings, self.string_indices = [], {}, [], {}
+        self.observed_error = False
+
+    @staticmethod
+    def require(condition):
+        if not condition:
+            raise ValueError('capacity_attempt_codec_invalid')
+
+    @classmethod
+    def b36(cls, number):
+        result = ''
+        while number:
+            number, digit = divmod(number, 36)
+            result = cls.DIGITS[digit] + result
+        return result or '0'
+
+    def unsigned(self, value, maximum):
+        self.require(type(value) is int and 0 <= value <= maximum)
+        return value
+
+    def decimal(self, value, maximum, *, positive=False, nullable=False):
+        if nullable and value is None:
+            return value
+        self.require(type(value) is str and len(value) <= 32 and
+                     re.fullmatch(r'(?:0|[1-9][0-9]*)', value) is not None)
+        self.require(int(value) <= maximum and (not positive or int(value) > 0))
+        return value
+
+    def clock(self, value):
+        self.require(value is None or (type(value) in (int, float) and math.isfinite(value)
+                                     and 0 <= value <= 1e15))
+
+    def reason(self, value):
+        self.require(value is None or (type(value) is str and value in self.store.REASONS))
+
+    def enum(self, value, choices):
+        self.require(type(value) is str and value in choices)
+
+    def kernel(self, name, value):
+        self.require(type(value) is str and len(value) <= 255)
+        pattern = self.LABEL if name == 'device_name' else (
+            r'[0-9]{1,7}:[0-9]{1,7}' if name in ('expected_device', 'actual_device')
+            else r'[0-9]{1,10}:[0-9]{1,10}')
+        self.require(re.fullmatch(pattern, value) is not None)
+
+    def primitive(self, name, value, *, metadata=False):
+        if value is None:
+            self.require(not metadata)
+        elif name in ('device', 'major_minor', 'device_name', 'expected_device', 'actual_device'):
+            self.kernel(name, value)
+        elif name in self.store.BOOLS:
+            self.require(type(value) is bool)
+        elif name in self.store.COUNTS:
+            if type(value) is int:
+                self.unsigned(value, (1 << 53) - 1)
+            else:
+                self.decimal(value, 10**32 - 1)
+                self.require(int(value) > (1 << 53) - 1)
+        elif name in self.store.DIGESTS or name in ('key_digest', 'identity_digest'):
+            self.require(type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) is not None)
+        elif name == 'code' and type(value) is int:
+            self.require(100 <= value <= 599)
+        else:
+            self.require(name in self.store.ENUMS)
+            self.enum(value, self.store.ENUMS[name])
+
+    def observations(self, value, stage, phase):
+        self.require(type(value) is dict and set(value) <= self.store._ALLOWED[stage])
+        for name, item in value.items():
+            self.primitive(name, item)
+        if 'phase' in value:
+            self.require(value['phase'] == phase)
+
+    def raw_event(self, value, stage, phase):
+        self.require(type(value) is dict and set(value) in (
+            {'status', 'reason', 'observations'}, {'status', 'reason', 'observations', 'observation_status'}))
+        self.enum(value['status'], self.store.STATUSES)
+        self.reason(value['reason'])
+        self.observations(value['observations'], stage, phase)
+        # Readable latches/headers retain the producer's u64 contract. Only
+        # typed event tokens admit the explicitly named 32-digit codec stress.
+        for name, item in value['observations'].items():
+            if name in self.store.COUNTS and name not in ('expected_device', 'actual_device') and item is not None:
+                self.require(int(item) < (1 << 64))
+        if 'observation_status' in value:
+            self.require(type(value['observation_status']) is str and value['observation_status'] == 'observer_error')
+            self.observed_error = True
+
+    def latch(self, value, kind):
+        if value is None:
+            return
+        self.require(type(value) is dict)
+        base = {'status', 'reason', 'observations'}
+        extra = {'stage', 'phase'} | ({'mount_id'} if kind == 'attempt' else set())
+        if kind == 'removal':
+            extra = {'attempt_id', 'event', 'epoch', 'mount_epoch', 'lifecycle'}
+        self.require(set(value) in (base | extra, base | extra | {'observation_status'}))
+        if kind == 'removal':
+            self.decimal(value['attempt_id'], self.store._MAX_ID, positive=True)
+            self.decimal(value['lifecycle'], self.store._MAX_ID, positive=True)
+            for name in ('epoch', 'mount_epoch'):
+                self.decimal(value[name], (1 << 64) - 1, nullable=True)
+            self.require(type(value['event']) is str and value['event'] == 'prune')
+            stage, phase = value['event'], None
+            self.require(value['observations'].get('removed_count') is not None)
+        else:
+            stage, phase = value['stage'], value['phase']
+            self.require(type(stage) is str and stage in (self.store.HISTORY_STAGES
+                         if kind == 'history' else self.stages))
+            self.require(phase is None or (type(phase) is str and
+                         phase in self.store.PHASES_BY_STAGE.get(stage, ())))
+            self.require(value['status'] == 'failed')
+            if kind == 'attempt':
+                mid = value['mount_id']
+                if mid is not None:
+                    self.require(stage in self.store.ROW_STAGES)
+                    self.require(type(mid) is int and 0 < mid <= 9999999999)
+                else:
+                    self.require(stage not in self.store.ROW_STAGES)
+        self.raw_event({key: item for key, item in value.items() if key in base | {'observation_status'}}, stage, phase)
+        if kind == 'removal':
+            self.require(int(value['observations']['removed_count']) > 0)
+
+    @staticmethod
+    def same(left, right):
+        # Equality alone would accept True for 1 in untrusted schema tables.
+        if type(left) is not type(right):
+            return False
+        if type(right) is dict:
+            return set(left) == set(right) and all(_CapacityAttemptCodec.same(left[key], item) for key, item in right.items())
+        if type(right) is list:
+            return len(left) == len(right) and all(_CapacityAttemptCodec.same(a, b) for a, b in zip(left, right))
+        return left == right
+
+    def headers(self, value, wire):
+        self.require(type(value) is dict)
+        dynamic = {'lifecycle', 'observation_status', 'sequence_exhausted', 'observation_errors',
+            'evicted_attempts', 'rows_dropped', 'first_rejected_since_lifecycle', 'first_rejected_id',
+            'last_rejected', 'latest_completed', 'first_historical_removal', 'attempts', 'phase_columns'}
+        extras = {'encoding', 'slot_layouts', 'digest_pool', 'string_pool'} if wire else set()
+        self.require(set(value) == set(self.constants) | dynamic | extras)
+        for key, expected in self.constants.items():
+            self.require(self.same(value[key], expected))
+        self.require(self.same(value['phase_columns'], self.WIRE_COLUMNS if wire else self.LOGICAL_COLUMNS))
+        self.decimal(value['lifecycle'], self.store._MAX_ID, positive=True)
+        self.require(type(value['sequence_exhausted']) is bool)
+        for name in ('observation_errors', 'evicted_attempts', 'rows_dropped'):
+            self.unsigned(value[name], self.store._MAX_COUNTER)
+        self.require(type(value['observation_status']) is str and value['observation_status'] ==
+                     ('observer_error' if value['observation_errors'] else 'complete'))
+        for key in ('first_rejected_since_lifecycle', 'first_rejected_id', 'last_rejected', 'latest_completed'):
+            self.decimal(value[key], self.store._MAX_ID, positive=True, nullable=True)
+        self.require(value['first_rejected_since_lifecycle'] == value['first_rejected_id'])
+        self.require((value['first_rejected_id'] is None) == (value['last_rejected'] is None))
+        self.latch(value['first_historical_removal'], 'removal')
+        if value['first_historical_removal'] is not None:
+            self.require(value['first_historical_removal']['lifecycle'] == value['lifecycle'])
+        self.require(type(value['attempts']) is list and len(value['attempts']) <= 4)
+        if wire:
+            self.require(type(value['encoding']) is str and value['encoding'] == self.ENCODING
+                         and self.same(value['slot_layouts'], self.slots))
+            self.pools(value['digest_pool'], value['string_pool'])
+
+    def pools(self, digest_pool, strings):
+        self.require(type(digest_pool) is str and len(digest_pool) % 43 == 0
+                     and len(digest_pool) <= self.MAX_DIGESTS * 43)
+        for offset in range(0, len(digest_pool), 43):
+            part = digest_pool[offset:offset + 43]
+            self.require(re.fullmatch(r'[A-Za-z0-9_-]{43}', part) is not None)
+            number = 0
+            for char in part:
+                number = (number << 6) | self.B64.index(char)
+            self.require(number & 3 == 0)
+            self.hashes.append((number >> 2).to_bytes(32, 'big').hex())
+        self.require(type(strings) is list and len(strings) <= self.MAX_STRINGS)
+        for item in strings:
+            self.require(type(item) is str and len(item) <= 255 and (
+                re.fullmatch(self.LABEL, item) is not None or
+                re.fullmatch(r'[0-9]{1,10}:[0-9]{1,10}', item) is not None))
+        self.strings = list(strings)
+
+    def intern(self, value, digest):
+        pool, indices, limit = (self.hashes, self.hash_indices, self.MAX_DIGESTS) if digest else (
+            self.strings, self.string_indices, self.MAX_STRINGS)
+        if value not in indices:
+            self.require(len(pool) < limit)
+            indices[value] = len(pool)
+            pool.append(value)
+        return self.b36(indices[value]).zfill(3)
+
+    def token(self, name, value):
+        if value is None:
+            return '-'
+        if name in self.store.BOOLS:
+            return '1' if value else '0'
+        if name in ('device', 'device_name', 'major_minor', 'expected_device', 'actual_device'):
+            return self.intern(value, False)
+        if name in self.store.COUNTS:
+            return self.b36(int(value))
+        if name in self.store.DIGESTS or name in ('key_digest', 'identity_digest'):
+            return self.intern(value, True)
+        if name == 'code':
+            return 'i' + self.b36(value) if type(value) is int else 'e' + self.b36(self.store.ENUMS[name].index(value))
+        return self.b36(self.store.ENUMS[name].index(value))
+
+    def number_token(self, token, maximum, width=21):
+        self.require(type(token) is str and re.fullmatch(r'[0-9a-z]{1,' + str(width) + '}', token) is not None)
+        number = int(token, 36)
+        self.require(self.b36(number) == token and number <= maximum)
+        return number
+
+    def untoken(self, name, token):
+        self.require(type(token) is str and 0 < len(token) <= 21)
+        if token == '-':
+            return None
+        if name in self.store.BOOLS:
+            self.require(token in ('0', '1'))
+            return token == '1'
+        if name in ('device', 'device_name', 'major_minor', 'expected_device', 'actual_device') or name in self.store.DIGESTS or name in ('key_digest', 'identity_digest'):
+            self.require(re.fullmatch(r'[0-9a-z]{3}', token) is not None)
+            pool = self.strings if name in ('device', 'device_name', 'major_minor', 'expected_device', 'actual_device') else self.hashes
+            index = int(token, 36)
+            self.require(index < len(pool))
+            return pool[index]
+        if name in self.store.COUNTS:
+            number = self.number_token(token, 10**32 - 1)
+            return number if number <= (1 << 53) - 1 else str(number)
+        if name == 'code':
+            self.require(token[0] in ('i', 'e'))
+            if token[0] == 'i':
+                number = self.number_token(token[1:], 599)
+                self.require(number >= 100)
+                return number
+            return self.store.ENUMS[name][self.number_token(token[1:], len(self.store.ENUMS[name]) - 1)]
+        return self.store.ENUMS[name][self.number_token(token, len(self.store.ENUMS[name]) - 1)]
+
+    def pairs(self, values, names):
+        chosen = [(index, name) for index, name in enumerate(names) if name in values]
+        return self.b36(sum(1 << index for index, _ in chosen)) + ':' + ','.join(
+            self.token(name, values[name]) for _, name in chosen)
+
+    def unpairs(self, text, names):
+        self.require(type(text) is str and len(text) <= 270 and text.count(':') == 1)
+        mask, content = text.split(':')
+        number = self.number_token(mask, (1 << len(names)) - 1, 3)
+        selected = [name for index, name in enumerate(names) if number & (1 << index)]
+        tokens = content.split(',') if content else []
+        self.require(len(selected) == len(tokens))
+        return {name: self.untoken(name, token) for name, token in zip(selected, tokens)}
+
+    def event(self, value, category, wire):
+        if wire:
+            self.require(type(value) is list and len(value) == 4)
+            slot, flags, reason, text = value
+            self.unsigned(slot, len(self.slots[category]) - 1)
+            self.unsigned(flags, 5)
+            self.unsigned(reason, len(self.reasons) - 1)
+            stage, phase = self.slots[category][slot]
+            names = [self.fields[index] for index in self.layouts[stage]]
+            values = self.unpairs(text, names)
+            logical = [stage, phase, flags // 2, reason, values, bool(flags % 2)]
+        else:
+            self.require(type(value) is list and len(value) == 6)
+            stage, phase, status, reason, values, error = value
+            self.unsigned(stage, len(self.stages) - 1)
+            self.require(phase is None or (type(phase) is int and 0 <= phase < len(self.store.WORKER_PHASES)))
+            self.unsigned(status, 2)
+            self.unsigned(reason, len(self.reasons) - 1)
+            self.require(type(error) is bool and [stage, phase] in self.slots[category])
+            slot = self.slots[category].index([stage, phase])
+            logical = value
+        stage, phase, status, reason, values, error = logical
+        self.observed_error = self.observed_error or error
+        self.observations(values, self.stages[stage], None if phase is None else self.store.WORKER_PHASES[phase])
+        if wire:
+            return logical, slot
+        names = [self.fields[index] for index in self.layouts[stage]]
+        return [slot, 2 * status + int(error), reason, self.pairs(values, names)], slot
+
+    def events(self, values, category, wire):
+        self.require(type(values) is list and len(values) <= len(self.slots[category]))
+        result, seen = [], set()
+        for value in values:
+            converted, slot = self.event(value, category, wire)
+            self.require(slot not in seen)
+            seen.add(slot)
+            result.append(converted)
+        return result
+
+    def attempt(self, value, lifecycle, wire):
+        keys = {'id', 'lifecycle', 'epoch', 'mount_epoch', 'origin', 'source', 'status',
+            'started_mono', 'started_at', 'rows', 'phases', 'history', 'first_rejection',
+            'first_history_rejection', 'rows_dropped', 'phase_replacements'}
+        finished = {'finished_mono', 'finished_at', 'summary'}
+        self.require(type(value) is dict and set(value) in (keys, keys | finished))
+        self.decimal(value['id'], self.store._MAX_ID, positive=True)
+        self.require(value['lifecycle'] == lifecycle and type(value['lifecycle']) is str)
+        for key in ('epoch', 'mount_epoch'):
+            self.decimal(value[key], (1 << 64) - 1, nullable=True)
+        self.enum(value['origin'], self.store.ORIGINS)
+        self.enum(value['source'], self.store.SOURCES)
+        self.enum(value['status'], ('running',) + self.store.FINAL_STATUSES)
+        self.require(('summary' in value) == (value['status'] != 'running'))
+        for key in ('started_mono', 'started_at'):
+            self.clock(value[key])
+        for key in ('rows_dropped', 'phase_replacements'):
+            self.unsigned(value[key], self.store._MAX_COUNTER)
+        if 'summary' in value:
+            for key in ('finished_mono', 'finished_at'):
+                self.clock(value[key])
+            self.require(type(value['summary']) is dict and set(value['summary']) <= {'code'})
+            if 'code' in value['summary']:
+                self.primitive('code', value['summary']['code'])
+        self.latch(value['first_rejection'], 'attempt')
+        self.latch(value['first_history_rejection'], 'history')
+        self.require(type(value['rows']) is dict and len(value['rows']) <= 128)
+        result = {key: copy.deepcopy(item) for key, item in value.items() if key not in ('rows', 'phases', 'history')}
+        result['phases'] = self.events(value['phases'], 'batch', wire)
+        result['history'] = self.events(value['history'], 'history', wire)
+        result['rows'] = {}
+        for rid, row in value['rows'].items():
+            self.decimal(rid, 9999999999, positive=True)
+            self.require(type(row) is dict and set(row) == {'mount_id', 'metadata', 'phases', 'first_rejection', 'final_disposition'})
+            self.require(type(row['mount_id']) is int and row['mount_id'] == int(rid))
+            metadata = self.unpairs(row['metadata'], self.METADATA) if wire else row['metadata']
+            self.require(type(metadata) is dict and set(metadata) <= set(self.METADATA))
+            for key, item in metadata.items():
+                self.primitive(key, item, metadata=True)
+            disposition = row['final_disposition']
+            if disposition is not None:
+                self.require(type(disposition) is dict and set(disposition) == {'status', 'reason', 'result_status'})
+                self.enum(disposition['status'], self.store.STATUSES)
+                self.reason(disposition['reason'])
+                self.require(disposition['result_status'] is None or (type(disposition['result_status']) is str and
+                             disposition['result_status'] in self.store.ENUMS['result_status']))
+            rejection = row['first_rejection']
+            if rejection is not None:
+                rejection, _ = self.event(rejection, 'row', wire)
+                self.require((rejection[2] if wire else rejection[1] // 2) == 1)
+            result['rows'][rid] = {'mount_id': row['mount_id'],
+                'metadata': metadata if wire else self.pairs(metadata, self.METADATA),
+                'phases': self.events(row['phases'], 'row', wire), 'first_rejection': rejection,
+                'final_disposition': copy.deepcopy(disposition)}
+        return result
+
+    def convert(self, value, wire):
+        self.headers(value, wire)
+        result = {key: copy.deepcopy(item) for key, item in value.items()
+                  if key not in ('attempts', 'encoding', 'slot_layouts', 'digest_pool', 'string_pool')}
+        result['attempts'], ids = [], set()
+        for item in value['attempts']:
+            converted = self.attempt(item, value['lifecycle'], wire)
+            self.require(converted['id'] not in ids)
+            ids.add(converted['id'])
+            result['attempts'].append(converted)
+        for key in ('first_rejected_since_lifecycle', 'last_rejected', 'latest_completed'):
+            self.require(value[key] is None or value[key] in ids)
+        self.require(not self.observed_error or value['observation_status'] == 'observer_error')
+        if wire:
+            result['phase_columns'] = list(self.LOGICAL_COLUMNS)
+        else:
+            result.update(encoding=self.ENCODING, phase_columns=list(self.WIRE_COLUMNS),
+                          slot_layouts=copy.deepcopy(self.slots), string_pool=list(self.strings))
+            chunks = []
+            for digest in self.hashes:
+                number = int(digest, 16) << 2
+                chunks.append(''.join(self.B64[(number >> shift) & 63] for shift in range(252, -1, -6)))
+            result['digest_pool'] = ''.join(chunks)
+        self.require(len(json.dumps(value, ensure_ascii=True, allow_nan=False).encode('ascii')) <=
+                     (self.WIRE_LIMIT if wire else self.LOGICAL_LIMIT))
+        self.require(len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode('ascii')) <=
+                     (self.LOGICAL_LIMIT if wire else self.WIRE_LIMIT))
+        return result
+
+
+def _capacity_attempt_encode(logical):
+    """Encode one closed logical snapshot; ValueError never includes raw data."""
+    try:
+        return _CapacityAttemptCodec().convert(logical, False)
+    except Exception:
+        raise ValueError('capacity_attempt_codec_invalid') from None
+
+
+def _capacity_attempt_decode(wire):
+    """Decode to six-column logical events; reject the entire malformed item."""
+    try:
+        return _CapacityAttemptCodec().convert(wire, True)
+    except Exception:
+        raise ValueError('capacity_attempt_codec_invalid') from None
+
+
+def _capacity_attempt_decode_json(raw):
+    """Bound raw JSON before parsing and reject duplicate keys/nonfinite values."""
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError('capacity_attempt_codec_invalid')
+            result[key] = value
+        return result
+    try:
+        if type(raw) not in (str, bytes) or len(raw) > _CapacityAttemptCodec.WIRE_LIMIT:
+            raise ValueError()
+        text = raw.decode('utf-8', errors='strict') if type(raw) is bytes else raw
+        if len(text.encode('utf-8')) > _CapacityAttemptCodec.WIRE_LIMIT:
+            raise ValueError()
+        value = json.loads(text, object_pairs_hook=pairs,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        return _capacity_attempt_decode(value)
+    except Exception:
+        raise ValueError('capacity_attempt_codec_invalid') from None
 
 
 class StatusSampler:
@@ -961,7 +2074,8 @@ class StatusSampler:
         self._capacity_closed = False
         self._capacity_context = threading.local()
         self._capacity_observation_errors = 0
-        self._capacity_ledger = self._capacity_observe(_CapacityLedger)
+        self._capacity_ledger = _capacity_observe_guarded(self, _CapacityLedger)
+        self._capacity_attempts = _capacity_observe_guarded(self, lambda: _CapacityAttemptStore())
         self._capacity_pending = 0
         self._capacity_pending_records = None
         self._capacity_last_watch = None
@@ -980,7 +2094,66 @@ class StatusSampler:
     def _capacity_note(self, reason, **kwargs):
         # Protect the entry point as well as ledger.event: instrumentation may
         # be replaced by a failing observer, but may never strand a real lock.
-        return self._capacity_observe(lambda: self._capacity_record(reason, **kwargs))
+        return _capacity_observe_guarded(self, lambda: self._capacity_record(reason, **kwargs))
+
+    def capacity_attempt_origin_set(self, origin):
+        """Trusted handlers annotate origin; this never supplies authorization."""
+        def set_origin():
+            previous = getattr(self._capacity_context, 'origin', 'unknown')
+            self._capacity_context.origin = origin if origin in (
+                'web_owner_refresh', 'web_owner_fill', 'web_owner_capacity',
+                'local_screen_fill', 'unknown') else 'unknown'
+            return previous
+        return _capacity_observe_guarded(self, set_origin)
+
+    def _capacity_attempt_step(self, stage, mount_id=None, status='passed', reason=None, observations=None):
+        def record():
+            with self._capacity_lock:
+                attempt = getattr(self._capacity_context, 'attempt_id', None)
+                actual_stage = ('authorization' if reason == 'authorization_denied' else
+                    'epoch' if reason == 'lifecycle_changed' else 'watch') if (
+                        mount_id is None and stage == 'parent_watch') else stage
+                self._capacity_attempts.step(attempt, actual_stage, mount_id, status, reason, observations)
+        return _capacity_observe_guarded(self, record)
+
+    def capacity_attempt_response(self, receipt, stage, status, reason=None, observations=None):
+        """Only the exact original private receipt can name a stored attempt."""
+        def record():
+            with self._capacity_lock:
+                attempt = getattr(receipt, 'capacity_attempt_id', None)
+                self._capacity_attempts.history(attempt, stage, status, reason, observations)
+        return _capacity_observe_guarded(self, record)
+
+    def _capacity_attempt_row(self, entry):
+        def record():
+            with self._capacity_lock:
+                identity = getattr(entry, 'capacity_identity', None)
+                metadata = {'key_digest': _capacity_digest('attempt-key', entry.get('_key')),
+                    'identity_digest': _capacity_digest('attempt-identity', identity),
+                    'device': entry.get('device'), 'device_name': entry.get('_device_name')}
+                # Unsupported targets legitimately have no verified kernel
+                # label. Missing metadata is not a malformed observation.
+                self._capacity_attempts.row(getattr(self._capacity_context, 'attempt_id', None),
+                    entry['mount_id'], {name: value for name, value in metadata.items() if value is not None})
+        return _capacity_observe_guarded(self, record)
+
+    def _capacity_attempt_inventory(self, stage, entries, complete, *, changed=False):
+        """Compare only the inventory already used by the production predicate."""
+        def record():
+            with self._capacity_lock:
+                evidence = getattr(entries, 'observation', None) or {}
+                for entry in entries:
+                    self._capacity_attempt_step(stage, entry['mount_id'],
+                        'failed' if changed or not complete or not entry.get('_key') else 'passed',
+                        'batch_changed' if changed else 'inventory_incomplete' if not complete else
+                        entry.get('_reason') if not entry.get('_key') else None,
+                        {'inventory_complete': complete, 'inventory_count': len(entries),
+                         'inventory_seq': evidence.get('seq'),
+                         'actual_key_digest': _capacity_digest('attempt-key', entry.get('_key')),
+                         'actual_identity_digest': _capacity_digest('attempt-identity',
+                                                   getattr(entry, 'capacity_identity', None)),
+                         'actual_mount_epoch': self._capacity_mount_epoch})
+        return _capacity_observe_guarded(self, record)
 
     @contextlib.contextmanager
     def _capacity_scope(self, source=None, stage=None):
@@ -995,8 +2168,8 @@ class StatusSampler:
             self._capacity_context.stage = stage or previous[1]
             if source is not None:
                 self._capacity_context.inventory = None
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', None))
-        self._capacity_observe(enter)
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'pending', None))
+        _capacity_observe_guarded(self, enter)
         try:
             yield
         finally:
@@ -1005,7 +2178,7 @@ class StatusSampler:
                     self._capacity_context.source, self._capacity_context.stage = previous
                     self._capacity_context.inventory = previous_inventory
                     self._capacity_context.pending = previous_pending
-            self._capacity_observe(leave)
+            _capacity_observe_guarded(self, leave)
 
     def _capacity_memory_state(self):
         return {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch,
@@ -1034,7 +2207,7 @@ class StatusSampler:
         pending = getattr(self._capacity_context, 'pending', None)
         if pending is not None:
             self._capacity_pending = len(pending)
-        self._capacity_observe(lambda: self._capacity_ledger.event(self, reason, **kwargs))
+        _capacity_observe_guarded(self, lambda: self._capacity_ledger.event(self, reason, **kwargs))
 
     @staticmethod
     def _capacity_watch_evidence(observation):
@@ -1056,7 +2229,7 @@ class StatusSampler:
     def _capacity_inventory_observe(self):
         """Attach an optional observer to the same production read, not a rescan."""
         evidence = {}
-        self._capacity_observe(lambda: setattr(self._capacity_context, 'inventory', None))
+        _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'inventory', None))
         previous = None
         with _capacity_observation(evidence):
             previous = getattr(_CAPACITY_TRACE, 'inventory', None)
@@ -1082,10 +2255,10 @@ class StatusSampler:
             self._capacity_note('inventory_observed')
             return True
         with self._capacity_lock:
-            if self._capacity_observe(publish) is not True:
+            if _capacity_observe_guarded(self, publish) is not True:
                 with _capacity_observation(evidence):
                     evidence.update(observation_status='observer_error', complete=False, reason='observer_error')
-        observed = self._capacity_observe(lambda: _CapacityEntries(result[0], evidence))
+        observed = _capacity_observe_guarded(self, lambda: _CapacityEntries(result[0], evidence))
         return (result[0] if observed is None else observed), result[1]
 
     def capacity_cache_diagnostics(self):
@@ -1098,6 +2271,8 @@ class StatusSampler:
                 'events': ledger.events if ledger else [], 'latest_inventory': ledger.latest if ledger else None,
                 'last_commit': ledger.last_commit if ledger else None,
                 'first_invalidation': ledger.first if ledger else None,
+                'attempt_diagnostics': _capacity_observe_guarded(self, lambda: self._capacity_attempts.snapshot())
+                    or {'observation_status': 'observer_error'},
                 'observation_status': 'observer_error' if self._capacity_observation_errors else 'observed',
                 'observation_errors': self._capacity_observation_errors,
                 'state': self._capacity_memory_state(), 'watch': self._capacity_last_watch,
@@ -1138,8 +2313,8 @@ class StatusSampler:
                     'atomic_with_capacity': True})
             # Clear first so a failed observer cannot retain a prior row's
             # provenance. Both operations remain independent of the real rows.
-            self._capacity_observe(lambda: setattr(self._capacity_context, 'returned_projection', None))
-            self._capacity_observe(publish)
+            _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'returned_projection', None))
+            _capacity_observe_guarded(self, publish)
             return rows
 
     @staticmethod
@@ -1179,13 +2354,36 @@ class StatusSampler:
 
     def _capacity_history_prune(self, entries, complete):
         """Caller holds capacity lock; incomplete/missing proof never revives."""
+        previous = self._capacity_history
         if not complete or self._capacity_closed:
             self._capacity_history = {}
+            _capacity_observe_guarded(self, lambda: self._capacity_history_removed(previous, {},
+                'inventory_incomplete' if not complete else 'lifecycle_changed'))
             return
         active = self._capacity_history_bindings(entries, complete)
         self._capacity_history = {mount_id: record for mount_id, record in self._capacity_history.items()
             if mount_id in active and record['key'] == active[mount_id]['_key']
             and record['identity'] == getattr(active[mount_id], 'capacity_identity', None)}
+        _capacity_observe_guarded(self, lambda: self._capacity_history_removed(previous, self._capacity_history,
+                                                                     'binding_changed', active))
+
+    def _capacity_history_removed(self, before, after, reason, active=None):
+        """Observe actual removed records, never an empty poll or reconstructed ID."""
+        for mount_id, record in before.items():
+            if mount_id in after:
+                continue
+            entry = (active or {}).get(mount_id)
+            precise = reason if active is None else 'inventory_missing' if entry is None else (
+                'key_changed' if record['key'] != entry['_key'] else 'identity_changed')
+            self._capacity_attempts.history(record.get('attempt_id'), 'prune', 'failed', precise,
+                {'expected_mount_id': mount_id,
+                 'expected_key_digest': _capacity_digest('attempt-key', record['key']),
+                 'actual_key_digest': _capacity_digest('attempt-key', entry.get('_key') if entry else None),
+                 'expected_identity_digest': _capacity_digest('attempt-identity', record['identity']),
+                 'actual_identity_digest': _capacity_digest('attempt-identity',
+                                            getattr(entry, 'capacity_identity', None) if entry else None),
+                 'actual_capacity_epoch': self._capacity_epoch,
+                 'actual_mount_epoch': self._capacity_mount_epoch, 'removed_count': len(before) - len(after)})
 
     @staticmethod
     def _capacity_history_view(records, current):
@@ -1236,6 +2434,9 @@ class StatusSampler:
     def _capacity_history_candidate(self, value, pending, entries, epoch, mount_epoch, deadline):
         """Stage numbers after successful core commit; no visible history yet."""
         if not pending or self._capacity_history_sequence >= 2 ** 63 - 1:
+            _capacity_observe_guarded(self, lambda: self._capacity_attempts.history(
+                getattr(self._capacity_context, 'attempt_id', None), 'candidate', 'not_run',
+                'no_pending' if not pending else 'sequence_exhausted'))
             return value
         by_id = self._capacity_history_bindings(entries, True)
         batch = self._capacity_history_sequence + 1
@@ -1252,10 +2453,22 @@ class StatusSampler:
                 'sampled_at': record['sampled_at'], 'device': entry['device'],
                 'device_name': entry['_device_name'], 'batch': batch}
         if not records:
+            _capacity_observe_guarded(self, lambda: self._capacity_attempts.history(
+                getattr(self._capacity_context, 'attempt_id', None), 'candidate', 'failed', 'binding_unverified'))
             return value
         self._capacity_history_sequence = batch
-        return _CapacityHistoryReceipt(value, self._capacity_history_instance,
-                                       epoch, mount_epoch, batch, deadline, records)
+        receipt = _CapacityHistoryReceipt(value, self._capacity_history_instance,
+                                         epoch, mount_epoch, batch, deadline, records)
+        def observed():
+            receipt.capacity_attempt_id = getattr(self._capacity_context, 'attempt_id', None)
+            # This sidecar is private, not authority and never public JSON.
+            receipt.records = _CapacityHistoryData({key: dict(record, attempt_id=receipt.capacity_attempt_id)
+                                                   for key, record in records.items()})
+            self.capacity_attempt_response(receipt, 'candidate', 'passed', observations={
+                'candidate_count': len(records), 'history_batch': batch,
+                'expected_capacity_epoch': epoch, 'expected_mount_epoch': mount_epoch})
+        _capacity_observe_guarded(self, observed)
+        return receipt
 
     def publish_capacity_history(self, receipt, *, authorizer):
         """Finalize a successfully written owner response; never collect or retry.
@@ -1267,6 +2480,12 @@ class StatusSampler:
             if (type(receipt) is not _CapacityHistoryReceipt
                     or receipt.instance is not self._capacity_history_instance):
                 return False
+            def rejected(reason, phase):
+                _capacity_observe_guarded(self, lambda: self.capacity_attempt_response(receipt, 'finalize',
+                    'failed', reason, {'phase': phase, 'expected_capacity_epoch': receipt.epoch,
+                        'actual_capacity_epoch': self._capacity_epoch,
+                        'expected_mount_epoch': receipt.mount_epoch,
+                        'actual_mount_epoch': self._capacity_mount_epoch}))
             def allowed():
                 try:
                     return callable(authorizer) and authorizer() is True
@@ -1274,17 +2493,22 @@ class StatusSampler:
                     return False
             with self._capacity_lock:
                 if receipt.finalized:
+                    rejected('already_finalized', 'initial')
                     return False
                 receipt.finalized = True
-                if (not allowed()
+                if (not (grant := allowed())
                         or self._capacity_closed or receipt.epoch != self._capacity_epoch
                         or receipt.mount_epoch != self._capacity_mount_epoch
                         or time.monotonic() >= receipt.deadline):
+                    rejected('authorization_denied' if not grant else 'lifecycle_changed'
+                        if self._capacity_closed or receipt.epoch != self._capacity_epoch else
+                        'mount_epoch_changed' if receipt.mount_epoch != self._capacity_mount_epoch else 'timeout', 'initial')
                     return False
                 if not all(self._capacity_cache.get(mount_id, {}) == {
                         'key': record['key'], 'values': record['values'],
                         'sampled_at': record['sampled_at']}
                         for mount_id, record in receipt.records.items()):
+                    rejected('cache_changed', 'cache_match')
                     return False
                 updated = dict(self._capacity_history)
                 changed = False
@@ -1297,23 +2521,33 @@ class StatusSampler:
                                     if record['device_name'] == name})
                     changed = True
                 if not changed:
+                    rejected('superseded', 'ordering')
                     return False
                 # Bounded RAM; evict whole oldest disk groups, never make a
                 # truncated group appear to have measured complete coverage.
                 while len(updated) > 128:
                     oldest = min(updated.values(), key=lambda record: record['batch'])['device_name']
                     updated = {key: record for key, record in updated.items() if record['device_name'] != oldest}
-                if (not allowed() or receipt.epoch != self._capacity_epoch
+                if (not (grant := allowed()) or receipt.epoch != self._capacity_epoch
                         or self._capacity_closed or time.monotonic() >= receipt.deadline):
+                    rejected('authorization_denied' if not grant else 'lifecycle_changed'
+                        if receipt.epoch != self._capacity_epoch or self._capacity_closed else 'timeout', 'before_publish')
                     return False
                 previous = self._capacity_history
                 self._capacity_history = updated
-                if (not allowed() or receipt.epoch != self._capacity_epoch
+                if (not (grant := allowed()) or receipt.epoch != self._capacity_epoch
                         or self._capacity_closed or time.monotonic() >= receipt.deadline):
                     self._capacity_history = previous if receipt.epoch == self._capacity_epoch and not self._capacity_closed else {}
+                    rejected('authorization_denied' if not grant else 'lifecycle_changed'
+                        if receipt.epoch != self._capacity_epoch or self._capacity_closed else 'timeout', 'rollback')
                     return False
+                _capacity_observe_guarded(self, lambda: self.capacity_attempt_response(receipt, 'finalize', 'passed',
+                    observations={'phase': 'published', 'records_count': len(receipt.records),
+                                  'history_batch': receipt.batch}))
                 return True
         except Exception:
+            _capacity_observe_guarded(self, lambda: self.capacity_attempt_response(receipt, 'finalize', 'failed',
+                                                                         'publication_error'))
             return False
 
     def capacity_projection_observation(self, rows):
@@ -1322,16 +2556,16 @@ class StatusSampler:
             pair = getattr(self._capacity_context, 'returned_projection', None)
             if pair is not None and pair[0] is rows:
                 return copy.deepcopy(pair[1])
-        return self._capacity_observe(observe) or {'status': 'not_observed'}
+        return _capacity_observe_guarded(self, observe) or {'status': 'not_observed'}
 
     def _capacity_replace_cache(self, records, reason='cache_replaced', before_epoch=None):
         """Caller holds the lock; records contain numbers, not mounted FS FDs."""
-        before = self._capacity_observe(lambda: self._capacity_ledger.records(self._capacity_cache))
+        before = _capacity_observe_guarded(self, lambda: self._capacity_ledger.records(self._capacity_cache))
         self._capacity_cache = records
         self._capacity_note(reason, before=before, before_epoch=before_epoch)
 
     def _capacity_invalidate(self, reason='invalidated'):
-        before = self._capacity_observe(lambda: self._capacity_ledger.records(self._capacity_cache))
+        before = _capacity_observe_guarded(self, lambda: self._capacity_ledger.records(self._capacity_cache))
         before_epoch = {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch}
         self._capacity_mount_epoch += 1
         self._capacity_cache = {}
@@ -1342,7 +2576,7 @@ class StatusSampler:
         """Any event or loss of proof rejects all namespace-derived values."""
         watch = self._capacity_watch
         if watch is not None and watch.changed():
-            self._capacity_last_watch = self._capacity_observe(lambda: self._capacity_watch_observe(watch))
+            self._capacity_last_watch = _capacity_observe_guarded(self, lambda: self._capacity_watch_observe(watch))
             reason = self._capacity_last_watch['reason'] if self._capacity_last_watch else 'changed_unclassified'
             self._capacity_invalidate('watch_' + reason)
             watch.close()
@@ -1354,11 +2588,11 @@ class StatusSampler:
                 try:
                     self._capacity_watch = _CapacityMountWatch(self.proc_root)
                 except CapacityRefreshError as error:
-                    self._capacity_last_watch = self._capacity_observe(lambda: self._capacity_watch_evidence(getattr(error, 'watch_observation', None)))
+                    self._capacity_last_watch = _capacity_observe_guarded(self, lambda: self._capacity_watch_evidence(getattr(error, 'watch_observation', None)))
                     self._capacity_note('watch_create_failed')
                     raise
         if self._capacity_watch is not None:
-            self._capacity_last_watch = self._capacity_observe(
+            self._capacity_last_watch = _capacity_observe_guarded(self,
                 lambda: self._capacity_watch_observe(self._capacity_watch))
         return self._capacity_watch is not None
 
@@ -1372,7 +2606,7 @@ class StatusSampler:
         """An observed detach is permanent for an old cache, even if it returns."""
         active = {row['mount_id']: row['_key'] for row in entries if row['_key']} if complete else {}
         with self._capacity_lock:
-            self._capacity_observe(lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
+            _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
             if self._capacity_observed_keys is not None and active != self._capacity_observed_keys:
                 self._capacity_invalidate('active_keys_changed' if complete else 'inventory_incomplete')
             self._capacity_observed_keys = active
@@ -1382,7 +2616,7 @@ class StatusSampler:
                 self._capacity_history = {}
             self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
                                           if active.get(key) == value['key']}, reason='reconcile')
-            self._capacity_observe(lambda: setattr(self._capacity_ledger, 'reconciled_inventory', getattr(self._capacity_context, 'inventory', None)))
+            _capacity_observe_guarded(self, lambda: setattr(self._capacity_ledger, 'reconciled_inventory', getattr(self._capacity_context, 'inventory', None)))
             keys = set(active.values())
             self._capacity_negative = {key: value for key, value in self._capacity_negative.items()
                                        if key in keys and value[0] > time.monotonic()}
@@ -1392,6 +2626,7 @@ class StatusSampler:
         with self._capacity_scope('start', 'lifecycle'), self._capacity_lock:
             before_epoch = {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch}
             self._capacity_epoch += 1
+            _capacity_observe_guarded(self, lambda: self._capacity_attempts.reset())
             self._capacity_closed = False
             self._capacity_negative = {}
             self._capacity_history = {}
@@ -1408,6 +2643,7 @@ class StatusSampler:
             before_epoch = {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch}
             self._capacity_epoch += 1
             self._capacity_closed = True
+            _capacity_observe_guarded(self, lambda: self._capacity_attempts.reset())
             self._capacity_negative = {}
             self._capacity_history = {}
             self._capacity_history_sequence = 0
@@ -1435,6 +2671,14 @@ class StatusSampler:
 
     def _capacity_probe(self, entry, deadline, authorized):
         """Bound the request, not the kernel: a lingering worker stays busy."""
+        def observe(stage, status, reason=None, observations=None):
+            try:
+                self._capacity_observe(lambda: self._capacity_attempt_step(stage,
+                    mount_id=entry['mount_id'], status=status, reason=reason, observations=observations or {}))
+            except Exception:
+                # The diagnostic boundary itself may fail; only real worker
+                # protocol/OS errors belong to the business exception below.
+                pass
         authorized()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1460,10 +2704,13 @@ class StatusSampler:
                                   'channel': child_channel.fileno()}, ensure_ascii=True).encode()
             child_channel.close()
             if len(request) > 4096:
+                observe('worker_request', 'failed', 'request_limit', {'bytes': len(request), 'send_attempted': False})
                 raise CapacityRefreshError('unavailable')
+            observe('worker_request', 'passed', observations={'bytes': len(request), 'send_attempted': False})
             authorized()
             if time.monotonic() >= deadline:
                 raise CapacityRefreshError('timeout')
+            observe('worker_request', 'passed', observations={'bytes': len(request), 'send_attempted': True})
             worker.stdin.write(request)
             worker.stdin.close()
             while worker.poll() is None:
@@ -1476,23 +2723,38 @@ class StatusSampler:
                 raise CapacityRefreshError('timeout')
             raw = worker.stdout.read(4097)
             if len(raw) > 4096 or worker.returncode != 0:
+                observe('worker_request', 'failed', 'response_limit' if len(raw) > 4096 else 'worker_exit',
+                        {'response_bytes': len(raw)})
                 raise CapacityRefreshError('probe_failed')
-            result = json.loads(raw)
+            try:
+                result = json.loads(raw)
+            except (ValueError, TypeError, UnicodeError):
+                observe('worker_request', 'failed', 'response_json_invalid', {'response_bytes': len(raw)})
+                raise
             if type(result) is not dict or type(result.get('ok')) is not bool:
+                observe('worker_request', 'failed', 'response_shape_invalid', {'response_bytes': len(raw)})
                 raise ValueError()
+            try:
+                self._capacity_observe(lambda: _capacity_worker_forward(self, result.get('diagnostic'), entry['mount_id']))
+            except Exception:
+                pass
             if not result['ok']:
                 reason = result.get('reason')
                 if reason not in ('timeout', 'identity_changed', 'unavailable', 'invalid_measurement', 'probe_failed'):
                     reason = 'probe_failed'
+                observe('worker_request', 'failed', 'worker_' + reason, {'response_bytes': len(raw)})
                 raise CapacityRefreshError(reason)
             values = result.get('values')
             if type(values) is not dict or set(values) != {'total_bytes', 'used_bytes', 'usage_percent'}:
+                observe('worker_request', 'failed', 'response_values_invalid', {'response_bytes': len(raw)})
                 raise ValueError()
             total, used, percent = (values[key] for key in ('total_bytes', 'used_bytes', 'usage_percent'))
             if (type(total) is not int or type(used) is not int or not 0 < total <= 2**63 - 1
                     or not 0 <= used <= total or type(percent) not in (int, float)
                     or not math.isfinite(percent) or percent != used / total * 100):
+                observe('worker_request', 'failed', 'response_values_invalid', {'response_bytes': len(raw)})
                 raise ValueError()
+            observe('worker_request', 'passed', observations={'response_bytes': len(raw)})
             marker, ancillary, flags, _ = channel.recvmsg(1, socket.CMSG_SPACE(array.array('i').itemsize))
             handles = array.array('i')
             for level, kind, payload in ancillary:
@@ -1500,12 +2762,21 @@ class StatusSampler:
                     handles.frombytes(payload[:len(payload) - len(payload) % handles.itemsize])
             if (marker != b'1' or flags or len(ancillary) != 1 or len(handles) != 1
                     or ancillary[0][:2] != (socket.SOL_SOCKET, socket.SCM_RIGHTS)):
+                observe('parent_scm', 'failed', 'message_invalid', {'fd_count': len(handles), 'fd_checked': False})
                 for handle in handles:
                     os.close(handle)
                 raise ValueError()
             anchor = handles[0]
             os.set_inheritable(anchor, False)
-            if _capacity_fd_mount(anchor, self.proc_root) != entry['mount_id']:
+            try:
+                actual_mount = _capacity_fd_mount(anchor, self.proc_root)
+            except Exception:
+                observe('parent_scm', 'failed', 'fd_mount_unavailable', {'fd_checked': True})
+                raise
+            observe('parent_scm', 'passed' if actual_mount == entry['mount_id'] else 'failed',
+                None if actual_mount == entry['mount_id'] else 'mount_mismatch',
+                {'expected_mount_id': entry['mount_id'], 'actual_mount_id': actual_mount, 'fd_checked': True})
+            if actual_mount != entry['mount_id']:
                 raise CapacityRefreshError('identity_changed')
             authorized()
             if time.monotonic() >= deadline:
@@ -1607,10 +2878,56 @@ class StatusSampler:
         if not self._capacity_refresh_lock.acquire(blocking=False):
             raise CapacityRefreshError('busy')
         try:
-            return self._capacity_refresh_acquired(authorizer=authorizer, eligibility=eligibility,
-                                                   missing=missing, visible=visible)
+            def begin():
+                with self._capacity_lock:
+                    self._capacity_context.mount_id = None
+                    self._capacity_context.attempt_phase = 'post_probe_inventory'
+                    self._capacity_context.candidate_error = False
+                    self._capacity_context.attempt_id = self._capacity_attempts.begin(
+                        self._capacity_epoch, self._capacity_mount_epoch,
+                        getattr(self._capacity_context, 'origin', 'unknown'),
+                        'visible_refresh' if visible else 'missing_fill' if missing else 'explicit_refresh',
+                        sampled_mono=time.monotonic(), sampled_at=time.time())
+            _capacity_observe_guarded(self, begin)
+            try:
+                value = self._capacity_refresh_acquired(authorizer=authorizer, eligibility=eligibility,
+                                                       missing=missing, visible=visible)
+            except BaseException as error:
+                def failed():
+                    with self._capacity_lock:
+                        self._capacity_attempts.finish(getattr(self._capacity_context, 'attempt_id', None),
+                            'failed', observations={'code': getattr(error, 'reason', 'exception')},
+                            sampled_mono=time.monotonic(), sampled_at=time.time(),
+                            epoch=self._capacity_epoch, mount_epoch=self._capacity_mount_epoch)
+                _capacity_observe_guarded(self, failed)
+                raise
+            def finished():
+                with self._capacity_lock:
+                    attempt = getattr(self._capacity_context, 'attempt_id', None)
+                    for row in value['results']:
+                        self._capacity_attempts.step(attempt, 'commit', row['mount_id'],
+                            'passed' if row['status'] in ('refreshed', 'cached') else
+                            'not_run' if row['status'] == 'skipped_standby' else 'failed',
+                            row.get('reason'), {'result_status': row['status']})
+                    self._capacity_attempts.finish(attempt, value['status'],
+                        sampled_mono=time.monotonic(), sampled_at=time.time(),
+                        epoch=self._capacity_epoch, mount_epoch=self._capacity_mount_epoch)
+                    if isinstance(value, _CapacityHistoryReceipt):
+                        value.capacity_attempt_id = attempt
+                        return value
+                    if getattr(self._capacity_context, 'candidate_error', False):
+                        # Preserve the exact pre-existing plain-dict fallback
+                        # when optional history construction itself failed.
+                        return value
+                    return _CapacityAttemptResult(value, attempt)
+            return _capacity_observe_guarded(self, finished) or value
         finally:
-            self._capacity_refresh_lock.release()
+            try:
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'attempt_id', None))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'mount_id', None))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'attempt_phase', 'post_probe_inventory'))
+            finally:
+                self._capacity_refresh_lock.release()
 
     def _capacity_refresh_acquired(self, *, authorizer=None, eligibility=None, missing=False, visible=False):
         """Refresh-lock owner only; retain the original deadline and cleanup."""
@@ -1619,13 +2936,15 @@ class StatusSampler:
         mount_generation, batch_changed = None, False
         with self._capacity_lock:
             epoch = self._capacity_epoch
-            self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', pending))
+            _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'pending', pending))
             self._capacity_pending_records = pending
             self._capacity_note('batch_started')
 
         def authorized():
             nonlocal denied
             if denied:
+                _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('parent_watch',
+                    getattr(self._capacity_context, 'mount_id', None), 'failed', 'authorization_denied'))
                 raise CapacityRefreshError('authorization_denied')
             try:
                 valid = authorizer is not None and bool(authorizer())
@@ -1633,10 +2952,15 @@ class StatusSampler:
                 valid = False
             if not valid:
                 denied = True
+                _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('parent_watch',
+                    getattr(self._capacity_context, 'mount_id', None), 'failed', 'authorization_denied'))
                 raise CapacityRefreshError('authorization_denied')
             with self._capacity_lock:
                 if self._capacity_closed or epoch != self._capacity_epoch:
                     self._capacity_note('pending_lifecycle_changed')
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('parent_watch',
+                        getattr(self._capacity_context, 'mount_id', None), 'failed', 'lifecycle_changed',
+                        {'expected_capacity_epoch': epoch, 'actual_capacity_epoch': self._capacity_epoch}))
                     raise CapacityRefreshError('unavailable')
 
         def permitted(entry):
@@ -1649,6 +2973,8 @@ class StatusSampler:
             return reason if reason in (None, 'standby') else 'power_state_unverified'
 
         def skipped(row, reason):
+            _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('eligibility', row['mount_id'],
+                'failed', reason))
             row.update(status='skipped_standby' if reason == 'standby' else 'unavailable',
                        reason=reason, sampled_at=history.get(row['mount_id']) if visible else None)
 
@@ -1662,12 +2988,23 @@ class StatusSampler:
             with self._capacity_lock:
                 self._capacity_check_watch()
                 if mount_generation != self._capacity_mount_epoch or self._capacity_watch is None:
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('parent_watch',
+                        getattr(self._capacity_context, 'mount_id', None), 'failed',
+                        'mount_epoch_changed' if mount_generation != self._capacity_mount_epoch else 'watch_missing',
+                        {'expected_mount_epoch': mount_generation, 'actual_mount_epoch': self._capacity_mount_epoch,
+                         'watch_present': self._capacity_watch is not None,
+                         'watch_reason': (self._capacity_last_watch or {}).get('reason'),
+                         'watch_mask': (self._capacity_last_watch or {}).get('mask')}))
                     raise CapacityRefreshError('identity_changed')
+                _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('parent_watch',
+                    getattr(self._capacity_context, 'mount_id', None), observations={
+                        'expected_mount_epoch': mount_generation, 'actual_mount_epoch': self._capacity_mount_epoch,
+                        'watch_present': self._capacity_watch is not None}))
 
         def observed(entries, complete):
             nonlocal batch_changed
             with self._capacity_lock:
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
                 self._capacity_check_watch()
             active = self._capacity_reconcile(entries, complete)
             batch_changed = batch_changed or (mount_generation is not None and (
@@ -1675,9 +3012,21 @@ class StatusSampler:
             for row in results:
                 record = pending.get(row['mount_id'])
                 if record is not None and (batch_changed or active.get(row['mount_id']) != record['key']):
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step(
+                        getattr(self._capacity_context, 'attempt_phase', 'post_probe_inventory'), row['mount_id'],
+                        'failed', 'batch_changed' if batch_changed else
+                        'inventory_incomplete' if not complete else
+                        'inventory_missing' if row['mount_id'] not in active else 'key_changed',
+                        {'expected_key_digest': _capacity_digest('attempt-key', record['key']),
+                         'actual_key_digest': _capacity_digest('attempt-key', active.get(row['mount_id'])),
+                         'inventory_complete': complete, 'expected_mount_epoch': mount_generation,
+                         'actual_mount_epoch': self._capacity_mount_epoch}))
                     close_pending(pending.pop(row['mount_id']))
                     row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
                 if visible and row['mount_id'] in history and batch_changed:
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step(
+                        getattr(self._capacity_context, 'attempt_phase', 'post_probe_inventory'), row['mount_id'],
+                        'failed', 'batch_changed'))
                     row.update(status='identity_changed', reason='identity_changed', sampled_at=None)
             return active
 
@@ -1700,6 +3049,8 @@ class StatusSampler:
                             stream.close()
                     self._capacity_worker = None
             entries, complete = self._capacity_inventory_observe()
+            _capacity_observe_guarded(self, lambda: [self._capacity_attempt_row(entry) for entry in entries])
+            _capacity_observe_guarded(self, lambda: self._capacity_attempt_inventory('initial_key', entries, complete))
             observed(entries, complete)
             authorized()
             if not complete or self._capacity_watch is None:
@@ -1708,7 +3059,8 @@ class StatusSampler:
                 raise CapacityRefreshError('unavailable')
             mount_generation = self._capacity_mount_epoch
             for entry in entries:
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'measure_entry'))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'mount_id', entry['mount_id']))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'stage', 'measure_entry'))
                 authorized()
                 if time.monotonic() >= deadline:
                     raise CapacityRefreshError('timeout')
@@ -1716,6 +3068,8 @@ class StatusSampler:
                        'reason': entry['_reason'], 'sampled_at': None}
                 results.append(row)
                 if batch_changed:
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('initial_key', entry['mount_id'],
+                        'failed', 'batch_changed'))
                     row.update(status='identity_changed', reason='identity_changed')
                     continue
                 if not entry['_key']:
@@ -1735,6 +3089,7 @@ class StatusSampler:
                     if reason is not None:
                         skipped(row, reason)
                         continue
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('eligibility', entry['mount_id']))
                     if failure is not None and failure[0] > time.monotonic():
                         row.update(status=failure[1], reason=failure[2],
                                    sampled_at=history.get(entry['mount_id'], failure[3]) if visible else failure[3])
@@ -1748,12 +3103,17 @@ class StatusSampler:
                     with self._capacity_lock:
                         self._capacity_note('pending_added')
                     authorized()
+                    _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'attempt_phase', 'post_probe_inventory'))
                     current, valid = self._capacity_inventory_observe()
                     observed(current, valid)
                     authorized()
                     if batch_changed or not valid or not any(item['mount_id'] == entry['mount_id']
                                             and item['_key'] == entry['_key'] for item in current):
+                        _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('post_probe_inventory', entry['mount_id'],
+                            'failed', 'batch_changed' if batch_changed else 'inventory_incomplete' if not valid else
+                            'key_changed', {'inventory_complete': valid}))
                         raise CapacityRefreshError('identity_changed')
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_inventory('post_probe_inventory', current, valid))
                     if time.monotonic() >= deadline:
                         raise CapacityRefreshError('timeout')
                     if missing:
@@ -1766,6 +3126,8 @@ class StatusSampler:
                     pending[entry['mount_id']]['sampled_at'] = sampled_at
                     row.update(status='refreshed', reason=None, sampled_at=sampled_at)
                 except CapacityRefreshError as error:
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('worker_request', entry['mount_id'],
+                        'failed', error.reason))
                     with self._capacity_lock:
                         self._capacity_note('probe_' + error.reason)
                     record = pending.pop(entry['mount_id'], None)
@@ -1784,10 +3146,13 @@ class StatusSampler:
                     if missing and error.reason != 'identity_changed':
                         negative[entry['_key']] = (time.monotonic() + 30, row['status'], row['reason'], row['sampled_at'])
             authorized()
-            self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'final_inventory'))
+            _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'stage', 'final_inventory'))
+            _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'attempt_phase', 'final_inventory'))
             with self._capacity_lock:
                 current, complete = self._capacity_inventory_observe()
                 active = observed(current, complete)
+                _capacity_observe_guarded(self, lambda: self._capacity_attempt_inventory('final_inventory', current, complete,
+                                                                              changed=batch_changed))
                 authorized()
                 if time.monotonic() >= deadline:
                     raise CapacityRefreshError('timeout')
@@ -1811,8 +3176,11 @@ class StatusSampler:
                 for record in pending.values():
                     close_pending(record)
                 authorized()
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'attempt_phase', 'post_fd_release'))
                 current, complete = self._capacity_inventory_observe()
                 active = observed(current, complete)
+                _capacity_observe_guarded(self, lambda: self._capacity_attempt_inventory('post_fd_release', current, complete,
+                                                                              changed=batch_changed))
                 authorized()
                 retained = {key: value for key, value in self._capacity_cache.items()
                             if active.get(key) == value['key']}
@@ -1821,7 +3189,7 @@ class StatusSampler:
                 if time.monotonic() >= deadline:
                     raise CapacityRefreshError('timeout')
                 previous_cache = dict(self._capacity_cache)
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'commit_prepare'))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'stage', 'commit_prepare'))
                 self._capacity_replace_cache(retained, reason='commit_prepare')
                 try:
                     # Recheck after publication while readers remain locked
@@ -1833,6 +3201,8 @@ class StatusSampler:
                     if time.monotonic() >= deadline:
                         raise CapacityRefreshError('timeout')
                 except CapacityRefreshError as error:
+                    _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('rollback', status='failed',
+                        reason=error.reason, observations={'result_status': 'rolled_back'}))
                     self._capacity_check_watch()
                     historical = ({key: value for key, value in previous_cache.items()
                                    if active.get(key) == value['key']}
@@ -1844,8 +3214,8 @@ class StatusSampler:
                 committed = True
                 self._capacity_pending = 0
                 self._capacity_pending_records = None
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', None))
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'commit_complete'))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'pending', None))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'stage', 'commit_complete'))
                 if pending:
                     self._capacity_note('commit_success', commit=True)
                 else:
@@ -1859,13 +3229,19 @@ class StatusSampler:
                 with self._capacity_lock:
                     return self._capacity_history_candidate(value, pending, current, epoch, mount_generation, deadline)
             except Exception:
-                pass
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'candidate_error', True))
+                _capacity_observe_guarded(self, lambda: self._capacity_attempts.history(
+                    getattr(self._capacity_context, 'attempt_id', None), 'candidate', 'failed', 'observer_error'))
             return value
         except CapacityRefreshError as error:
+            _capacity_observe_guarded(self, lambda: [self._capacity_attempt_step('commit', row['mount_id'],
+                'failed', error.reason, {'result_status': 'failed'}) for row in results])
             with self._capacity_lock:
                 self._capacity_note('pending_rejected_' + error.reason)
             raise
         except Exception:
+            _capacity_observe_guarded(self, lambda: [self._capacity_attempt_step('commit', row['mount_id'],
+                'failed', 'exception', {'result_status': 'failed'}) for row in results])
             with self._capacity_lock:
                 self._capacity_note('batch_exception')
             raise
@@ -1876,7 +3252,7 @@ class StatusSampler:
             with self._capacity_lock:
                 self._capacity_pending = 0
                 self._capacity_pending_records = None
-                self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', None))
+                _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'pending', None))
                 if not committed:
                     self._capacity_note('pending_discarded')
 
@@ -2051,6 +3427,18 @@ class StatusMonitor:
 
     def refresh_capacity(self, *, authorizer=None):
         return self.sampler.refresh_capacity(authorizer=authorizer)
+
+    def capacity_attempt_origin_set(self, origin):
+        try:
+            return self.sampler.capacity_attempt_origin_set(origin)
+        except Exception:
+            return None
+
+    def capacity_attempt_response(self, receipt, stage, status, reason=None, observations=None):
+        try:
+            return self.sampler.capacity_attempt_response(receipt, stage, status, reason, observations)
+        except Exception:
+            return None
 
     def refresh_capacity_missing(self, *, authorizer=None, eligibility=None):
         return self.sampler.refresh_capacity_missing(authorizer=authorizer, eligibility=eligibility)
@@ -2288,7 +3676,18 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             try:
                 if not current():
                     raise CapacityRefreshError('authorization_denied')
-                value = web_config.storage_fill(authorizer=current)
+                previous_origin = None
+                try:
+                    previous_origin = monitor.capacity_attempt_origin_set('local_screen_fill')
+                except Exception:
+                    pass
+                try:
+                    value = web_config.storage_fill(authorizer=current)
+                finally:
+                    try:
+                        monitor.capacity_attempt_origin_set(previous_origin)
+                    except Exception:
+                        pass
                 if not current():
                     raise CapacityRefreshError('authorization_denied')
                 self.send_json(200, value, origin, authorizer=current)

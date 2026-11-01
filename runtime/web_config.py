@@ -1340,6 +1340,26 @@ class WebConfigServer:
         finally:
             self._storage_fill_lock.release()
 
+    def _capacity_attempt_origin_set(self, origin):
+        """Best-effort trusted-handler provenance; never an authorization grant."""
+        try:
+            setter = getattr(self.monitor, 'capacity_attempt_origin_set', None)
+            return setter(origin) if callable(setter) else 'unknown'
+        except Exception:
+            return 'unknown'
+
+    def _capacity_attempt_response(self, receipt, stage, status, reason=None, observations=None):
+        """Record already-executed response decisions without changing delivery."""
+        try:
+            receipt = receipt.get('capacity', receipt) if isinstance(receipt, dict) else None
+            if getattr(receipt, 'capacity_attempt_id', None) is None:
+                return
+            observer = getattr(self.monitor, 'capacity_attempt_response', None)
+            if callable(observer):
+                observer(receipt, stage, status, reason=reason, observations=observations)
+        except Exception:
+            pass
+
     def _storage_fill_post(self, body, headers, ip, *, current=None, refresh=False):
         """Owner-only foreground request; caller cannot select disks or force."""
         operation = '刷新' if refresh else '补齐'
@@ -1350,6 +1370,11 @@ class WebConfigServer:
         if type(body) is not dict or body:
             return 400, {'ok': False, 'reason': 'invalid_parameters',
                           'error': f'页面{operation}仅接受空对象，不接受强制刷新或磁盘路径'}, None
+        previous_origin = 'unknown'
+        try:
+            previous_origin = self._capacity_attempt_origin_set('web_owner_refresh' if refresh else 'web_owner_fill')
+        except Exception:
+            pass
         try:
             value = self.storage_refresh(authorizer=current) if refresh else self.storage_fill(authorizer=current)
         except Exception as error:
@@ -1361,7 +1386,20 @@ class WebConfigServer:
             status, message = errors.get(reason, (503, f'页面{operation}当前不可用'))
             return status, {'ok': False, 'reason': reason if reason in errors else 'unavailable',
                             'error': message}, None
-        if not current():
+        finally:
+            try:
+                self._capacity_attempt_origin_set(previous_origin)
+            except Exception:
+                pass
+        allowed = current()
+        try:
+            self._capacity_attempt_response(value, 'web_return',
+                                            'passed' if allowed else 'failed',
+                                            None if allowed else 'authorization_denied',
+                                            {'guard_passed': allowed, 'code': 200 if allowed else 403})
+        except Exception:
+            pass
+        if not allowed:
             return 403, {'ok': False, 'reason': 'authorization_denied',
                          'error': '网页登录授权已失效，已丢弃结果'}, None
         return 200, value, None
@@ -1383,6 +1421,11 @@ class WebConfigServer:
         if not callable(refresh):
             return 503, {'ok': False, 'reason': 'unavailable',
                          'error': '手动容量刷新当前不可用'}, None
+        previous_origin = 'unknown'
+        try:
+            previous_origin = self._capacity_attempt_origin_set('web_owner_capacity')
+        except Exception:
+            pass
         try:
             value = refresh(authorizer=current)
         except Exception as error:
@@ -1394,7 +1437,19 @@ class WebConfigServer:
             status, message = errors.get(reason, (503, '容量刷新未完成'))
             return status, {'ok': False, 'reason': reason if reason in errors else 'unavailable',
                             'error': message}, None
-        if not current():
+        finally:
+            try:
+                self._capacity_attempt_origin_set(previous_origin)
+            except Exception:
+                pass
+        allowed = current()
+        try:
+            self._capacity_attempt_response(value, 'web_return', 'passed' if allowed else 'failed',
+                                            None if allowed else 'authorization_denied',
+                                            {'guard_passed': allowed, 'code': 200 if allowed else 403})
+        except Exception:
+            pass
+        if not allowed:
             return 403, {'ok': False, 'reason': 'authorization_denied',
                          'error': '网页登录授权已失效，已丢弃结果'}, None
         return 200, value, None
@@ -2099,6 +2154,18 @@ class WebConfigServer:
                     pass
 
                 def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None, guard=None, developer_guard=False):
+                    # Preserve the original private receipt even when an existing
+                    # authorization decision replaces the public body with 403.
+                    attempt_value = value if (self.command == 'POST'
+                        and urllib.parse.urlsplit(self.path).path in (
+                            CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE)) else None
+
+                    def attempt(stage, status, reason=None, **observations):
+                        try:
+                            outer._capacity_attempt_response(attempt_value, stage, status, reason, observations)
+                        except Exception:
+                            pass
+
                     def denied_value():
                         if developer_guard:
                             return {'ok': False, 'error': '开发窗口授权已失效，已丢弃检测结果',
@@ -2111,42 +2178,75 @@ class WebConfigServer:
                             return guard is None or guard() is True
                         except Exception:
                             return False
-                    if not still_authorized():
+                    allowed = still_authorized()
+                    attempt('json_before', 'passed' if allowed else 'failed',
+                            None if allowed else 'authorization_denied',
+                            guard_passed=allowed, code=code)
+                    if not allowed:
                         code, value, cookie = 403, denied_value(), None
-                    data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
-                    if not still_authorized():
+                    try:
+                        data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+                    except Exception:
+                        attempt('json_after', 'failed', 'encoding_unavailable', code=code)
+                        attempt('write', 'not_run', 'encoding_unavailable', code=code)
+                        attempt('finalize', 'not_run', 'encoding_unavailable', code=code)
+                        raise
+                    allowed = still_authorized()
+                    attempt('json_after', 'passed' if allowed else 'failed',
+                            None if allowed else 'authorization_denied',
+                            guard_passed=allowed, code=code, serialized=True)
+                    if not allowed:
                         code, cookie = 403, None
-                        data = json.dumps(denied_value(), ensure_ascii=False).encode()
+                        try:
+                            data = json.dumps(denied_value(), ensure_ascii=False).encode()
+                        except Exception:
+                            attempt('write', 'not_run', 'encoding_unavailable', code=code)
+                            attempt('finalize', 'not_run', 'encoding_unavailable', code=code)
+                            raise
                     try:
                         self.connection.settimeout(self.RESPONSE_TIMEOUT)
                     except OSError:
                         pass
-                    self.send_response(code)
-                    csp = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-                           "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
-                    for key, content in {'Content-Type': mime, 'Content-Length': str(len(data)), 'Cache-Control': 'no-store',
-                                         'Connection': 'close', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
-                                         'Content-Security-Policy': csp}.items():
-                        self.send_header(key, content)
-                    if cookie:
-                        self.send_header('Set-Cookie', cookie)
-                    for key, content in (extra_headers or {}).items():
-                        self.send_header(key, content)
-                    if public:
-                        self.send_header('Access-Control-Allow-Origin', '*')
-                        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
-                    if mime.startswith('text/csv'):
-                        self.send_header('Content-Disposition', 'attachment; filename="r1-monitoring.csv"')
-                    elif mime.startswith('text/html') and code == 200 and self.path.startswith('/api/'):
-                        self.send_header('Content-Disposition', 'attachment; filename="r1-report.html"')
-                    self.end_headers()
+                    try:
+                        self.send_response(code)
+                        csp = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                               "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
+                        for key, content in {'Content-Type': mime, 'Content-Length': str(len(data)), 'Cache-Control': 'no-store',
+                                             'Connection': 'close', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+                                             'Content-Security-Policy': csp}.items():
+                            self.send_header(key, content)
+                        if cookie:
+                            self.send_header('Set-Cookie', cookie)
+                        for key, content in (extra_headers or {}).items():
+                            self.send_header(key, content)
+                        if public:
+                            self.send_header('Access-Control-Allow-Origin', '*')
+                            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+                        if mime.startswith('text/csv'):
+                            self.send_header('Content-Disposition', 'attachment; filename="r1-monitoring.csv"')
+                        elif mime.startswith('text/html') and code == 200 and self.path.startswith('/api/'):
+                            self.send_header('Content-Disposition', 'attachment; filename="r1-report.html"')
+                        self.end_headers()
+                    except Exception:
+                        attempt('write', 'failed', 'response_error', code=code, write_completed=False)
+                        attempt('finalize', 'not_run', 'response_error', code=code)
+                        raise
                     written = False
                     try:
                         if self.command != 'HEAD':
                             self.wfile.write(data)
                             written = True
                     except OSError:
+                        attempt('write', 'failed', 'transport_error', code=code, write_completed=False)
                         pass
+                    except Exception:
+                        attempt('write', 'failed', 'response_error', code=code, write_completed=False)
+                        attempt('finalize', 'not_run', 'response_error', code=code)
+                        raise
+                    else:
+                        attempt('write', 'passed' if written else 'not_run',
+                                None if written else 'response_not_written',
+                                code=code, write_completed=written)
                     self.close_connection = True
                     # History is separate from the core capacity commit. Only
                     # this server-side successful response-write and the same
@@ -2158,10 +2258,30 @@ class WebConfigServer:
                         try:
                             publisher = getattr(outer.monitor, 'publish_capacity_history', None)
                             receipt = value.get('capacity', value) if isinstance(value, dict) else None
-                            if guard is not None and still_authorized() and callable(publisher):
-                                publisher(receipt, authorizer=guard)
+                            if guard is not None:
+                                allowed = still_authorized()
+                                if allowed and callable(publisher):
+                                    published = publisher(receipt, authorizer=guard)
+                                    attempt('finalize', 'passed' if published is True else
+                                            'failed' if published is False else 'not_run',
+                                            None if published is True else 'publication_rejected'
+                                            if published is False else 'publication_result_unobserved',
+                                            guard_passed=allowed, publisher_called=True,
+                                            published=published is True, code=code)
+                                else:
+                                    attempt('finalize', 'not_run',
+                                            'authorization_denied' if not allowed else 'publisher_unavailable',
+                                            guard_passed=allowed, publisher_called=False, code=code)
+                            else:
+                                attempt('finalize', 'not_run', 'publisher_unavailable',
+                                        publisher_called=False, code=code)
                         except Exception:
+                            attempt('finalize', 'failed', 'publication_error', code=code)
                             pass
+                    else:
+                        attempt('finalize', 'not_run',
+                                'transport_error' if not written else 'response_rejected',
+                                code=code, write_completed=written)
 
                 def valid(self, post=False, public=False, panel=False):
                     for name in ('Host', 'Origin', 'Cookie', 'Content-Length', 'Connection', 'X-R1-CSRF', 'X-FNM-Request'):

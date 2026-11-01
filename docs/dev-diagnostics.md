@@ -83,7 +83,27 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 
 响应有固定体积门。完整证据正常时 `status:complete/evidence_returned:true/truncated:false`；单独容量证据保留 4 MiB 上限及 16 KiB 包装余量，客户端至少允许 4 MiB，建议 5 MiB。32 字符以内的大整数使用无损十进制字符串，非有限数字或无法编码返回固定 `encoding_unavailable`。超额返回 `size_exceeded/diagnostic_size_exceeded`、原编码字节数与 SHA-256、`evidence_returned:false/truncated:true`，明确完整证据未返回且 RAM 首错仍保留；不悄悄剪掉首错，不把超额当成没有失效。单项收集完成不代表内部证据完整。最大字段夹具必须同时覆盖四份各 128 行库存、三份各 128 条正记录、三十二条 ring、完整组件变化位与 Monitor／Fnm 的各自有界记录；不能沿用旧 512 KiB 或未证明的 2 MiB 客户端限制。
 
-永久尺寸回归按每个字段的边界构造比自然同时状态更大的保守结构上包络：mount ID 十位、身份数字字符串三十二字符、内核设备名至多 255 字节、摘要六十四字符、有限 double 最长表示；Fnm 自身计数不超过 JavaScript 安全整数、设备标签至多三十二字符、每事件至多 128 行、七个固定计数与六个非递归子来源。完整原行／选项不进入响应。Monitor 包含十六条 ring、latest 与首错两帧；Fnm 对六个 latest 和十六条 ring 均按最大事件形状估算。真实 envelope 编码为 2257602 字节，其中证据 2257465 字节，距离 4 MiB 减包装预留仍有 1920455 字节；没有删除任何首错组件。该门只约束单选容量证据及其固定包装，不承诺任意混选其他旧项目的整份响应也小于 4 MiB。
+永久尺寸回归按每个字段的边界构造比自然同时状态更大的保守结构上包络：mount ID 十位、身份数字字符串三十二字符、内核设备名至多 255 字节、摘要六十四字符、有限 double 最长表示；Fnm 自身计数不超过 JavaScript 安全整数、设备标签至多三十二字符、每事件至多 128 行、七个固定计数与六个非递归子来源。完整原行／选项不进入响应。Monitor 包含十六条 ring、latest 与首错两帧；Fnm 对六个 latest 和十六条 ring 均按最大事件形状估算。增加尝试记录前的 envelope 上包络为 2257602 字节；新增尝试必须与这些原组件同时通过完整包络测试，不能把旧结果当作新增结构的体积证明。该门只约束单选容量证据及其固定包装，不承诺任意混选其他旧项目的整份响应也小于 4 MiB。
+
+`attempt_diagnostics` 是同一 schema 1 的只读扩展，不增加路由、默认四项或采集。最多四份不同批次的完整记录，优先保留本生命周期首个拒绝、最后拒绝、活动批次和最新完成批次；引用相同时只存一份。每批最多一百二十八行，超限、替换次数和丢弃计数明确返回。首拒绝独立于三十二项事件环，空轮询和其他来源成功不能覆盖；start 后开启新生命周期且不复用旧尝试 ID。
+
+包含新增尝试的最大包络必须同时保留原四份最大库存、Monitor／Fnm 全部有界记录、四份各一百二十八行的尝试、每行独立首拒绝及其后替换槽位、全部二十二个行槽、九个批次槽和十三个历史槽。各摘要、设备字符串与大整数采用独立最大值，不依赖自然重复来缩小结果。原 3926917 字节候选不包含这些更强边界，不能当作完整上限；正式编码及完整包络的实际字节、推导上界和余量随最终验证收据保存。生产输入仍为原 u64，三十二位十进制夹具只作编码压力上包络，不扩展输入权限。
+
+当前永久夹具的合法 u64 完整证据为 3951080 字节；仅有类型事件计数扩大至三十二位的编码压力证据为 4124936 字节，连同现有 envelope 为 4125073 字节。独立字段预算给出证据保守上界 4150768 字节，低于 4177920 字节的证据预算，另保留 16 KiB 外层空间；上界余量 27152 字节。原 header／latch 仍按 u64 和有限原时刻验证，不为压力测试放宽。回归位于 `test_capacity_attempt_codec.py`、`test_capacity_attempt_bounds.py` 与原 Store 测试；新增字段、阶段或池类型须更新版本和重新证明上界，不能沿用此预算。
+
+每批记录原开始／结束 wall 与 monotonic 时刻、原容量／挂载 epoch、实际受信来源、逐行元数据摘要、首个拒绝及最终处置。固定阶段包括初始 key、资格、worker 请求及库存／FD 前后／测量／传输、父进程 SCM 与 watch、测量后库存、最终库存、释放 FD 后库存、commit。worker 的原三次库存检查分别保留，未执行阶段按 `missing_stage_status:not_run` 解释，不能当 passed。检查次数、短路和真实判定保持原样；worker 的私有诊断和业务 JSON 合计仍限 4096 字节，编码或观察故障退回原业务输出，不改变传输成败。
+
+历史事件独立记录 `candidate/web_return/json_before/json_after/write/finalize/prune`；内部 finalizer 的初始、cache 匹配、排序、发布前和回滚等子阶段与外层 Web 结果分别保留。每行首拒绝、整批首拒绝、历史首拒绝和首次真正剪枝不被后续通用错误覆盖。原业务元数据只用同次已有值和摘要，诊断不重读库存、guard、poll、fdinfo 或挂载路径。跨锁的既有 Monitor／Fnm 记录仍明确非原子，不用最新库存覆盖旧失败现场。
+
+`attempt_diagnostics.encoding` 固定为 `fixed_fields_v2_b36_b64digest`。`phase_columns` 为 `slot/status_error_flags/reason/observations`：slot 绑定编译期固定阶段与子阶段，状态依次为 passed、failed、not_run，flags 为状态索引乘二再加独立观察错误位。`observations` 与 metadata 使用规范三十六进制 presence mask 加有类型的 token；缺字段没有 mask 位，显式 null 为 `-`，布尔仅 `0/1`。整数用规范三十六进制无损表示，解码后安全整数保留数字，更大者保留十进制字符串；不得把 false、零、null 与缺测合并。
+
+已有六十四字符十六进制摘要只转换成同一字节的四十三字符 base64url，按固定三字符引用进入最多 16400 项的摘要池；这不是重新计算身份。内核设备名及 major:minor 独立进入最多 3584 项的字符串池，保留前导零及原字段的七位／十位限制。不得把路径、SN、令牌或自由文本放入任一池。每行 `first_rejection` 是独立完整事件，不能引用会被后续覆盖的槽；批次、历史首拒绝与首次剪枝同样保留原值。`final_disposition` 仍是原业务最终处置，不能用它替代更早的精确拒绝。
+
+解码器必须先核 wire 大小、封闭根字段、原 header／独立 latch 的类型及范围、固定表和槽位，再核池大小、base64url 规范尾位、引用、mask、token、阶段对应和重复槽；拒绝布尔充当整数、非有限时间、溢出与未知字段。读取 JSON 时拒绝重复对象键。客户端建议 5 MiB wire 上限，扩张后的逻辑 JSON 另限 20 MiB；后者不是进程 RAM 承诺。解码失败只表示本项证据不可用，不能变成 passed 或与其他批次拼接。旧 `values` 池与旧 presence 编码已被替代，不得猜格式回退。
+
+原时刻不重映射，观察来源与 epoch 保持原批次关联。未知兄弟字段只保留固定安全位置／字段名及 incomplete，未知值不落盘；合法容量子树不能因 reader 不认识外层字段而整份丢失。编码、codec／parent decoder、JSON、write 或 finalizer 的纯观察故障均不改变原业务返回、原异常、FD、锁、授权次数与安全拒绝；`observer_error/not_observed` 不是安全门通过。诊断只在显式请求中复制已有 RAM，不运行 worker、库存、poll、SMART、statvfs 或任何 GET 补采。
+
+现有容量锁内仍包含尝试编码和 ledger 深拷贝。四批最大尝试与最大旧 ledger 的本机受控 RAM-only 调用约 0.66 秒；启用分配跟踪时，codec 新分配峰值约 16.1 MB，不包括原 Store、旧证据或整进程。它们是 Windows 合成夹具测量，不是 NAS CPU／延迟／总 RAM 承诺，也不适合作为页面轮询接口；默认检查和 GET 均不执行本编码。
 
 `a47ab33` 实机仍曾在刷新完成约 13.47 秒后首次观察到四盘容量同时未知；当时缺少上述 epoch／namespace／逐 mount key 证据，不能认定是基本心跳或某一个真实挂载事件。本诊断用于下一次受控现场取证，本机回归不证明 NAS 已恢复或物理休眠。
 
@@ -99,7 +119,7 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `file_protocol` | 仅显式选择：固定精确固件与所有者，核对最多八个规划根的 Users／admin／public `get_info` 与最多两项 `get_list`，共享十二秒窗口、最多四十八次。先验证真实同挂载句柄，失败不发原厂请求；返回四阶段 errno、预期／实际 mount ID、设备号、self／PID1／emhistor namespace 和脱敏协议形状，不返回目录名称、路径、内容、令牌或任意原厂参数。可能唤盘／更新原厂状态，诊断自身 `file_access_available:false` |
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
 | `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
-| `capacity_cache` | 显式只读已有容量决策 ledger；包含最近成功提交、首次真实失效、原库存组件摘要和独立心跳，不运行库存／poll／容量投影或任何磁盘采集。见本页固定 schema。 |
+| `capacity_cache` | 显式只读已有容量决策 ledger 和独立尝试记录；包含最近成功提交、首次真实失效、逐盘首拒绝与最终处置、原库存组件摘要和独立心跳，不运行库存／poll／容量投影或任何磁盘采集。见本页固定 schema。 |
 
 Docker 候选、文件上下文和协议检查会访问元数据，部分原厂查询可能初始化状态并唤盘，只能显式选择，不加入默认采集或轮询。文件边界仍为 `/drives/*/Users/admin/`；元数据或映射候选不代替完整原厂 ACL 和最终句柄。五项文件只读执行器另有逐次运行门槛，八项写合同仍未接入。Docker 证据见[固定项目读取](docker-projects.md)。检测结束时开发窗口失效，丢弃整次结果并返回 `403`，不续期。
 
