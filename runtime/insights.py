@@ -415,6 +415,39 @@ class InsightsCollector:
             if thread is not threading.current_thread():
                 thread.join(timeout=0.5)
 
+    def panel_cache_snapshot(self):
+        """Copy the panel's fixed non-disk cache without disk/SMART projection.
+
+        This optional internal view grants no identity authority. Disk rows,
+        raw SMART, serial inventories and sample history are deliberately absent;
+        their consumers must keep using snapshot() and its lifecycle checks.
+        No request cache or new sample date is created here.
+        """
+        with self._lock:
+            selected = {key: self._state[key] for key in (
+                'timestamp', 'system', 'interfaces', 'containers', 'vms',
+                'ports', 'processes', 'gpu') if key in self._state}
+            device = self._state.get('device')
+            if isinstance(device, dict):
+                selected['device'] = {key: device[key] for key in (
+                    'sampled_at', 'cpu', 'identity', 'network', 'thermal', 'fans')
+                    if key in device}
+                identity = device.get('identity')
+                if isinstance(identity, dict):
+                    selected['device']['identity'] = {key: identity[key] for key in (
+                        'name', 'name_source', 'hostname', 'kernel', 'os', 'firmware', 'pci')
+                        if key in identity}
+                    dmi = identity.get('dmi')
+                    if isinstance(dmi, dict):
+                        selected['device']['identity']['dmi'] = {key: dmi[key] for key in (
+                            'sys_vendor', 'product_name', 'product_version', 'board_vendor',
+                            'board_name', 'board_version', 'bios_vendor', 'bios_version',
+                            'bios_date', 'chassis_vendor', 'chassis_type') if key in dmi}
+                storage = device.get('storage')
+                if isinstance(storage, dict) and 'raid' in storage:
+                    selected['device']['storage'] = {'raid': storage['raid']}
+            return copy.deepcopy(selected)
+
     def snapshot(self):
         with self._lock:
             state = copy.deepcopy(self._state)

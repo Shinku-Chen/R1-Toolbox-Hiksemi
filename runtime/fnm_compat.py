@@ -860,11 +860,19 @@ class FnmonitorPanel:
             pass
         return value
 
-    def _insights(self):
+    def _insights(self, *, include_disks=False):
+        # Only explicitly implemented hooks opt in. Snapshot-only embeddings
+        # (including dynamic legacy adapters) keep the original fallback.
+        try:
+            if not include_disks and callable(getattr(type(self.insights), 'panel_cache_snapshot', None)):
+                value = self.insights.panel_cache_snapshot()
+                return copy.deepcopy(value) if isinstance(value, dict) else {}
+        except Exception:
+            return {}
         return self._safe(self.insights)
 
-    def _device(self):
-        return _dict(self._insights().get('device'))
+    def _device(self, *, include_disks=False):
+        return _dict(self._insights(include_disks=include_disks).get('device'))
 
     @_capacity_projection_stage('basic')
     def _basic(self):
@@ -1041,7 +1049,9 @@ class FnmonitorPanel:
 
     @_capacity_projection_stage('disks')
     def _disks(self, *, include_identity=False):
-        insight, device = self._insights(), self._device()
+        # Physical disk/SMART rows still use the full production projection,
+        # including both original lifecycle checks. Non-disk helpers do not.
+        insight, device = self._insights(include_disks=True), self._device(include_disks=True)
         storage = _dict(device.get('storage'))
         inventory = {row.get('name'): row for row in _list(storage.get('devices'), 128)
                      if isinstance(row, dict) and isinstance(row.get('name'), str)}
