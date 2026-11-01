@@ -68,11 +68,21 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
   const dom = () => page.locator('#layout-storage [data-mod="storage"]').evaluate(module => ({
     pool: module.querySelector('[data-ref="poolLeg"]').textContent,
     poolHistorical: !!module.querySelector('.r1-pool-hist'),
-    bays: [...module.querySelectorAll('.bay')].map(bay => ({
-      name: bay.querySelector('.bay-name').textContent,
-      text: bay.querySelector('.bay-cap').textContent,
-      historical: bay.classList.contains('r1-cap-hist'),
-    })),
+    bays: [...module.querySelectorAll('.bay')].map(bay => {
+      const cap = bay.querySelector('.bay-cap'), meta = bay.querySelector('.r1-miss-meta'), value = bay.querySelector('.r1-hist-value');
+      return {
+        name: bay.querySelector('.bay-name').textContent,
+        text: cap.textContent,
+        historical: bay.classList.contains('r1-cap-hist'),
+        missing: bay.classList.contains('r1-cap-missing'),
+        marker: bay.getAttribute('data-r1-history'),
+        missing_marker: bay.getAttribute('data-r1-missing'),
+        miss_font: meta ? getComputedStyle(meta).fontSize : null,
+        value_font: value ? getComputedStyle(value).fontSize : null,
+        cap_clip: cap.scrollWidth > cap.clientWidth + 1,
+        bay_clip: bay.scrollHeight > bay.clientHeight + 1,
+      };
+    }),
   }));
   const timeStrings = value => page.evaluate(value => [...new Set([
     new Date(value.sampled_at * 1000).toLocaleString(),
@@ -165,7 +175,8 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
       const currentDOM = await dom();
       check(scenario + ': valid current values keep the ordinary display instead of historical mode',
         !currentDOM.poolHistorical && currentDOM.bays.filter(row => expectedNames.includes(row.name))
-          .every(row => !row.historical && !row.text.includes('最近实测')), currentDOM);
+          .every(row => !row.historical && !row.missing && !row.text.includes('最近实测')
+            && !row.text.includes('容量未采集')), currentDOM);
       const liveBefore = await page.evaluate(() => window.__capacityObservationProbe.liveDisk);
       phase = 'invalidated';
       const invalidated = await nextFrame('event');
@@ -189,6 +200,32 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
           const bay = firstDOM.bays.find(row => row.name === name);
           return bay.historical && bay.text.includes('最近实测') && /已测|文件系统|子集/.test(bay.text);
         }), firstDOM);
+      if (scenario === 'partial') {
+        const failedBay = firstDOM.bays.find(row => row.name === 'sdb');
+        check('partial: unmeasured disk without history shows complete missing reason instead of ellipsis',
+          failedBay && failedBay.missing && !failedBay.historical && failedBay.marker === null && failedBay.missing_marker === 'bay'
+          && failedBay.text.includes('已挂载 1 个分区') && failedBay.text.includes('容量未采集')
+          && !failedBay.text.includes('未挂载') && failedBay.cap_clip === false && failedBay.bay_clip === false
+          && failedBay.miss_font === '12px', failedBay);
+        check('partial: measured disks keep history mode without stale missing marker',
+          firstDOM.bays.filter(row => ['sda', 'sdc'].includes(row.name))
+            .every(row => row.historical && !row.missing && row.marker !== null && row.missing_marker === null
+              && row.value_font === '12px' && row.cap_clip === false && row.bay_clip === false), firstDOM);
+        phase = 'missing-responsive';
+        for (const width of [376, 320]) {
+          await page.setViewportSize({ width, height: 1000 });
+          await page.waitForTimeout(120);
+          const narrow = await dom();
+          const row = narrow.bays.find(item => item.name === 'sdb');
+          const doc = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
+          check('partial missing reason fully readable at ' + width + 'px',
+            row && row.missing && row.text.includes('已挂载 1 个分区') && row.text.includes('容量未采集')
+            && row.cap_clip === false && row.bay_clip === false && row.miss_font === '12px'
+            && narrow.poolHistorical && doc.scrollWidth <= doc.innerWidth, { width, row, pool: narrow.pool, doc });
+        }
+        await page.setViewportSize({ width: 1400, height: 1000 });
+        await page.waitForTimeout(120);
+      }
       if (scenario === 'zero') check('genuine measured zero use is preserved in historical API and disk display',
         summary.used === 0 && summary.percent === 0 && firstDOM.bays.every(row => row.text.includes('0%')), { summary, firstDOM });
       if (scenario === 'multipart') check('two partitions of one physical disk count as two filesystems, one disk',

@@ -8010,6 +8010,11 @@ style.textContent = '.r1-cap-hist .bay-cap{opacity:.72}.r1-cap-hist .bay-gauge{o
 + '.r1-cap-hist .bay-cap .r1-hist-value{font-size:12px;white-space:normal;overflow-wrap:anywhere}'
 + '.r1-cap-hist .bay-cap .r1-hist-meta{color:var(--chassis-ink-2);font-size:12px;white-space:normal;overflow-wrap:anywhere;line-height:1.35}'
 + '.r1-cap-hist .bay-gauge,.r1-cap-hist .bay-zz{display:none!important}'
++ '.r1-cap-missing .bay-cap{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;'
++ 'display:flex;flex-direction:column;gap:2px;line-height:1.35;font-size:12px;max-width:100%;min-width:0}'
++ '.r1-cap-missing .bay-cap .r1-miss-size,.r1-cap-missing .bay-cap .r1-miss-meta{font-size:12px;white-space:normal;overflow-wrap:anywhere}'
++ '.r1-cap-missing .bay-cap .r1-miss-meta{color:var(--chassis-ink-2)}'
++ '.r1-cap-missing .bay-gauge,.r1-cap-missing .bay-zz{display:none!important}'
 + '.r1-pool-hist .legend,.r1-pool-hist .dnum{opacity:.85}'
 + '.r1-pool-hist .bar i{background:var(--ink-3)!important}'
 + '.r1-hist-note{color:var(--ink-3);font-weight:400}';
@@ -8035,6 +8040,21 @@ bay.classList.remove('r1-cap-hist');
 r1MarkHist(bay, 'bay', false);
 cap._html = undefined;
 }
+}
+function r1ApplyBayMissing(bay, disk) {
+const cap = bay && bay._r && bay._r.cap;
+if (!cap) return;
+bay.classList.add('r1-cap-missing');
+bay.setAttribute('data-r1-missing', 'bay');
+cap._html = undefined;
+setHTML(cap, `<span class="r1-miss-size">${esc(F.dsizeStr(disk.size))}</span>`
++ `<span class="r1-miss-meta">${disk.standby === true ? '休眠 · ' : ''}${esc(r1DiskCapacityMissing(disk))}</span>`);
+}
+function r1ClearBayMissing(bay) {
+if (!bay) return;
+bay.classList.remove('r1-cap-missing');
+bay.removeAttribute('data-r1-missing');
+if (bay._r && bay._r.cap) bay._r.cap._html = undefined;
 }
 function r1PoolHistory(o) {
 const summary = o && o.capacity_last_observation_summary;
@@ -8096,9 +8116,17 @@ disks.forEach(d => {
 const bay = m.bays[d.name];
 const hist = r1DiskHasCapacity(d) ? null : r1DiskHistory(d);
 if (bay && !r1DiskHasCapacity(d)) {
-if (!hist) setText(bay._r.cap, `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
+if (hist) {
+r1ClearBayMissing(bay);
 r1ApplyBayHistory(bay, hist, d.standby === true);
-} else if (bay) r1ApplyBayHistory(bay, null, false);
+} else {
+r1ApplyBayHistory(bay, null, false);
+r1ApplyBayMissing(bay, d);
+}
+} else if (bay) {
+r1ApplyBayHistory(bay, null, false);
+r1ClearBayMissing(bay);
+}
 if (bay) bay.title = `${d.name} · ${bayState(d).text}（${r1DiskObservedText([d], o)}）`
 + (hist ? ' · 当前容量未知，展示最近实测快照：' + r1HistLine(hist) : '');
 });
