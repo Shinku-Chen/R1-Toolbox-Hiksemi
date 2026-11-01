@@ -21,6 +21,8 @@ Deliberate limits, matching the project's rules:
 
 import copy
 import datetime
+import functools
+import hashlib
 import json
 import math
 import os
@@ -30,6 +32,33 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+
+
+def _capacity_projection_stage(stage):
+    """Observe one normal call without turning diagnostic failure into IO failure."""
+    def decorate(method):
+        @functools.wraps(method)
+        def observed(self, *args, **kwargs):
+            frame = None
+            try:
+                frame = self._capacity_projection_begin(stage)
+            except Exception:
+                pass
+            try:
+                value = method(self, *args, **kwargs)
+            except BaseException:
+                try:
+                    self._try_capacity_projection_end(frame, None, 'projection_error')
+                except Exception:
+                    pass
+                raise
+            try:
+                self._try_capacity_projection_end(frame, value, 'returned')
+            except Exception:
+                pass
+            return value
+        return observed
+    return decorate
 
 
 PANEL_SCHEMA = 1
@@ -497,6 +526,210 @@ class FnmonitorPanel:
         self._weather_key = None
         self._temperature_read_clock = None
         self._temperature_clock_lock = threading.Lock()
+        # These breadcrumbs describe only values consumed by normal requests.
+        # Reading them never invokes a collector or a mount projection.
+        self._capacity_projection_lock = threading.Lock()
+        self._capacity_projection_local = threading.local()
+        self._capacity_projection_sequence = 0
+        self._capacity_projection_operation = 0
+        self._capacity_projection_ring = []
+        self._capacity_projection_dropped = 0
+        self._capacity_projection_saturated = False
+        self._capacity_projection_latest = {}
+        self._capacity_projection_instance = hashlib.sha256(
+            ('fnm-capacity:%s:%s' % (id(self), time.monotonic_ns())).encode('ascii')).hexdigest()[:24]
+
+    def _capacity_projection_begin(self, stage):
+        with self._capacity_projection_lock:
+            if self._capacity_projection_operation >= 2 ** 53 - 1:
+                self._capacity_projection_saturated = True
+                return None
+            self._capacity_projection_operation += 1
+            operation = self._capacity_projection_operation
+        stack = getattr(self._capacity_projection_local, 'stack', None)
+        if stack is None:
+            stack = self._capacity_projection_local.stack = []
+        if len(stack) >= 16:
+            return None
+        frame = {'stage': stage, 'operation_id': operation,
+                 'parent_operation_id': stack[-1]['operation_id'] if stack else None,
+                 'children': {}, 'counts': {}, 'devices': [], 'source': {'status': 'not_observed'}}
+        stack.append(frame)
+        return frame
+
+    def _capacity_projection_hint(self, stage, name, value=None):
+        """Best-effort fixed counters at the production branch that made a choice."""
+        try:
+            stack = getattr(self._capacity_projection_local, 'stack', ())
+            if not stack or stack[-1]['stage'] != stage:
+                return
+            frame = stack[-1]
+            if name == 'device':
+                if len(frame['devices']) < 128:
+                    frame['devices'].append({
+                        'device': value if isinstance(value, str) and re.fullmatch(
+                            r'(?:sd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|vd[a-z]+|xvd[a-z]+)', value)
+                        and len(value) <= 32 else None,
+                        'matched': 0, 'unknown': 0, 'deduplicated': 0, 'contributed': 0,
+                        'capacity_unknown': 0})
+                return
+            allowed = ('matched', 'unknown', 'deduplicated', 'contributed', 'out_of_scope',
+                       'invalid_identity', 'capacity_unknown')
+            if name in allowed:
+                frame['counts'][name] = min(65536, frame['counts'].get(name, 0) + 1)
+                if frame['devices'] and name in frame['devices'][-1]:
+                    item = frame['devices'][-1]
+                    item[name] = min(65536, item[name] + 1)
+            elif name == 'mount_cache':
+                frame['mount_cache'] = value if value in ('hit', 'reloaded') else 'not_observed'
+            elif name == 'mount_read':
+                frame['mount_read'] = value if value in ('returned', 'read_error') else 'not_observed'
+            elif name == 'sample_date':
+                stamp = _number(value, 0, 10 ** 12)
+                if stamp is not None and stamp > 0 and len(frame.setdefault('dates', [])) < 128:
+                    frame['dates'].append({'capacity_sampled_at': stamp})
+            elif name in ('mount_count', 'basic_row_count'):
+                if type(value) is int and 0 <= value <= 65536:
+                    frame[name] = value
+        except Exception:
+            pass
+
+    def _try_capacity_projection_hint(self, *args):
+        # The dispatch boundary is also best-effort: a broken/replaced observer
+        # must not turn an otherwise successful disk projection into a failure.
+        try:
+            self._capacity_projection_hint(*args)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _capacity_projection_source(value):
+        """Copy only the Monitor's documented, exact-return sideband contract."""
+        if not isinstance(value, dict) or value.get('status') != 'observed':
+            return {'status': 'not_observed'}
+        result = {'status': 'observed'}
+        for field in ('sequence', 'operation_id', 'row_count', 'measured_count'):
+            raw = value.get(field)
+            result[field] = raw if type(raw) is int and 0 <= raw <= 2 ** 53 - 1 else None
+        for field in ('sampled_monotonic', 'sampled_at'):
+            result[field] = _number(value.get(field), 0, 10 ** 12)
+        for field in ('capacity_epoch', 'mount_epoch'):
+            raw = value.get(field)
+            result[field] = raw if type(raw) is int and 0 <= raw <= 2 ** 53 - 1 else 'not_observed'
+        result['result'] = value.get('result') if value.get('result') in (
+            'returned', 'projection_error', 'not_observed') else 'not_observed'
+        digest = value.get('date_digest')
+        result['date_digest'] = digest if isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) else None
+        result['atomic_with_capacity'] = value.get('atomic_with_capacity') is True
+        return result
+
+    @staticmethod
+    def _capacity_projection_dates(rows):
+        stamps = [_number(row.get('capacity_sampled_at'), 0, 10 ** 12)
+                  for row in rows if isinstance(row, dict)]
+        stamps = sorted(value for value in stamps if value is not None and value > 0)
+        return {'sample_date_count': len(stamps),
+                'sampled_at_oldest': min(stamps) if stamps else None,
+                'sampled_at_newest': max(stamps) if stamps else None,
+                'date_digest': hashlib.sha256(b'fnm-capacity-dates-v1\0' + json.dumps(
+                    stamps, separators=(',', ':'), allow_nan=False).encode('ascii')).hexdigest()}
+
+    def _capacity_projection_end(self, frame, value, result):
+        if frame is None:
+            return
+        stack = getattr(self._capacity_projection_local, 'stack', ())
+        if not stack or stack[-1] is not frame:
+            return
+        # Pop even when an observation cannot be represented. No stale frame may
+        # attribute the next normal request to an earlier request or thread.
+        stack.pop()
+        event = {'stage': frame['stage'], 'operation_id': frame['operation_id'],
+                 'parent_operation_id': frame['parent_operation_id'],
+                 'sampled_monotonic': _number(time.monotonic(), 0, 10 ** 12),
+                 'sampled_at': _number(time.time(), 0, 10 ** 12),
+                 'result': result, 'atomic': False, 'counts': frame['counts'],
+                 'children': frame['children'], 'monitor_source': frame['source']}
+        stage = frame['stage']
+        if stage in ('safe', 'basic'):
+            rows = _list(_dict(value).get('disks'), 128)
+        elif stage == 'disks':
+            rows = _list(value, 128)
+        elif stage == 'overview':
+            rows = _list(_dict(value).get('disks_detail'), 128)
+            event['summary_has_value'] = all(_number(_dict(value).get(field)) is not None
+                                             for field in ('disk_size', 'disk_used', 'disk_total'))
+        else:
+            rows = []
+        if stage in ('safe', 'basic', 'disks', 'overview'):
+            event['row_count'] = len(rows)
+            total_field, used_field = ('total', 'used') if stage in ('disks', 'overview') else ('total_bytes', 'used_bytes')
+            event['measured_count'] = sum(
+                isinstance(row, dict) and _number(row.get(total_field)) is not None
+                and _number(row.get(used_field)) is not None for row in rows)
+            event.update(self._capacity_projection_dates(rows))
+        if stage == 'mounts':
+            mapping = _dict(value)
+            event['device_count'] = min(len(mapping), 65536)
+            event['mount_count'] = min(sum(len(rows) for rows in mapping.values() if isinstance(rows, list)), 65536)
+            event['mount_cache'] = frame.get('mount_cache', 'not_observed')
+            event['mount_read'] = frame.get('mount_read', 'not_observed')
+        if stage == 'disks':
+            event['devices'] = frame['devices']
+        if stage == 'summary':
+            event['summary_has_value'] = (isinstance(value, tuple) and len(value) == 3
+                                          and all(_number(item) is not None for item in value))
+            event.update(self._capacity_projection_dates(frame.get('dates', [])))
+            event['mount_count'] = frame.get('mount_count', 0)
+            event['basic_row_count'] = frame.get('basic_row_count', 0)
+        # _basic has exactly one _safe child. Other stages keep their own child
+        # sequences: overview's disks and summary are independent snapshots.
+        source = frame['children'].get('safe' if stage == 'basic' else 'basic', {})
+        event['input_result'] = (result if stage == 'safe' else source.get(
+            'input_result', source.get('result', 'not_observed')))
+        if source.get('monitor_source', {}).get('status') == 'observed':
+            event['monitor_source'] = source['monitor_source']
+        with self._capacity_projection_lock:
+            self._capacity_projection_sequence += 1
+            event['sequence'] = self._capacity_projection_sequence
+            self._capacity_projection_latest[stage] = event
+            if len(self._capacity_projection_ring) == 16:
+                self._capacity_projection_ring.pop(0)
+                self._capacity_projection_dropped += 1
+            self._capacity_projection_ring.append(event)
+        if stack:
+            stack[-1]['children'][stage] = {
+                'sequence': event['sequence'], 'operation_id': event['operation_id'],
+                'result': event['result'], 'input_result': event['input_result'],
+                'monitor_source': event['monitor_source']}
+
+    def _try_capacity_projection_end(self, frame, value, result):
+        try:
+            self._capacity_projection_end(frame, value, result)
+        except Exception:
+            pass
+        finally:
+            # Even a failed observer dispatch must not leave an old operation
+            # as the parent of a later, unrelated request on this thread.
+            try:
+                stack = getattr(self._capacity_projection_local, 'stack', ())
+                if frame is not None and stack and stack[-1] is frame:
+                    stack.pop()
+            except Exception:
+                pass
+
+    def capacity_projection_diagnostics(self):
+        """Read only bounded RAM breadcrumbs, never replay the normal projection."""
+        with self._capacity_projection_lock:
+            return copy.deepcopy({
+                'schema_version': 1, 'source': 'fnm_normal_consumption',
+                'instance': self._capacity_projection_instance,
+                'sequence': self._capacity_projection_sequence, 'atomic': False,
+                'sequence_saturated': self._capacity_projection_saturated,
+                'ring_limit': 16, 'dropped_count': self._capacity_projection_dropped,
+                'latest': {stage: self._capacity_projection_latest.get(stage, {
+                    'stage': stage, 'result': 'not_observed'})
+                    for stage in ('safe', 'basic', 'mounts', 'disks', 'summary', 'overview')},
+                'ring': self._capacity_projection_ring})
 
     # ------------------------------------------------------------------
     # snapshots
@@ -504,11 +737,33 @@ class FnmonitorPanel:
     def _safe(self, component, default=None):
         if component is None:
             return default if default is not None else {}
+        frame = None
+        if component is self.monitor:
+            try:
+                frame = self._capacity_projection_begin('safe')
+            except Exception:
+                pass
         try:
             value = component.snapshot()
-            return copy.deepcopy(value) if isinstance(value, dict) else (default if default is not None else {})
+            observed_result = 'returned' if isinstance(value, dict) else 'invalid_type'
+            if frame is not None:
+                try:
+                    observer = getattr(component, 'capacity_projection_observation', None)
+                    frame['source'] = self._capacity_projection_source(observer(value)) if callable(observer) else {'status': 'not_observed'}
+                except Exception:
+                    pass
+            value = copy.deepcopy(value) if isinstance(value, dict) else (default if default is not None else {})
         except Exception:
+            try:
+                self._try_capacity_projection_end(frame, None, 'projection_error')
+            except Exception:
+                pass
             return default if default is not None else {}
+        try:
+            self._try_capacity_projection_end(frame, value, observed_result)
+        except Exception:
+            pass
+        return value
 
     def _insights(self):
         return self._safe(self.insights)
@@ -516,6 +771,7 @@ class FnmonitorPanel:
     def _device(self):
         return _dict(self._insights().get('device'))
 
+    @_capacity_projection_stage('basic')
     def _basic(self):
         return self._safe(self.monitor)
 
@@ -610,16 +866,20 @@ class FnmonitorPanel:
     # ------------------------------------------------------------------
     # mounts (read-only, cached): /dev/sda1 -> ["/drives/data"]
     # ------------------------------------------------------------------
+    @_capacity_projection_stage('mounts')
     def _mounts(self):
         now = self.clock()
         stamp, cached = self._mount_cache
         if now - stamp < 30:
+            self._try_capacity_projection_hint('mounts', 'mount_cache', 'hit')
             return cached
         result, devices = {}, {}
         try:
             text = (self.proc_root / 'self/mountinfo').read_text(encoding='utf-8', errors='replace')[:262144]
+            self._try_capacity_projection_hint('mounts', 'mount_read', 'returned')
         except OSError:
             text = ''
+            self._try_capacity_projection_hint('mounts', 'mount_read', 'read_error')
         for line in text.splitlines():
             parts = line.split(' - ', 1)
             if len(parts) != 2:
@@ -639,6 +899,7 @@ class FnmonitorPanel:
                 devices[mount] = fields[2]
         self._mount_cache = (now, result)
         self._mount_devices = devices
+        self._try_capacity_projection_hint('mounts', 'mount_cache', 'reloaded')
         return result
 
     # ------------------------------------------------------------------
@@ -683,6 +944,7 @@ class FnmonitorPanel:
             'swap_percent': _number(memory.get('swap_usage_percent'), 0, 100),
         }
 
+    @_capacity_projection_stage('disks')
     def _disks(self, *, include_identity=False):
         insight, device = self._insights(), self._device()
         storage = _dict(device.get('storage'))
@@ -713,6 +975,7 @@ class FnmonitorPanel:
             if item.get('type') == 'eMMC':
                 continue
             name = item['id']
+            self._try_capacity_projection_hint('disks', 'device', name)
             physical = _dict(inventory.get(name))
             identity = _dict(identities.get(name))
             # No sysfs fallback: missing/conflicting cache evidence remains null.
@@ -732,16 +995,21 @@ class FnmonitorPanel:
             capacity_entries = []
             for mount in disk_mounts:
                 entry = _dict(basic.get(mount))
+                self._try_capacity_projection_hint('disks', 'matched' if mount in basic else 'unknown')
                 filesystem = self._mount_devices.get(mount)
                 if filesystem is not None and filesystem in measured_devices:
+                    self._try_capacity_projection_hint('disks', 'deduplicated')
                     continue
                 capacity_entries.append(entry)
                 if _number(entry.get('total_bytes')) is not None and _number(entry.get('used_bytes')) is not None:
                     total += entry['total_bytes']
                     used += entry['used_bytes']
                     measured = True
+                    self._try_capacity_projection_hint('disks', 'contributed')
                     if filesystem is not None:
                         measured_devices.add(filesystem)
+                else:
+                    self._try_capacity_projection_hint('disks', 'capacity_unknown')
             # This is a dated manual measurement, independent of the fast
             # overview timestamp. Multiple partitions retain the oldest sample
             # and explicitly mark incomplete coverage rather than imply live IO.
@@ -793,6 +1061,7 @@ class FnmonitorPanel:
             })
         return rows
 
+    @_capacity_projection_stage('summary')
     def _disk_summary(self):
         """Count each confirmed block filesystem once, excluding FUSE aliases.
 
@@ -804,17 +1073,23 @@ class FnmonitorPanel:
         total = used = 0
         measured = False
         mounts = {mount for rows in self._mounts().values() for mount in rows}
+        self._try_capacity_projection_hint('summary', 'mount_count', len(mounts))
         if not mounts:
             return None, None, None
         seen = set()
-        for entry in _list(self._basic().get('disks'), 128):
+        entries = _list(self._basic().get('disks'), 128)
+        self._try_capacity_projection_hint('summary', 'basic_row_count', len(entries))
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
             mount = entry.get('mount')
             if mount not in mounts:
+                self._try_capacity_projection_hint('summary', 'out_of_scope')
                 continue
+            self._try_capacity_projection_hint('summary', 'matched')
             identity = self._mount_devices.get(mount) or mount
             if not isinstance(identity, str) or identity in seen:
+                self._try_capacity_projection_hint('summary', 'deduplicated' if isinstance(identity, str) else 'invalid_identity')
                 continue
             size = _number(entry.get('total_bytes'), 1)
             taken = _number(entry.get('used_bytes'), 0)
@@ -823,6 +1098,10 @@ class FnmonitorPanel:
                 used += taken
                 measured = True
                 seen.add(identity)
+                self._try_capacity_projection_hint('summary', 'contributed')
+                self._try_capacity_projection_hint('summary', 'sample_date', entry.get('capacity_sampled_at'))
+            else:
+                self._try_capacity_projection_hint('summary', 'capacity_unknown')
         if not measured or total <= 0:
             return None, None, None
         return total, used, used / total * 100
@@ -1263,6 +1542,7 @@ class FnmonitorPanel:
     # ------------------------------------------------------------------
     # fnmonitor endpoints
     # ------------------------------------------------------------------
+    @_capacity_projection_stage('overview')
     def overview(self, *, include_identity=False):
         """Shared overview; only an authorized owner Web call opts into identity."""
         disks = self._disks(include_identity=include_identity)

@@ -46,6 +46,44 @@ SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', '
                       'night_enabled', 'night_start', 'night_end', 'night_brightness', 'enabled_pages'))
 COOKIE = 'r1_web_session'
 PAIR_TTL, SESSION_TTL = 180, 8 * 3600
+# Bound the new explicit capacity evidence, including space for its fixed HTTP
+# diagnostic wrapper. Never trim the retained first-invalidation RAM record.
+CAPACITY_DIAGNOSTIC_RESPONSE_LIMIT = 4 * 1024 * 1024
+
+
+def _capacity_diagnostic_envelope(value):
+    limit = CAPACITY_DIAGNOSTIC_RESPONSE_LIMIT
+    def numbers(item):
+        # This diagnostic has no caller-supplied tree. Keep kernel/counter
+        # integers lossless in JavaScript and bound their public decimal form.
+        if type(item) is int and abs(item) > 2 ** 53 - 1:
+            text = str(item)
+            if len(text) > 32:
+                raise OverflowError()
+            return text
+        if isinstance(item, dict):
+            return {key: numbers(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return [numbers(child) for child in item]
+        return item
+    try:
+        value = numbers(value)
+        data = json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8')
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        return {'schema_version': 1, 'status': 'encoding_unavailable',
+                'reason': 'diagnostic_encoding_unavailable', 'evidence_returned': False,
+                'truncated': False, 'response_limit_bytes': limit,
+                'first_invalidation_retained_in_memory': True}
+    if len(data) > limit - 16384:
+        return {'schema_version': 1, 'status': 'size_exceeded',
+                'reason': 'diagnostic_size_exceeded', 'evidence_returned': False,
+                'truncated': True, 'response_limit_bytes': limit,
+                'evidence_encoded_bytes': len(data), 'evidence_sha256': hashlib.sha256(data).hexdigest(),
+                'first_invalidation_retained_in_memory': True}
+    return dict(value, status='complete', evidence_returned=True, truncated=False,
+                response_limit_bytes=limit, evidence_encoded_bytes=len(data))
+
+
 PUBLIC_ROUTES = frozenset(('/api/v1', '/api/v1/status', '/api/v1/history', '/api/v1/traffic',
                            '/api/v1/alerts', '/api/v1/report', '/api/v1/export.csv', '/api/v1/openapi.json'))
 
@@ -862,7 +900,7 @@ class WebConfigServer:
         return peer_matches(str(peer), [str(rule) for rule in self.dev_allow_ips]) if peer else False
 
     def _media_debug_authorizer(self, peer, *, generation=None):
-        """One fixed media request's real-peer grant, never revived or renewed."""
+        """One fixed development request's real-peer grant, never renewed."""
         generation = self._media_sort_generation if generation is None else generation
         revoked, expires_at = False, None
 
@@ -1077,7 +1115,8 @@ class WebConfigServer:
 
     def panel_post(self, route, body, headers, ip='', *, media_sort_current=None,
                     smart_refresh_current=None, capacity_refresh_current=None,
-                    storage_fill_current=None, storage_refresh_current=None, media_debug_current=None):
+                    storage_fill_current=None, storage_refresh_current=None, media_debug_current=None,
+                    diagnostic_current=None):
         """Return ``(status, payload, cookie)`` for a panel POST route."""
         if route in MANAGEMENT_POST_ROUTES and headers.get('Authorization') is not None:
             return 403, {'ok': False, 'error': '访问密钥不能管理 API 授权，请使用网页登录'}, None
@@ -1090,7 +1129,7 @@ class WebConfigServer:
         if route == '/api/r1/business/refresh':
             return self._business_refresh_post(body, headers, ip)
         if route == '/api/dev/diagnostics':
-            return self._diagnostic_post(body, ip)
+            return self._diagnostic_post(body, ip, headers, current=diagnostic_current)
         if route == '/api/dev/media':
             return self._media_debug_post(body, ip, headers, current=media_debug_current)
         if route == '/api/dev/native':
@@ -1566,7 +1605,7 @@ class WebConfigServer:
                                  'cached': True, 'busy': True}, None
         return status, value, cookie
 
-    def _diagnostic_post(self, body, ip):
+    def _diagnostic_post(self, body, ip, headers=None, *, current=None):
         """Explicit developer IP access grants passive checks without a login.
 
         This grant is local to this fixed route. Control, retry and command
@@ -1578,6 +1617,15 @@ class WebConfigServer:
             action, checks = parse_diagnostic_request(body)
         except ValueError:
             return 400, {'ok': False, 'error': '仅支持固定检测目录或不重复的检测项目列表'}, None
+        # This opt-in ledger is only a memory projection. Its actual-peer grant
+        # must nevertheless survive collection and the final JSON encoding.
+        guarded = action == 'snapshot' and 'capacity_cache' in checks
+        if guarded:
+            if headers is not None and headers.get('Authorization') is not None:
+                return 403, {'ok': False, 'error': '访问密钥不能授权容量缓存检测'}, None
+            current = current if current is not None else self._media_debug_authorizer(ip)
+            if not current():
+                return 403, {'ok': False, 'error': '开发窗口已失效，未开始容量缓存检测'}, None
         access = {'client_ip': str(ip), 'expires_in': max(0, int(self.dev_until - time.time()))}
         if action == 'catalog':
             return 200, {'ok': True, 'version': self.version, 'access': access,
@@ -1595,17 +1643,46 @@ class WebConfigServer:
                 'file_backend_context': self._file_backend_context_snapshot,
                 'file_protocol': lambda: self._file_protocol_snapshot(ip),
                 'disk_activity': self._disk_activity_snapshot,
+                'capacity_cache': self._capacity_cache_snapshot,
                 'docker_project_readiness': lambda: (200, {'ok': True,
                     'discovery': self.integration.docker_projects.catalog(),
                     'registry': self.integration.docker_projects.metadata()}),
             }
+            if guarded:
+                def checked(provider):
+                    def invoke():
+                        if not current():
+                            return 403, {'ok': False}
+                        return provider()
+                    return invoke
+                collectors = {name: checked(provider) for name, provider in collectors.items()}
             snapshot = collect_diagnostics(checks, collectors)
-            if not self._dev_authorized(ip):
+            if not (current() if guarded else self._dev_authorized(ip)):
                 return 403, {'ok': False, 'error': '开发窗口已失效，未返回检测结果'}, None
             return 200, {'ok': True, 'version': self.version, 'access': access,
                          'snapshot': snapshot}, None
         finally:
             self.diagnostic_lock.release()
+
+    def _capacity_cache_snapshot(self):
+        """Read the bounded decision ledger, without replaying any disk checks."""
+        if not self.storage_diagnostic_lock.acquire(blocking=False):
+            return 409, {'ok': False}
+        try:
+            read = getattr(self.monitor, 'capacity_cache_diagnostics', None)
+            if not callable(read):
+                return 503, {'ok': False}
+            value = read()
+            if not isinstance(value, dict):
+                return 503, {'ok': False}
+            try:
+                observe = getattr(self.panel, 'capacity_projection_diagnostics', None)
+                value['fnm'] = observe() if callable(observe) else {'status': 'not_observed'}
+            except Exception:
+                value['fnm'] = {'status': 'not_observed'}
+            return 200, {'ok': True, 'capacity_cache': _capacity_diagnostic_envelope(value)}
+        finally:
+            self.storage_diagnostic_lock.release()
 
     def _file_protocol_snapshot(self, ip):
         """One opt-in native/root topology probe, sharing the storage lock."""
@@ -2022,7 +2099,7 @@ class WebConfigServer:
                 def send(self, code, value, cookie=None, mime='application/json; charset=utf-8', public=False, extra_headers=None, guard=None, developer_guard=False):
                     def denied_value():
                         if developer_guard:
-                            return {'ok': False, 'error': '开发窗口授权已失效，已丢弃媒体检测结果',
+                            return {'ok': False, 'error': '开发窗口授权已失效，已丢弃检测结果',
                                     'code': 'development_authorization_expired'}
                         return {'ok': False, 'error': '网页登录授权已失效，已丢弃结果',
                                 'code': 'authorization_expired'}
@@ -2400,7 +2477,7 @@ class WebConfigServer:
                     if not self.valid(post=True, panel=panel):
                         return
                     if (route in ('/api/dev/diagnostics', '/api/dev/media', '/api/dev/native', '/api/dev/storage/probe', '/api/dev/files/write-preflight', '/api/r1/business/refresh') or route in MANAGEMENT_POST_ROUTES) and (
-                            parsed.query or parsed.fragment or route in (CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE)
+                            parsed.query or parsed.fragment or route in (CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE, '/api/dev/diagnostics')
                             and ('?' in self.path or '#' in self.path)):
                         self.send(400, {'error': '该接口不接受 URL 参数'})
                         return
@@ -2422,7 +2499,7 @@ class WebConfigServer:
                             self.send(403, {'ok': False, 'error': 'csrf_rejected',
                                             'message': '请求被拒绝：缺少 X-FNM-Request 头或会话校验失败'})
                             return
-                        developer_guard, media_debug_current = False, None
+                        developer_guard, media_debug_current, diagnostic_current = False, None, None
                         try:
                             guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
                                      if route in MEDIA_SORT_POST_ROUTES or route == SMART_REFRESH_ROUTE else None)
@@ -2433,6 +2510,13 @@ class WebConfigServer:
                                     and body.get('action') in ('probe_listener', 'probe_transcode')):
                                 developer_guard = True
                                 media_debug_current = outer._media_debug_authorizer(
+                                    self.client_address[0], generation=self.media_sort_generation)
+                            if (route == '/api/dev/diagnostics' and isinstance(body, dict)
+                                    and body.get('action') == 'snapshot'
+                                    and isinstance(body.get('checks'), list)
+                                    and 'capacity_cache' in body['checks']):
+                                developer_guard = True
+                                diagnostic_current = outer._media_debug_authorizer(
                                     self.client_address[0], generation=self.media_sort_generation)
                             status, value, cookie = outer.panel_post(route, body, self.headers,
                                                                      self.client_address[0],
@@ -2445,12 +2529,14 @@ class WebConfigServer:
                                                                           {'storage_refresh_current': guard}
                                                                           if route == STORAGE_REFRESH_ROUTE else
                                                                         {'media_sort_current': guard} if guard else {}),
-                                                                     **({'media_debug_current': media_debug_current}
-                                                                        if developer_guard else {}))
+                                                                      **({'media_debug_current': media_debug_current}
+                                                                         if media_debug_current is not None else {}),
+                                                                      **({'diagnostic_current': diagnostic_current}
+                                                                         if diagnostic_current is not None else {}))
                         except Exception:
                             status, value, cookie = 503, {'ok': False, 'error': '服务暂不可用'}, None
                         self.send(status, value, cookie=cookie,
-                                  guard=media_debug_current if developer_guard else guard,
+                                  guard=(diagnostic_current or media_debug_current) if developer_guard else guard,
                                   developer_guard=developer_guard)
                         return
                     if route == '/api/pair':

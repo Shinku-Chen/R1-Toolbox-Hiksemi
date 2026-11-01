@@ -717,8 +717,8 @@ class CapacityCoreTests(unittest.TestCase):
                 self.values = dict(self.values, used_bytes=102400, usage_percent=25.0)
                 state, clock = [True], [time.monotonic()]
                 replace = self.sampler._capacity_replace_cache
-                def publish(records):
-                    replace(records)
+                def publish(records, **observation):
+                    replace(records, **observation)
                     if records and records.get(11, {}).get('values', {}).get('usage_percent') == 25:
                         if failure == 'authorization_denied':
                             state[0] = False
@@ -737,8 +737,8 @@ class CapacityCoreTests(unittest.TestCase):
         self.refresh()
         self.values = dict(self.values, used_bytes=102400, usage_percent=25.0)
         replace = self.sampler._capacity_replace_cache
-        def publish(records):
-            replace(records)
+        def publish(records, **observation):
+            replace(records, **observation)
             if records and records.get(11, {}).get('values', {}).get('usage_percent') == 25:
                 self.watch.changed.return_value = True
         with mock.patch.object(self.sampler, '_capacity_probe', side_effect=self.probe), \
@@ -851,8 +851,8 @@ class CapacityCoreTests(unittest.TestCase):
     def test_post_publication_revocation_discards_new_cache(self):
         allowed = [True]
         replace = self.sampler._capacity_replace_cache
-        def publish(records):
-            replace(records)
+        def publish(records, **observation):
+            replace(records, **observation)
             if records:
                 allowed[0] = False
         with mock.patch.object(self.sampler, '_capacity_replace_cache', side_effect=publish), \

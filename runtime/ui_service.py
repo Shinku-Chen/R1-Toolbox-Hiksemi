@@ -9,6 +9,7 @@ actions can adjust supported hardware, manage workloads and request host power.
 import argparse
 import array
 import copy
+import contextlib
 import datetime
 import errno
 import hashlib
@@ -192,36 +193,268 @@ class CapacityRefreshError(RuntimeError):
         super().__init__(reason)
 
 
+_CAPACITY_TRACE = threading.local()
+
+
+def _capacity_trace_get(name):
+    try:
+        return getattr(_CAPACITY_TRACE, name, None)
+    except Exception:
+        return None
+
+
+@contextlib.contextmanager
+def _capacity_observation(evidence=None, *, owner=None):
+    """Isolate only diagnostic work; never put a business read/gate here."""
+    try:
+        yield
+    except Exception:
+        if owner is not None:
+            try:
+                object.__setattr__(owner, '_capacity_observation_failed', True)
+            except Exception:
+                pass
+        # Fixed RAM-only failure marker. Never retain the exception or claim a
+        # partial collection is complete. Bypass custom evidence dict methods.
+        if isinstance(evidence, dict):
+            dict.update(evidence, observation_status='observer_error',
+                        complete=False, reason='observer_error')
+        # A child read/device failure makes the enclosing evidence incomplete,
+        # without changing the production inventory's independent completeness.
+        for name in ('read', 'device', 'inventory'):
+            try:
+                parent = getattr(_CAPACITY_TRACE, name, None)
+                if isinstance(parent, dict):
+                    dict.update(parent, observation_status='observer_error',
+                                complete=False, reason='observer_error')
+            except Exception:
+                pass
+    finally:
+        if isinstance(evidence, dict) and dict.get(evidence, 'observation_status') == 'observer_error':
+            dict.update(evidence, complete=False, reason='observer_error')
+
+
+class _CapacityEntries(list):
+    """The inventory result carries its own observation across interleaving calls."""
+    def __init__(self, entries, observation):
+        super().__init__(entries)
+        self.observation = observation
+
+
+def _capacity_digest(domain, value):
+    """Domain-separated evidence only; never export mount paths or raw lines."""
+    return hashlib.sha256((domain + '\0' + json.dumps(value, ensure_ascii=True,
+                          separators=(',', ':'))).encode()).hexdigest()
+
+
+def _capacity_stat_evidence(value):
+    # Kernel inode/ctime values must survive JavaScript's 53-bit number limit.
+    evidence = {}
+    for key, attr in (('dev', 'st_dev'), ('ino', 'st_ino'), ('ctime_ns', 'st_ctime_ns')):
+        text = str(getattr(value, attr))
+        evidence[key] = text if len(text) <= 32 and re.fullmatch(r'-?[0-9]+', text) else None
+    return evidence
+
+
+def _capacity_rows_evidence(rows):
+    """Summarize an already returned projection, without paths or another read."""
+    if not isinstance(rows, list):
+        return {'row_count': None, 'measured_count': None, 'date_digest': None,
+                'dates_count': None, 'date_min': None, 'date_max': None, 'truncated': False}
+    measured, dates = 0, []
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value)
+    for index, row in enumerate(rows[:128]):
+        if not isinstance(row, dict):
+            continue
+        total, used = row.get('total_bytes'), row.get('used_bytes')
+        measured += int(number(total) and number(used))
+        stamp = row.get('capacity_sampled_at')
+        if number(stamp) and stamp > 0:
+            dates.append((index, stamp))
+    return {'row_count': len(rows), 'measured_count': measured,
+            'date_digest': _capacity_digest('projection-dates', dates), 'dates_count': len(dates),
+            'date_min': min((date for _, date in dates), default=None),
+            'date_max': max((date for _, date in dates), default=None), 'truncated': len(rows) > 128}
+
+
+class _CapacityLedger:
+    """Bounded RAM provenance, updated only by actual production decisions.
+
+    The ring stores summaries; full inventories are retained for latest/commit
+    and the first loss only. Reading this object never repeats a safety check.
+    Caller holds StatusSampler._capacity_lock for all access.
+    """
+    LIMIT = 32
+
+    def __init__(self):
+        self.instance = secrets.token_hex(8)
+        self.seq, self.generation, self.dropped = 0, 0, 0
+        self.events, self.latest, self.last_commit, self.first = [], None, None, None
+        self.baseline = {}
+        self.reconciled_inventory = None
+
+    @staticmethod
+    def changes(before, after):
+        """None means evidence missing/incomplete, never 'proved unchanged'."""
+        if not before or not after or not before.get('complete') or not after.get('complete'):
+            return {'complete': False, 'mounts': [], 'reason': 'inventory_evidence_incomplete'}
+        old = {row['mount_id']: row for row in before['entries']}
+        new = {row['mount_id']: row for row in after['entries']}
+        mounts = []
+        for identity in sorted(set(old) | set(new)):
+            left, right = old.get(identity), new.get(identity)
+            fields = {}
+            if left is not None and right is not None:
+                for key in ('parent_id', 'major_minor', 'filesystem', 'device', 'key_digest', 'reason'):
+                    fields[key] = left.get(key) != right.get(key)
+                for key in ('mountline', 'target', 'root', 'source', 'mount_options',
+                            'optional_fields', 'super_options', 'ancestry', 'sysfs_target',
+                            'sysfs_parent', 'device_material'):
+                    a, b = left['components'].get(key), right['components'].get(key)
+                    fields[key] = a != b if a is not None and b is not None else None
+                for key in ('link_before', 'target_before', 'parent_before', 'diskseq',
+                            'target_digest', 'physical_digest', 'parent_major_minor'):
+                    a, b = left['device_identity'].get(key), right['device_identity'].get(key)
+                    fields[key] = a != b if a is not None and b is not None else None
+            mounts.append({'mount_id': identity, 'presence_changed': (left is None) != (right is None),
+                           'changed': fields})
+        return {'complete': True, 'mounts': mounts, 'reason': None}
+
+    @staticmethod
+    def records(records):
+        return [{'mount_id': key, 'key_digest': value['key'],
+                 'sampled_at': value.get('sampled_at'),
+                 'record_digest': _capacity_digest('capacity-record',
+                    (value['key'], value.get('sampled_at'), value.get('values')))}
+                for key, value in sorted(records.items())]
+
+    def event(self, sampler, reason, *, before=None, before_epoch=None, commit=False):
+        self.seq += 1
+        state = sampler._capacity_memory_state()
+        source = getattr(sampler._capacity_context, 'source', 'get_projection')
+        stage = getattr(sampler._capacity_context, 'stage', 'projection')
+        if source not in ('get_projection', 'sample', 'start', 'close', 'explicit_refresh',
+                          'visible_refresh', 'missing_fill'):
+            source = 'not_observed'
+        if stage not in ('projection', 'lifecycle', 'refresh_begin', 'measure_entry',
+                         'final_inventory', 'commit_prepare', 'commit_complete'):
+            stage = 'not_observed'
+        observation = getattr(sampler._capacity_context, 'inventory', None)
+        now, wall = time.monotonic(), time.time()
+        after = self.records(sampler._capacity_cache)
+        before = after if before is None else before
+        prior = {row['mount_id']: row['record_digest'] for row in before}
+        current = {row['mount_id']: row['record_digest'] for row in after}
+        lost = sorted(key for key in prior if prior[key] != current.get(key))
+        event = {'seq': self.seq, 'generation': self.generation, 'source': source,
+                 'stage': stage, 'reason': reason, 'sampled_mono': now, 'sampled_at': wall,
+                 'capacity_epoch': state['capacity_epoch'], 'mount_epoch': state['mount_epoch'],
+                 'before_epoch': before_epoch or {'capacity_epoch': state['capacity_epoch'],
+                                                 'mount_epoch': state['mount_epoch']},
+                 'counts': {key: state[key] for key in ('positive', 'negative', 'pending')},
+                 'positive_before': len(before), 'changed_mount_ids': lost,
+                 'inventory_seq': observation['seq'] if observation else None,
+                 'watch': copy.deepcopy(sampler._capacity_last_watch)}
+        # A provisional commit is invisible under the same capacity lock. A
+        # rollback that restores every historical record is not a cache loss.
+        baseline_lost = [key for key, value in self.baseline.items() if current.get(key) != value]
+        if (self.last_commit is not None and self.first is None and lost and baseline_lost
+                and reason not in ('commit_prepare', 'commit_success')):
+            self.first = dict(event, before={'records': copy.deepcopy(before),
+                               'inventory': copy.deepcopy(self.reconciled_inventory),
+                               'inventory_role': 'last_reconciled_observation'},
+                               after={'records': copy.deepcopy(after),
+                               'inventory': copy.deepcopy(observation)},
+                               component_changes=self.changes(self.reconciled_inventory, observation))
+        if commit:
+            self.generation += 1
+            self.first = None
+            self.baseline = current
+            event['generation'] = self.generation
+            self.last_commit = dict(event, records=copy.deepcopy(after), inventory=copy.deepcopy(observation))
+        self.events.append(event)
+        if len(self.events) > self.LIMIT:
+            self.events.pop(0)
+            self.dropped += 1
+
+
 class _CapacityMountWatch:
     """Namespace event proof only; this proc FD never pins a user filesystem."""
 
     def __init__(self, proc_root):
         self.descriptor = None
+        with _capacity_observation(owner=self):
+            self.observation = {'reason': 'not_checked', 'mask': 0, 'namespace': None,
+                                'namespace_current': None, 'namespace_read': False, 'polled': False}
         if not sys.platform.startswith('linux') or not hasattr(select, 'poll'):
-            raise CapacityRefreshError('unavailable')
+            error = CapacityRefreshError('unavailable')
+            with _capacity_observation(owner=self):
+                error.watch_observation = dict(self.observation, stage='platform')
+            raise error
         self.namespace = Path(proc_root) / 'self/ns/mnt'
+        stage = 'namespace'
         try:
             self.identity = os.readlink(self.namespace)
             if not re.fullmatch(r'mnt:\[[1-9][0-9]*\]', self.identity):
                 raise ValueError()
+            stage = 'open_mountinfo'
             self.descriptor = os.open(Path(proc_root) / 'self/mountinfo',
                                       os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
             if not stat.S_ISREG(os.fstat(self.descriptor).st_mode):
                 raise ValueError()
+            stage = 'register_poll'
             self.poller = select.poll()
             self.poller.register(self.descriptor, select.POLLPRI | select.POLLERR)
+            stage = 'initial_check'
             if self.changed():
                 raise ValueError()
         except (OSError, ValueError):
             self.close()
-            raise CapacityRefreshError('unavailable') from None
+            error = CapacityRefreshError('unavailable')
+            with _capacity_observation(owner=self):
+                error.watch_observation = dict(self.observation, stage=stage)
+            raise error from None
 
     def changed(self):
+        observation = {'reason': 'unchanged', 'mask': 0, 'namespace_read': False, 'polled': False,
+                       'namespace': None, 'namespace_current': None}
+        with _capacity_observation(observation, owner=self):
+            observation['namespace'] = getattr(self, 'identity', None)
         try:
-            return (self.descriptor is None or os.readlink(self.namespace) != self.identity
-                    or bool(self.poller.poll(0)))
+            if self.descriptor is None:
+                with _capacity_observation(observation, owner=self):
+                    observation['reason'] = 'descriptor_lost'
+                return True
+            current = os.readlink(self.namespace)
+            with _capacity_observation(observation, owner=self):
+                observation.update(namespace_current=current, namespace_read=True)
+            if current != self.identity:
+                with _capacity_observation(observation, owner=self):
+                    observation['reason'] = 'namespace_changed'
+                return True
+            events = self.poller.poll(0)
+            with _capacity_observation(observation, owner=self):
+                observation['polled'] = True
+                observation['mask'] = 0
+                for _, mask in events:
+                    observation['mask'] |= mask
+            if events:
+                with _capacity_observation(observation, owner=self):
+                    observation['reason'] = 'mount_event'
+            return bool(events)
         except (OSError, ValueError):
+            with _capacity_observation(observation, owner=self):
+                observation['reason'] = 'watch_error'
             return True
+        finally:
+            # Only canonical namespace identities are public, never readlink
+            # error text or any unexpected path returned by a test/OS seam.
+            with _capacity_observation(observation, owner=self):
+                for key in ('namespace', 'namespace_current'):
+                    value = observation[key]
+                    observation[key] = value if isinstance(value, str) and re.fullmatch(r'mnt:\[[1-9][0-9]{0,24}\]', value) else None
+                self.observation = observation
 
     def close(self):
         if self.descriptor is not None:
@@ -232,25 +465,48 @@ class _CapacityMountWatch:
 def _capacity_read(path, limit):
     """Read kernel metadata to bounded EOF, including short proc/sys reads."""
     descriptor = None
+    evidence = _capacity_trace_get('read')
+    with _capacity_observation(evidence):
+        if evidence is not None:
+            evidence.update(reason='open_failed', bytes=0, complete=False)
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
                              | getattr(os, 'O_CLOEXEC', 0))
         before = os.fstat(descriptor)
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['reason'] = 'not_regular'
         if not stat.S_ISREG(before.st_mode):
             return None
         chunks, size = [], 0
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['reason'] = 'read_failed'
         while True:
             chunk = os.read(descriptor, min(16384, limit + 1 - size))
             if not chunk:
                 break
             size += len(chunk)
+            with _capacity_observation(evidence):
+                if evidence is not None:
+                    evidence.update(bytes=size, reason='read_limit' if size > limit else 'read_failed')
             if size > limit:
                 return None
             chunks.append(chunk)
         after = os.fstat(descriptor)
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['reason'] = 'read_identity_changed'
         if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             return None
-        return b''.join(chunks).decode('utf-8', 'strict')
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['reason'] = 'decode_failed'
+        value = b''.join(chunks).decode('utf-8', 'strict')
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence.update(reason=None, complete=True)
+        return value
     except (OSError, ValueError, UnicodeError):
         return None
     finally:
@@ -258,72 +514,156 @@ def _capacity_read(path, limit):
             os.close(descriptor)
 
 
+def _capacity_traced_read(path, limit, evidence):
+    previous = None
+    with _capacity_observation(evidence):
+        previous = getattr(_CAPACITY_TRACE, 'read', None)
+        _CAPACITY_TRACE.read = evidence
+    try:
+        return _capacity_read(path, limit)
+    finally:
+        with _capacity_observation(evidence):
+            _CAPACITY_TRACE.read = previous
+
+
 def _capacity_device(sys_root, device):
     """Identity of a real sysfs block lifetime; never inspect a /drives path."""
+    evidence = _capacity_trace_get('device')
+    def phase(value):
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence.update(stage=value, reason='device_identity_unavailable', complete=False)
+    def rejected(reason):
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['reason'] = reason
+        return None
+    phase('resolve')
     try:
         base = Path(sys_root).resolve(strict=True)
         link = base / 'dev/block' / device
         link_before = link.lstat()
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['link_before'] = _capacity_stat_evidence(link_before)
         target = link.resolve(strict=True)
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['target_digest'] = _capacity_digest('sysfs-target', str(target))
         if base not in target.parents or 'virtual' in target.relative_to(base).parts:
-            return None
+            return rejected('target_untrusted')
         # Partitions are bound to their parent physical device as well.
         before = target.stat()
+        phase('target')
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['target_before'] = _capacity_stat_evidence(before)
         if not stat.S_ISDIR(before.st_mode):
-            return None
+            return rejected('target_not_directory')
         partition = _capacity_read(target / 'partition', 64)
         if partition is not None and not re.fullmatch(r'[1-9][0-9]{0,9}\n?', partition):
-            return None
+            return rejected('partition_invalid')
         physical = target.parent if partition is not None else target
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['physical_digest'] = _capacity_digest('sysfs-parent', str(physical))
         if not re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+|mmcblk\d+)', physical.name):
-            return None
+            return rejected('physical_name_invalid')
         parent_before = physical.stat()
+        phase('parent')
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence['parent_before'] = _capacity_stat_evidence(parent_before)
         if not stat.S_ISDIR(parent_before.st_mode):
-            return None
-        declared = _capacity_read(target / 'dev', 64)
-        parent_dev = _capacity_read(physical / 'dev', 64)
-        diskseq = _capacity_read(physical / 'diskseq', 64)
+            return rejected('parent_not_directory')
+        phase('attributes')
+        reads = {}
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                reads = evidence.setdefault('reads', {})
+        def read_attribute(path, name):
+            observed = None
+            with _capacity_observation(evidence):
+                observed = reads.setdefault(name, {})
+            return _capacity_traced_read(path, 64, observed)
+        declared = read_attribute(target / 'dev', 'device')
+        parent_dev = read_attribute(physical / 'dev', 'parent_device')
+        diskseq = read_attribute(physical / 'diskseq', 'diskseq')
         if declared is None or declared.strip() != device or parent_dev is None:
-            return None
+            return rejected('device_number_mismatch')
         if not re.fullmatch(r'[0-9]{1,7}:[0-9]{1,7}', parent_dev.strip()):
-            return None
+            return rejected('parent_number_invalid')
         if diskseq is not None and not re.fullmatch(r'[1-9][0-9]{0,19}\n?', diskseq):
-            return None
+            return rejected('diskseq_invalid')
         after, parent_after = target.stat(), physical.stat()
         link_after = link.lstat()
+        phase('lifecycle')
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence.update(target_after=_capacity_stat_evidence(after), parent_after=_capacity_stat_evidence(parent_after),
+                                link_after=_capacity_stat_evidence(link_after), diskseq=diskseq.strip() if diskseq else None,
+                                parent_major_minor=parent_dev.strip())
         def generation(value):
             return (value.st_dev, value.st_ino, value.st_ctime_ns)
         if (generation(before), generation(parent_before), generation(link_before)) != (
                 generation(after), generation(parent_after), generation(link_after)):
-            return None
+            return rejected('device_generation_changed')
         if link.resolve(strict=True) != target:
-            return None
+            return rejected('device_link_changed')
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence.update(stage='complete', reason=None, complete=True)
+                if any(field is None for name in ('link_before', 'target_before', 'parent_before',
+                                                  'target_after', 'parent_after', 'link_after')
+                       for field in evidence[name].values()):
+                    evidence.update(complete=False, reason='identity_evidence_out_of_range')
         return (str(target), str(physical), generation(link_before), generation(before),
                 generation(parent_before), parent_dev.strip(), diskseq.strip() if diskseq else None, physical.name)
     except (OSError, ValueError, RuntimeError):
-        return None
+        return rejected('metadata_error')
 
 
 def _capacity_inventory(proc_root, sys_root):
     """Only bounded mountinfo/sysfs metadata, never stat/resolve mount targets."""
-    text = _capacity_read(Path(proc_root) / 'self/mountinfo', 262144)
-    if text is None or '\x00' in text:
+    evidence = _capacity_trace_get('inventory')
+    def reject(stage, reason):
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                evidence.update(stage=stage, reason=reason, complete=False,
+                                count=len(evidence.get('entries', [])),
+                                truncated=reason in ('line_limit', 'entry_limit')
+                                or evidence.get('read_before', {}).get('reason') == 'read_limit'
+                                or evidence.get('read_after', {}).get('reason') == 'read_limit')
         return [], False
+    with _capacity_observation(evidence):
+        if evidence is not None:
+            evidence.update(stage='mountinfo', reason=None, complete=False, entries=[],
+                            limits={'bytes': 262144, 'lines': 4096, 'entries': 128}, read_before={})
+    read_before = None
+    with _capacity_observation(evidence):
+        if evidence is not None:
+            read_before = evidence['read_before']
+    text = _capacity_traced_read(Path(proc_root) / 'self/mountinfo', 262144, read_before)
+    if text is None or '\x00' in text:
+        return reject('mountinfo', 'mountinfo_unreadable' if text is None else 'mountinfo_malformed')
     lines = text.splitlines()
     if len(lines) > 4096:
-        return [], False
+        return reject('parse', 'line_limit')
+    with _capacity_observation(evidence):
+        if evidence is not None:
+            evidence['line_count'] = len(lines)
     entries, mounts, seen_ids, devices = [], [], set(), {}
     for line in lines:
         parts = line.split(' - ')
         if len(parts) != 2:
-            return [], False
+            return reject('parse', 'mountinfo_malformed')
         fields, extra = parts[0].split(), parts[1].split()
         if (len(fields) < 6 or len(extra) < 3 or not re.fullmatch(r'[1-9][0-9]{0,9}', fields[0])
                 or not re.fullmatch(r'[0-9]{1,10}', fields[1])):
-            return [], False
+            return reject('parse', 'mountinfo_malformed')
         mount_id = int(fields[0])
         if mount_id in seen_ids:
-            return [], False
+            return reject('parse', 'duplicate_mount_id')
         seen_ids.add(mount_id)
         mount, root = unescape_mount_field(fields[4]), unescape_mount_field(fields[3])
         mounts.append((mount_id, int(fields[1]), mount, root, fields, extra, line))
@@ -337,16 +677,26 @@ def _capacity_inventory(proc_root, sys_root):
         components = mount.split('/')[1:]
         if (any(part in ('', '.', '..') for part in components) or len(mount.encode()) > 4096
                 or any(ord(char) < 32 or ord(char) == 127 for char in mount)):
-            return [], False
+            return reject('target', 'mount_target_invalid')
         if extra[0] in ('tmpfs', 'devtmpfs', 'proc', 'sysfs', 'overlay', 'squashfs'):
             continue
         if len(entries) >= 128:
-            return [], False
+            return reject('target', 'entry_limit')
         row = {'mount_id': mount_id, 'mount': mount, 'device': fields[2], 'root': root,
                'filesystem': extra[0], 'source': unescape_mount_field(extra[1]), '_key': None,
                '_reason': 'unsupported_filesystem', '_device_name': None}
+        identity = None
         if re.fullmatch(r'[1-9][0-9]{0,6}:[0-9]{1,7}', fields[2]) and extra[0] in _CAPACITY_FILESYSTEMS:
-            identity = _capacity_device(sys_root, fields[2])
+            previous_device = None
+            device_evidence = {'complete': False, 'stage': 'not_observed', 'reason': None}
+            with _capacity_observation(evidence):
+                previous_device = getattr(_CAPACITY_TRACE, 'device', None)
+                _CAPACITY_TRACE.device = device_evidence
+            try:
+                identity = _capacity_device(sys_root, fields[2])
+            finally:
+                with _capacity_observation(evidence):
+                    _CAPACITY_TRACE.device = previous_device
             row['_reason'] = 'device_identity_unavailable'
             if identity is not None:
                 # Include mount options/parentage, so an observed remount is
@@ -375,8 +725,38 @@ def _capacity_inventory(proc_root, sys_root):
                 previous['_key'], previous['_reason'] = None, 'identity_changed'
         devices[fields[2]] = row
         entries.append(row)
-    if _capacity_read(Path(proc_root) / 'self/mountinfo', 262144) != text:
-        return [], False
+        with _capacity_observation(evidence):
+            if evidence is not None:
+                # Every key component is covered, including unrecognised options.
+                components = {'mountline': line, 'target': mount, 'root': root, 'source': extra[1],
+                              'mount_options': fields[5], 'optional_fields': fields[6:],
+                              'super_options': extra[2:], 'ancestry': sorted(ancestors),
+                              'device_material': identity,
+                              'sysfs_target': identity[0] if identity is not None and len(identity) == 8 else None,
+                              'sysfs_parent': identity[1] if identity is not None and len(identity) == 8 else None}
+                evidence['entries'].append({'mount_id': mount_id, 'parent_id': parent_id,
+                    'major_minor': fields[2] if re.fullmatch(r'[0-9]{1,7}:[0-9]{1,7}', fields[2]) else None,
+                    'filesystem': extra[0] if extra[0] in _CAPACITY_FILESYSTEMS else 'unsupported',
+                    'device': row['_device_name'], 'key_digest': row['_key'], 'reason': row['_reason'],
+                    'components': {name: _capacity_digest(name, value) if value is not None else None
+                                   for name, value in components.items()},
+                    'device_identity': copy.deepcopy(device_evidence) if extra[0] in _CAPACITY_FILESYSTEMS
+                        and re.fullmatch(r'[1-9][0-9]{0,6}:[0-9]{1,7}', fields[2]) else {'complete': False, 'stage': 'not_run'}})
+    read_after = {}
+    if _capacity_traced_read(Path(proc_root) / 'self/mountinfo', 262144, read_after) != text:
+        reason = 'mountinfo_unreadable'
+        with _capacity_observation(evidence):
+            reason = 'mountinfo_changed' if read_after.get('complete') else 'mountinfo_unreadable'
+            if evidence is not None:
+                evidence['read_after'] = read_after
+        return reject('verify_mountinfo', reason)
+    with _capacity_observation(evidence):
+        if evidence is not None:
+            by_id = {row['mount_id']: row for row in entries}
+            for row in evidence['entries']:
+                row['key_digest'], row['reason'] = by_id[row['mount_id']]['_key'], by_id[row['mount_id']]['_reason']
+            evidence.update(stage='complete', reason=None, complete=True, read_after=read_after,
+                            count=len(entries), truncated=False)
     return sorted(entries, key=lambda row: row['mount']), True
 
 
@@ -523,12 +903,156 @@ class StatusSampler:
         self._capacity_reaper = None
         self._capacity_epoch = 0
         self._capacity_closed = False
+        self._capacity_context = threading.local()
+        self._capacity_observation_errors = 0
+        self._capacity_ledger = self._capacity_observe(_CapacityLedger)
+        self._capacity_pending = 0
+        self._capacity_pending_records = None
+        self._capacity_last_watch = None
+
+    def _capacity_observe(self, operation, *args, **kwargs):
+        """Best effort diagnostic boundary; business predicates stay outside."""
+        try:
+            return operation(*args, **kwargs)
+        except Exception:
+            try:
+                self._capacity_observation_errors += 1
+            except Exception:
+                pass
+            return None
+
+    def _capacity_note(self, reason, **kwargs):
+        # Protect the entry point as well as ledger.event: instrumentation may
+        # be replaced by a failing observer, but may never strand a real lock.
+        return self._capacity_observe(lambda: self._capacity_record(reason, **kwargs))
+
+    @contextlib.contextmanager
+    def _capacity_scope(self, source=None, stage=None):
+        previous, previous_inventory, previous_pending = None, None, None
+        def enter():
+            nonlocal previous, previous_inventory, previous_pending
+            previous = (getattr(self._capacity_context, 'source', 'get_projection'),
+                        getattr(self._capacity_context, 'stage', 'projection'))
+            previous_inventory = getattr(self._capacity_context, 'inventory', None)
+            previous_pending = getattr(self._capacity_context, 'pending', None)
+            self._capacity_context.source = source or previous[0]
+            self._capacity_context.stage = stage or previous[1]
+            if source is not None:
+                self._capacity_context.inventory = None
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', None))
+        self._capacity_observe(enter)
+        try:
+            yield
+        finally:
+            def leave():
+                if previous is not None:
+                    self._capacity_context.source, self._capacity_context.stage = previous
+                    self._capacity_context.inventory = previous_inventory
+                    self._capacity_context.pending = previous_pending
+            self._capacity_observe(leave)
+
+    def _capacity_memory_state(self):
+        return {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch,
+                'positive': len(self._capacity_cache), 'negative': len(self._capacity_negative),
+                'pending': len(self._capacity_pending_records) if self._capacity_pending_records is not None
+                           else self._capacity_pending, 'closed': self._capacity_closed,
+                'watch_present': self._capacity_watch is not None,
+                'worker_present': self._capacity_worker is not None,
+                'reaper_present': self._capacity_reaper is not None}
+
+    def _capacity_record(self, reason, **kwargs):
+        fixed = {'inventory_observed', 'projection', 'cache_replaced', 'invalidated',
+                 'watch_missing', 'watch_create_failed', 'active_keys_changed', 'inventory_incomplete',
+                 'reconcile', 'start', 'close', 'scan_failed', 'row_identity_changed',
+                 'commit_prepare', 'commit_success', 'batch_no_new_values', 'batch_finished',
+                 'batch_started', 'pending_added', 'pending_discarded', 'pending_lifecycle_changed',
+                 'batch_exception'}
+        failures = {'authorization_denied', 'unavailable', 'timeout', 'busy', 'probe_failed',
+                    'invalid_measurement', 'identity_changed'}
+        watch_reasons = {'unchanged', 'descriptor_lost', 'namespace_changed', 'mount_event',
+                         'watch_error', 'changed_unclassified', 'observer_error'}
+        if (reason not in fixed and reason not in {'watch_' + item for item in watch_reasons}
+                and reason not in {prefix + item for prefix in ('batch_', 'probe_', 'rollback_', 'pending_rejected_')
+                                   for item in failures}):
+            reason = 'unclassified_decision'
+        pending = getattr(self._capacity_context, 'pending', None)
+        if pending is not None:
+            self._capacity_pending = len(pending)
+        self._capacity_observe(lambda: self._capacity_ledger.event(self, reason, **kwargs))
+
+    @staticmethod
+    def _capacity_watch_evidence(observation):
+        if not isinstance(observation, dict):
+            return None
+        value = {key: observation.get(key) is True for key in ('namespace_read', 'polled')}
+        value['reason'] = observation.get('reason') if observation.get('reason') in (
+            'unchanged', 'descriptor_lost', 'namespace_changed', 'mount_event', 'watch_error') else 'changed_unclassified'
+        mask = observation.get('mask')
+        value['mask'] = mask if type(mask) is int and 0 <= mask <= 65535 else None
+        stage = observation.get('stage')
+        value['stage'] = stage if stage in ('platform', 'namespace', 'open_mountinfo',
+                                            'register_poll', 'initial_check') else None
+        for key in ('namespace', 'namespace_current'):
+            namespace = observation.get(key)
+            value[key] = namespace if isinstance(namespace, str) and re.fullmatch(r'mnt:\[[1-9][0-9]{0,24}\]', namespace) else None
+        return value
+
+    def _capacity_inventory_observe(self):
+        """Attach an optional observer to the same production read, not a rescan."""
+        evidence = {}
+        self._capacity_observe(lambda: setattr(self._capacity_context, 'inventory', None))
+        previous = None
+        with _capacity_observation(evidence):
+            previous = getattr(_CAPACITY_TRACE, 'inventory', None)
+            _CAPACITY_TRACE.inventory = evidence
+        try:
+            result = _capacity_inventory(self.proc_root, self.sys_root)
+        finally:
+            with _capacity_observation(evidence):
+                _CAPACITY_TRACE.inventory = previous
+        def publish():
+            if evidence.get('observation_status') == 'observer_error':
+                self._capacity_observation_errors += 1
+            if not evidence:
+                # OS seams used by portable fixtures may supply an inventory
+                # without observing it. Do not invent complete provenance.
+                evidence.update(stage='not_observed', reason='observer_unavailable',
+                                complete=False, entries=[], truncated=False)
+            evidence.update(seq=self._capacity_ledger.seq + 1, sampled_mono=time.monotonic(),
+                            sampled_at=time.time(), capacity_epoch=self._capacity_epoch,
+                            mount_epoch=self._capacity_mount_epoch)
+            self._capacity_ledger.latest = evidence
+            self._capacity_context.inventory = evidence
+            self._capacity_note('inventory_observed')
+            return True
+        with self._capacity_lock:
+            if self._capacity_observe(publish) is not True:
+                with _capacity_observation(evidence):
+                    evidence.update(observation_status='observer_error', complete=False, reason='observer_error')
+        observed = self._capacity_observe(lambda: _CapacityEntries(result[0], evidence))
+        return (result[0] if observed is None else observed), result[1]
+
+    def capacity_cache_diagnostics(self):
+        """Copy only RAM. In particular never reap, scan, poll, or project disks."""
+        with self._capacity_lock:
+            ledger = self._capacity_ledger
+            return copy.deepcopy({'schema_version': 1, 'instance': ledger.instance if ledger else None,
+                'seq': ledger.seq if ledger else None, 'generation': ledger.generation if ledger else None,
+                'ring_limit': 32, 'dropped_events': ledger.dropped if ledger else None,
+                'events': ledger.events if ledger else [], 'latest_inventory': ledger.latest if ledger else None,
+                'last_commit': ledger.last_commit if ledger else None,
+                'first_invalidation': ledger.first if ledger else None,
+                'observation_status': 'observer_error' if self._capacity_observation_errors else 'observed',
+                'observation_errors': self._capacity_observation_errors,
+                'state': self._capacity_memory_state(), 'watch': self._capacity_last_watch,
+                'numeric_encoding': 'kernel_identity_decimal_strings',
+                'inventory_limit': 128, 'read_only_memory': True})
 
     def capacity_snapshot(self):
         """Recheck kernel identities immediately, independent of the 2s sample."""
         with self._capacity_lock:
             self._capacity_reap_exited()
-            entries, complete = _capacity_inventory(self.proc_root, self.sys_root)
+            entries, complete = self._capacity_inventory_observe()
             previous = set(self._capacity_cache)
             self._capacity_check_watch()
             # Observing an unmount/incomplete scan irrevocably discards the old
@@ -538,64 +1062,112 @@ class StatusSampler:
             for row in rows:
                 if row['mount_id'] in previous and row['mount_id'] not in self._capacity_cache:
                     row['capacity_status'] = 'identity_changed'
+            self._capacity_note('projection')
+            def publish():
+                if self._capacity_observation_errors:
+                    self._capacity_context.returned_projection = None
+                    return
+                event = self._capacity_ledger.events[-1]
+                self._capacity_context.returned_projection = (rows, {
+                    'status': 'observed', 'sequence': event['seq'], 'generation': event['generation'],
+                    'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch,
+                    'sampled_monotonic': event['sampled_mono'], 'sampled_at': event['sampled_at'],
+                    'atomic_with_capacity': True})
+            # Clear first so a failed observer cannot retain a prior row's
+            # provenance. Both operations remain independent of the real rows.
+            self._capacity_observe(lambda: setattr(self._capacity_context, 'returned_projection', None))
+            self._capacity_observe(publish)
             return rows
 
-    def _capacity_replace_cache(self, records):
-        """Caller holds the lock; records contain numbers, not mounted FS FDs."""
-        self._capacity_cache = records
+    def capacity_projection_observation(self, rows):
+        """Return metadata only for this thread's exact original rows object."""
+        def observe():
+            pair = getattr(self._capacity_context, 'returned_projection', None)
+            if pair is not None and pair[0] is rows:
+                return copy.deepcopy(pair[1])
+        return self._capacity_observe(observe) or {'status': 'not_observed'}
 
-    def _capacity_invalidate(self):
+    def _capacity_replace_cache(self, records, reason='cache_replaced', before_epoch=None):
+        """Caller holds the lock; records contain numbers, not mounted FS FDs."""
+        before = self._capacity_observe(lambda: self._capacity_ledger.records(self._capacity_cache))
+        self._capacity_cache = records
+        self._capacity_note(reason, before=before, before_epoch=before_epoch)
+
+    def _capacity_invalidate(self, reason='invalidated'):
+        before = self._capacity_observe(lambda: self._capacity_ledger.records(self._capacity_cache))
+        before_epoch = {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch}
         self._capacity_mount_epoch += 1
         self._capacity_cache = {}
         self._capacity_negative = {}
+        self._capacity_note(reason, before=before, before_epoch=before_epoch)
 
     def _capacity_check_watch(self, *, create=False):
         """Any event or loss of proof rejects all namespace-derived values."""
         watch = self._capacity_watch
         if watch is not None and watch.changed():
-            self._capacity_invalidate()
+            self._capacity_last_watch = self._capacity_observe(lambda: self._capacity_watch_observe(watch))
+            reason = self._capacity_last_watch['reason'] if self._capacity_last_watch else 'changed_unclassified'
+            self._capacity_invalidate('watch_' + reason)
             watch.close()
             self._capacity_watch = None
         if self._capacity_watch is None:
             if self._capacity_cache or self._capacity_negative:
-                self._capacity_invalidate()
+                self._capacity_invalidate('watch_missing')
             if create:
-                self._capacity_watch = _CapacityMountWatch(self.proc_root)
+                try:
+                    self._capacity_watch = _CapacityMountWatch(self.proc_root)
+                except CapacityRefreshError as error:
+                    self._capacity_last_watch = self._capacity_observe(lambda: self._capacity_watch_evidence(getattr(error, 'watch_observation', None)))
+                    self._capacity_note('watch_create_failed')
+                    raise
+        if self._capacity_watch is not None:
+            self._capacity_last_watch = self._capacity_observe(
+                lambda: self._capacity_watch_observe(self._capacity_watch))
         return self._capacity_watch is not None
+
+    def _capacity_watch_observe(self, watch):
+        if getattr(watch, '_capacity_observation_failed', False):
+            self._capacity_observation_errors += 1
+            return {'reason': 'observer_error', 'complete': False}
+        return self._capacity_watch_evidence(getattr(watch, 'observation', None))
 
     def _capacity_reconcile(self, entries, complete):
         """An observed detach is permanent for an old cache, even if it returns."""
         active = {row['mount_id']: row['_key'] for row in entries if row['_key']} if complete else {}
         with self._capacity_lock:
+            self._capacity_observe(lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
             if self._capacity_observed_keys is not None and active != self._capacity_observed_keys:
-                self._capacity_invalidate()
+                self._capacity_invalidate('active_keys_changed' if complete else 'inventory_incomplete')
             self._capacity_observed_keys = active
             self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
-                                          if active.get(key) == value['key']})
+                                          if active.get(key) == value['key']}, reason='reconcile')
+            self._capacity_observe(lambda: setattr(self._capacity_ledger, 'reconciled_inventory', getattr(self._capacity_context, 'inventory', None)))
             keys = set(active.values())
             self._capacity_negative = {key: value for key, value in self._capacity_negative.items()
                                        if key in keys and value[0] > time.monotonic()}
         return active
 
     def start_capacity(self):
-        with self._capacity_lock:
+        with self._capacity_scope('start', 'lifecycle'), self._capacity_lock:
+            before_epoch = {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch}
             self._capacity_epoch += 1
             self._capacity_closed = False
-            self._capacity_replace_cache({})
             self._capacity_negative = {}
             self._capacity_mount_epoch += 1
+            self._capacity_replace_cache({}, reason='start', before_epoch=before_epoch)
             self._capacity_observed_keys = None
             if self._capacity_watch is not None:
                 self._capacity_watch.close()
                 self._capacity_watch = None
 
     def close_capacity(self):
-        with self._capacity_lock:
+        with self._capacity_scope('close', 'lifecycle'), self._capacity_lock:
+            before_epoch = {'capacity_epoch': self._capacity_epoch, 'mount_epoch': self._capacity_mount_epoch}
             self._capacity_epoch += 1
             self._capacity_closed = True
-            self._capacity_replace_cache({})
             self._capacity_negative = {}
             self._capacity_mount_epoch += 1
+            self._capacity_replace_cache({}, reason='close', before_epoch=before_epoch)
             self._capacity_observed_keys = None
             if self._capacity_watch is not None:
                 self._capacity_watch.close()
@@ -772,14 +1344,39 @@ class StatusSampler:
         return self._refresh_capacity(authorizer=authorizer, eligibility=eligibility, missing=True, visible=True)
 
     def _refresh_capacity(self, *, authorizer=None, eligibility=None, missing=False, visible=False):
+        source = 'visible_refresh' if visible else 'missing_fill' if missing else 'explicit_refresh'
+        with self._capacity_scope(source, 'refresh_begin'):
+            try:
+                return self._capacity_refresh_batch(authorizer=authorizer, eligibility=eligibility,
+                                                    missing=missing, visible=visible)
+            except CapacityRefreshError as error:
+                with self._capacity_lock:
+                    self._capacity_note('batch_' + error.reason)
+                raise
+            finally:
+                with self._capacity_lock:
+                    self._capacity_note('batch_finished')
+
+    def _capacity_refresh_batch(self, *, authorizer=None, eligibility=None, missing=False, visible=False):
         """One explicit owner batch; only verified same-lifetime results commit."""
         if not self._capacity_refresh_lock.acquire(blocking=False):
             raise CapacityRefreshError('busy')
+        try:
+            return self._capacity_refresh_acquired(authorizer=authorizer, eligibility=eligibility,
+                                                   missing=missing, visible=visible)
+        finally:
+            self._capacity_refresh_lock.release()
+
+    def _capacity_refresh_acquired(self, *, authorizer=None, eligibility=None, missing=False, visible=False):
+        """Refresh-lock owner only; retain the original deadline and cleanup."""
         started, deadline = time.time(), time.monotonic() + _CAPACITY_WINDOW
         denied, pending, negative, results, history, committed = False, {}, {}, [], {}, False
         mount_generation, batch_changed = None, False
         with self._capacity_lock:
             epoch = self._capacity_epoch
+            self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', pending))
+            self._capacity_pending_records = pending
+            self._capacity_note('batch_started')
 
         def authorized():
             nonlocal denied
@@ -794,6 +1391,7 @@ class StatusSampler:
                 raise CapacityRefreshError('authorization_denied')
             with self._capacity_lock:
                 if self._capacity_closed or epoch != self._capacity_epoch:
+                    self._capacity_note('pending_lifecycle_changed')
                     raise CapacityRefreshError('unavailable')
 
         def permitted(entry):
@@ -824,6 +1422,7 @@ class StatusSampler:
         def observed(entries, complete):
             nonlocal batch_changed
             with self._capacity_lock:
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
                 self._capacity_check_watch()
             active = self._capacity_reconcile(entries, complete)
             batch_changed = batch_changed or (mount_generation is not None and (
@@ -855,15 +1454,16 @@ class StatusSampler:
                         if stream is not None:
                             stream.close()
                     self._capacity_worker = None
-            entries, complete = _capacity_inventory(self.proc_root, self.sys_root)
+            entries, complete = self._capacity_inventory_observe()
             observed(entries, complete)
             authorized()
             if not complete or self._capacity_watch is None:
                 with self._capacity_lock:
-                    self._capacity_replace_cache({})
+                    self._capacity_replace_cache({}, reason='scan_failed')
                 raise CapacityRefreshError('unavailable')
             mount_generation = self._capacity_mount_epoch
             for entry in entries:
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'measure_entry'))
                 authorized()
                 if time.monotonic() >= deadline:
                     raise CapacityRefreshError('timeout')
@@ -900,8 +1500,10 @@ class StatusSampler:
                     # source also closes the freshly transferred mount pin.
                     pending[entry['mount_id']] = {'key': entry['_key'], 'values': values,
                                                   'anchor': anchor, 'sampled_at': None}
+                    with self._capacity_lock:
+                        self._capacity_note('pending_added')
                     authorized()
-                    current, valid = _capacity_inventory(self.proc_root, self.sys_root)
+                    current, valid = self._capacity_inventory_observe()
                     observed(current, valid)
                     authorized()
                     if batch_changed or not valid or not any(item['mount_id'] == entry['mount_id']
@@ -919,13 +1521,15 @@ class StatusSampler:
                     pending[entry['mount_id']]['sampled_at'] = sampled_at
                     row.update(status='refreshed', reason=None, sampled_at=sampled_at)
                 except CapacityRefreshError as error:
+                    with self._capacity_lock:
+                        self._capacity_note('probe_' + error.reason)
                     record = pending.pop(entry['mount_id'], None)
                     if record is not None:
                         close_pending(record)
                     if error.reason == 'identity_changed':
                         with self._capacity_lock:
                             self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
-                                                          if key != entry['mount_id']})
+                                                          if key != entry['mount_id']}, reason='row_identity_changed')
                     if error.reason in ('authorization_denied', 'timeout', 'busy') or (error.reason == 'unavailable' and not missing):
                         raise
                     row.update(status='identity_changed' if error.reason == 'identity_changed' else
@@ -935,8 +1539,9 @@ class StatusSampler:
                     if missing and error.reason != 'identity_changed':
                         negative[entry['_key']] = (time.monotonic() + 30, row['status'], row['reason'], row['sampled_at'])
             authorized()
+            self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'final_inventory'))
             with self._capacity_lock:
-                current, complete = _capacity_inventory(self.proc_root, self.sys_root)
+                current, complete = self._capacity_inventory_observe()
                 active = observed(current, complete)
                 authorized()
                 if time.monotonic() >= deadline:
@@ -961,7 +1566,7 @@ class StatusSampler:
                 for record in pending.values():
                     close_pending(record)
                 authorized()
-                current, complete = _capacity_inventory(self.proc_root, self.sys_root)
+                current, complete = self._capacity_inventory_observe()
                 active = observed(current, complete)
                 authorized()
                 retained = {key: value for key, value in self._capacity_cache.items()
@@ -971,7 +1576,8 @@ class StatusSampler:
                 if time.monotonic() >= deadline:
                     raise CapacityRefreshError('timeout')
                 previous_cache = dict(self._capacity_cache)
-                self._capacity_replace_cache(retained)
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'commit_prepare'))
+                self._capacity_replace_cache(retained, reason='commit_prepare')
                 try:
                     # Recheck after publication while readers remain locked
                     # out; failed grants discard all values from this batch.
@@ -981,26 +1587,47 @@ class StatusSampler:
                         raise CapacityRefreshError('unavailable')
                     if time.monotonic() >= deadline:
                         raise CapacityRefreshError('timeout')
-                except CapacityRefreshError:
+                except CapacityRefreshError as error:
                     self._capacity_check_watch()
                     historical = ({key: value for key, value in previous_cache.items()
                                    if active.get(key) == value['key']}
                                   if self._capacity_watch is not None
                                   and mount_generation == self._capacity_mount_epoch else {})
-                    self._capacity_replace_cache(historical)
+                    self._capacity_replace_cache(historical, reason='rollback_' + error.reason)
                     pending.clear()
                     raise
                 committed = True
+                self._capacity_pending = 0
+                self._capacity_pending_records = None
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', None))
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'stage', 'commit_complete'))
+                if pending:
+                    self._capacity_note('commit_success', commit=True)
+                else:
+                    self._capacity_note('batch_no_new_values')
                 if not batch_changed:
                     self._capacity_negative.update({key: value for key, value in negative.items() if key in set(active.values())})
             successful = ('refreshed', 'cached', 'skipped_standby') if missing else ('refreshed', 'cached')
             return {'ok': True, 'status': 'complete' if all(row['status'] in successful for row in results) else 'partial',
                     'started_at': started, 'finished_at': time.time(), 'results': results}
+        except CapacityRefreshError as error:
+            with self._capacity_lock:
+                self._capacity_note('pending_rejected_' + error.reason)
+            raise
+        except Exception:
+            with self._capacity_lock:
+                self._capacity_note('batch_exception')
+            raise
         finally:
             if not committed:
                 for record in pending.values():
                     close_pending(record)
-            self._capacity_refresh_lock.release()
+            with self._capacity_lock:
+                self._capacity_pending = 0
+                self._capacity_pending_records = None
+                self._capacity_observe(lambda: setattr(self._capacity_context, 'pending', None))
+                if not committed:
+                    self._capacity_note('pending_discarded')
 
     def sample(self):
         status = empty_status()
@@ -1029,7 +1656,8 @@ class StatusSampler:
                     tx_bytes_per_sec=(counters[1] - old_tx) / elapsed,
                 )
         self.previous_network = (iface, *counters, now) if counters is not None else None
-        status["disks"] = self.capacity_snapshot()
+        with self._capacity_scope('sample', 'projection'):
+            status["disks"] = self.capacity_snapshot()
         status["available"] = ticks is not None or status["memory"]["total_bytes"] is not None or status["uptime_seconds"] is not None
         return status
 
@@ -1042,31 +1670,132 @@ class StatusMonitor:
         self.stopped = threading.Event()
         self.status = empty_status()
         self.updated_at = None
+        self._capacity_heartbeat = {'result': 'not_run', 'sampled_at': None, 'sampled_mono': None}
+        self._capacity_projection_state = {'result': 'not_run', 'sampled_mono': None}
+        self._capacity_projection_local = threading.local()
+        self._capacity_projection_seq = 0
+        self._capacity_projection_operation = 0
+        self._capacity_projection_events = []
+        self._capacity_projection_dropped = 0
+        self._capacity_projection_first_loss = None
+        self._capacity_projection_last_positive = None
         self.thread = threading.Thread(target=self._run, name="r1-metrics", daemon=True)
 
     def _run(self):
         while not self.stopped.is_set():
             try:
                 status = self.sampler.sample()
+                result = 'sampled'
             except Exception as error:
                 print("[WARN] 数据采样失败：" + str(error), flush=True)
                 status = empty_status()
+                result = 'sample_error'
             with self.lock:
                 self.status, self.updated_at = status, time.monotonic()
+                self._capacity_heartbeat = {'result': result, 'sampled_mono': self.updated_at,
+                                            'sampled_at': time.time()}
             self.stopped.wait(self.interval)
 
     def snapshot(self):
-        with self.lock:
-            if self.updated_at is None or time.monotonic() - self.updated_at > max(6, self.interval * 3):
-                value = empty_status()
-            else:
-                value = copy.deepcopy(self.status)
+        operation = None
+        try:
+            self._capacity_projection_local.returned = None
+            with self.lock:
+                self._capacity_projection_operation += 1
+                operation = self._capacity_projection_operation
+        except Exception:
+            pass
+        try:
+            with self.lock:
+                if self.updated_at is None or time.monotonic() - self.updated_at > max(6, self.interval * 3):
+                    value = empty_status()
+                    result = 'heartbeat_missing' if self.updated_at is None else 'heartbeat_stale'
+                else:
+                    value = copy.deepcopy(self.status)
+                    result = 'heartbeat_fresh'
+                self._capacity_projection_state = {'result': result, 'sampled_mono': time.monotonic(),
+                                                  'heartbeat_mono': self.updated_at}
+        except Exception:
+            self._try_capacity_projection_note(None, 'snapshot_error', {'status': 'not_observed'}, operation)
+            raise
         # Dated capacity has its own mount/lifetime proof, not the basic
         # heartbeat's freshness. Always revalidate it, including when the
         # basic sampler has stalled; this projection never measures capacity.
         project = getattr(self.sampler, 'capacity_snapshot', None)
-        if callable(project):
-            value['disks'] = project()
+        source = {'status': 'not_observed'}
+        try:
+            if callable(project):
+                value['disks'] = project()
+                try:
+                    observe = getattr(self.sampler, 'capacity_projection_observation', None)
+                    source = observe(value['disks']) if callable(observe) else source
+                except Exception:
+                    pass
+        except Exception:
+            self._try_capacity_projection_note(None, 'projection_error', source, operation)
+            raise
+        self._try_capacity_projection_note(value, 'returned' if callable(project) else 'not_observed',
+                                           source, operation)
+        return value
+
+    def _try_capacity_projection_note(self, value, result, source, operation):
+        """Observation failure is independent from the original business result."""
+        try:
+            self._capacity_projection_note(value, result, source, operation)
+        except Exception:
+            pass
+
+    def _capacity_projection_note(self, value, result, source, operation):
+        rows = value.get('disks') if isinstance(value, dict) else None
+        evidence = _capacity_rows_evidence(rows)
+        verified = isinstance(source, dict) and source.get('status') == 'observed'
+        with self.lock:
+            self._capacity_projection_seq += 1
+            event = dict(evidence, status='observed', sequence=self._capacity_projection_seq,
+                operation_id=operation, sampled_monotonic=time.monotonic(), sampled_at=time.time(),
+                result=result, capacity_epoch=source.get('capacity_epoch') if verified else 'not_observed',
+                mount_epoch=source.get('mount_epoch') if verified else 'not_observed',
+                capacity_generation=source.get('generation') if verified else 'not_observed',
+                sampler_projection_seq=source.get('sequence') if verified else 'not_observed',
+                atomic_with_capacity=verified and source.get('atomic_with_capacity') is True,
+                atomic_scope='sampler_projection_rows' if verified else 'not_observed')
+            previous = self._capacity_projection_last_positive
+            if evidence['measured_count'] is not None and evidence['measured_count'] > 0:
+                if (previous is not None and event['capacity_generation'] != 'not_observed'
+                        and event['capacity_generation'] != previous['capacity_generation']):
+                    self._capacity_projection_first_loss = None
+                self._capacity_projection_last_positive = event
+            elif previous is not None and self._capacity_projection_first_loss is None:
+                self._capacity_projection_first_loss = {'before': copy.deepcopy(previous), 'after': copy.deepcopy(event)}
+            self._capacity_projection_events.append(event)
+            if len(self._capacity_projection_events) > 16:
+                self._capacity_projection_events.pop(0)
+                self._capacity_projection_dropped += 1
+            if value is not None:
+                self._capacity_projection_local.returned = (value, event)
+
+    def capacity_projection_observation(self, value):
+        """Do not associate a different call's latest observation with this value."""
+        pair = getattr(self._capacity_projection_local, 'returned', None)
+        if pair is not None and pair[0] is value:
+            return copy.deepcopy(pair[1])
+        return {'status': 'not_observed'}
+
+    def capacity_cache_diagnostics(self):
+        """Two independently locked RAM views, explicitly not an atomic sample."""
+        with self.lock:
+            heartbeat = copy.deepcopy({'last_sample': self._capacity_heartbeat,
+                'last_projection': self._capacity_projection_state,
+                'updated_mono': self.updated_at, 'interval_seconds': self.interval,
+                'basic_available': self.status.get('available') is True,
+                'projection': {'status': 'observed' if self._capacity_projection_events else 'not_observed',
+                    'events': self._capacity_projection_events, 'ring_limit': 16,
+                    'latest': self._capacity_projection_events[-1] if self._capacity_projection_events
+                              else {'status': 'not_observed'},
+                    'dropped_events': self._capacity_projection_dropped,
+                    'first_loss': self._capacity_projection_first_loss}})
+        value = self.sampler.capacity_cache_diagnostics()
+        value['monitor'] = dict(heartbeat, atomic_with_capacity=False, read_order=['monitor', 'capacity'])
         return value
 
     def refresh_capacity(self, *, authorizer=None):

@@ -56,11 +56,36 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"snapshot","checks":["disk_activity"]}
 {"action":"snapshot","checks":["file_backend_context"]}
 {"action":"snapshot","checks":["file_protocol"]}
+{"action":"snapshot","checks":["capacity_cache"]}
 ```
 
-不指定 `checks` 时仍只采 `device/storage/business/fan` 原四项。目录共十项，额外六项须在 `checks` 明确选择；媒体 `probe_business` 和独立原厂 `probe/packages` 不属于目录。列表非空、已知且不重复，按请求顺序返回；不接受其他字段、查询参数、命令、路径、端口、凭据、用户或任务 ID。没有公开 GET／CORS，也不建立网页登录会话；固定业务认证边界见[业务状态](business-diagnostics.md)。
+不指定 `checks` 时仍只采 `device/storage/business/fan` 原四项。目录共十一项，额外七项须在 `checks` 明确选择；媒体 `probe_business` 和独立原厂 `probe/packages` 不属于目录。列表非空、已知且不重复，按请求顺序返回；不接受其他字段、查询参数、命令、路径、端口、凭据、用户或任务 ID。没有公开 GET／CORS，也不建立网页登录会话；固定业务认证边界见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
+
+### 容量缓存决策现场
+
+显式选择 `capacity_cache`，结果在 `snapshot.checks.capacity_cache.data.capacity_cache`。此检查只复制常驻进程已经记录的 RAM，不调用库存、挂载监听 poll、容量投影／采样、SMART、statvfs 或工作进程；不会为了诊断重演失效判断。没有过去的记录时返回空证据，不能补造。单独所有者会话、小屏令牌和机器 Token 不授权；必须命中真实 peer 的开发白名单及绝对窗口，明确拒绝 `Authorization`。共享检测锁和存储来源锁均非排队；采后及 JSON 序列化前后复核，首次撤权锁存，复权或重启不能复活旧结果。
+
+固定 schema 1：
+
+- `instance/seq/generation` 标识本进程和决策序列；`state` 是容量锁下的正／负／pending 数量、容量与挂载 epoch、关闭及 worker／reaper 是否存在。
+- `events` 最多 32 条，只存固定来源、阶段、原因、原始 wall／monotonic 时刻、前后 epoch、删除或替换的 mount ID 和计数；`dropped_events` 明示环形记录淘汰数。
+- `latest_inventory` 是最近一次真实生产扫描的观察，含完整性、失败阶段／原因、原读取字节与上限、最多 128 行。单次返回携带自己的 observation，不能用并发扫描的“最新值”替换真正参与决策的证据。
+- `last_commit` 保留最近成功发布新测量后的原日期与对应库存；`first_invalidation` 在同一容量锁内比较真实正记录删除／替换后锁存。它保留原 before／after、组件变化位及事件时的监听证据。几十次空轮询或 ring 溢出不覆盖首错；新成功提交才开始新 generation。首次填充、空缓存失效、未删除历史的授权拒绝和恢复完整历史的回滚不误记首错。
+- 采集器的 `observation_status:observer_error` 和 `observation_errors` 表示本实例存在纯观察缺口；对应库存／设备证据标记 `complete:false`、`reason:observer_error`，未取得的投影关联为 `not_observed`。构造、摘要、监听证据、事件和记录入口的观察异常不改变真实读取、身份／授权判定、容量日期、业务返回或异常，也不占住刷新锁；原安全失败仍照常拒绝。缺口前保留的记录仅证明其原事件，不能据观察不可用推定安全门通过。
+- 库存记录只公开 mount ID、parent ID、major:minor、固定文件系统枚举、内核设备标签及已读取的 sysfs link／target／parent 身份；dev／inode／ctime_ns 和 diskseq 使用十进制字符串。完整 mountinfo 行、target／root／source、挂载／super options、optional propagation、父链和 sysfs 路径只用分域 SHA-256；变化位未知用 null，扫描不完整不能声称“未改变”。原行不返回。
+- `monitor` 单独说明基本心跳；`monitor.projection` 最多保存十六条正常调用的输出或异常记录及首次输出丢失。`returned`、`projection_error`、`snapshot_error` 和 `not_observed` 分开，记录行数、实际有容量的行数、原日期摘要／范围、seq 和观察时刻；未返回行时计数为 null，不当成实测零行。监控锁先复制并释放，再读容量锁，外层 `atomic_with_capacity:false` 明确这不是同一瞬间的联合样本。
+- Sampler 在原有容量投影的同一锁内，将 seq／epoch 与那次返回的行对象关联；Monitor 只消费对应对象的纯内存侧带，不重读当前 Sampler。Monitor 的 `capacity_projection_observation(value)` 也只认可调用线程持有的同一个返回对象，以强引用和 `is` 核对，不用可能复用的对象 ID 或全局最新 seq 借号。事件中 `atomic_scope:sampler_projection_rows` 仅表示该原行对象与其 epoch 同次取得，不表示诊断读取时仍是同一瞬间。
+- `fnm` 记录 `_safe/_basic/_mounts/_disks/_disk_summary/overview` 六个正常消费阶段，各自有 operation／parent、seq、原观察时刻、固定结果、匹配／缺测／去重／容量贡献计数，以及原日期摘要。盘位和存储池可能分别消费不同的 Monitor 快照，分别保留真实子调用来源；不把后来的基本状态当成前面的盘位输入。六个 latest 加十六条 ring 均有界并标明非原子与淘汰数；超出保留范围的旧投影为未观测，不能用 latest 冒充旧失效帧。异常兜底的有效空结果与原输入的 `projection_error/invalid_type` 分开。日期摘要有分域，不能直接拿不同层的摘要判相等；输入来源保留该次 Monitor 的原摘要。
+
+内核观察保留原短路顺序与同一次 poll：descriptor 丢失、namespace 改变、mount 事件及监听异常分开记录；不会多 poll 消费事件。扫描失败、全 key／设备代次变化、单盘删除、start／close、pending 拒绝和发布回滚均在原生产路径记录；不修改任何失效或放行语义。响应最多四份完整库存，内部另有一份最近已应用观察用于比较，ring 不复制整套库存。Monitor／Fnm 的观察入口异常不能改变业务返回、原异常或原兜底；诊断不调用任何投影函数来补记录，不持久化、不新建后台采集。
+
+响应有固定体积门。完整证据正常时 `status:complete/evidence_returned:true/truncated:false`；单独容量证据保留 4 MiB 上限及 16 KiB 包装余量，客户端至少允许 4 MiB，建议 5 MiB。32 字符以内的大整数使用无损十进制字符串，非有限数字或无法编码返回固定 `encoding_unavailable`。超额返回 `size_exceeded/diagnostic_size_exceeded`、原编码字节数与 SHA-256、`evidence_returned:false/truncated:true`，明确完整证据未返回且 RAM 首错仍保留；不悄悄剪掉首错，不把超额当成没有失效。单项收集完成不代表内部证据完整。最大字段夹具必须同时覆盖四份各 128 行库存、三份各 128 条正记录、三十二条 ring、完整组件变化位与 Monitor／Fnm 的各自有界记录；不能沿用旧 512 KiB 或未证明的 2 MiB 客户端限制。
+
+永久尺寸回归按每个字段的边界构造比自然同时状态更大的保守结构上包络：mount ID 十位、身份数字字符串三十二字符、内核设备名至多 255 字节、摘要六十四字符、有限 double 最长表示；Fnm 自身计数不超过 JavaScript 安全整数、设备标签至多三十二字符、每事件至多 128 行、七个固定计数与六个非递归子来源。完整原行／选项不进入响应。Monitor 包含十六条 ring、latest 与首错两帧；Fnm 对六个 latest 和十六条 ring 均按最大事件形状估算。真实 envelope 编码为 2257602 字节，其中证据 2257465 字节，距离 4 MiB 减包装预留仍有 1920455 字节；没有删除任何首错组件。该门只约束单选容量证据及其固定包装，不承诺任意混选其他旧项目的整份响应也小于 4 MiB。
+
+`a47ab33` 实机仍曾在刷新完成约 13.47 秒后首次观察到四盘容量同时未知；当时缺少上述 epoch／namespace／逐 mount key 证据，不能认定是基本心跳或某一个真实挂载事件。本诊断用于下一次受控现场取证，本机回归不证明 NAS 已恢复或物理休眠。
 
 | 标识 | 实际来源与边界 |
 |---|---|
@@ -74,6 +99,7 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `file_protocol` | 仅显式选择：固定精确固件与所有者，核对最多八个规划根的 Users／admin／public `get_info` 与最多两项 `get_list`，共享十二秒窗口、最多四十八次。先验证真实同挂载句柄，失败不发原厂请求；返回四阶段 errno、预期／实际 mount ID、设备号、self／PID1／emhistor namespace 和脱敏协议形状，不返回目录名称、路径、内容、令牌或任意原厂参数。可能唤盘／更新原厂状态，诊断自身 `file_access_available:false` |
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
 | `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
+| `capacity_cache` | 显式只读已有容量决策 ledger；包含最近成功提交、首次真实失效、原库存组件摘要和独立心跳，不运行库存／poll／容量投影或任何磁盘采集。见本页固定 schema。 |
 
 Docker 候选、文件上下文和协议检查会访问元数据，部分原厂查询可能初始化状态并唤盘，只能显式选择，不加入默认采集或轮询。文件边界仍为 `/drives/*/Users/admin/`；元数据或映射候选不代替完整原厂 ACL 和最终句柄。五项文件只读执行器另有逐次运行门槛，八项写合同仍未接入。Docker 证据见[固定项目读取](docker-projects.md)。检测结束时开发窗口失效，丢弃整次结果并返回 `403`，不续期。
 

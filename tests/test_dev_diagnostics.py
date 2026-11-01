@@ -37,7 +37,7 @@ class RequestTests(unittest.TestCase):
             self.assertTrue(row['description'])
         value['checks'][0]['label'] = 'changed'
         value['checks'].clear()
-        self.assertEqual(len(diagnostics.catalog()['checks']), 10)
+        self.assertEqual(len(diagnostics.catalog()['checks']), 11)
         self.assertNotEqual(diagnostics.catalog()['checks'][0]['label'], 'changed')
 
     def test_valid_actions_and_requested_order_leave_request_unchanged(self):
