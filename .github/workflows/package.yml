@@ -50,6 +50,7 @@ jobs:
           node tests/check_storage_refresh_entry.cjs
           node tests/check_small_screen_fill.cjs
           node tests/check_storage_fill_http.cjs
+          node tests/check_capacity_observation.cjs
           node tests/check_network_curves.cjs
           node tests/check_temperature_curves.cjs
           node tests/check_api_management.cjs

@@ -20,6 +20,8 @@
 - **应用**：容器列表、资源占用、端口与确认式启停；端口占用查询；内置应用在 R1 上为空。
 - **温度**：温度测点、风扇与电压，R1 新增的 **双路风扇**、**机身灯光**，以及能耗。
 
+存储盘位与顶部可独立显示所有者的“最近实测快照”，以原日期、历史状态和已测子集范围说明过去测量；当前挂载连续性不明时保持当前容量未知，不能把历史百分比写回当前池汇总。历史顶部只汇总同一已发布批次，待机兄弟的更旧日期不会混成新批完整池；换盘、身份未知、库存不全或冲突则不展示。该数据只来自已经完成的受控刷新，不为显示它新增 SMART、容量测量、轮询或文件访问。字段与授权／传输边界见 [容量按需刷新](capacity-refresh.md#当前容量与最近实测快照)，永久真实 HTTP 浏览器检查使用 `node tests/check_capacity_observation.cjs`。
+
 实时 CPU／主板读数与曲线使用同一份 Monitoring 温度缓存。主板曲线 `temp_mb` 对应实际 `board_temperature_c`，没有明确主板测点时显示未知，不能把 CPU 封装热区或 ACPI 的读数当作主板温度。原独立测点仍可查看，展示分类不改变风扇温控来源。
 
 `overview.temp` 保留 `cpu`、`system`、`disks`，其中 `system` 与兼容别名 `mb` 都表示已证主板温度；`samples.cpu`／`samples.board` 提供真实 `sampled_at`、`sampled_monotonic`、`max_age_seconds`、`fresh` 和固定缺测 `reason`。有 Monitoring 但明确缺测时，不回退旧 basic／device 值；GET 不把请求时刻当新测量。旧嵌入没有 Monitoring 时，只接受确有原时间且三秒内的兼容缓存。

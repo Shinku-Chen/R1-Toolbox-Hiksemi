@@ -7957,6 +7957,92 @@ function r1DiskHasCapacity(d) {
 return !!d && r1DiskNumber(d.total) && d.total > 0
 && r1DiskNumber(d.used) && d.used >= 0 && d.used <= d.total;
 }
+const R1_HIST_REASONS = new Set(['last_successful_measurement', 'mount_continuity_unverified']);
+const r1HistNum = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : null);
+function r1CapacityHistory(value) {
+if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+if (value.status !== 'historical' || value.source !== 'last_successful_observation') return null;
+if (!R1_HIST_REASONS.has(value.reason)) return null;
+if (typeof value.observation_id !== 'string' || !/^\d{1,32}$/.test(value.observation_id)) return null;
+const bytes = v => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null);
+const total = bytes(value.total), used = bytes(value.used), available = bytes(value.available);
+const percent = r1HistNum(value.percent, 0, 100);
+const sampled = r1HistNum(value.sampled_at, 1, 1e10);
+const latest = r1HistNum(value.sampled_at_latest, 1, 1e10);
+if (!total || used === null || available === null || percent === null
+|| sampled === null || latest === null || used > total || latest < sampled) return null;
+if (available !== total - used) return null;
+if (Math.abs(percent - used / total * 100) > 0.5) return null;
+const coverage = value.coverage;
+if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)) return null;
+if (coverage.scope !== 'measured_filesystem_subset' || coverage.complete !== false) return null;
+const filesystems = r1HistNum(coverage.filesystem_count, 1, 4096);
+const disks = r1HistNum(coverage.disk_count, 1, 1024);
+if (filesystems === null || disks === null || !Number.isInteger(filesystems) || !Number.isInteger(disks)) return null;
+return { total, used, available, percent, sampled_at: sampled, sampled_at_latest: latest,
+filesystems, disks, observation_id: value.observation_id, reason: value.reason };
+}
+function r1HistRange(h) {
+const first = r1SmartStamp(h.sampled_at), last = r1SmartStamp(h.sampled_at_latest);
+return h.sampled_at_latest !== h.sampled_at ? first + ' – ' + last : first;
+}
+const r1HistBytes = v => (v === 0 ? '0 B' : F.dsizeStr(v));
+function r1HistShort(h) {
+return `${F.int(h.percent)}% · ${r1HistBytes(h.used)} / ${r1HistBytes(h.total)}`;
+}
+function r1HistCoverage(h) {
+return `已测 ${h.filesystems} 个文件系统 / ${h.disks} 块盘（子集）`;
+}
+function r1HistNote(h) {
+return `最近实测快照 · ${r1HistShort(h)} · ${r1HistRange(h)} · ${r1HistCoverage(h)} · 当前容量未知`;
+}
+function r1HistLine(h) {
+return `最近实测快照 ${r1HistShort(h)} · ${r1HistRange(h)} · ${r1HistCoverage(h)}`;
+}
+let r1HistStyle = false;
+function r1HistCss() {
+if (r1HistStyle || typeof document === 'undefined') return;
+r1HistStyle = true;
+const style = document.createElement('style');
+style.textContent = '.r1-cap-hist .bay-cap{opacity:.72}.r1-cap-hist .bay-gauge{opacity:.55}'
++ '.r1-cap-hist .bay-cap{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;'
++ 'display:flex;flex-direction:column;gap:2px;line-height:1.35;font-size:12px;max-width:100%;min-width:0}'
++ '.r1-cap-hist .bay-cap .r1-hist-value{font-size:12px;white-space:normal;overflow-wrap:anywhere}'
++ '.r1-cap-hist .bay-cap .r1-hist-meta{color:var(--chassis-ink-2);font-size:12px;white-space:normal;overflow-wrap:anywhere;line-height:1.35}'
++ '.r1-cap-hist .bay-gauge,.r1-cap-hist .bay-zz{display:none!important}'
++ '.r1-pool-hist .legend,.r1-pool-hist .dnum{opacity:.85}'
++ '.r1-pool-hist .bar i{background:var(--ink-3)!important}'
++ '.r1-hist-note{color:var(--ink-3);font-weight:400}';
+document.head.appendChild(style);
+}
+function r1MarkHist(node, kind, on) {
+if (!node) return;
+if (on) node.setAttribute('data-r1-history', kind);
+else node.removeAttribute('data-r1-history');
+}
+function r1ApplyBayHistory(bay, hist, standby) {
+const cap = bay && bay._r && bay._r.cap;
+if (!cap) return;
+if (hist) {
+bay.classList.add('r1-cap-hist');
+r1MarkHist(bay, 'bay', true);
+cap._html = undefined;   // setText 可能已清空 DOM，setHTML 的内部缓存不能跳过重绘
+setHTML(cap, `<span class="r1-hist-value">${F.int(hist.percent)}% · ${esc(r1HistBytes(hist.used))} / ${esc(r1HistBytes(hist.total))}</span>`
++ `<span class="r1-hist-meta">${standby ? '休眠 · ' : ''}最近实测快照 · ${esc(r1HistRange(hist))} · 已测 ${hist.filesystems} 个文件系统（子集）</span>`);
+bay._g.set(hist.percent / 100, 'hist', null);
+} else {
+bay.classList.remove('r1-cap-hist');
+r1MarkHist(bay, 'bay', false);
+cap._html = undefined;
+}
+}
+function r1PoolHistory(o) {
+const summary = o && o.capacity_last_observation_summary;
+return r1CapacityHistory(summary);
+}
+function r1DiskHistory(d) {
+return r1CapacityHistory(d && d.capacity_last_observation);
+}
 function r1DiskCapacityMissing(d) {
 if (!Array.isArray(d && d.mounts)) return '挂载状态未知 · 容量未采集';
 return d.mounts.length ? `已挂载 ${d.mounts.length} 个分区 · 容量未采集` : '未挂载';
@@ -8005,17 +8091,34 @@ MODS.storage.update = function (o, m) {
 if (!o) return;
 r1StorageUpdate.call(this, r1DiskDisplay(o), m);
 const disks = disksOf(o), measured = disks.filter(r1DiskHasCapacity).length;
+r1HistCss();
 disks.forEach(d => {
 const bay = m.bays[d.name];
-if (bay && !r1DiskHasCapacity(d)) setText(bay._r.cap, `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
-if (bay) bay.title = `${d.name} · ${bayState(d).text}（${r1DiskObservedText([d], o)}）`;
+const hist = r1DiskHasCapacity(d) ? null : r1DiskHistory(d);
+if (bay && !r1DiskHasCapacity(d)) {
+if (!hist) setText(bay._r.cap, `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
+r1ApplyBayHistory(bay, hist, d.standby === true);
+} else if (bay) r1ApplyBayHistory(bay, null, false);
+if (bay) bay.title = `${d.name} · ${bayState(d).text}（${r1DiskObservedText([d], o)}）`
++ (hist ? ' · 当前容量未知，展示最近实测快照：' + r1HistLine(hist) : '');
 });
 setText(m.x.scanAgo, r1DiskObservedText(disks, o));
+const poolHist = (+o.disk_size > 0) ? null : r1PoolHistory(o);
+const poolCard = m.x.poolV && m.x.poolV.closest ? m.x.poolV.closest('.card') : null;
+if (poolCard) { poolCard.classList.toggle('r1-pool-hist', !!poolHist); r1MarkHist(poolCard, 'pool', !!poolHist); }
+if (poolHist) {
+dnum(m.x.poolV, poolHist.percent);
+setW(m.x.poolBar, poolHist.percent);
+setHTML(m.x.poolLeg, `<span class="r1-hist-note">当前容量未知 · 最近实测快照</span>`
++ `<span>${esc(r1HistBytes(poolHist.used))} / ${esc(r1HistBytes(poolHist.total))}</span>`
++ `<span>${esc(r1HistRange(poolHist))}</span><span>${esc(r1HistCoverage(poolHist))}</span>`);
+} else {
 setHTML(m.x.poolLeg, o.disk_size > 0
 ? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>`
 + (o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : '')
 + (measured < disks.length ? `<span>仅统计已有容量快照 · 已覆盖 ${measured}/${disks.length} 块盘</span>` : '')
 : '<span>R1 尚无可用容量快照；已挂载分区的容量尚未采集或不可用。</span>');
+}
 };
 for (const type of ['storage', 'disk']) {
 const build = SHEETS[type].build;
@@ -8026,11 +8129,23 @@ return o => {
 update(r1DiskDisplay(o));
 if (type === 'storage') {
 disksOf(o).forEach(d => {
-if (!r1DiskHasCapacity(d)) setText(body.querySelector(`[data-p="${CSS.escape(d.name)}"]`), `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
+if (!r1DiskHasCapacity(d)) {
+const hist = r1DiskHistory(d);
+const row = body.querySelector(`[data-p="${CSS.escape(d.name)}"]`);
+setText(row, hist ? `${F.dsizeStr(d.size)} · ${r1HistLine(hist)}` : `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
+r1MarkHist(row, 'row', !!hist);
+}
 });
 } else {
 const disk = disksOf(o).find(d => d.name === arg);
-if (disk && !r1DiskHasCapacity(disk)) setText(body.querySelector('[data-ref="leg"]'), `${r1DiskCapacityMissing(disk)} · 硬盘容量 ${F.dsizeStr(disk.size)}`);
+if (disk && !r1DiskHasCapacity(disk)) {
+const hist = r1DiskHistory(disk);
+const leg = body.querySelector('[data-ref="leg"]');
+setText(leg, hist
+? r1HistNote(hist) + ` · 硬盘容量 ${F.dsizeStr(disk.size)}`
+: `${r1DiskCapacityMissing(disk)} · 硬盘容量 ${F.dsizeStr(disk.size)}`);
+r1MarkHist(leg, 'detail', !!hist);
+}
 r1DiskPatchDetail();
 }
 };

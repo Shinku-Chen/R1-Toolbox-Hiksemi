@@ -972,7 +972,7 @@ class WebConfigServer:
             raise ValueError('查询参数无效')
         return {key: values[0] for key, values in parsed.items()}
 
-    def panel_get(self, route, query, headers, peer=None, *, media_sort_current=None):
+    def panel_get(self, route, query, headers, peer=None, *, media_sort_current=None, owner_read_current=None):
         """Return ``(status, payload, content_type)`` for a panel GET route."""
         panel = self.panel
         if route in OWNER_READ_ROUTES:
@@ -1035,7 +1035,8 @@ class WebConfigServer:
         if route == '/api/overview':
             # Full disk identities belong to the owner Web view, not public
             # monitoring, developer allowlists or machine Bearer credentials.
-            identity = (headers.get('Authorization') is None
+            identity = (owner_read_current() is True if owner_read_current is not None else
+                        headers.get('Authorization') is None
                         and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open'))
             return 200, panel.overview(include_identity=identity), 'application/json; charset=utf-8'
         if route == '/api/system':
@@ -1077,7 +1078,8 @@ class WebConfigServer:
         if route == '/api/history/diag':
             return 200, panel.history_diag(), 'application/json; charset=utf-8'
         if route == '/api/smart':
-            identity = (headers.get('Authorization') is None
+            identity = (owner_read_current() is True if owner_read_current is not None else
+                        headers.get('Authorization') is None
                         and self.panel_authorized(headers, peer=peer) in ('password', 'pair', 'open'))
             return 200, panel.smart(params.get('dev', ''), include_identity=identity), 'application/json; charset=utf-8'
         if route == '/api/disk_health':
@@ -2138,12 +2140,28 @@ class WebConfigServer:
                     elif mime.startswith('text/html') and code == 200 and self.path.startswith('/api/'):
                         self.send_header('Content-Disposition', 'attachment; filename="r1-report.html"')
                     self.end_headers()
+                    written = False
                     try:
                         if self.command != 'HEAD':
                             self.wfile.write(data)
+                            written = True
                     except OSError:
                         pass
                     self.close_connection = True
+                    # History is separate from the core capacity commit. Only
+                    # this server-side successful response-write and the same
+                    # still-current owner grant can publish its private receipt.
+                    # Socket success does not prove delivery to the browser.
+                    if (written and code == 200 and self.command == 'POST'
+                            and urllib.parse.urlsplit(self.path).path in (
+                                CAPACITY_REFRESH_ROUTE, STORAGE_FILL_ROUTE, STORAGE_REFRESH_ROUTE)):
+                        try:
+                            publisher = getattr(outer.monitor, 'publish_capacity_history', None)
+                            receipt = value.get('capacity', value) if isinstance(value, dict) else None
+                            if guard is not None and still_authorized() and callable(publisher):
+                                publisher(receipt, authorizer=guard)
+                        except Exception:
+                            pass
 
                 def valid(self, post=False, public=False, panel=False):
                     for name in ('Host', 'Origin', 'Cookie', 'Content-Length', 'Connection', 'X-R1-CSRF', 'X-FNM-Request'):
@@ -2445,8 +2463,17 @@ class WebConfigServer:
                         try:
                             guard = (outer._media_sort_authorizer(self.headers, self.client_address[0], generation=self.media_sort_generation)
                                      if route == '/api/plugins/media-sort' else None)
+                            owner_read = None
+                            if route in ('/api/overview', '/api/smart'):
+                                owner_read = outer._capacity_authorizer(self.headers, self.client_address[0],
+                                                                        generation=self.media_sort_generation)
+                                # Latch admission before producing any owner-only
+                                # fields. A later grant cannot upgrade this read.
+                                if owner_read():
+                                    guard = owner_read
                             status, value, mime = outer.panel_get(route, parsed.query, self.headers, peer=self.client_address[0],
-                                                                 **({'media_sort_current': guard} if guard else {}))
+                                **({'media_sort_current': guard} if guard and route == '/api/plugins/media-sort' else {}),
+                                **({'owner_read_current': owner_read} if owner_read is not None else {}))
                         except ValueError:
                             status, value, mime = 400, {'ok': False, 'error': '查询参数无效'}, 'application/json; charset=utf-8'
                         except Exception:

@@ -135,6 +135,101 @@ def _number(value, low=None, high=None):
     return value
 
 
+class _CapacityHistoryDisks(list):
+    """Carry the same disk-read summary privately, outside the JSON list contract."""
+
+
+def _capacity_last_observation(value):
+    """Whitelist owner-only historical display data, never current capacity proof.
+
+    Producer binding and deduplication happen in the sampler. This projection
+    neither recomputes its coverage nor renews its original sample dates.
+    Malformed optional history cannot change the ordinary disk projection.
+    """
+    try:
+        if (not isinstance(value, dict) or value.get('status') != 'historical'
+                or value.get('source') != 'last_successful_observation'
+                or value.get('reason') not in ('last_successful_measurement',
+                                               'mount_continuity_unverified')):
+            return None
+        observation_id = value.get('observation_id')
+        if (not isinstance(observation_id, str)
+                or re.fullmatch(r'[0-9]{1,32}', observation_id) is None):
+            return None
+        total = _number(value.get('total'), 1)
+        used = _number(value.get('used'), 0)
+        available = _number(value.get('available'), 0)
+        percent = _number(value.get('percent'), 0, 100)
+        oldest = _number(value.get('sampled_at'), 0)
+        latest = _number(value.get('sampled_at_latest'), 0)
+        if (total is None or used is None or used > total or available is None
+                or available != total - used or percent is None
+                or not math.isclose(percent, used / total * 100, rel_tol=0, abs_tol=1e-9)
+                or oldest is None or oldest <= 0 or latest is None or latest < oldest):
+            return None
+        coverage = value.get('coverage')
+        if (not isinstance(coverage, dict)
+                or coverage.get('scope') != 'measured_filesystem_subset'
+                or coverage.get('complete') is not False
+                or any(type(coverage.get(key)) is not int or not 1 <= coverage[key] <= 128
+                       for key in ('filesystem_count', 'disk_count'))):
+            return None
+        return {
+            'status': 'historical', 'source': 'last_successful_observation',
+            'reason': value['reason'], 'observation_id': observation_id,
+            'total': total, 'used': used, 'available': available, 'percent': percent,
+            'sampled_at': oldest, 'sampled_at_latest': latest,
+            'coverage': {'scope': 'measured_filesystem_subset',
+                         'filesystem_count': coverage['filesystem_count'],
+                         'disk_count': coverage['disk_count'], 'complete': False},
+        }
+    except Exception:
+        return None
+
+
+def _capacity_history_sideband(rows):
+    """Consume only the optional history on this exact normal Monitor read."""
+    try:
+        value = _dict(getattr(rows, 'capacity_observations', None))
+        disks = _dict(value.get('disks'))
+        if len(disks) > 128:
+            return {}, None
+        return ({key: _capacity_last_observation(item) for key, item in disks.items()
+                 if isinstance(key, str) and len(key) <= 32},
+                _capacity_last_observation(value.get('summary')))
+    except Exception:
+        return {}, None
+
+
+def _capacity_history_rendered_summary(summary, rows):
+    """Publish the producer's batch only when its full rendered group agrees.
+
+    A filtered or missing disk cannot contribute invisible usage to the owner
+    summary. Older disk observations may coexist, but must not be mixed into a
+    newer batch. Validation never synthesizes a replacement aggregate.
+    """
+    try:
+        if summary is None:
+            return None
+        members = [row for row in rows
+                   if isinstance(row.get('capacity_last_observation'), dict)
+                   and row['capacity_last_observation']['observation_id'] == summary['observation_id']]
+        histories = [row['capacity_last_observation'] for row in members]
+        if (not histories or len(members) != len({row['name'] for row in members})
+                or len(histories) != summary['coverage']['disk_count']
+                or any(value['coverage']['disk_count'] != 1 for value in histories)
+                or sum(value['coverage']['filesystem_count'] for value in histories)
+                != summary['coverage']['filesystem_count']
+                or any(sum(value[key] for value in histories) != summary[key]
+                       for key in ('total', 'used', 'available'))
+                or min(value['sampled_at'] for value in histories) != summary['sampled_at']
+                or max(value['sampled_at_latest'] for value in histories) != summary['sampled_at_latest']):
+            return None
+        return summary
+    except Exception:
+        return None
+
+
 def _text(value, limit=256):
     if not isinstance(value, str):
         return None
@@ -951,8 +1046,11 @@ class FnmonitorPanel:
         inventory = {row.get('name'): row for row in _list(storage.get('devices'), 128)
                      if isinstance(row, dict) and isinstance(row.get('name'), str)}
         mounts = self._mounts()
-        basic = {entry.get('mount'): entry for entry in _list(self._basic().get('disks'), 128)
+        basic_rows = self._basic().get('disks')
+        basic = {entry.get('mount'): entry for entry in _list(basic_rows, 128)
                  if isinstance(entry, dict)}
+        history, history_summary = (_capacity_history_sideband(basic_rows)
+                                    if include_identity else ({}, None))
         identities = {}
         if include_identity:
             getter = getattr(self.insights, 'storage_identity_cached', None)
@@ -1059,6 +1157,12 @@ class FnmonitorPanel:
                 'smart_fresh': item.get('smart_fresh') is True,
                 'temperature_critical_c': _number(item.get('temperature_critical_c'), 0, 200),
             })
+            if include_identity:
+                rows[-1]['capacity_last_observation'] = history.get(name)
+        if include_identity:
+            history_summary = _capacity_history_rendered_summary(history_summary, rows)
+            rows = _CapacityHistoryDisks(rows)
+            rows.capacity_history_summary = history_summary
         return rows
 
     @_capacity_projection_stage('summary')
@@ -1561,6 +1665,8 @@ class FnmonitorPanel:
             'disk_size': total_size,
             'disk_pools': 0,
             'disks_detail': disks,
+            **({'capacity_last_observation_summary': getattr(disks, 'capacity_history_summary', None)}
+               if include_identity else {}),
             'idrac_slot_state': 'off',
             'net': self._net(),
             'net_aggregate': self._network_aggregate(),
@@ -1774,6 +1880,8 @@ class FnmonitorPanel:
                     observations['serial_number'] = disk['serial']
                 detail = _smart_rows(observations)
                 return {'ok': True, 'dev': device, 'model': disk.get('model'),
+                        **({'capacity_last_observation': disk.get('capacity_last_observation')}
+                           if include_identity else {}),
                         'serial': disk.get('serial'), 'size': disk.get('size'),
                         'temp': disk.get('temp'), 'health': disk.get('health'),
                         'standby': disk.get('standby'),

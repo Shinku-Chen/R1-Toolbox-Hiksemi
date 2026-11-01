@@ -85,6 +85,10 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 
 ## 代码约定
 
+前述容量条款的“拒旧／丢历史值”继续约束原当前容量字段及其安全用途；下段新增的独立历史只表示过去观测，不覆盖原失效规则。
+
+- 最近容量观测独立于当前容量缓存。所有者网页可展示 `capacity_last_observation` 与独立的 `capacity_last_observation_summary`，必须标为历史、保留原日期与 `measured_filesystem_subset` 范围，`coverage.complete:false`；不得写回当前 `total/used/usage` 或 `disk_size/disk_used/disk_total`，也不参与 SMART／statvfs 资格、文件空间预检、根规划、Token 或控制授权。历史只来自原容量业务最终成功后的私有候选，经同一所有者代次和 JSON 前后守卫、服务器响应写入成功后在原容量锁内发布；传输成功不等于客户端收到，失败不重放，也不回滚别人已发布的历史。候选使用独立业务递增序号，迟到 HTTP 不覆盖较新批次，顶部历史只合计一个批次，待机兄弟可保留自己的旧日期但不混入新批。绑定复用同次真实 `_capacity_device` 私有八段 tuple，不从诊断 ledger／摘要／sdX／SN 认盘；原生产挂载库存并非完整物理库存，缺行、未知、冲突或换代时隐藏／丢弃历史。同盘多个分区的物理父代次、设备号和 diskseq 必须一致，冲突整组拒绝。所有当前挂载／命名空间／设备／权限失效门照旧，历史不能使旧 current 复活；start／close 清空历史，不长期持有文件系统 FD，不新增 SMART、statvfs、用户挂载访问或内核轮询。仅 owner 的固定 Web 投影包含历史，公开 v1、小屏、MCP、Bearer 和开发白名单不扩权；私有同次 sideband 有界、不可变且可 deepcopy，JSON 不序列化它。
+
 - MCP 缓存历史、健康事件和流量仅读已有内存；健康必须同锁取得告警及评估，缺测、过期或不完整不得报正常，不输出动态 SMART／传感器身份。固定项目 stats 只使用已登记项目及 `inspect`，每次连接后复核授权和容器生命周期；CPU 无合法实际两帧差分则 `null`，网络／块 I/O 不重复聚合。proc 元数据必须有界读至 EOF，不能把一次短读当完整 mountinfo。固定 sysfs 分区 `dev` 文本属性的 `st_size` 是声明容量，不能作为实际长度；只用严格构造的 `sys/block/sdX/sdXN/dev` 专用读取器，实际 EOF 上限 64 字节并核对打开前后身份，普通文件长度门保持不变。见 `docs/mcp-monitoring-tools.md`、`docs/docker-projects.md` 与 `docs/file-mutations.md`。
 
 - 镜像 RAM 缓存严格拒绝清单之外的文件和目录；所有执行或导入缓存运行时的 Python 入口必须带 `-B`，包括启动脚本在 `exec --resident` 前的导入，避免字节码缓存污染导致重启失败。

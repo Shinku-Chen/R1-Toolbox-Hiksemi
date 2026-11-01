@@ -81,6 +81,48 @@ Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌
 
 移除后台温度和容量读取是去除潜在访问源，不证明这些调用曾唤盘，也不证明新版本已物理休眠。部署后仍需在不受主动刷新／媒体操作影响的完整原厂空闲窗口内另行验收；本轮实现与本机隔离测试不代替 NAS 结果。
 
+## 当前容量与最近实测快照
+
+`a543` 已保存的实机决策现场确认：成功提交后约 13.50 秒，真实 namespace-wide `mountinfo` poll 事件使八条当前容量清空；当时 namespace 相同、相关目标的可比较 key 相同，但全局表由 85 行变为 86 行。未确定是哪条外部挂载或进程，也不能用两个相同终态排除中间短暂卸载／覆盖。原安全失效继续保留；本功能不忽略事件，也不宣称已修复内核或证明物理休眠。
+
+独立 RAM 最近观测用于显示“最近实测快照”，不会恢复当前容量。历史只保存真实容量业务成功后的本批新测量；核心提交后仍是私有候选，直到真实所有者的同一授权守卫通过 JSON 前后检查、服务器响应 body 写入成功，再在容量锁内复核候选实例、业务递增序号、epoch、原缓存、绝对期限与授权后发布。服务器写入成功不证明浏览器收到；传输失败不生成新历史、不自动重放，核心已经提交的当前容量仍按原语义处理。失败、超时、撤权回滚或 stop／start 不能复活候选，迟到响应不能覆盖较新批次。
+
+候选绑定同次真实 `_capacity_device` 的完整私有 tuple，存放在不可 JSON 序列化的旁侧数据中，不扩大 worker 的原 4096 字节请求。被动投影只复用本次原库存已读取的值，不为历史重扫、poll、开 worker 或访问用户挂载。这里的库存是原 `/drives` 挂载目标库存，不是完整 `sys/block` 物理／分区枚举；必须仍有完整可验证的原生产元数据行，且同盘各分区的物理父身份、设备号、diskseq 一致。未知归属、截断、缺行、冲突、设备／分区代次变化时保守隐藏或删除历史，不能按 sdX／序列号或诊断摘要挂到新盘上。实际卸载后缺少这项证明就不展示，即使后来同名重新出现也不复活旧记录。
+
+仅真实 password／pair／open 所有者的现有 Web overview／SMART 投影增加以下字段；非所有者、Bearer、开发白名单、公开 v1、小屏与 MCP 不增加历史字段。普通 GET 与 JSON 不包含内部 sideband、候选、身份 tuple、路径、凭据或 FD。
+
+- `disks_detail[i].capacity_last_observation`：`null` 或该盘最近一次已发布批次的已测子集。
+- `capacity_last_observation_summary`：`null` 或同一个最新、仍可绑定的批次的独立汇总。不会混入另一盘更旧批次；Fnm 还须核其贡献与本次实际渲染的同批盘位完全一致，否则不发布汇总。
+
+两者使用同一固定形状：
+
+```json
+{
+  "status": "historical",
+  "source": "last_successful_observation",
+  "reason": "mount_continuity_unverified",
+  "observation_id": "1",
+  "total": 100000,
+  "used": 25000,
+  "available": 75000,
+  "percent": 25.0,
+  "sampled_at": 1793522657.1,
+  "sampled_at_latest": 1793522658.2,
+  "coverage": {
+    "scope": "measured_filesystem_subset",
+    "filesystem_count": 2,
+    "disk_count": 1,
+    "complete": false
+  }
+}
+```
+
+`available` 固定为当时 `total - used` 的未用量，不是 `f_bavail`，不能当作用户可写空间。`sampled_at`／`sampled_at_latest` 是本观测包含测量的最早／最晚原日期，不是 GET、刷新完成或重绘时间。`observation_id` 是有界 RAM 业务批次的十进制字符串，只作显示关联，不能作为授权凭据。当前挂载连续性仍被原缓存证明时 reason 为 `last_successful_measurement`；当前缓存因事件被拒而物理／分区绑定仍成立时为 `mount_continuity_unverified`。两者 status 都是历史；不宣称数据实时。
+
+范围始终是实际测过的文件系统子集，`complete:false` 不代表完整物理盘／池。重复设备挂载不能重复相加，多分区分别保留原贡献；同盘新批只测到部分分区时替换该盘旧组，不把旧分区数值混进新日期。单盘待机、不产生新测量时保留其仍合法的旧观测与原日期，但新批顶部汇总只统计新批实际贡献。历史永不进入当前 `total/used/usage`、`disk_size/disk_used/disk_total`、容量资格、空间预检、文件根或 Token 计划；当前未知仍是 `null`，不能用历史或 0 补成正常。所有者撤权后不披露历史；start／close 清空历史，RAM 上限 128 条测量，超限按整盘最旧组淘汰。
+
+原“卸载／重挂拒旧”规则继续约束当前容量与全部权限；新增的是明确列出的过去观测。浏览器的永久真实 HTTP 验收入口为 `node tests/check_capacity_observation.cjs`；Python 生产链、发布／回滚、传输与身份冲突回归位于 `test_capacity_history_*.py`。本地合成／便携 fixture 不证明 NAS 已恢复显示或已物理休眠，最终仍由精确 Linux CI 与部署后的有限验收判定。
+
 ## Linux 验证边界
 
 `tests/test_capacity_refresh_mount_linux.py` 必须在 CI 的独立 UID0 步骤实跑五项且零 skip：临时私有挂载命名空间、只读 ext4、真实 Popen／JSON／SCM／fstatvfs 链、普通卸载成功、事件失效及超时／撤权／关闭后的回收。测试仅用临时 loop 文件系统并替换硬件身份映射，生产仍拒绝 loop；故障测试的受控 sleep 不代表实测不可中断内核状态。Windows 和普通用户发现套件的跳过不算这五项已通过。

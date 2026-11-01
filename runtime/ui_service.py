@@ -241,6 +241,49 @@ class _CapacityEntries(list):
         self.observation = observation
 
 
+class _CapacityInventoryRow(dict):
+    """Retain the original identity privately without changing worker JSON."""
+    def __init__(self, value):
+        super().__init__(value)
+        self.capacity_identity = None
+
+
+class _CapacityHistoryData(dict):
+    """Bounded numeric/text projection, immutable and safe for deep-copy users."""
+    def __init__(self, value):
+        dict.__init__(self, ((key, _CapacityHistoryData(item) if isinstance(item, dict) else item)
+                            for key, item in value.items()))
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError('immutable_capacity_history')
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+class _CapacityHistoryRows(list):
+    """Private same-projection history; normal JSON list encoding omits it."""
+    def __init__(self, rows, observations):
+        super().__init__(rows)
+        self.capacity_observations = _CapacityHistoryData(observations)
+
+
+class _CapacityHistoryReceipt(dict):
+    """Unpublished candidate; only the real response publisher may finalize."""
+    def __init__(self, value, instance, epoch, mount_epoch, batch, deadline, records):
+        super().__init__(value)
+        self.instance, self.epoch, self.mount_epoch = instance, epoch, mount_epoch
+        self.batch, self.deadline, self.records = batch, deadline, _CapacityHistoryData(records)
+        self.finalized = False
+
+    def __deepcopy__(self, memo):
+        # Copying a public receipt never copies its private publication right
+        # or the live sampler/locks. Only the original object can finalize.
+        return copy.deepcopy(dict(self), memo)
+
+
 def _capacity_digest(domain, value):
     """Domain-separated evidence only; never export mount paths or raw lines."""
     return hashlib.sha256((domain + '\0' + json.dumps(value, ensure_ascii=True,
@@ -685,6 +728,10 @@ def _capacity_inventory(proc_root, sys_root):
         row = {'mount_id': mount_id, 'mount': mount, 'device': fields[2], 'root': root,
                'filesystem': extra[0], 'source': unescape_mount_field(extra[1]), '_key': None,
                '_reason': 'unsupported_filesystem', '_device_name': None}
+        try:
+            row = _CapacityInventoryRow(row)
+        except Exception:
+            pass
         identity = None
         if re.fullmatch(r'[1-9][0-9]{0,6}:[0-9]{1,7}', fields[2]) and extra[0] in _CAPACITY_FILESYSTEMS:
             previous_device = None
@@ -705,6 +752,12 @@ def _capacity_inventory(proc_root, sys_root):
                 row['_key'] = hashlib.sha256(json.dumps(material, ensure_ascii=True).encode()).hexdigest()
                 row['_reason'] = None
                 row['_device_name'] = identity[-1]
+                # History must retain this exact production read, never rebuild
+                # physical/partition identity from a name or diagnostic digest.
+                try:
+                    row.capacity_identity = identity
+                except Exception:
+                    pass
         # Two full-root aliases or stacked targets are ambiguous; none may
         # inherit a cache entry simply because their device number matches.
         ancestors, current = set(), parent_id
@@ -895,6 +948,9 @@ class StatusSampler:
         self._capacity_lock = threading.RLock()
         self._capacity_refresh_lock = threading.Lock()
         self._capacity_cache = {}
+        self._capacity_history = {}
+        self._capacity_history_sequence = 0
+        self._capacity_history_instance = object()
         self._capacity_negative = {}
         self._capacity_watch = None
         self._capacity_mount_epoch = 0
@@ -1063,6 +1119,13 @@ class StatusSampler:
                 if row['mount_id'] in previous and row['mount_id'] not in self._capacity_cache:
                     row['capacity_status'] = 'identity_changed'
             self._capacity_note('projection')
+            # Create the private sideband before binding a543's diagnostic
+            # provenance: both consumers must refer to the exact returned list.
+            try:
+                observations = self._capacity_history_projection(entries, complete)
+                rows = _CapacityHistoryRows(rows, observations)
+            except Exception:
+                pass
             def publish():
                 if self._capacity_observation_errors:
                     self._capacity_context.returned_projection = None
@@ -1078,6 +1141,180 @@ class StatusSampler:
             self._capacity_observe(lambda: setattr(self._capacity_context, 'returned_projection', None))
             self._capacity_observe(publish)
             return rows
+
+    @staticmethod
+    def _capacity_history_bindings(entries, complete):
+        """Same-read per-partition proof plus consistent physical parent groups.
+
+        This is the existing mounted-target inventory, not a claim that all
+        physical disks/partitions were enumerated. Unknown attribution rejects
+        history conservatively; a name alone cannot resolve a missing identity.
+        """
+        if not complete:
+            return {}
+        parents, names_by_parent, invalid, active = {}, {}, set(), {}
+        for row in entries:
+            identity = getattr(row, 'capacity_identity', None)
+            name = row.get('_device_name')
+            if not isinstance(identity, tuple) or len(identity) != 8:
+                if (row.get('filesystem') in _CAPACITY_FILESYSTEMS
+                        and re.fullmatch(r'[1-9][0-9]{0,6}:[0-9]{1,7}', row.get('device', ''))):
+                    return {}
+                continue
+            if name != identity[7]:
+                return {}
+            physical = (identity[1], identity[4], identity[5], identity[6], identity[7])
+            if name in parents and parents[name] != physical:
+                invalid.add(name)
+            parents[name] = physical
+            names_by_parent.setdefault(identity[1], set()).add(name)
+            if not row.get('_key'):
+                invalid.add(name)
+            else:
+                active[row['mount_id']] = row
+        for names in names_by_parent.values():
+            if len(names) != 1:
+                invalid.update(names)
+        return {key: row for key, row in active.items() if row['_device_name'] not in invalid}
+
+    def _capacity_history_prune(self, entries, complete):
+        """Caller holds capacity lock; incomplete/missing proof never revives."""
+        if not complete or self._capacity_closed:
+            self._capacity_history = {}
+            return
+        active = self._capacity_history_bindings(entries, complete)
+        self._capacity_history = {mount_id: record for mount_id, record in self._capacity_history.items()
+            if mount_id in active and record['key'] == active[mount_id]['_key']
+            and record['identity'] == getattr(active[mount_id], 'capacity_identity', None)}
+
+    @staticmethod
+    def _capacity_history_view(records, current):
+        """A measured subset of exactly one publication, with original dates."""
+        if not records or len({record['batch'] for record in records}) != 1:
+            return None
+        # Partition major/minor is used only after its full production identity
+        # matched. Never sum bind/FUSE aliases or combine batches to fill gaps.
+        unique = {record['device']: record for record in records}
+        if len(unique) != len(records):
+            return None
+        total = sum(record['values']['total_bytes'] for record in records)
+        used = sum(record['values']['used_bytes'] for record in records)
+        dates = [record['sampled_at'] for record in records]
+        if total <= 0 or used < 0 or used > total:
+            return None
+        return {'status': 'historical', 'source': 'last_successful_observation',
+            'reason': 'last_successful_measurement' if all(
+                current.get(record['mount_id'], {}).get('key') == record['key'] for record in records)
+                else 'mount_continuity_unverified',
+            'observation_id': str(records[0]['batch']), 'total': total, 'used': used,
+            'available': total - used, 'percent': used / total * 100,
+            'sampled_at': min(dates), 'sampled_at_latest': max(dates),
+            'coverage': {'scope': 'measured_filesystem_subset',
+                         'filesystem_count': len(records),
+                         'disk_count': len({record['device_name'] for record in records}),
+                         'complete': False}}
+
+    def _capacity_history_projection(self, entries, complete):
+        """No IO/ledger reads; only original complete inventory may bind history."""
+        self._capacity_history_prune(entries, complete)
+        groups = {}
+        for record in self._capacity_history.values():
+            groups.setdefault(record['device_name'], []).append(record)
+        disks, selected = {}, []
+        for name, records in groups.items():
+            newest = max(record['batch'] for record in records)
+            records = [record for record in records if record['batch'] == newest]
+            view = self._capacity_history_view(records, self._capacity_cache)
+            if view is not None:
+                disks[name] = view
+                selected.extend(records)
+        newest = max((record['batch'] for record in selected), default=None)
+        summary = self._capacity_history_view(
+            [record for record in selected if record['batch'] == newest], self._capacity_cache)
+        return {'disks': disks, 'summary': summary}
+
+    def _capacity_history_candidate(self, value, pending, entries, epoch, mount_epoch, deadline):
+        """Stage numbers after successful core commit; no visible history yet."""
+        if not pending or self._capacity_history_sequence >= 2 ** 63 - 1:
+            return value
+        by_id = self._capacity_history_bindings(entries, True)
+        batch = self._capacity_history_sequence + 1
+        records = {}
+        for mount_id, record in pending.items():
+            entry = by_id.get(mount_id, {})
+            identity = getattr(entry, 'capacity_identity', None)
+            if (not isinstance(identity, tuple) or len(identity) != 8
+                    or entry.get('_key') != record['key']
+                    or not re.fullmatch(r'(?:sd[a-z]+|nvme\d+n\d+)', entry.get('_device_name', ''))):
+                continue
+            records[mount_id] = {'mount_id': mount_id, 'key': record['key'],
+                'identity': identity, 'values': dict(record['values']),
+                'sampled_at': record['sampled_at'], 'device': entry['device'],
+                'device_name': entry['_device_name'], 'batch': batch}
+        if not records:
+            return value
+        self._capacity_history_sequence = batch
+        return _CapacityHistoryReceipt(value, self._capacity_history_instance,
+                                       epoch, mount_epoch, batch, deadline, records)
+
+    def publish_capacity_history(self, receipt, *, authorizer):
+        """Finalize a successfully written owner response; never collect or retry.
+
+        Socket write completion is server-side publication, not proof that the
+        browser received it. Failure affects history only, never current cache.
+        """
+        try:
+            if (type(receipt) is not _CapacityHistoryReceipt
+                    or receipt.instance is not self._capacity_history_instance):
+                return False
+            def allowed():
+                try:
+                    return callable(authorizer) and authorizer() is True
+                except Exception:
+                    return False
+            with self._capacity_lock:
+                if receipt.finalized:
+                    return False
+                receipt.finalized = True
+                if (not allowed()
+                        or self._capacity_closed or receipt.epoch != self._capacity_epoch
+                        or receipt.mount_epoch != self._capacity_mount_epoch
+                        or time.monotonic() >= receipt.deadline):
+                    return False
+                if not all(self._capacity_cache.get(mount_id, {}) == {
+                        'key': record['key'], 'values': record['values'],
+                        'sampled_at': record['sampled_at']}
+                        for mount_id, record in receipt.records.items()):
+                    return False
+                updated = dict(self._capacity_history)
+                changed = False
+                for name in {record['device_name'] for record in receipt.records.values()}:
+                    if any(record['device_name'] == name and record['batch'] >= receipt.batch
+                           for record in updated.values()):
+                        continue
+                    updated = {key: record for key, record in updated.items() if record['device_name'] != name}
+                    updated.update({key: record for key, record in receipt.records.items()
+                                    if record['device_name'] == name})
+                    changed = True
+                if not changed:
+                    return False
+                # Bounded RAM; evict whole oldest disk groups, never make a
+                # truncated group appear to have measured complete coverage.
+                while len(updated) > 128:
+                    oldest = min(updated.values(), key=lambda record: record['batch'])['device_name']
+                    updated = {key: record for key, record in updated.items() if record['device_name'] != oldest}
+                if (not allowed() or receipt.epoch != self._capacity_epoch
+                        or self._capacity_closed or time.monotonic() >= receipt.deadline):
+                    return False
+                previous = self._capacity_history
+                self._capacity_history = updated
+                if (not allowed() or receipt.epoch != self._capacity_epoch
+                        or self._capacity_closed or time.monotonic() >= receipt.deadline):
+                    self._capacity_history = previous if receipt.epoch == self._capacity_epoch and not self._capacity_closed else {}
+                    return False
+                return True
+        except Exception:
+            return False
 
     def capacity_projection_observation(self, rows):
         """Return metadata only for this thread's exact original rows object."""
@@ -1139,6 +1376,10 @@ class StatusSampler:
             if self._capacity_observed_keys is not None and active != self._capacity_observed_keys:
                 self._capacity_invalidate('active_keys_changed' if complete else 'inventory_incomplete')
             self._capacity_observed_keys = active
+            try:
+                self._capacity_history_prune(entries, complete)
+            except Exception:
+                self._capacity_history = {}
             self._capacity_replace_cache({key: value for key, value in self._capacity_cache.items()
                                           if active.get(key) == value['key']}, reason='reconcile')
             self._capacity_observe(lambda: setattr(self._capacity_ledger, 'reconciled_inventory', getattr(self._capacity_context, 'inventory', None)))
@@ -1153,6 +1394,8 @@ class StatusSampler:
             self._capacity_epoch += 1
             self._capacity_closed = False
             self._capacity_negative = {}
+            self._capacity_history = {}
+            self._capacity_history_sequence = 0
             self._capacity_mount_epoch += 1
             self._capacity_replace_cache({}, reason='start', before_epoch=before_epoch)
             self._capacity_observed_keys = None
@@ -1166,6 +1409,8 @@ class StatusSampler:
             self._capacity_epoch += 1
             self._capacity_closed = True
             self._capacity_negative = {}
+            self._capacity_history = {}
+            self._capacity_history_sequence = 0
             self._capacity_mount_epoch += 1
             self._capacity_replace_cache({}, reason='close', before_epoch=before_epoch)
             self._capacity_observed_keys = None
@@ -1608,8 +1853,14 @@ class StatusSampler:
                 if not batch_changed:
                     self._capacity_negative.update({key: value for key, value in negative.items() if key in set(active.values())})
             successful = ('refreshed', 'cached', 'skipped_standby') if missing else ('refreshed', 'cached')
-            return {'ok': True, 'status': 'complete' if all(row['status'] in successful for row in results) else 'partial',
-                    'started_at': started, 'finished_at': time.time(), 'results': results}
+            value = {'ok': True, 'status': 'complete' if all(row['status'] in successful for row in results) else 'partial',
+                     'started_at': started, 'finished_at': time.time(), 'results': results}
+            try:
+                with self._capacity_lock:
+                    return self._capacity_history_candidate(value, pending, current, epoch, mount_generation, deadline)
+            except Exception:
+                pass
+            return value
         except CapacityRefreshError as error:
             with self._capacity_lock:
                 self._capacity_note('pending_rejected_' + error.reason)
@@ -1806,6 +2057,10 @@ class StatusMonitor:
 
     def refresh_capacity_visible(self, *, authorizer=None, eligibility=None):
         return self.sampler.refresh_capacity_visible(authorizer=authorizer, eligibility=eligibility)
+
+    def publish_capacity_history(self, receipt, *, authorizer):
+        """Pure RAM finalization for the actual owner response publisher."""
+        return self.sampler.publish_capacity_history(receipt, authorizer=authorizer)
 
     def start(self):
         start = getattr(self.sampler, 'start_capacity', None)
