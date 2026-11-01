@@ -1058,8 +1058,12 @@ class StatusMonitor:
     def snapshot(self):
         with self.lock:
             if self.updated_at is None or time.monotonic() - self.updated_at > max(6, self.interval * 3):
-                return empty_status()
-            value = copy.deepcopy(self.status)
+                value = empty_status()
+            else:
+                value = copy.deepcopy(self.status)
+        # Dated capacity has its own mount/lifetime proof, not the basic
+        # heartbeat's freshness. Always revalidate it, including when the
+        # basic sampler has stalled; this projection never measures capacity.
         project = getattr(self.sampler, 'capacity_snapshot', None)
         if callable(project):
             value['disks'] = project()

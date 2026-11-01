@@ -99,6 +99,100 @@ class CapacityCoreTests(unittest.TestCase):
         self.assertIsNone(monitor.snapshot()['disks'][0]['total_bytes'])
         self.assertEqual(self.sampler._capacity_cache, {})
 
+    def test_monitor_retains_dated_capacity_without_a_fresh_basic_heartbeat(self):
+        self.refresh()
+        expected = self.sampler.capacity_snapshot()
+        monitor = service.StatusMonitor(self.sampler)
+        monitor.status = self.sampler.sample()
+        monitor.status['cpu'].update(usage_percent=77, temp_c=44)
+        now = time.monotonic()
+        for heartbeat in (None, now - 7, now - 60):
+            with self.subTest(heartbeat=heartbeat), \
+                    mock.patch.object(service.time, 'monotonic', return_value=now), \
+                    mock.patch.object(self.sampler, '_capacity_probe', side_effect=AssertionError('passive worker')), \
+                    mock.patch.object(service.os, 'statvfs', create=True, side_effect=AssertionError('passive statvfs')):
+                monitor.updated_at = heartbeat
+                for _ in range(2):
+                    snapshot = monitor.snapshot()
+                    self.assertEqual(snapshot['disks'], expected)
+                    self.assertEqual(snapshot['cpu'], service.empty_status()['cpu'])
+                    self.assertFalse(snapshot['available'])
+
+    def test_stale_monitor_still_rejects_invalid_capacity_lifetimes(self):
+        for failure in ('mount_event', 'device_generation', 'unmount', 'incomplete_scan', 'lost_watch', 'close'):
+            with self.subTest(failure=failure):
+                self.write_mount()
+                self.watch.changed.return_value = False
+                self.sampler.start_capacity()
+                self.refresh()
+                monitor = service.StatusMonitor(self.sampler)
+                monitor.status, monitor.updated_at = self.sampler.sample(), time.monotonic() - 7
+                self.sampler._capacity_negative['old-failure'] = (time.monotonic() + 30, 'failed', 'probe_failed', None)
+                if failure == 'mount_event':
+                    self.watch.changed.return_value = True
+                elif failure == 'device_generation':
+                    self.generation += 1
+                elif failure == 'unmount':
+                    self.mountinfo.write_text('')
+                elif failure == 'incomplete_scan':
+                    self.mountinfo.write_text('invalid mountinfo\n')
+                elif failure == 'lost_watch':
+                    self.sampler._capacity_watch = None
+                else:
+                    self.sampler.close_capacity()
+                with mock.patch.object(self.sampler, '_capacity_probe', side_effect=AssertionError('passive worker')):
+                    rows = monitor.snapshot()['disks']
+                self.assertTrue(all(row['total_bytes'] is None and row['capacity_sampled_at'] is None for row in rows))
+                self.assertFalse(self.sampler._capacity_cache)
+                self.assertFalse(self.sampler._capacity_negative)
+
+    def test_real_smart_capacity_panel_chain_keeps_other_disks_when_basic_heartbeat_expires(self):
+        import test_smart_power_compat as power_fixture
+        case = power_fixture.SmartPowerCompatTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.ordinary_mix()
+        smart, _, _, initial = case.refresh_visible()
+        self.assertEqual(next(row['status'] for row in smart['results'] if row['device'] == 'sda'),
+                         'skipped_standby')
+        expected = {row['name']: (row['total'], row['used'], row['percent'], row['capacity_sampled_at'])
+                    for row in initial['disks_detail']}
+        smart_calls, capacity_calls = list(case.calls), list(case.capacity_calls)
+        case.now += 14
+        case.wall += 14
+        case.collector._publish_integration('disks', case.collector._disks)
+        case.monitor.updated_at = time.monotonic() - 7
+        actual = {row['name']: row for row in case.panel.overview()['disks_detail']}
+        for name in ('sdb', 'sdc', 'sdd'):
+            self.assertEqual((actual[name]['total'], actual[name]['used'], actual[name]['percent'],
+                              actual[name]['capacity_sampled_at']), expected[name])
+            self.assertTrue(actual[name]['smart_fresh'])
+        self.assertIsNone(actual['sda']['total'])
+        self.assertIs(actual['sda']['standby'], True)
+        self.assertEqual(case.calls, smart_calls)
+        self.assertEqual(case.capacity_calls, capacity_calls)
+
+    def test_stale_monitor_observation_fences_pending_capacity_after_transient_unmount(self):
+        self.refresh()
+        monitor = service.StatusMonitor(self.sampler)
+        monitor.status, monitor.updated_at = self.sampler.sample(), time.monotonic() - 7
+        descriptors = []
+        def probe(*_):
+            result = self.probe()
+            descriptors.append(result[1])
+            self.mountinfo.write_text('')
+            self.assertEqual(monitor.snapshot()['disks'], [])
+            self.write_mount()
+            return result
+        with mock.patch.object(self.sampler, '_capacity_probe', side_effect=probe):
+            result = self.sampler.refresh_capacity(authorizer=lambda: True)
+        self.assertEqual(result['results'][0]['status'], 'identity_changed')
+        self.assertFalse(self.sampler._capacity_cache)
+        self.assertFalse(self.sampler._capacity_negative)
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
     def test_monitor_refresh_delegates_the_exact_authorizer(self):
         authorizer = lambda: True
         monitor = service.StatusMonitor(self.sampler)
