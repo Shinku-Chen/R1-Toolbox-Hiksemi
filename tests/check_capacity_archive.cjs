@@ -579,20 +579,32 @@ async function main() {
     await switchTo('#/storage');
     const beforeNoise = (await api('/api/overview')).body;
     const noisy = await nextFrame('mount_noise');
-    check('unrelated mountinfo change invalidates current capacity', currentUnknown(noisy), noisy);
-    check('mount invalidation keeps the existing per-disk observation, unchanged and unrenewed',
+    // Host-wide mountinfo noise must not erase a still-validated data mount.
+    check('unrelated mountinfo change keeps current capacity', !currentUnknown(noisy), noisy);
+    check('unrelated mountinfo change keeps the existing per-disk observation unchanged',
       noisy.disks_detail.every(row => {
+        const before = beforeNoise.disks_detail.find(item => item.name === row.name);
+        return row.total === before.total && row.used === before.used
+          && row.capacity_sampled_at === before.capacity_sampled_at
+          && JSON.stringify(row.capacity_last_observation) === JSON.stringify(before.capacity_last_observation);
+      }), noisy.disks_detail);
+    // A real namespace identity change still invalidates all derived current
+    // values; history remains available for the archived promotion below.
+    const invalidated = await nextFrame('namespace_event');
+    check('real namespace change invalidates every current capacity', currentUnknown(invalidated), invalidated);
+    check('namespace invalidation keeps the existing per-disk observation, unchanged and unrenewed',
+      invalidated.disks_detail.every(row => {
         const before = beforeNoise.disks_detail.find(item => item.name === row.name).capacity_last_observation;
         const now = row.capacity_last_observation;
         return now && now.observation_id === before.observation_id
           && JSON.stringify([now.sampled_at, now.sampled_at_latest]) === JSON.stringify([before.sampled_at, before.sampled_at_latest]);
-      }), noisy.disks_detail);
+      }), invalidated.disks_detail);
     check('archive survives the invalidation with the original numbers, dates and identity',
-      validateArchive(archive(noisy)) === null
-      && JSON.stringify(numbers(archive(noisy))) === JSON.stringify(numbers(archive(beforeNoise))), archive(noisy));
+      validateArchive(archive(invalidated)) === null
+      && JSON.stringify(numbers(archive(invalidated))) === JSON.stringify(numbers(archive(beforeNoise))), archive(invalidated));
     const noisePrimary = await settlePrimary('storage');
     const noiseScan = await readStorageScan();
-    const noiseDates = await localDates(archive(noisy));
+    const noiseDates = await localDates(archive(invalidated));
     check('invalidated storage promotes the archived snapshot into the primary card',
       noisePrimary && noisePrimary.kind === 'storage' && noisePrimary.title === '最近实测'
       && noiseDates.every(text => noisePrimary.date.includes(text))
@@ -827,7 +839,7 @@ async function main() {
 
     phase = 'primary_promote';
     const beforePromote = (await api('/api/overview')).body;
-    const promotedBody = await nextFrame('mount_noise');
+    const promotedBody = await nextFrame('namespace_event');
     const promotedArchive = archive(promotedBody);
     const promotedExpect = primaryTextExpectations(promotedArchive, await localDates(promotedArchive));
     check('P1 invalidated current still keeps a legal archive for promotion',
@@ -938,7 +950,7 @@ async function main() {
       { restored: restored.status, restoredScan, restoredNative });
 
     phase = 'primary_round_trip';
-    const roundTrip = await nextFrame('mount_noise');
+    const roundTrip = await nextFrame('namespace_event');
     await page.waitForSelector('#layout-storage [data-r1-primary-measured="storage"]', { timeout: 8000 });
     await page.clock.fastForward(1100);
     const roundTripCard = await settlePrimary('storage');
@@ -990,7 +1002,7 @@ async function main() {
     const afterEntry = (await api('/api/overview')).body;
 
     phase = 'home_visible_promote';
-    const homeNoise = await nextFrame('mount_noise');
+    const homeNoise = await nextFrame('namespace_event');
     const homeArchive = archive(homeNoise);
     const homeExpect = primaryTextExpectations(homeArchive, await localDates(homeArchive));
     const homePrimary = await settlePrimary('overview');
@@ -1040,7 +1052,7 @@ async function main() {
       const settleAfterResize = await settleMobileLayout();
       // Re-invalidate at this width: the overview view may run its own allowed
       // capacity fill after a resize, so the promoted card can be short-lived.
-      await nextFrame('mount_noise');
+      await nextFrame('namespace_event');
       const mobileHome = await settlePrimary('overview');
       const settleAfterPromotion = await settleMobileLayout();
       const view = await page.evaluate(() => {
@@ -1095,7 +1107,7 @@ async function main() {
     await page.locator('#page-storage:not([hidden])').waitFor({ state: 'visible', timeout: 8000 });
     await page.clock.fastForward(15100);
     await page.waitForTimeout(120);
-    const backNoise = await nextFrame('mount_noise');
+    const backNoise = await nextFrame('namespace_event');
     const backArchive = archive(backNoise);
     const backExpect = primaryTextExpectations(backArchive, await localDates(backArchive));
     const backStorage = await settlePrimary('storage');

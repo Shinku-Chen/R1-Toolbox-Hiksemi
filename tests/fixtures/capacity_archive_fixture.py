@@ -67,6 +67,10 @@ class Watch:
                             'namespace': 'mnt:[1234]', 'namespace_current': 'mnt:[1234]'}
 
     def changed(self):
+        if self.state.namespace_event:
+            self.state.namespace_event = False
+            self.observation['reason'] = 'namespace_changed'
+            return True
         changed = self.state.mount_event
         if changed:
             self.state.mount_event = False
@@ -183,7 +187,7 @@ class State:
         self.folder = fixture / ('case_' + str(self.sequence) + '_' + case)
         self.folder.mkdir(mode=0o700)
         self.calls, self.measurements, self.descriptors = [], [], {}
-        self.mount_event, self.hold_next, self.mount_noise = False, False, False
+        self.mount_event, self.namespace_event, self.hold_next, self.mount_noise = False, False, False, False
         self.standby = set()
         self.failed = {'sdb'} if case == 'partial' else set()
         self.release.set(); self.entered.clear()
@@ -354,6 +358,8 @@ try:
             server.panel._mount_cache = (float('-inf'), {})
         elif operation == 'event':
             state.mount_event = True
+        elif operation == 'namespace_event':
+            state.namespace_event = True
         elif operation == 'mount_noise':
             state.mount_noise = True
             state.write_mounts()
