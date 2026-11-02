@@ -39,7 +39,7 @@ class BundleTests(unittest.TestCase):
         (self.root / 'runtime/histor.py').write_text('class HistorAdapter: pass\n')
         (self.root / 'runtime/web_config.py').write_text('class WebConfigServer: pass\n')
         for name in ('fan_policy.py', 'fan_native.py', 'fan_watchdog.py', 'temperature_sources.py',
-                     'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py', 'disk_names.py', 'vendor_device.py',
+                     'light_policy.py', 'monitoring.py', 'fnm_auth.py', 'fnm_compat.py', 'fan_diagnostics.py', 'dev_diagnostics.py', 'screen_diagnostics.py', 'disk_names.py', 'vendor_device.py',
                      'vendor_business.py', 'vendor_runtime.py', 'vendor_app_diagnostics.py', 'vendor_download_diagnostics.py', 'download_operations.py', 'vendor_media_operations.py', 'vendor_business_transport.py', 'native_capability_specs.py', 'vendor_native_capabilities.py',
                      'vendor_media_auth.py', 'vendor_media_probe.py', 'vendor_media_batch.py', 'vendor_transcode_probe.py',
                      'vendor_media_snapshot.py', 'vendor_app_probe.py', 'vendor_storage_probe.py',
