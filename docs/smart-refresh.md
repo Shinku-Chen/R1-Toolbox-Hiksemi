@@ -12,7 +12,7 @@ Web 进入存储页、打开磁盘详情或从 hidden 回到该视图时显式�
 
 ## 概览和小屏缺测补齐
 
-网页固定 `POST /api/r1/storage/fill`，严格 `{}`，要求当前所有者和同源／JSON／CSRF；登录开启却没有有效会话时只能展示缓存。本机小屏固定 `POST /api/storage/fill`，使用原独立 `X-R1-Token`、本地 Origin 和服务生命周期，不借用网页登录授权，令牌不发给 Web。两条路由都拒绝 force、盘名、路径、命令及 URL 参数。
+网页固定 `POST /api/r1/storage/fill`，严格 `{}`，要求当前所有者和同源／JSON／CSRF；登录开启却没有有效会话时只能展示缓存。本机小屏固定 `POST /api/storage/fill`，使用原独立 `X-R1-Token`、本地 Origin 和服务生命周期，不借用网页登录授权，令牌不发给 Web。两条路由都拒绝 force、盘名、路径、命令及 URL 参数。本机 Electron 页面可能以 file／同源方式发起请求而不带 `Origin`；该路由仍要求匹配的 `X-R1-Token`，并拒绝 `Authorization`，无 Origin 本身不授予权限。
 
 所有者可见的 `/api/r1.screen_fill` 只返回最近八条小屏补齐／预检事件的来源类别、令牌是否出现与是否匹配、结果和固定原因；不保存令牌、请求头、请求体、路径或 peer。它只用于区分“小屏未发出请求”“预检／来源被拒”“令牌不匹配”和“容量采集已开始”，不授予写权限，也不改变 GET、轮询或采集频率。
 

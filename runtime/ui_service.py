@@ -3693,7 +3693,12 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
             supplied = self.headers.get('X-R1-Token', '')
             matched = bool(control_token) and secrets.compare_digest(
                 supplied.encode('utf8'), control_token.encode('utf8'))
-            if (origin is None or self.headers.get('Authorization') is not None or not control_token
+            # The local Electron page can be a file:// or same-origin document
+            # and may omit Origin even though the request carries the screen
+            # token.  Missing Origin is not authority on its own: keep the
+            # independent token comparison and reject Authorization/Bearer.
+            # Web owner/Bearer paths never use this route.
+            if (self.headers.get('Authorization') is not None or not control_token
                     or not matched):
                 screen_diagnostics.note_outcome(
                     sequence, token_present=bool(supplied), token_match=matched,

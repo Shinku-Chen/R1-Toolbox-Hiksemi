@@ -591,12 +591,20 @@ class ScreenStorageFillTests(unittest.TestCase):
         self.request(method='GET', body=None)
         self.web.storage_fill.assert_not_called()
 
-    def test_owner_bearer_missing_token_or_origin_never_authorizes_screen_fill(self):
+    def test_owner_bearer_or_missing_token_never_authorizes_screen_fill(self):
         for headers in ({'X-R1-Token': None}, {'X-R1-Token': 'owner-cookie'},
-                        {'Authorization': 'Bearer SENTINEL'}, {'Origin': None}, {'Origin': 'http://example.invalid'}):
+                        {'Authorization': 'Bearer SENTINEL'}, {'Origin': 'http://example.invalid'}):
             with self.subTest(headers=headers):
                 self.assertEqual(self.request(headers=headers)[0], 403)
         self.web.storage_fill.assert_not_called()
+
+    def test_missing_origin_with_matching_screen_token_is_accepted(self):
+        # The vendor Electron document can omit Origin for a local file or
+        # same-origin fetch.  The independent screen token remains mandatory.
+        status, _, value = self.request(headers={'Origin': None})
+        self.assertEqual(status, 200)
+        self.assertEqual(value, {'ok': True, 'force': False})
+        self.web.storage_fill.assert_called_once()
 
     def test_strict_object_and_no_query_or_proxy_fields(self):
         for body in (b'[]', b'null', b'{"force":false}', b'{"path":"/drives/PRIVATE"}',
