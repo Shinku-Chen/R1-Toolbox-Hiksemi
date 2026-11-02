@@ -103,7 +103,38 @@ function validateArchive(value) {
   return null;
 }
 
-(async () => {
+// Genuinely bounded font/layout readiness: Node wall-clock deadline, Playwright
+// real waits, and only synchronous page reads (document.fonts.status). A pending
+// font promise can never block this loop; the deadline is the real upper bound.
+async function settleBounded(page, { deadlineMs = 6000, pollMs = 120, stableFrames = 2 } = {}) {
+  const startedAt = Date.now();
+  let last = null, stable = 0;
+  while (Date.now() - startedAt < deadlineMs) {
+    let probe;
+    try {
+      probe = await page.evaluate(() => ({
+        sw: document.documentElement.scrollWidth,
+        iw: window.innerWidth,
+        cw: document.documentElement.clientWidth,
+        fonts: document.fonts ? document.fonts.status : 'unavailable',
+      }));
+    } catch (error) {
+      return { ok: false, reason: 'probe_failed', error: String(error && error.message || error),
+        elapsed_ms: Date.now() - startedAt, deadline_ms: deadlineMs };
+    }
+    if (probe.fonts === 'loaded' && last && probe.sw === last.sw && probe.iw === last.iw) stable += 1;
+    else stable = 0;
+    last = probe;
+    if (stable >= stableFrames) {
+      return { ok: true, probe, stable_frames: stable, elapsed_ms: Date.now() - startedAt, deadline_ms: deadlineMs };
+    }
+    await page.waitForTimeout(pollMs);
+  }
+  return { ok: false, reason: 'font_or_layout_not_settled', probe: last,
+    elapsed_ms: Date.now() - startedAt, deadline_ms: deadlineMs };
+}
+
+async function main() {
   const child = spawn(process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
     ['-B', '-u', path.join(__dirname, 'fixtures/capacity_archive_fixture.py'), root, fixtureDir],
     { stdio: ['pipe', 'pipe', 'pipe'],
@@ -256,6 +287,41 @@ function validateArchive(value) {
     }
     return scan;
   };
+  // Bounded public-DOM geometry for the mobile home assertion: a CI-only overflow
+  // must name its offender instead of only reporting a boolean.
+  const mobileGeometry = () => page.evaluate(() => {
+    const inner = window.innerWidth;
+    const describe = el => {
+      const rect = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return {
+        tag: el.tagName.toLowerCase(), id: el.id || null,
+        cls: typeof el.className === 'string' ? el.className.slice(0, 120) : null,
+        rect: { left: +rect.left.toFixed(1), right: +rect.right.toFixed(1), width: +rect.width.toFixed(1), height: +rect.height.toFixed(1) },
+        client: { w: el.clientWidth, h: el.clientHeight }, scroll: { w: el.scrollWidth, h: el.scrollHeight },
+        style: { display: s.display, position: s.position, minWidth: s.minWidth, whiteSpace: s.whiteSpace,
+          grid: s.gridTemplateColumns, overflowX: s.overflowX },
+      };
+    };
+    const offenders = [];
+    for (const el of document.querySelectorAll('body *')) {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (r.right > inner + 0.5 || r.left < -0.5) {
+        offenders.push(describe(el));
+        if (offenders.length >= 24) break;
+      }
+    }
+    const card = document.querySelector('#layout-overview [data-r1-primary-measured="overview"]');
+    const chain = [];
+    for (let n = card; n && n !== document.body && chain.length < 8; n = n.parentElement) chain.push(describe(n));
+    return { innerWidth: inner, clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth, bodyScrollWidth: document.body.scrollWidth,
+      devicePixelRatio: window.devicePixelRatio, fonts: document.fonts ? document.fonts.status : null,
+      overflow: document.documentElement.scrollWidth > inner + 1, offenders, cardChain: chain };
+  });
+  // Bounded readiness: fonts + two consecutive stable frames, never an open sleep.
+  const settleMobileLayout = () => settleBounded(page, { deadlineMs: 6000, pollMs: 120, stableFrames: 2 });
   const settleArchiveGone = async () => {
     let scan = await readStorageScan();
     for (let attempt = 0; attempt < 12 && (scan.primary > 0 || scan.cards > 0); attempt += 1) {
@@ -949,10 +1015,12 @@ function validateArchive(value) {
     phase = 'home_visible_mobile';
     for (const width of [376, 320]) {
       await page.setViewportSize({ width, height: 1100 });
+      const settleAfterResize = await settleMobileLayout();
       // Re-invalidate at this width: the overview view may run its own allowed
       // capacity fill after a resize, so the promoted card can be short-lived.
       await nextFrame('mount_noise');
       const mobileHome = await settlePrimary('overview');
+      const settleAfterPromotion = await settleMobileLayout();
       const view = await page.evaluate(() => {
         const card = document.querySelector('#layout-overview [data-r1-primary-measured="overview"]');
         const rect = card ? card.getBoundingClientRect() : null;
@@ -968,6 +1036,16 @@ function validateArchive(value) {
       const mobileExpect = mobileArchive
         ? primaryTextExpectations(mobileArchive, await localDates(mobileArchive)) : null;
       await page.screenshot({ path: path.join(fixtureDir, 'home-visible-' + width + '.png'), fullPage: true });
+      const geometry = await mobileGeometry();
+      fs.writeFileSync(path.join(fixtureDir, 'home-mobile-geometry-' + width + '.json'),
+        JSON.stringify({ settleAfterResize, settleAfterPromotion, geometry }, null, 2), 'utf8');
+      if (!settleAfterResize.ok || !settleAfterPromotion.ok) {
+        console.log(JSON.stringify({ bounded_readiness_failed: { width, settleAfterResize,
+          settleAfterPromotion, geometry } }));
+      }
+      check('R-home-' + width + '-settle bounded font/layout readiness completes before the overflow assertion',
+        settleAfterResize.ok === true && settleAfterPromotion.ok === true,
+        { settleAfterResize, settleAfterPromotion, offenders: geometry.offenders, cardChain: geometry.cardChain });
       // Either the promoted card is still on screen (assert readability), or the
       // product's own overview fill already restored a valid current (assert that
       // real restored state instead of claiming a promotion that is gone).
@@ -981,7 +1059,10 @@ function validateArchive(value) {
           : view.markerCount === 0 && view.archiveCount === 1
             && Number.isFinite(mobileApi.disk_size) && mobileApi.disk_size > 0),
         { width, view, promotedHere, apiCurrent: mobileApi.disk_size,
-          archiveId: archive(mobileApi)?.observation_id, fonts: mobileHome && mobileHome.fonts });
+          archiveId: archive(mobileApi)?.observation_id, fonts: mobileHome && mobileHome.fonts,
+          geometry: { innerWidth: geometry.innerWidth, clientWidth: geometry.clientWidth,
+            scrollWidth: geometry.scrollWidth, dpr: geometry.devicePixelRatio, fonts: geometry.fonts,
+            offenders: geometry.offenders.slice(0, 6), cardChain: geometry.cardChain.slice(0, 4) } });
     }
     await page.setViewportSize({ width: 1400, height: 1000 });
 
@@ -1158,4 +1239,9 @@ function validateArchive(value) {
       pageErrors, consoleErrors, external, blocked, stderr: stderr.slice(-4000) }, null, 2));
     process.exitCode = 1;
   }
-})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+}
+
+if (require.main === module) {
+  main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
+}
+module.exports = { settleBounded };
