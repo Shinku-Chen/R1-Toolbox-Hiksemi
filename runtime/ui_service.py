@@ -690,6 +690,39 @@ def _capacity_device(sys_root, device):
         return rejected('metadata_error')
 
 
+_CAPACITY_SKIP_INVENTORY_FILESYSTEMS = frozenset(('tmpfs', 'devtmpfs', 'proc', 'sysfs', 'overlay', 'squashfs'))
+
+
+def _capacity_selected_mount_lines(text):
+    """Return only capacity-relevant mount lines for a post-read comparison.
+
+    A host-wide mountinfo read also contains Docker overlay and unrelated
+    tmpfs mounts.  Their churn must not make a stable /drives measurement look
+    incomplete; changes to the selected data mounts below still reject.
+    Malformed lines are ignored here because the caller's first parse already
+    rejected malformed inventory; the equality check treats a changed shape as
+    a real change.
+    """
+    selected = {}
+    for line in text.splitlines():
+        parts = line.split(' - ')
+        if len(parts) != 2:
+            continue
+        fields, extra = parts[0].split(), parts[1].split()
+        if len(fields) < 6 or len(extra) < 3:
+            continue
+        if (not re.fullmatch(r'[1-9][0-9]{0,9}', fields[0])
+                or not re.fullmatch(r'[0-9]{1,10}', fields[1])):
+            continue
+        mount, root = unescape_mount_field(fields[4]), unescape_mount_field(fields[3])
+        if not mount.startswith(_CAPACITY_DRIVES_ROOT + '/') or root != '/':
+            continue
+        if extra[0] in _CAPACITY_SKIP_INVENTORY_FILESYSTEMS:
+            continue
+        selected[int(fields[0])] = line
+    return selected
+
+
 def _capacity_inventory(proc_root, sys_root):
     """Only bounded mountinfo/sysfs metadata, never stat/resolve mount targets."""
     evidence = _capacity_trace_get('inventory')
@@ -719,7 +752,7 @@ def _capacity_inventory(proc_root, sys_root):
     with _capacity_observation(evidence):
         if evidence is not None:
             evidence['line_count'] = len(lines)
-    entries, mounts, seen_ids, devices = [], [], set(), {}
+    entries, mounts, seen_ids, devices, selected_lines = [], [], set(), {}, {}
     for line in lines:
         parts = line.split(' - ')
         if len(parts) != 2:
@@ -745,7 +778,7 @@ def _capacity_inventory(proc_root, sys_root):
         if (any(part in ('', '.', '..') for part in components) or len(mount.encode()) > 4096
                 or any(ord(char) < 32 or ord(char) == 127 for char in mount)):
             return reject('target', 'mount_target_invalid')
-        if extra[0] in ('tmpfs', 'devtmpfs', 'proc', 'sysfs', 'overlay', 'squashfs'):
+        if extra[0] in _CAPACITY_SKIP_INVENTORY_FILESYSTEMS:
             continue
         if len(entries) >= 128:
             return reject('target', 'entry_limit')
@@ -802,6 +835,7 @@ def _capacity_inventory(proc_root, sys_root):
                 previous['_key'], previous['_reason'] = None, 'identity_changed'
         devices[fields[2]] = row
         entries.append(row)
+        selected_lines[mount_id] = line
         with _capacity_observation(evidence):
             if evidence is not None:
                 # Every key component is covered, including unrecognised options.
@@ -820,13 +854,23 @@ def _capacity_inventory(proc_root, sys_root):
                     'device_identity': copy.deepcopy(device_evidence) if extra[0] in _CAPACITY_FILESYSTEMS
                         and re.fullmatch(r'[1-9][0-9]{0,6}:[0-9]{1,7}', fields[2]) else {'complete': False, 'stage': 'not_run'}})
     read_after = {}
-    if _capacity_traced_read(Path(proc_root) / 'self/mountinfo', 262144, read_after) != text:
-        reason = 'mountinfo_unreadable'
+    after_text = _capacity_traced_read(Path(proc_root) / 'self/mountinfo', 262144, read_after)
+    if not isinstance(after_text, str):
         with _capacity_observation(evidence):
-            reason = 'mountinfo_changed' if read_after.get('complete') else 'mountinfo_unreadable'
             if evidence is not None:
                 evidence['read_after'] = read_after
-        return reject('verify_mountinfo', reason)
+        return reject('verify_mountinfo', 'mountinfo_unreadable')
+    if after_text != text:
+        # Host-wide Docker overlay/tmpfs churn changes bytes unrelated to the
+        # selected /drives rows.  Compare the complete selected data-mount
+        # set instead; any changed, added or removed data row still rejects.
+        selected_before = selected_lines
+        selected_after = _capacity_selected_mount_lines(after_text)
+        if selected_after != selected_before:
+            with _capacity_observation(evidence):
+                if evidence is not None:
+                    evidence['read_after'] = read_after
+            return reject('verify_mountinfo', 'mountinfo_changed')
     with _capacity_observation(evidence):
         if evidence is not None:
             by_id = {row['mount_id']: row for row in entries}

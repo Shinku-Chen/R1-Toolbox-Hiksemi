@@ -457,6 +457,20 @@ class CapacityCoreTests(unittest.TestCase):
         self.assertEqual(entries[0]['mount_id'], 11)
         self.assertIsNone(service._capacity_read(self.mountinfo, 3))
 
+    def test_unrelated_mountinfo_change_keeps_selected_scan_complete(self):
+        real_read = service._capacity_traced_read
+        calls = []
+        def read(path, limit, evidence):
+            text = real_read(path, limit, evidence)
+            calls.append(1)
+            if len(calls) == 2:
+                return text + '99 1 0:99 / /unrelated-noise rw - tmpfs tmpfs rw\n'
+            return text
+        with mock.patch.object(service, '_capacity_traced_read', side_effect=read):
+            entries, complete = service._capacity_inventory(self.proc, self.sys)
+        self.assertTrue(complete)
+        self.assertEqual(entries[0]['mount_id'], 11)
+
     def test_mountinfo_change_during_sysfs_sampling_rejects_scan(self):
         def identity(*_):
             self.write_mount(mount_id=12)
