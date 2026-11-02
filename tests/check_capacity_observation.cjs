@@ -51,6 +51,17 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
       ...(method === 'POST' ? { body: '{}' } : {}) });
     return { status: response.status, body: await response.json() };
   }, { pathname, method, headers });
+  // The promoted primary is painted by the 1 s archive watch, which under the
+  // faked clock only runs when the clock advances; settle the real public DOM.
+  const settlePrimary = async () => {
+    let probe = await dom();
+    for (let attempt = 0; attempt < 12 && !probe.primaryMeasured; attempt += 1) {
+      await page.clock.fastForward(1100);
+      await page.waitForTimeout(80);
+      probe = await dom();
+    }
+    return probe;
+  };
   const stats = async () => (await operation('stats')).state;
   const currentUnknown = value => value.disk_size === null && value.disk_used === null && value.disk_total === null
     && value.disks_detail.every(row => row.total === null && row.used === null && row.percent === null);
@@ -66,7 +77,9 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
     && value.coverage.scope === 'measured_filesystem_subset' && value.coverage.complete === false
     && value.coverage.filesystem_count > 0 && value.coverage.disk_count > 0;
   const dom = () => page.locator('#layout-storage [data-mod="storage"]').evaluate(module => ({
-    pool: module.querySelector('[data-ref="poolLeg"]').textContent,
+    pool: module.querySelector('[data-ref="poolLeg"]')?.textContent || '',
+    primaryMeasured: !!module.querySelector('.card.pool > .r1-primary-measured'),
+    primaryText: (module.querySelector('.card.pool > .r1-primary-measured')?.textContent || '').replace(/\s+/g, ' ').trim(),
     poolHistorical: !!module.querySelector('.r1-pool-hist'),
     bays: [...module.querySelectorAll('.bay')].map(bay => {
       const cap = bay.querySelector('.bay-cap'), meta = bay.querySelector('.r1-miss-meta'), value = bay.querySelector('.r1-hist-value');
@@ -174,7 +187,8 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
       await page.waitForFunction(ts => window.__capacityObservationProbe.ts === ts, initial.ts);
       const currentDOM = await dom();
       check(scenario + ': valid current values keep the ordinary display instead of historical mode',
-        !currentDOM.poolHistorical && currentDOM.bays.filter(row => expectedNames.includes(row.name))
+        !currentDOM.poolHistorical && !currentDOM.primaryMeasured
+        && currentDOM.bays.filter(row => expectedNames.includes(row.name))
           .every(row => !row.historical && !row.missing && !row.text.includes('最近实测')
             && !row.text.includes('容量未采集')), currentDOM);
       const liveBefore = await page.evaluate(() => window.__capacityObservationProbe.liveDisk);
@@ -190,11 +204,13 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
         }) && invalidated.capacity_last_observation_summary.total === summary.total, invalidated);
       await page.waitForFunction(expected => expected.every(name =>
         document.querySelector('.bay[data-sheet="disk/' + name + '"]')?.classList.contains('r1-cap-hist')), expectedNames);
-      const firstDOM = await dom();
+      const firstDOM = await settlePrimary();
       const poolDates = await timeStrings(summary);
-      check(scenario + ': top-level history is visibly labelled with original dates and subset coverage',
-        firstDOM.poolHistorical && firstDOM.pool.includes('最近实测快照') && firstDOM.pool.includes('当前容量未知')
-        && firstDOM.pool.includes('子集') && poolDates.every(text => firstDOM.pool.includes(text)), firstDOM);
+      check(scenario + ': top-level history is promoted into the primary card with original dates and subset coverage',
+        firstDOM.primaryMeasured && firstDOM.primaryText.includes('最近实测')
+        && firstDOM.primaryText.includes('当前归属未确认') && firstDOM.primaryText.includes('重启清空')
+        && /已测\s*\d+\s*个文件系统/.test(firstDOM.primaryText) && firstDOM.primaryText.includes('子集')
+        && poolDates.every(text => firstDOM.primaryText.includes(text)), firstDOM);
       check(scenario + ': each measured disk visibly labels history and coverage without a hover dependency',
         expectedNames.every(name => {
           const bay = firstDOM.bays.find(row => row.name === name);
@@ -221,7 +237,7 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
           check('partial missing reason fully readable at ' + width + 'px',
             row && row.missing && row.text.includes('已挂载 1 个分区') && row.text.includes('容量未采集')
             && row.cap_clip === false && row.bay_clip === false && row.miss_font === '12px'
-            && narrow.poolHistorical && doc.scrollWidth <= doc.innerWidth, { width, row, pool: narrow.pool, doc });
+            && narrow.primaryMeasured && doc.scrollWidth <= doc.innerWidth, { width, row, pool: narrow.pool, doc });
         }
         await page.setViewportSize({ width: 1400, height: 1000 });
         await page.waitForTimeout(120);
@@ -329,11 +345,16 @@ assert.ok(chromeBin, 'Set CHROME_BIN to an installed Chrome/Chromium executable'
       await page.locator('.bay[data-sheet="disk/sda"]').evaluate(bay => !bay.classList.contains('r1-cap-hist')
         && !bay.hasAttribute('data-r1-history') && !bay.querySelector('.r1-hist-meta')));
     const incomplete = await nextFrame('inventory_incomplete');
+    await settlePrimary();
     check('incomplete kernel mount inventory hides every old observation and current capacity',
       currentUnknown(incomplete) && incomplete.capacity_last_observation_summary === null
       && incomplete.disks_detail.every(row => row.capacity_last_observation === null), incomplete);
     check('hidden historical fields clear all pool and disk DOM markers without collecting',
       await page.locator('#layout-storage').evaluate(layout => layout.querySelectorAll('[data-r1-history],.r1-cap-hist,.r1-pool-hist').length === 0));
+    check('inventory incomplete keeps the legal archive promoted while bound history is cleared',
+      await page.locator('#layout-storage').evaluate(layout =>
+        layout.querySelectorAll('[data-r1-history],.r1-cap-hist,.r1-pool-hist').length === 0
+        && layout.querySelectorAll('.card.pool > .r1-primary-measured').length === 1));
     await operation('start');
     const restarted = (await api('/api/overview')).body;
     check('start never revives historical state from a prior sampler lifecycle',

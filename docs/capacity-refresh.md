@@ -164,7 +164,18 @@ Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌
 
 正常 snapshot 通过同次有界、不可变私有 sideband 携带档案，Fnm 从这一次结果读取；即使这次挂载 entries 为空或库存不完整，也不为档案额外 snapshot、扫描库存、poll、运行 SMART／statvfs 或访问用户挂载。每批仍最多 128 个原候选测量。档案只在 RAM 中保留一个最新批次，无 TTL、不持久化，start／close／重启清空。它不进入当前 `total/used/usage`、`disk_size/disk_used/disk_total` 或当前池汇总，不授容量采集、空间预检、文件根、Token 或控制资格。
 
-首页和存储页将档案放在独立区域，明确标为“过去测量档案”“当前归属未确认”“已测 N 个文件系统／M 块盘（子集）”“重启清空”，并显示原完整日期区间。当前未知仍为 `--`，不得把历史百分比放回当前容量进度或把当时未用量称为现在可用空间。生产链的定向回归位于 `tests/test_capacity_archive_core.py`、`tests/test_capacity_archive_http.py` 与 `tests/test_capacity_archive_fnm.py`，原 no-revival 回归继续保留。新档案不补回旧扫描谓词；已丢失的八项旧实机拒绝原因仍未追回，本机 fixture 不证明 NAS 长期留存或物理休眠已经通过。
+用户已选择“主卡改为最近实测”。首页和存储页在 current 有效时保留原显示；仅当 current 未知且所有者的 `capacity_observation_archive` 完整合法时，主卡以 `data-r1-primary-measured` 标记展示档案已用／总量与百分比，清楚标为“最近实测”，同时保留原完整日期区间、“已测 N 个文件系统／M 块盘（子集）”、`coverage.complete:false`、“当前归属未确认”和“重启清空”。同页去掉重复的独立档案卡；这只是主卡的历史展示，不将档案绑定到现在的池或各盘位，也不写入 `S.o`、current／API 字段或当前池汇总数据。晋升时存储主卡必须仍有可见的“当前可用空间 --”，不能隐藏原池区后漏掉当前缺测提示，绝不以 `archive.available` 的当时未用量填补。档案清空、畸形、撤权或 current 恢复时，展示按真实来源可逆切换。生产链的定向回归位于 `tests/test_capacity_archive_core.py`、`tests/test_capacity_archive_http.py` 与 `tests/test_capacity_archive_fnm.py`，原 no-revival 回归继续保留。新档案不补回旧扫描谓词；已丢失的八项旧实机拒绝原因仍未追回，本机 fixture 不证明 NAS 长期留存或物理休眠已经通过。
+
+两页使用同一有效 current 判定：`disk_size` 有限且大于 0，`disk_used` 有限且满足 `0 <= used <= size`，`disk_total` 是合法有限百分比；已用为 0 是有效 current，不应触发档案晋升。主标记 `data-r1-primary-measured` 按页取 `overview`／`storage`，解除晋升时恢复原生主卡节点与引用。主卡来源选择不改变采集、日期或安全判定：
+
+| 实际数据状态 | 主卡展示 | 当前可用空间 |
+| --- | --- | --- |
+| current 有效，archive 任意 | 原 current 数字，取消最近实测晋升 | 原 current 计算值 |
+| current 未知，合法 owner archive 存在 | 带上述历史标记、原日期与子集范围的最近实测 | `--` |
+| current 未知，archive 缺失或畸形，仍有合法旧盘位历史／同批汇总 | 保持各页面原有历史回退，不制造 archive 或新的主卡晋升 | `--` |
+| current 未知，无可用历史来源，或不具备 owner 披露权 | 原未知态 `--`，不沿用上次晋升值 | `--` |
+
+主卡晋升不增加 SMART、statvfs、缓存 GET 或后台轮询；原每个可见周期一次的前台规则不变，不增加 TTL 或持久化。当前与按盘历史的完整库存、卸载／重挂、设备、FD、watch／namespace／ABA、epoch、授权与永久 prune 门保持原样；这项显示约定不证明八项旧 `identity_changed` 的根因已修复、当前容量实时有效或硬盘物理休眠。
 
 ## Linux 验证边界
 

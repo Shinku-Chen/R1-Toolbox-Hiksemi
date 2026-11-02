@@ -8246,18 +8246,82 @@ style.textContent = '.r1-cap-archive{font-size:12px;line-height:1.45;color:var(-
 + '.r1-cap-archive .r1-arc-value{margin-top:4px;font-size:14px;color:var(--ink-1);font-weight:600}'
 + '.r1-cap-archive .r1-arc-bytes{margin-left:6px;font-size:12px;font-weight:400;color:var(--ink-3)}'
 + '.r1-cap-archive .r1-arc-date,.r1-cap-archive .r1-arc-coverage,.r1-cap-archive .r1-arc-note{margin-top:2px}'
-+ '.r1-cap-archive .r1-arc-note{font-size:12px}';
++ '.r1-cap-archive .r1-arc-note{font-size:12px}'
++ '.r1-primary-measured{font-size:12px;line-height:1.45;color:var(--ink-3);white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;min-width:0;grid-column:1 / -1}'
++ '.r1-primary-measured .r1-primary-title{font-size:13px;font-weight:600;color:var(--ink-2)}'
++ '.r1-primary-measured .r1-primary-value{margin-top:2px;font-size:14px;font-weight:600;color:var(--ink-1)}'
++ '.r1-primary-measured .r1-primary-value span{font-size:12px;font-weight:400;color:var(--ink-3)}'
++ '.r1-primary-measured .r1-primary-date,.r1-primary-measured .r1-primary-coverage,.r1-primary-measured .r1-primary-note{margin-top:2px;font-size:12px}';
 document.head.appendChild(style);
 }
 function r1ArchiveRemove(kind) {
 document.querySelectorAll(`[data-r1-archive="${kind}"]`).forEach(node => node.remove());
 }
+function r1PrimaryExit(card) {
+if (!card) return;
+const node = card.querySelector(':scope > .r1-primary-measured');
+if (node) node.remove();
+card.querySelectorAll('[data-r1-primary-hidden="1"]').forEach(el => {
+el.hidden = el.dataset.r1PrimaryWasHidden === '1';
+el.style.display = el.dataset.r1PrimaryWasDisplay || '';
+delete el.dataset.r1PrimaryHidden;
+delete el.dataset.r1PrimaryWasHidden;
+delete el.dataset.r1PrimaryWasDisplay;
+});
+if (card.hasAttribute('data-r1-primary-measured')) card.removeAttribute('data-r1-primary-measured');
+if (card.hasAttribute('data-r1-primary-sig')) card.removeAttribute('data-r1-primary-sig');
+}
+function r1PrimaryEnter(card, kind, a, sig) {
+if (!card) return;
+const html = `<div class="r1-primary-title">最近实测</div>`
++ `<div class="r1-primary-value">${F.int(a.percent)}% <span>${esc(r1HistBytes(a.used))} / ${esc(r1HistBytes(a.total))}</span></div>`
++ `<div class="r1-primary-date">原日期区间 ${esc(r1ArchiveDate(a))}</div>`
++ `<div class="r1-primary-coverage">已测 ${a.filesystems} 个文件系统 / ${a.disks} 块盘（子集）· 当前归属未确认</div>`
++ `<div class="r1-primary-note">重启清空 · 不代表当前可用空间</div>`
++ (kind === 'storage' ? `<div class="r1-primary-current-free"><span>当前可用空间</span> <span class="r1-primary-current-free-value">--</span></div>` : '');
+card.dataset.r1PrimaryMeasured = kind;
+card.dataset.r1PrimarySig = sig;
+let node = card.querySelector(':scope > .r1-primary-measured');
+if (!node) {
+node = document.createElement('div');
+node.className = 'r1-primary-measured';
+node.setAttribute('role', 'note');
+Array.from(card.children).forEach(child => {
+if (child === node || child.classList.contains('r1-primary-measured')) return;
+if (child.dataset.r1PrimaryHidden !== '1') {
+child.dataset.r1PrimaryHidden = '1';
+child.dataset.r1PrimaryWasHidden = child.hidden ? '1' : '0';
+child.dataset.r1PrimaryWasDisplay = child.style.display || '';
+child.hidden = true;
+child.style.display = 'none';
+}
+});
+card.appendChild(node);
+}
+if (node._html !== html) { node._html = html; node.innerHTML = html; }
+}
 function r1ArchiveSync() {
 const archive = r1CapacityArchive(S.o && S.o.capacity_observation_archive);
 r1ArchiveCss();
-if (!archive) { r1ArchiveRemove('overview'); r1ArchiveRemove('storage'); return; }
+const ovCard = document.querySelector('#layout-overview [data-m="disk"]');
+const pool = document.querySelector('#layout-storage .card.pool');
+const currentValid = (() => {
+const o = S.o || {};
+const size = o.disk_size, used = o.disk_used, pct = o.disk_total;
+return typeof size === 'number' && Number.isFinite(size) && size > 0
+&& typeof used === 'number' && Number.isFinite(used) && used >= 0 && used <= size
+&& typeof pct === 'number' && Number.isFinite(pct) && pct >= 0 && pct <= 100;
+})();
+r1ArchiveCss();
+if (!archive) {
+r1PrimaryExit(ovCard); r1PrimaryExit(pool);
+r1ArchiveRemove('overview'); r1ArchiveRemove('storage');
+return;
+}
 const html = r1ArchiveHTML(archive);
-const sig = JSON.stringify(archive);
+const sig = JSON.stringify({ observation_id: archive.observation_id, total: archive.total, used: archive.used,
+available: archive.available, percent: archive.percent, sampled_at: archive.sampled_at,
+sampled_at_latest: archive.sampled_at_latest, filesystems: archive.filesystems, disks: archive.disks });
 const ensure = (kind, anchor, extraStyle) => {
 if (!anchor) { r1ArchiveRemove(kind); return; }
 let node = document.querySelector(`[data-r1-archive="${kind}"]`);
@@ -8272,12 +8336,10 @@ anchor.insertAdjacentElement('afterend', node);
 node.dataset.r1ArchiveSig = sig;
 if (node._html !== html) { node._html = html; node.innerHTML = html; }
 };
-const ovCard = document.querySelector('#layout-overview [data-m="disk"]');
-if (ovCard) ensure('overview', ovCard, 'grid-column:1 / -1');
-else r1ArchiveRemove('overview');
-const pool = document.querySelector('#layout-storage .card.pool');
-if (pool) ensure('storage', pool, 'margin-top:0');
-else r1ArchiveRemove('storage');
+if (ovCard && !currentValid) { r1PrimaryEnter(ovCard, 'overview', archive, sig); r1ArchiveRemove('overview'); }
+else { r1PrimaryExit(ovCard); if (ovCard) ensure('overview', ovCard, 'grid-column:1 / -1'); else r1ArchiveRemove('overview'); }
+if (pool && !currentValid) { r1PrimaryEnter(pool, 'storage', archive, sig); r1ArchiveRemove('storage'); }
+else { r1PrimaryExit(pool); if (pool) ensure('storage', pool, 'margin-top:0'); else r1ArchiveRemove('storage'); }
 }
 if (typeof Poll !== 'undefined' && Poll.add) Poll.add('r1ArchiveWatch', async () => { r1ArchiveSync(); }, 1000);
 let uiBootReady = false, uiPending = false, uiTimer = 0;

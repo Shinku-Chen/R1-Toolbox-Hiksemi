@@ -201,6 +201,70 @@ function validateArchive(value) {
   }, selector);
   const readOverviewCard = () => readCard('#layout-overview [data-r1-archive="overview"]');
   const readStorageCard = () => readCard('#layout-storage [data-r1-archive="storage"]');
+  const readPrimaryCard = kind => page.evaluate(([selector, kindName]) => {
+    const card = document.querySelector(selector);
+    if (!card) return null;
+    const node = card.querySelector(':scope > .r1-primary-measured');
+    const part = cls => node?.querySelector(cls)?.textContent.replace(/\s+/g, ' ').trim() || null;
+    const fonts = {};
+    for (const cls of ['.r1-primary-title', '.r1-primary-value', '.r1-primary-value span',
+      '.r1-primary-date', '.r1-primary-coverage', '.r1-primary-note']) {
+      const leaf = node?.querySelector(cls);
+      fonts[cls] = leaf ? Number.parseFloat(getComputedStyle(leaf).fontSize) : null;
+    }
+    let sig = null;
+    try { sig = JSON.parse(card.getAttribute('data-r1-primary-sig') || 'null'); } catch (e) { sig = null; }
+    return {
+      kind: card.getAttribute('data-r1-primary-measured'),
+      expectedKind: kindName,
+      title: part('.r1-primary-title'),
+      value: part('.r1-primary-value'),
+      date: part('.r1-primary-date'),
+      coverage: part('.r1-primary-coverage'),
+      note: part('.r1-primary-note'),
+      freeText: part('.r1-primary-current-free-value'),
+      freeLabel: part('.r1-primary-current-free'),
+      freeVisible: (() => { const n = node?.querySelector('.r1-primary-current-free');
+        if (!n) return false; const r = n.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && !n.closest('[hidden]'); })(),
+      text: (node?.textContent || '').replace(/\s+/g, ' ').trim(),
+      sig,
+      hiddenLegacy: card.querySelectorAll('[data-r1-primary-hidden="1"]').length,
+      fonts,
+      insideBay: !!card.closest('.bay'),
+      overflow: card.scrollWidth > card.clientWidth + 1,
+    };
+  }, [kind === 'overview' ? '#layout-overview [data-r1-primary-measured="overview"]' : '#layout-storage [data-r1-primary-measured="storage"]', kind]);
+  // The panel re-renders modules independently of the 1 s archive watch; under the
+  // faked clock a fresh render can drop the promoted node for one tick. Settle the
+  // real public marker before asserting, without ever skipping an assertion.
+  const settlePrimary = async kind => {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const card = await readPrimaryCard(kind);
+      if (card && card.kind === kind && card.sig) return card;
+      await page.clock.fastForward(1100);
+      await page.waitForTimeout(60);
+    }
+    return readPrimaryCard(kind);
+  };
+  const settlePrimaryExit = async () => {
+    let scan = await readStorageScan();
+    for (let attempt = 0; attempt < 12 && (scan.primaryStorage || !scan.archiveStorage); attempt += 1) {
+      await page.clock.fastForward(1100);
+      await page.waitForTimeout(80);
+      scan = await readStorageScan();
+    }
+    return scan;
+  };
+  const settleArchiveGone = async () => {
+    let scan = await readStorageScan();
+    for (let attempt = 0; attempt < 12 && (scan.primary > 0 || scan.cards > 0); attempt += 1) {
+      await page.clock.fastForward(1100);
+      await page.waitForTimeout(80);
+      scan = await readStorageScan();
+    }
+    return scan;
+  };
   const readStorageScan = () => page.evaluate(() => ({
     pool: document.querySelector('#layout-storage [data-ref="poolLeg"]')?.textContent || '',
     bays: [...document.querySelectorAll('#layout-storage .bay')].map(bay => ({
@@ -211,6 +275,9 @@ function validateArchive(value) {
     })),
     docOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
     cards: document.querySelectorAll('[data-r1-archive]').length,
+    primary: document.querySelectorAll('[data-r1-primary-measured]').length,
+    primaryStorage: !!document.querySelector('#layout-storage [data-r1-primary-measured="storage"]'),
+    archiveStorage: !!document.querySelector('#layout-storage [data-r1-archive="storage"]'),
     theme: document.documentElement.getAttribute('data-theme'),
   }));
 
@@ -271,7 +338,7 @@ function validateArchive(value) {
       await page.waitForSelector('#layout-storage .bay');
       // Fake clock: the archive card is synced by a 1s Poll job, so tick it once.
       await page.clock.fastForward(1100);
-      await page.waitForSelector('#layout-storage [data-r1-archive="storage"]', { timeout: 8000 });
+      await page.waitForSelector('#layout-storage [data-r1-primary-measured="storage"], #layout-storage [data-r1-archive="storage"]', { timeout: 8000 });
       return body;
     };
     const nextFrame = async command => {
@@ -291,7 +358,7 @@ function validateArchive(value) {
     const openOverview = async () => {
       await page.goto(fixture.owner + '/#/', { waitUntil: 'networkidle' });
       await page.clock.fastForward(1100);
-      await page.waitForSelector('#layout-overview [data-r1-archive="overview"]', { timeout: 8000 });
+      await page.waitForSelector('#layout-overview [data-r1-primary-measured="overview"], #layout-overview [data-r1-archive="overview"]', { timeout: 8000 });
     };
     const openStorage = async () => {
       await page.goto(fixture.owner + '/#/storage', { waitUntil: 'networkidle' });
@@ -435,13 +502,15 @@ function validateArchive(value) {
     check('archive survives the invalidation with the original numbers, dates and identity',
       validateArchive(archive(noisy)) === null
       && JSON.stringify(numbers(archive(noisy))) === JSON.stringify(numbers(archive(beforeNoise))), archive(noisy));
+    const noisePrimary = await settlePrimary('storage');
     const noiseScan = await readStorageScan();
-    const noiseCard = await readStorageCard();
-    check('current pool/available stay unknown while the archive keeps its own dates',
-      /(^|\D)--(\D|$)|未知/.test(noiseScan.pool) && !/%/.test(noiseScan.pool)
-      && noiseCard && noiseCard.title === '过去测量档案'
-      && (await localDates(archive(noisy))).every(text => noiseCard.date.includes(text))
-      && noiseScan.bays.every(bay => !bay.archive), { pool: noiseScan.pool, storage: noiseCard, bays: noiseScan.bays });
+    const noiseDates = await localDates(archive(noisy));
+    check('invalidated storage promotes the archived snapshot into the primary card',
+      noisePrimary && noisePrimary.kind === 'storage' && noisePrimary.title === '最近实测'
+      && noiseDates.every(text => noisePrimary.date.includes(text))
+      && noisePrimary.freeVisible === true && noisePrimary.freeText === '--'
+      && !noiseScan.archiveStorage && noiseScan.primaryStorage === true
+      && noiseScan.bays.every(bay => !bay.archive), { primary: noisePrimary, scan: noiseScan });
     check('per-disk history remains a separate disclosure and never becomes a bay archive',
       noiseScan.bays.filter(bay => ['sda', 'sdb', 'sdc'].includes(bay.name)).every(bay => bay.history)
       && noiseScan.bays.every(bay => !bay.text.includes('过去测量档案')), noiseScan.bays);
@@ -449,13 +518,13 @@ function validateArchive(value) {
     for (const width of [320, 376, 1400]) for (const theme of ['light', 'dark']) {
       await page.setViewportSize({ width, height: 1000 });
       if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#btnTheme').click();
-      await page.locator('#layout-storage [data-r1-archive]').scrollIntoViewIfNeeded();
-      const card = await readStorageCard();
+      await page.locator('#layout-storage [data-r1-primary-measured="storage"]').scrollIntoViewIfNeeded();
+      const card = await readPrimaryCard('storage');
       const scan = await readStorageScan();
       await page.screenshot({ path: path.join(fixtureDir, 'archive-' + width + '-' + theme + '.png'), fullPage: true });
       check('archive card is readable at ' + width + 'px/' + theme + ' without horizontal overflow',
         card && scan.theme === theme && !scan.docOverflow && !card.overflow
-        && ['r1-arc-title', 'r1-arc-value', 'r1-arc-date', 'r1-arc-coverage', 'r1-arc-note']
+        && ['.r1-primary-title', '.r1-primary-value', '.r1-primary-date', '.r1-primary-coverage', '.r1-primary-note']
           .every(cls => card.fonts[cls] !== null && card.fonts[cls] >= 12)
         && (await localDates(archive(noisy))).every(text => card.date.includes(text)),
         { width, theme, card, docOverflow: scan.docOverflow, themeNow: scan.theme });
@@ -635,6 +704,308 @@ function validateArchive(value) {
     }));
     check('revoked/unauthenticated page exposes no archive DOM',
       unauthenticatedDom.cards === 0 && unauthenticatedDom.login, unauthenticatedDom);
+
+    // ---------------- S10: primary card promoted to last measured ----------------
+    // Values recomputed from the API archive in the test process (never the page).
+    const primaryDsize = b => {
+      if (b >= 1e12) { const v = b / 1e12; return (v >= 100 ? String(Math.round(v)) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + ' TB'; }
+      if (b >= 1e9) { const v = b / 1e9; return (v >= 100 ? String(Math.round(v)) : v.toFixed(1)) + ' GB'; }
+      return String(Math.round(b / 1e6)) + ' MB';
+    };
+    const primaryTextExpectations = (a, dates) => ({
+      percent: String(Math.round(a.percent)) + '%',
+      bytes: primaryDsize(a.used) + ' / ' + primaryDsize(a.total),
+      availableBytes: primaryDsize(a.available),
+      coverage: '已测 ' + a.coverage.filesystem_count + ' 个文件系统 / ' + a.coverage.disk_count + ' 块盘（子集）',
+      dates,
+    });
+    // Unified contract: promotion only when current is genuinely invalid and a
+    // valid owner archive exists. Display sig reuses the canonical nine keys
+    // (available included for contract checking only, never shown as free space).
+    currentCase = 'S10_primary_measured';
+    scenarios.add('S10_primary_measured');
+    phase = 'primary_current';
+    // S8 leaves the browser unauthenticated on purpose; restore a real owner
+    // session (same fixture auth path, no cookie copying) before the new page.
+    const primaryOwner = (await operation('auth:password')).cookie;
+    await context.clearCookies();
+    await context.addCookies([{ ...primaryOwner, url: fixture.owner }]);
+    await enter('normal', 'S10_primary_measured');
+    await switchTo('#/storage');
+    const validScan = await readStorageScan();
+    check('P0 valid current keeps the native primary without any measured marker',
+      !validScan.primaryStorage && validScan.archiveStorage
+      && /\d/.test(validScan.pool), validScan);
+
+    phase = 'primary_promote';
+    const beforePromote = (await api('/api/overview')).body;
+    const promotedBody = await nextFrame('mount_noise');
+    const promotedArchive = archive(promotedBody);
+    const promotedExpect = primaryTextExpectations(promotedArchive, await localDates(promotedArchive));
+    check('P1 invalidated current still keeps a legal archive for promotion',
+      currentUnknown(promotedBody) && validateArchive(promotedArchive) === null
+      && JSON.stringify(archive(beforePromote)) === JSON.stringify(promotedArchive), promotedBody);
+    check('P2 promotion never writes measured numbers back into the native API/current',
+      promotedBody.disk_size === null && promotedBody.disk_used === null && promotedBody.disk_total === null
+      && promotedBody.disks_detail.every(row => row.total === null && row.used === null && row.percent === null)
+      && promotedBody.disks_detail.every(row => !('capacity_observation_archive' in row)), promotedBody);
+    await page.waitForSelector('#layout-storage [data-r1-primary-measured="storage"]', { timeout: 8000 });
+    await page.clock.fastForward(1100);
+    const promotedStorage = await settlePrimary('storage');
+    const promotedScan = await readStorageScan();
+    check('P3 storage primary shows title, archived percent/bytes, original date range and subset coverage',
+      promotedStorage && promotedStorage.kind === 'storage' && promotedStorage.title === '最近实测'
+      && promotedStorage.value.includes(promotedExpect.percent)
+      && promotedStorage.value.includes(promotedExpect.bytes)
+      && promotedStorage.date.includes(promotedExpect.dates[0])
+      && (promotedExpect.dates.length < 2 || promotedStorage.date.includes(promotedExpect.dates[1]))
+      && /^已测\s*3\s*个文件系统\s*\/\s*3\s*块盘（子集）· 当前归属未确认$/.test(promotedStorage.coverage)
+      && promotedStorage.note.includes('重启清空') && promotedStorage.note.includes('不代表当前可用空间'),
+      { promotedStorage, promotedExpect });
+    check('P4 storage promotion shows a visible current-free node whose value is exactly --',
+      promotedStorage.freeVisible === true && promotedStorage.freeText === '--'
+      && /当前可用空间/.test(promotedStorage.freeLabel || '')
+      && !promotedStorage.text.includes(promotedExpect.availableBytes)
+      && !String(promotedStorage.value).includes(promotedExpect.availableBytes),
+      { freeText: promotedStorage.freeText, freeVisible: promotedStorage.freeVisible,
+        archiveAvailableText: promotedExpect.availableBytes });
+    const pageCards = await page.evaluate(() => ({
+      overviewPrimary: document.querySelectorAll('#layout-overview [data-r1-primary-measured="overview"]').length,
+      storagePrimary: document.querySelectorAll('#layout-storage [data-r1-primary-measured="storage"]').length,
+      overviewArchive: document.querySelectorAll('#layout-overview [data-r1-archive]').length,
+      storageArchive: document.querySelectorAll('#layout-storage [data-r1-archive]').length,
+    }));
+    check('P5 promotion dedupes the standalone archive card on both pages (one marker each)',
+      pageCards.overviewPrimary === 1 && pageCards.storagePrimary === 1
+      && pageCards.overviewArchive === 0 && pageCards.storageArchive === 0
+      && promotedScan.archiveStorage === false && promotedScan.cards === 0,
+      { pageCards, promotedScan });
+    check('P6 per-bay cells keep their own disclosure and never host archive numbers',
+      promotedScan.bays.length === 3
+      && promotedScan.bays.every(bay => !bay.archive && !bay.text.includes(promotedExpect.percent))
+      && !promotedStorage.insideBay, { bays: promotedScan.bays });
+    check('P7 promoted primary carries the canonical nine-key display signature',
+      promotedStorage.sig
+      && Object.keys(promotedStorage.sig).sort().join() === 'available,disks,filesystems,observation_id,percent,sampled_at,sampled_at_latest,total,used'
+      && promotedStorage.sig.observation_id === promotedArchive.observation_id
+      && promotedStorage.sig.total === promotedArchive.total && promotedStorage.sig.used === promotedArchive.used
+      && promotedStorage.sig.available === promotedArchive.available
+      && Math.abs(promotedStorage.sig.percent - promotedArchive.percent) < 1e-9
+      && promotedStorage.sig.filesystems === promotedArchive.coverage.filesystem_count
+      && promotedStorage.sig.disks === promotedArchive.coverage.disk_count
+      && !('reason' in promotedStorage.sig), { sig: promotedStorage.sig });
+
+    phase = 'primary_home';
+    // Do not navigate: entering the overview view triggers its own ordinary fill
+    // entry (allowed write), which would restore current and end the promotion.
+    // The overview card lives in the same document, so it is asserted in place.
+    const promotedHome = await settlePrimary('overview');
+    const homeArchiveCount = await page.evaluate(() => document.querySelectorAll('#layout-overview [data-r1-archive="overview"]').length);
+    check('P8 home primary mirrors the same archived numbers, dates and dedupe',
+      promotedHome && promotedHome.kind === 'overview' && promotedHome.title === '最近实测'
+      && promotedHome.value.includes(promotedExpect.percent)
+      && promotedHome.value.includes(promotedExpect.bytes)
+      && promotedHome.coverage === promotedStorage.coverage
+      && promotedHome.freeVisible === false && homeArchiveCount === 0,
+      { promotedHome, homeArchiveCount });
+
+    phase = 'primary_responsive';
+    for (const width of [320, 376, 1400]) for (const theme of ['light', 'dark']) {
+      await page.setViewportSize({ width, height: 1000 });
+      if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#btnTheme').click();
+      await page.locator('#layout-storage [data-r1-primary-measured="storage"]').scrollIntoViewIfNeeded();
+      const card = await settlePrimary('storage');
+      const doc = await page.evaluate(() => ({ scroll_width: document.documentElement.scrollWidth, width: window.innerWidth,
+        theme: document.documentElement.getAttribute('data-theme') }));
+      await page.screenshot({ path: path.join(fixtureDir, 'primary-' + width + '-' + theme + '.png'), fullPage: true });
+      check('R' + width + '-' + theme + ' primary measured card is readable and unclipped',
+        card && doc.theme === theme && doc.scroll_width <= doc.width + 1 && !card.overflow
+        && Object.values(card.fonts).every(font => font !== null && font >= 12)
+        && promotedExpect.dates.every(text => card.date.includes(text)),
+        { width, theme, card: card && { value: card.value, date: card.date, fonts: card.fonts }, doc });
+    }
+    await page.setViewportSize({ width: 1400, height: 1000 });
+
+    phase = 'primary_restore';
+    await switchTo('#/storage');
+    await operation('restore_mounts');
+    const restored = await explicitRefresh();
+    await nextFrame();
+    // Wait for the real public DOM to leave the promoted state (native primary
+    // restored, standalone archive card back) instead of sampling one frame.
+    const restoredScan = await settlePrimaryExit();
+    const restoredPrimary = await readPrimaryCard('storage');
+    const restoredNative = await page.evaluate(() => {
+      const pool = document.querySelector('#layout-storage .card.pool');
+      return { hiddenLegacy: pool ? pool.querySelectorAll('[data-r1-primary-hidden="1"]').length : -1,
+        primaryNode: pool ? pool.querySelectorAll(':scope > .r1-primary-measured').length : -1,
+        marker: pool ? pool.hasAttribute('data-r1-primary-measured') : null,
+        poolV: document.querySelector('#layout-storage [data-ref="poolV"]')?.closest('[hidden]') ? 'hidden' : 'visible' };
+    });
+    check('P9 restored current returns the native primary, restores hidden refs and re-exposes the archive card',
+      restored.status === 200 && !restoredScan.primaryStorage && restoredScan.archiveStorage
+      && /\d/.test(restoredScan.pool) && !restoredScan.pool.includes('最近实测')
+      && restoredPrimary === null && restoredNative.hiddenLegacy === 0
+      && restoredNative.primaryNode === 0 && restoredNative.marker === false,
+      { restored: restored.status, restoredScan, restoredNative });
+
+    phase = 'primary_round_trip';
+    const roundTrip = await nextFrame('mount_noise');
+    await page.waitForSelector('#layout-storage [data-r1-primary-measured="storage"]', { timeout: 8000 });
+    await page.clock.fastForward(1100);
+    const roundTripCard = await settlePrimary('storage');
+    const roundTripArchive = archive(roundTrip);
+    check('P10 current->unknown round trip re-promotes exactly the current archive batch',
+      validateArchive(roundTripArchive) === null && roundTripCard
+      && roundTripCard.value.includes(String(Math.round(roundTripArchive.percent)) + '%')
+      && roundTripCard.sig && roundTripCard.sig.observation_id === roundTripArchive.observation_id,
+      { roundTripCard: roundTripCard && { value: roundTripCard.value, sig: roundTripCard.sig }, roundTripArchive });
+
+    phase = 'primary_archive_removed';
+    await operation('close');
+    await page.clock.fastForward(15100);
+    const closedScan = await settleArchiveGone();
+    const closedPrimary = await readPrimaryCard('storage');
+    check('P11 cleared archive removes the promoted numbers and the primary marker',
+      closedScan.primary === 0 && closedScan.cards === 0 && closedPrimary === null
+      && !closedScan.pool.includes('最近实测') && !/\d+%/.test(closedScan.pool), closedScan);
+    await operation('start');
+
+    phase = 'primary_zero_used_current';
+    // 0 used is a valid current value: it must never be mistaken for "missing".
+    await enter('zero', 'S10_zero_used_current');
+    await switchTo('#/storage');
+    const zeroBody = (await api('/api/overview')).body;
+    const zeroScan = await settlePrimaryExit();
+    check('P12 genuine 0%-used current is valid and is never promoted to the measured card',
+      Number.isFinite(zeroBody.disk_size) && zeroBody.disk_size > 0
+      && zeroBody.disk_used === 0 && zeroBody.disk_used <= zeroBody.disk_size
+      && Number.isFinite(zeroBody.disk_total) && zeroBody.disk_total === 0
+      && !zeroScan.primaryStorage && zeroScan.archiveStorage
+      && zeroScan.bays.length === 3 && zeroScan.bays.every(bay => /0%/.test(bay.text))
+      && !zeroScan.pool.includes('最近实测'), { zeroBody, zeroScan });
+
+    // ---------------- S11: visible home promotion (real navigation) ----------------
+    // The home card must promote while the overview page is genuinely visible, not
+    // merely read from the hidden layout. Navigation uses the stock tab button; the
+    // overview entry may run its own allowed fill, which is allowed to finish first.
+    currentCase = 'S11_home_visible';
+    scenarios.add('S11_home_visible');
+    phase = 'home_visible_enter';
+    await enter('normal', 'S11_home_visible');
+    await switchTo('#/storage');
+    await page.locator('#pageSeg button[data-page="overview"]').click({ timeout: 8000 });
+    await page.locator('#page-overview:not([hidden])').waitFor({ state: 'visible', timeout: 8000 });
+    // Let the overview entry's own fill / native polls finish normally.
+    await page.clock.fastForward(15100);
+    await page.waitForTimeout(120);
+    const afterEntry = (await api('/api/overview')).body;
+
+    phase = 'home_visible_promote';
+    const homeNoise = await nextFrame('mount_noise');
+    const homeArchive = archive(homeNoise);
+    const homeExpect = primaryTextExpectations(homeArchive, await localDates(homeArchive));
+    const homePrimary = await settlePrimary('overview');
+    const homeVisible = await page.evaluate(() => {
+      const card = document.querySelector('#layout-overview [data-r1-primary-measured="overview"]');
+      const layout = document.querySelector('#layout-overview');
+      const pageEl = document.querySelector('#page-overview');
+      const rect = card ? card.getBoundingClientRect() : null;
+      const layoutRect = layout ? layout.getBoundingClientRect() : null;
+      return {
+        hash: location.hash,
+        selected: document.querySelector('#pageSeg button[aria-selected="true"]')?.getAttribute('data-page') || null,
+        pageHidden: pageEl ? pageEl.hasAttribute('hidden') : null,
+        layoutVisible: !!layoutRect && layoutRect.width > 0 && layoutRect.height > 0,
+        cardVisible: !!rect && rect.width > 0 && rect.height > 0 && !card.closest('[hidden]'),
+        cardRect: rect ? { width: +rect.width.toFixed(1), height: +rect.height.toFixed(1) } : null,
+        archiveOverviewCards: document.querySelectorAll('#layout-overview [data-r1-archive]').length,
+      };
+    });
+    const homeRendered = await readPrimaryCard('overview');
+    check('P13 genuinely visible home promotes the latest archive with full original values and dedupe',
+      homeVisible.selected === 'overview' && homeVisible.pageHidden === false
+      && homeVisible.layoutVisible === true && homeVisible.cardVisible === true
+      && homeVisible.archiveOverviewCards === 0
+      && homePrimary && homePrimary.kind === 'overview' && homePrimary.title === '最近实测'
+      && homeRendered.value.includes(homeExpect.percent) && homeRendered.value.includes(homeExpect.bytes)
+      && homeRendered.date.includes(homeExpect.dates[0])
+      && (homeExpect.dates.length < 2 || homeRendered.date.includes(homeExpect.dates[1]))
+      && /^已测\s*3\s*个文件系统\s*\/\s*3\s*块盘（子集）· 当前归属未确认$/.test(homeRendered.coverage)
+      && homeRendered.freeVisible === false
+      && homeRendered.sig
+      && Object.keys(homeRendered.sig).sort().join() === 'available,disks,filesystems,observation_id,percent,sampled_at,sampled_at_latest,total,used'
+      && homeRendered.sig.observation_id === homeArchive.observation_id
+      && (!archive(afterEntry) || archive(afterEntry).observation_id === homeArchive.observation_id)
+      && homeVisible.hash.startsWith('#/'),
+      { homeVisible, homeRendered: homeRendered && { value: homeRendered.value, coverage: homeRendered.coverage, sig: homeRendered.sig },
+        homeExpect, afterEntryArchive: archive(afterEntry) });
+    check('P14 visible home promotion never writes measured numbers into the native API current',
+      homeNoise.disk_size === null && homeNoise.disk_used === null && homeNoise.disk_total === null
+      && homeNoise.disks_detail.every(row => row.total === null && row.used === null && row.percent === null)
+      && homeNoise.disks_detail.every(row => !('capacity_observation_archive' in row)), homeNoise);
+    await page.screenshot({ path: path.join(fixtureDir, 'home-visible-1440.png'), fullPage: true });
+
+    phase = 'home_visible_mobile';
+    for (const width of [376, 320]) {
+      await page.setViewportSize({ width, height: 1100 });
+      // Re-invalidate at this width: the overview view may run its own allowed
+      // capacity fill after a resize, so the promoted card can be short-lived.
+      await nextFrame('mount_noise');
+      const mobileHome = await settlePrimary('overview');
+      const view = await page.evaluate(() => {
+        const card = document.querySelector('#layout-overview [data-r1-primary-measured="overview"]');
+        const rect = card ? card.getBoundingClientRect() : null;
+        return { cardVisible: !!rect && rect.width > 0 && rect.height > 0,
+          markerCount: document.querySelectorAll('#layout-overview [data-r1-primary-measured]').length,
+          archiveCount: document.querySelectorAll('#layout-overview [data-r1-archive]').length,
+          diskModule: !!document.querySelector('#layout-overview [data-m="disk"]'),
+          layoutWidth: document.querySelector('#layout-overview')?.getBoundingClientRect().width || 0,
+          docOverflow: document.documentElement.scrollWidth > window.innerWidth + 1 };
+      });
+      const mobileApi = (await api('/api/overview')).body;
+      const mobileArchive = archive(mobileApi);
+      const mobileExpect = mobileArchive
+        ? primaryTextExpectations(mobileArchive, await localDates(mobileArchive)) : null;
+      await page.screenshot({ path: path.join(fixtureDir, 'home-visible-' + width + '.png'), fullPage: true });
+      // Either the promoted card is still on screen (assert readability), or the
+      // product's own overview fill already restored a valid current (assert that
+      // real restored state instead of claiming a promotion that is gone).
+      const promotedHere = !!(mobileHome && view.cardVisible);
+      check('R-home-' + width + ' visible home is readable without horizontal overflow',
+        !view.docOverflow && (promotedHere
+          ? !!mobileExpect
+            && Object.values(mobileHome.fonts).every(font => font !== null && font >= 12)
+            && mobileExpect.dates.every(text => mobileHome.date.includes(text))
+            && mobileHome.freeVisible === false
+          : view.markerCount === 0 && view.archiveCount === 1
+            && Number.isFinite(mobileApi.disk_size) && mobileApi.disk_size > 0),
+        { width, view, promotedHere, apiCurrent: mobileApi.disk_size,
+          archiveId: archive(mobileApi)?.observation_id, fonts: mobileHome && mobileHome.fonts });
+    }
+    await page.setViewportSize({ width: 1400, height: 1000 });
+
+    phase = 'home_visible_back_to_storage';
+    // Returning to storage runs the existing entry refresh; accept whatever batch it
+    // publishes and compare against that newest real API archive only.
+    await page.locator('#pageSeg button[data-page="storage"]').click({ timeout: 8000 });
+    await page.locator('#page-storage:not([hidden])').waitFor({ state: 'visible', timeout: 8000 });
+    await page.clock.fastForward(15100);
+    await page.waitForTimeout(120);
+    const backNoise = await nextFrame('mount_noise');
+    const backArchive = archive(backNoise);
+    const backExpect = primaryTextExpectations(backArchive, await localDates(backArchive));
+    const backStorage = await settlePrimary('storage');
+    check('P15 storage after the entry refresh re-promotes the newest batch using fresh API values',
+      backArchive && validateArchive(backArchive) === null
+      && backStorage && backStorage.kind === 'storage'
+      && backStorage.value.includes(backExpect.percent) && backStorage.value.includes(backExpect.bytes)
+      && backExpect.dates.every(text => backStorage.date.includes(text))
+      && backStorage.sig && backStorage.sig.observation_id === backArchive.observation_id
+      && backStorage.freeText === '--' && backStorage.freeVisible === true
+      && backNoise.disk_size === null,
+      { backStorage: backStorage && { value: backStorage.value, date: backStorage.date, sig: backStorage.sig },
+        backExpect });
 
     // ---------------- S9: start/close clear ----------------
     currentCase = 'S9_lifecycle_clear';
