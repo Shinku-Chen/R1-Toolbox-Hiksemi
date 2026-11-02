@@ -369,6 +369,102 @@ function screenModel() {
     await page.waitForTimeout(2200);
     check('metrics 缺测补齐不循环', fills.length === base + 1);
 
+    // ================= 新增：每次真实相关 view entry 独立一次 =================
+    // 已确认语义：overview / storage / metrics 的每一次真实进入都获得
+    // 独立的一次缺测 fill 机会；同一 view 内 poll/render/重复点击不重试；离开相关
+    // 视图（hidden/saver/sleep/非相关页）结束本次机会，回来可再一次。原 45 项全部
+    // 保留，本节只追加，不改写任何既有断言。
+    insightDisks = [];
+    disks = [{ name: 'sda', total_bytes: null, used_bytes: null, usage_percent: null,
+               capacity_sampled_at: null, capacity_status: 'unavailable' }];
+    mode = 'normal';
+    base = fills.length;
+    await page.reload({ waitUntil: 'networkidle' });          // overview entry
+    await page.waitForTimeout(2600);
+    check('每页进入独立：overview 首次一次', fills.length === base + 1);
+    await page.waitForTimeout(2000);
+    check('overview 同页轮询不重试', fills.length === base + 1);
+
+    await page.click('[data-tab="storage"]');                  // storage entry
+    await page.waitForTimeout(2600);
+    check('每页进入独立：storage 新一次', fills.length === base + 2);
+    await page.waitForTimeout(2000);
+    check('storage 同页轮询不重试', fills.length === base + 2);
+
+    await page.click('[data-tab="storage"]');                  // same view: no new
+    await page.waitForTimeout(1200);
+    check('同 view 重复点击不追加', fills.length === base + 2);
+
+    await page.click('[data-tab="overview"]');                 // overview re-entry
+    await page.waitForTimeout(2600);
+    check('相关页之间来回：overview 再入一次', fills.length === base + 3);
+    await page.click('[data-view="metrics"]');                 // metrics entry
+    await page.waitForTimeout(2600);
+    check('metrics 进入独立一次', fills.length === base + 4);
+    await page.waitForTimeout(1800);
+    check('metrics 同页轮询不重试', fills.length === base + 4);
+
+    // 有效 current：任何相关 view 都不需要读
+    disks = [{ name: 'sda', total_bytes: 4e12, used_bytes: 1e12, usage_percent: 25,
+               capacity_sampled_at: NOW, capacity_status: 'ok' }];
+    base = fills.length;
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForTimeout(1400);
+    await page.click('[data-tab="storage"]');
+    await page.waitForTimeout(1400);
+    await page.click('[data-tab="overview"]');
+    await page.waitForTimeout(1400);
+    await page.click('[data-view="metrics"]');
+    await page.waitForTimeout(1400);
+    check('有效 current 各 view 0 次', fills.length === base);
+
+    // 在途 A→B：单并发、旧回执不能占 B 的进入机会、释放后 B 自己一次
+    disks = [{ name: 'sda', total_bytes: null, used_bytes: null, usage_percent: null,
+               capacity_sampled_at: null, capacity_status: 'unavailable' }];
+    mode = 'gated';
+    maxActive = 0;
+    base = fills.length;
+    await page.goto(origin + '/', { waitUntil: 'domcontentloaded' });   // A: overview fill in flight
+    const inflightDeadline = Date.now() + 6000;
+    while (active === 0 && Date.now() < inflightDeadline) await new Promise(r => setTimeout(r, 30));
+    check('在途确认：A 单请求', active === 1 && fills.length === base + 1 && maxActive === 1);
+    await page.click('[data-tab="storage"]');                  // B entry while A is inflight
+    await page.waitForTimeout(400);
+    check('A 在途时 B 不并发', maxActive === 1);
+    releaseGate();
+    await page.waitForTimeout(2600);
+    check('旧回执不占 B：释放后 B 自己一次', fills.length === base + 2 && maxActive === 1);
+    await page.waitForTimeout(1800);
+    check('B 之后同页不追加', fills.length === base + 2);
+    mode = 'normal';
+
+    // hidden 进入不补；恢复可见后该 view 补一次（边界保留）
+    disks = [{ name: 'sda', total_bytes: null, used_bytes: null, usage_percent: null,
+               capacity_sampled_at: null, capacity_status: 'unavailable' }];
+    base = fills.length;
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.click('[data-tab="overview"]');
+    await page.waitForTimeout(1600);
+    check('hidden 进入不补齐', fills.length === base);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.waitForTimeout(2600);
+    check('恢复可见后该 view 补一次', fills.length === base + 1);
+
+    // 非相关页结束本次机会；下一次相关 view entry 重新允许一次
+    base = fills.length;
+    await page.click('[data-tab="network"]');
+    await page.waitForTimeout(1600);
+    check('非相关页 0 次', fills.length === base);
+    await page.click('[data-tab="storage"]');
+    await page.waitForTimeout(2600);
+    check('非相关页之后 storage 新一次', fills.length === base + 1);
+
     console.log('PASS: ' + checks.length + ' checks; fill POST=' + fills.length);
   } finally {
     if (releaseGate) releaseGate();

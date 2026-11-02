@@ -289,11 +289,13 @@
   }
 
   // ------------------------------------------------- 按需补齐（local 18731）
-  const fillState = { epoch: 0, attempted: false, inflight: false, relevant: false, ticket: null };
-  function fillRelevant() {
-    if (document.hidden || state.saver || state.sleeping) return false;
-    return state.view === 'overview' || state.view === 'storage' || state.view === 'metrics';
+  const fillState = { epoch: 0, attempted: false, inflight: false, relevant: false, ticket: null, view: null };
+  // 可见周期按真实 view 区分：overview/storage/metrics 各自独立；同页轮询不新周期。
+  function fillView() {
+    if (document.hidden || state.saver || state.sleeping) return null;
+    return ['overview', 'storage', 'metrics'].includes(state.view) ? state.view : null;
   }
+  function fillRelevant() { return fillView() !== null; }
   function fillCapacityValid(disk) {
     const stamp = num(disk.capacity_sampled_at, 0);
     const status = typeof disk.capacity_status === 'string' ? disk.capacity_status : '';
@@ -364,26 +366,30 @@
     return fillSection(data.smart, false) && fillSection(data.capacity, true);
   }
   async function fillTick() {
-    const relevant = fillRelevant();
-    if (!relevant) { fillState.relevant = false; return; }
-    if (!fillState.relevant) {
+    const view = fillView();
+    if (!view) { fillState.relevant = false; fillState.view = null; return; }
+    if (!fillState.relevant || fillState.view !== view) {
       fillState.epoch += 1;
       fillState.attempted = false;
       fillState.relevant = true;
+      fillState.view = view;
     }
     if (!controlToken || !state.online) return;
     if (fillState.inflight || fillState.attempted) return;
     if (!fillMissing()) return;
     fillState.attempted = true;
     fillState.inflight = true;
-    const ticket = {};
+    const epoch = fillState.epoch;
+    const ticket = { epoch };
     fillState.ticket = ticket;
     try {
       const data = await request('/storage/fill', {});
-      if (fillState.ticket !== ticket) return;
+      // 旧周期的响应不投影、不 poll、不重置新周期状态。
+      if (fillState.ticket !== ticket || fillState.epoch !== epoch) return;
       if (!fillReceipt(data)) return;
+      if (fillView() !== view) return;
       await poll();
-    } catch (_) { /* busy/403/异常：本周期结束 */ }
+    } catch (_) { /* busy/403/异常：本周期结束，不重试 */ }
     finally { if (fillState.ticket === ticket) { fillState.ticket = null; fillState.inflight = false; } }
   }
   document.addEventListener('visibilitychange', () => { fillTick().catch(() => {}); });
