@@ -106,6 +106,28 @@ function validateArchive(value) {
 // Genuinely bounded font/layout readiness: Node wall-clock deadline, Playwright
 // real waits, and only synchronous page reads (document.fonts.status). A pending
 // font promise can never block this loop; the deadline is the real upper bound.
+// Failure detail for the mobile home assertions. The caller's geometry is already
+// bounded by mobileGeometry() (offenders <= 24, ancestor chain <= 8); this shaper
+// must never slice again, otherwise a CI failure cannot be attributed.
+function mobileCheckDetail({ width, view, promotedHere, apiCurrent, archiveId, fonts,
+  geometry, settleAfterResize = null, settleAfterPromotion = null }) {
+  const offenders = Array.isArray(geometry.offenders) ? geometry.offenders : [];
+  const cardChain = Array.isArray(geometry.cardChain) ? geometry.cardChain : [];
+  return {
+    width, view, promotedHere, apiCurrent, archiveId, fonts,
+    settle: { after_resize: settleAfterResize, after_promotion: settleAfterPromotion },
+    geometry: {
+      innerWidth: geometry.innerWidth, clientWidth: geometry.clientWidth,
+      scrollWidth: geometry.scrollWidth, bodyScrollWidth: geometry.bodyScrollWidth,
+      dpr: geometry.devicePixelRatio, fonts: geometry.fonts, overflow: geometry.overflow,
+      offenders, cardChain,
+    },
+    bounds: { offenders_limit: 24, card_chain_limit: 8,
+      offenders_returned: offenders.length, card_chain_returned: cardChain.length,
+      offenders_truncated: offenders.length >= 24, card_chain_truncated: cardChain.length >= 8 },
+  };
+}
+
 async function settleBounded(page, { deadlineMs = 6000, pollMs = 120, stableFrames = 2 } = {}) {
   const startedAt = Date.now();
   let last = null, stable = 0;
@@ -1045,7 +1067,9 @@ async function main() {
       }
       check('R-home-' + width + '-settle bounded font/layout readiness completes before the overflow assertion',
         settleAfterResize.ok === true && settleAfterPromotion.ok === true,
-        { settleAfterResize, settleAfterPromotion, offenders: geometry.offenders, cardChain: geometry.cardChain });
+        mobileCheckDetail({ width, view, promotedHere: null, apiCurrent: mobileApi.disk_size,
+          archiveId: archive(mobileApi)?.observation_id, fonts: mobileHome && mobileHome.fonts,
+          geometry, settleAfterResize, settleAfterPromotion }));
       // Either the promoted card is still on screen (assert readability), or the
       // product's own overview fill already restored a valid current (assert that
       // real restored state instead of claiming a promotion that is gone).
@@ -1058,11 +1082,9 @@ async function main() {
             && mobileHome.freeVisible === false
           : view.markerCount === 0 && view.archiveCount === 1
             && Number.isFinite(mobileApi.disk_size) && mobileApi.disk_size > 0),
-        { width, view, promotedHere, apiCurrent: mobileApi.disk_size,
+        mobileCheckDetail({ width, view, promotedHere, apiCurrent: mobileApi.disk_size,
           archiveId: archive(mobileApi)?.observation_id, fonts: mobileHome && mobileHome.fonts,
-          geometry: { innerWidth: geometry.innerWidth, clientWidth: geometry.clientWidth,
-            scrollWidth: geometry.scrollWidth, dpr: geometry.devicePixelRatio, fonts: geometry.fonts,
-            offenders: geometry.offenders.slice(0, 6), cardChain: geometry.cardChain.slice(0, 4) } });
+          geometry, settleAfterResize, settleAfterPromotion }));
     }
     await page.setViewportSize({ width: 1400, height: 1000 });
 
@@ -1244,4 +1266,4 @@ async function main() {
 if (require.main === module) {
   main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 }
-module.exports = { settleBounded };
+module.exports = { settleBounded, mobileCheckDetail };

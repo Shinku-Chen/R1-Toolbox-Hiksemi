@@ -3467,3 +3467,18 @@ function r1ArchiveSync() {
   else { r1PrimaryExit(pool); if (pool) ensure('storage', pool, 'margin-top:0'); else r1ArchiveRemove('storage'); }
 }
 if (typeof Poll !== 'undefined' && Poll.add) Poll.add('r1ArchiveWatch', async () => { r1ArchiveSync(); }, 1000);
+
+/* 320/窄屏 hero/clock intrinsic sizing：只约束 R1 小屏布局，不改上游渲染。 */
+(function r1NarrowHeroCss() {
+  if (typeof document === 'undefined') return;
+  const style = document.createElement('style');
+  style.textContent = '@media (max-width:640px){'
+    + '.hero{grid-template-columns:minmax(0,1fr)}'
+    + '.hero-text{min-width:0;max-width:100%;overflow-wrap:anywhere}'
+    + '.hero-text h1{overflow-wrap:anywhere}'
+    + '.clock-card{grid-template-columns:minmax(0,1fr);min-width:0;max-width:100%}'
+    + '.clock-card .clock-time{min-width:0;max-width:100%;flex-wrap:wrap}'
+    + '.clock-date,.clock-lunar{overflow-wrap:anywhere}'
+    + '}';
+  document.head.appendChild(style);
+})();

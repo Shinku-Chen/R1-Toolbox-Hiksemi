@@ -8342,6 +8342,19 @@ if (pool && !currentValid) { r1PrimaryEnter(pool, 'storage', archive, sig); r1Ar
 else { r1PrimaryExit(pool); if (pool) ensure('storage', pool, 'margin-top:0'); else r1ArchiveRemove('storage'); }
 }
 if (typeof Poll !== 'undefined' && Poll.add) Poll.add('r1ArchiveWatch', async () => { r1ArchiveSync(); }, 1000);
+(function r1NarrowHeroCss() {
+if (typeof document === 'undefined') return;
+const style = document.createElement('style');
+style.textContent = '@media (max-width:640px){'
++ '.hero{grid-template-columns:minmax(0,1fr)}'
++ '.hero-text{min-width:0;max-width:100%;overflow-wrap:anywhere}'
++ '.hero-text h1{overflow-wrap:anywhere}'
++ '.clock-card{grid-template-columns:minmax(0,1fr);min-width:0;max-width:100%}'
++ '.clock-card .clock-time{min-width:0;max-width:100%;flex-wrap:wrap}'
++ '.clock-date,.clock-lunar{overflow-wrap:anywhere}'
++ '}';
+document.head.appendChild(style);
+})();
 let uiBootReady = false, uiPending = false, uiTimer = 0;
 const uiPayload = () => ({ theme: UI.theme, accent: UI.accent, dotMatrix: UI.dotMatrix, motion: UI.motion, fontScale: UI.fontScale, range: UI.range, layoutVersion: LAYOUT_VERSION, layout: UI.layout, hidden: UI.hidden, thresholds: TH, ignored: UI.ignored || [] });
 function saveUI() {
