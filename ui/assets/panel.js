@@ -14,11 +14,24 @@
   const REQUEST_TIMEOUT = 4500;
   const ACTION_TIMEOUT = 60000;
   const controlToken = (() => {
+    const value = env => {
+      const token = env && env.R1_TOOLBOX_CONTROL_TOKEN;
+      return typeof token === 'string' ? token : '';
+    };
+    // The vendor Electron shell normally exposes require('process').  Some
+    // renderer builds only expose the process global or the node: alias; do
+    // not silently disable every local write when one bridge shape is missing.
     try {
-      if (typeof window.require !== 'function') return '';
-      const value = window.require('process').env.R1_TOOLBOX_CONTROL_TOKEN;
-      return typeof value === 'string' ? value : '';
-    } catch (_) { return ''; }
+      if (typeof window.require === 'function') {
+        const fromRequire = value(window.require('process').env);
+        if (fromRequire) return fromRequire;
+      }
+    } catch (_) {}
+    try { if (window.process) return value(window.process.env); } catch (_) {}
+    try {
+      if (typeof window.require === 'function') return value(window.require('node:process').env);
+    } catch (_) {}
+    return '';
   })();
 
   const $ = id => document.getElementById(id);
@@ -58,6 +71,7 @@
     pairingDeadline: null,
     containerId: null,
     toastTimer: null,
+    tokenWarned: false,
     countdownTimer: null,
     sleeping: false,
     saver: false,
@@ -374,7 +388,14 @@
       fillState.relevant = true;
       fillState.view = view;
     }
-    if (!controlToken || !state.online) return;
+    if (!controlToken) {
+      if (!state.tokenWarned && fillMissing()) {
+        state.tokenWarned = true;
+        toast('本机控制令牌未就绪，无法补齐容量；请重启小屏服务', true);
+      }
+      return;
+    }
+    if (!state.online) return;
     if (fillState.inflight || fillState.attempted) return;
     if (!fillMissing()) return;
     fillState.attempted = true;
@@ -389,7 +410,12 @@
       if (!fillReceipt(data)) return;
       if (fillView() !== view) return;
       await poll();
-    } catch (_) { /* busy/403/异常：本周期结束，不重试 */ }
+    } catch (error) {
+      // Surface the fixed gate reason once per view; never retry automatically.
+      if (fillState.ticket === ticket && fillState.epoch === epoch && fillView() === view) {
+        toast('容量补齐未完成：' + (error && error.message ? error.message : '本机服务拒绝'), true);
+      }
+    }
     finally { if (fillState.ticket === ticket) { fillState.ticket = null; fillState.inflight = false; } }
   }
   document.addEventListener('visibilitychange', () => { fillTick().catch(() => {}); });

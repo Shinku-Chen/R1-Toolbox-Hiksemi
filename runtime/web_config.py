@@ -40,6 +40,7 @@ from service_settings import ServiceSettingsStore
 from network_access import peer_matches
 from mcp_service import validate_http_metadata
 from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
+import screen_diagnostics
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
                       'saver_brightness', 'saver_content', 'saver_items', 'brightness',
@@ -1020,7 +1021,12 @@ class WebConfigServer:
             return 200, self.auth_status(headers, peer=peer), 'application/json; charset=utf-8'
         if route == '/api/r1':
             authorized = self.panel_authorized(headers, peer=peer) is not None
-            return 200, panel.r1_state(authorized=authorized), 'application/json; charset=utf-8'
+            value = panel.r1_state(authorized=authorized)
+            if authorized:
+                # Owner-only, bounded evidence for the independent local screen.
+                # No token, headers, peer, body, or path is retained.
+                value['screen_fill'] = screen_diagnostics.snapshot()
+            return 200, value, 'application/json; charset=utf-8'
         if route == '/api/business':
             if query:
                 raise ValueError('业务状态不接受查询参数')

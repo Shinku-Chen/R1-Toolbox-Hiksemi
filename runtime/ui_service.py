@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import screen_diagnostics
 import select
 import signal
 import socket
@@ -3679,26 +3680,41 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
 
         def storage_fill(self):
             """Screen-only explicit fill; never reuse owner/Bearer authority."""
+            raw_origin = self.headers.get('Origin')
+            supplied_header = self.headers.get('X-R1-Token', '')
+            sequence = screen_diagnostics.note_request(
+                kind='fill', origin=raw_origin,
+                token_present=bool(supplied_header), outcome='received')
             valid, origin = self.request_origin()
             if not valid:
+                screen_diagnostics.note_outcome(sequence, outcome='origin_rejected')
                 return
             supplied = self.headers.get('X-R1-Token', '')
+            matched = bool(control_token) and secrets.compare_digest(
+                supplied.encode('utf8'), control_token.encode('utf8'))
             if (origin is None or self.headers.get('Authorization') is not None or not control_token
-                    or not secrets.compare_digest(supplied.encode('utf8'), control_token.encode('utf8'))):
+                    or not matched):
+                screen_diagnostics.note_outcome(
+                    sequence, token_present=bool(supplied), token_match=matched,
+                    outcome='authorization_denied')
                 self.send_json(403, {'ok': False, 'reason': 'authorization_denied'}, origin)
                 return
             if self.path != '/api/storage/fill':
+                screen_diagnostics.note_outcome(sequence, token_match=True, outcome='invalid_request')
                 self.send_json(400, {'ok': False, 'reason': 'invalid_request'}, origin)
                 return
             if web_config is None or not callable(getattr(web_config, 'storage_fill', None)):
+                screen_diagnostics.note_outcome(sequence, token_match=True, outcome='unavailable')
                 self.send_json(503, {'ok': False, 'reason': 'unavailable'}, origin)
                 return
             length = self.headers.get('Content-Length', '')
             if (self.headers.get('Transfer-Encoding') is not None or not length.isascii()
                     or not length.isdigit() or len(length) > 2 or not 0 < int(length) <= 64):
+                screen_diagnostics.note_outcome(sequence, token_match=True, outcome='invalid_request')
                 self.send_json(400, {'ok': False, 'reason': 'invalid_request'}, origin)
                 return
             if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
+                screen_diagnostics.note_outcome(sequence, token_match=True, outcome='invalid_request')
                 self.send_json(415, {'ok': False, 'reason': 'invalid_request'}, origin)
                 return
             try:
@@ -3706,6 +3722,7 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 if type(payload) is not dict or payload:
                     raise ValueError()
             except (ValueError, UnicodeError):
+                screen_diagnostics.note_outcome(sequence, token_match=True, outcome='invalid_request')
                 self.send_json(400, {'ok': False, 'reason': 'invalid_request'}, origin)
                 return
             with self.server.storage_guard:
@@ -3736,11 +3753,16 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                         pass
                 if not current():
                     raise CapacityRefreshError('authorization_denied')
+                screen_diagnostics.note_outcome(sequence, token_match=True, outcome='completed')
                 self.send_json(200, value, origin, authorizer=current)
             except Exception as error:
                 reason = getattr(error, 'reason', 'unavailable')
                 if reason not in ('authorization_denied', 'busy', 'timeout', 'unavailable'):
                     reason = 'unavailable'
+                screen_diagnostics.note_outcome(
+                    sequence, token_match=True,
+                    outcome='denied' if reason == 'authorization_denied' else 'failed',
+                    reason=reason)
                 self.send_json(403 if reason == 'authorization_denied' else 409 if reason == 'busy' else 503,
                                {'ok': False, 'reason': reason}, origin)
 
@@ -3770,10 +3792,16 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
         def do_OPTIONS(self):
             # Newer Chromium versions can preflight file:// -> loopback reads.
             # Grant only this read route, never a control method or extra headers.
+            raw_origin = self.headers.get('Origin')
+            route = urllib.parse.urlsplit(self.path).path
+            sequence = screen_diagnostics.note_request(
+                kind='preflight', origin=raw_origin,
+                outcome='received') if route == '/api/storage/fill' else None
             valid, origin = self.request_origin()
             if not valid:
+                if sequence is not None:
+                    screen_diagnostics.note_outcome(sequence, outcome='origin_rejected')
                 return
-            route = urllib.parse.urlsplit(self.path).path
             method = self.headers.get("Access-Control-Request-Method")
             headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",") if part.strip()}
             can_read = route in ("/api/status", "/api/toolbox", "/api/insights", "/api/web-config", "/api/fan-policy",
@@ -3785,8 +3813,12 @@ def make_http_server(monitor, port=PORT, controller=None, insights=None, control
                 origin is None or not allowed_origin(origin, self.server.server_port)
                 or not (can_read or can_control)
             ):
+                if sequence is not None:
+                    screen_diagnostics.note_outcome(sequence, outcome='preflight_denied')
                 self.send_json(403, {"error": "preflight not allowed"})
                 return
+            if sequence is not None:
+                screen_diagnostics.note_outcome(sequence, outcome='preflight_allowed')
             self.send_response(204)
             self.send_header("Content-Length", "0")
             self.send_header("Cache-Control", "no-store")

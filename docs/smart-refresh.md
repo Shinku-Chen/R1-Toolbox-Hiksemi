@@ -14,6 +14,8 @@ Web 进入存储页、打开磁盘详情或从 hidden 回到该视图时显式�
 
 网页固定 `POST /api/r1/storage/fill`，严格 `{}`，要求当前所有者和同源／JSON／CSRF；登录开启却没有有效会话时只能展示缓存。本机小屏固定 `POST /api/storage/fill`，使用原独立 `X-R1-Token`、本地 Origin 和服务生命周期，不借用网页登录授权，令牌不发给 Web。两条路由都拒绝 force、盘名、路径、命令及 URL 参数。
 
+所有者可见的 `/api/r1.screen_fill` 只返回最近八条小屏补齐／预检事件的来源类别、令牌是否出现与是否匹配、结果和固定原因；不保存令牌、请求头、请求体、路径或 peer。它只用于区分“小屏未发出请求”“预检／来源被拒”“令牌不匹配”和“容量采集已开始”，不授予写权限，也不改变 GET、轮询或采集频率。
+
 Web 以 `GET /api/auth/session` 的布尔 `owner_authorized` 判断是否显示自动补齐资格；该字段只委托当前 `panel_authorized` 的 password／pair／open 结果。不能用 `authorized && !dev_mode` 推断所有者：开发窗口可与正常所有者同时开启，pair 也可能在旧 authorized:false 时有效。旧服务没有此字段时，仅 logged_in:true，或 auth_mode:password、auth_required:false 且 authorized:true 可作兼容提示；旧 pair 无明确证明时只显示缓存。提示不授操作权，POST 仍独立检查 Bearer、同源／JSON／CSRF、当前授权和服务代次，撤权后旧提示不能继续使用。
 
 上述 fill 只在概览或小屏磁盘容量／温度相关页面可见且缓存缺失时请求，每个可见周期最多一次。已有有效数据不重复请求；离页、Web 隐藏或屏保后不发新请求。休眠、不支持、失败和 busy 都结束本周期自动尝试，不因两秒 GET 或重绘循环重试。Web 存储页和磁盘详情改用前述 refresh，不受 fill 的正缓存命中规则限制。服务器没有无人查看仍运行的页面租约采集器。
