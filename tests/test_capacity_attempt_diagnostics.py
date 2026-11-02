@@ -80,7 +80,9 @@ class CapacityAttemptTests(unittest.TestCase):
     def test_watch_guard_rejection_precedes_outer_probe_error(self):
         def changed(entry, deadline, guard):
             self.fixture.watch.changed.return_value = True
-            self.fixture.watch.observation = {'reason': 'mount_event', 'polled': True,
+            # A namespace identity change is a real loss of proof, not the
+            # unrelated Docker overlay mount noise ignored by the projection.
+            self.fixture.watch.observation = {'reason': 'namespace_changed', 'polled': True,
                                              'namespace_read': True, 'mask': 10}
             return self.fixture.measure(entry, deadline, guard)
         with mock.patch.object(self.sampler, '_capacity_probe', side_effect=changed):
@@ -88,7 +90,7 @@ class CapacityAttemptTests(unittest.TestCase):
         first = self.latest()['first_rejection']
         self.assertEqual(first['stage'], 'parent_watch')
         self.assertEqual(first['reason'], 'mount_epoch_changed')
-        self.assertEqual(first['observations']['watch_reason'], 'mount_event')
+        self.assertEqual(first['observations']['watch_reason'], 'namespace_changed')
         self.assertEqual(result['results'][0]['status'], 'identity_changed')
 
     def test_same_batch_key_change_is_not_reported_as_worker_failure_only(self):
@@ -239,7 +241,7 @@ class CapacityAttemptTests(unittest.TestCase):
             nonlocal triggered
             result, triggered = triggered, False
             self.fixture.watch.observation = {'namespace_read': True, 'polled': True,
-                'reason': 'mount_event' if result else 'unchanged', 'mask': 10 if result else 0}
+                'reason': 'namespace_changed' if result else 'unchanged', 'mask': 10 if result else 0}
             return result
         self.fixture.watch.changed.side_effect = watch_changed
         fired = False

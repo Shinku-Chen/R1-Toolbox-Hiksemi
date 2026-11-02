@@ -231,6 +231,22 @@
     };
   }
 
+  function capacityByDevice() {
+    const result = new Map();
+    for (const row of list(obj(state.data.status).disks)) {
+      const name = typeof row.device === 'string' ? row.device : '';
+      const total = num(row.total_bytes, 1);
+      const used = num(row.used_bytes, 0);
+      if (!name || total === null || used === null || used > total) continue;
+      const item = result.get(name) || { total: 0, used: 0, measured: 0 };
+      item.total += total;
+      item.used += used;
+      item.measured += 1;
+      result.set(name, item);
+    }
+    return result;
+  }
+
   function pool() {
     const disks = list(obj(state.data.status).disks);
     let total = 0;
@@ -772,20 +788,23 @@
   // These labels come from explicit host metadata, never from a model or mount path.
   const driveName = (disk, index = 0) => disk.user_name || disk.display_name || disk.id || 'disk ' + (index + 1);
 
-  function driveCard(disk, index) {
+  function driveCard(disk, index, capacity) {
     const temp = num(disk.temp_c, -40, 200);
     const standby = disk.standby === true;
     const size = bytes(disk.size_bytes);
     const health = obj(disk.health);
     const smart = health.passed === false ? 'SMART 异常' : health.passed === true ? 'SMART 正常' : 'SMART 未读取';
-    return `<article class="card"><div class="drive-row"><div class="drive-symbol" style="color:${standby ? 'var(--dim)' : temp !== null && temp >= 50 ? 'var(--orange)' : 'var(--green)'}"><svg viewBox="0 0 28 58" aria-hidden="true" fill="currentColor">${Array.from({ length: 10 }, (_, row) => `<circle cx="8" cy="${6 + row * 5}" r="1.7"/><circle cx="14" cy="${6 + row * 5}" r="1.7"/><circle cx="20" cy="${6 + row * 5}" r="1.7"/>`).join('')}</svg></div><div class="drive-content"><div class="drive-title"><h3>${esc(driveName(disk, index))}</h3><span class="drive-temperature ${standby || temp === null ? 'muted' : temp >= 50 ? 'orange' : 'green'}">${tempText(temp)}</span></div><p class="drive-meta">${esc(disk.model || '未知型号')} · ${esc(size)}</p>${standby ? `<p class="drive-standby">休眠中 · ${temp === null ? '暂无缓存读数' : '已有缓存读数'} · 不主动唤醒</p>` : `<p class="caption">${esc(smart)}${num(disk.temperature_critical_c, 0) ? ' · 临界 ' + disk.temperature_critical_c + '°C' : ''}</p>`}</div></div></article>`;
+    const usedPercent = capacity && capacity.total > 0 ? capacity.used / capacity.total * 100 : null;
+    const usage = capacity ? `<div class="drive-capacity"><div class="drive-capacity-top"><span>已用 <b>${percentText(usedPercent)}%</b></span><span class="mono">${bytes(capacity.used)} / ${bytes(capacity.total)}</span></div>${bar(usedPercent, usedPercent >= 85 ? 'var(--orange)' : 'linear-gradient(90deg,#8ed7b2,#c7ed89)', 'drive-capacity-bar')}${capacity.measured > 1 ? `<p class="drive-capacity-note">已测 ${capacity.measured} 个分区／挂载</p>` : ''}</div>` : '<p class="drive-capacity muted">容量暂不可读</p>';
+    return `<article class="card"><div class="drive-row"><div class="drive-symbol" style="color:${standby ? 'var(--dim)' : temp !== null && temp >= 50 ? 'var(--orange)' : 'var(--green)'}"><svg viewBox="0 0 28 58" aria-hidden="true" fill="currentColor">${Array.from({ length: 10 }, (_, row) => `<circle cx="8" cy="${6 + row * 5}" r="1.7"/><circle cx="14" cy="${6 + row * 5}" r="1.7"/><circle cx="20" cy="${6 + row * 5}" r="1.7"/>`).join('')}</svg></div><div class="drive-content"><div class="drive-title"><h3>${esc(driveName(disk, index))}</h3><span class="drive-temperature ${standby || temp === null ? 'muted' : temp >= 50 ? 'orange' : 'green'}">${tempText(temp)}</span></div><p class="drive-meta">${esc(disk.model || '未知型号')} · ${esc(size)}</p>${usage}${standby ? `<p class="drive-standby">休眠中 · ${temp === null ? '暂无缓存读数' : '已有缓存读数'} · 不主动唤醒</p>` : `<p class="caption">${esc(smart)}${num(disk.temperature_critical_c, 0) ? ' · 临界 ' + disk.temperature_critical_c + '°C' : ''}</p>`}</div></div></article>`;
   }
 
   function storage() {
     const disk = pool();
     const allDrives = list(obj(obj(state.data.insights).disks).items);
     const drives = allDrives.filter(row => row && row.id);
-    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '快照使用率' : '尚未采集容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>${esc(snapshotLabel(disk))}</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map(driveCard).join('')}${drives.length ? '' : '<p class="info-note">未读取到物理磁盘。</p>'}`;
+    const capacity = capacityByDevice();
+    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '快照使用率' : '尚未采集容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>${esc(snapshotLabel(disk))}</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map((row, index) => driveCard(row, index, capacity.get(row.id))).join('')}${drives.length ? '' : '<p class="info-note">未读取到物理磁盘。</p>'}`;
   }
 
   function network() {

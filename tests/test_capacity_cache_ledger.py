@@ -210,15 +210,26 @@ class CapacityLedgerCoreTests(unittest.TestCase):
         self.assertEqual(len(inventory['entries']), 1)
         self.assertEqual(inventory['entries'][0]['reason'], 'device_identity_unavailable')
 
-    def test_watch_event_invalidates_positive_cache_and_is_latched(self):
+    def test_unrelated_mount_event_keeps_unchanged_data_mounts(self):
         self.refresh()
         self.case.watch.observation = {'reason': 'mount_event', 'mask': 2,
                                        'namespace_read': True, 'polled': True}
         self.case.watch.changed.return_value = True
         self.sampler.capacity_snapshot()
-        self.first('watch_mount_event')
-        self.assertIsNone(self.sampler._capacity_watch)
-        self.case.watch.close.assert_called_once()
+        # Host-wide mountinfo also reports Docker overlay churn.  A projection
+        # revalidates the data-mount keys and keeps an unchanged measurement.
+        self.assertIsNone(self.diagnostics()['first_invalidation'])
+        self.assertGreater(self.diagnostics()['state']['positive'], 0)
+        self.assertIsNotNone(self.sampler._capacity_watch)
+
+    def test_mount_event_with_changed_data_mount_is_invalidated(self):
+        self.refresh()
+        self.case.watch.observation = {'reason': 'mount_event', 'mask': 2,
+                                       'namespace_read': True, 'polled': True}
+        self.case.watch.changed.return_value = True
+        self.case.write_mount(mount_id=12)
+        self.sampler.capacity_snapshot()
+        self.first('active_keys_changed')
 
     def test_missing_watch_is_distinct_from_kernel_event(self):
         self.refresh()

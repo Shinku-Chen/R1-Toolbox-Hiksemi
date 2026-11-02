@@ -189,6 +189,15 @@ body{font-size:22px}
   .saver-title{display:none}
 }
 
+/* Per-disk capacity stays a cached snapshot; unknown never becomes 0%. */
+.drive-capacity{margin:0 0 10px}
+.drive-capacity-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:15px;color:var(--muted)}
+.drive-capacity-top b{font-weight:500;color:var(--text)}
+.drive-capacity-top .mono{font-size:13px;color:var(--dim)}
+.drive-capacity-bar{height:5px;margin-top:8px}
+.drive-capacity-note{font-size:12px;color:var(--dim);margin-top:6px}
+.drive-capacity.muted{color:var(--dim);font-size:14px}
+
 /* Prototype canvas only; screen components stay identical. */
 /* Only the design canvas differs from the production screen host. */
 body{display:block;overflow:auto;background:#101211}

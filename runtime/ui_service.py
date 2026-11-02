@@ -841,6 +841,7 @@ def _capacity_projection(entries, cache):
     rows = []
     for entry in entries:
         row = {'mount': entry['mount'], 'mount_id': entry['mount_id'],
+               'device': entry.get('_device_name'),
                'total_bytes': None, 'used_bytes': None, 'usage_percent': None,
                'capacity_sampled_at': None, 'capacity_source': _CAPACITY_SOURCE,
                'capacity_status': 'unknown' if entry['_key'] else 'unavailable'}
@@ -2287,7 +2288,9 @@ class StatusSampler:
             self._capacity_reap_exited()
             entries, complete = self._capacity_inventory_observe()
             previous = set(self._capacity_cache)
-            self._capacity_check_watch()
+            # Mountinfo is host-wide.  Docker overlay churn must not erase a
+            # capacity row whose real mount identity is unchanged.
+            self._capacity_check_watch(defer_mount_event=True)
             # Observing an unmount/incomplete scan irrevocably discards the old
             # record; a later same-name mount cannot revive it.
             self._capacity_reconcile(entries, complete)
@@ -2616,15 +2619,23 @@ class StatusSampler:
         self._capacity_negative = {}
         self._capacity_note(reason, before=before, before_epoch=before_epoch)
 
-    def _capacity_check_watch(self, *, create=False):
-        """Any event or loss of proof rejects all namespace-derived values."""
+    def _capacity_check_watch(self, *, create=False, defer_mount_event=False):
+        """Any relevant event or loss of proof rejects all namespace-derived values.
+
+        A host-wide mountinfo poll also reports unrelated Docker overlay mounts.
+        A read-only status projection must revalidate the actual data-mount keys
+        after such an event instead of clearing a valid measurement on every
+        container churn.  Other callers keep the immediate fail-closed behavior;
+        only capacity_snapshot() opts into the key-based revalidation below.
+        """
         watch = self._capacity_watch
         if watch is not None and watch.changed():
             self._capacity_last_watch = _capacity_observe_guarded(self, lambda: self._capacity_watch_observe(watch))
             reason = self._capacity_last_watch['reason'] if self._capacity_last_watch else 'changed_unclassified'
-            self._capacity_invalidate('watch_' + reason)
-            watch.close()
-            self._capacity_watch = None
+            if not (defer_mount_event and reason == 'mount_event'):
+                self._capacity_invalidate('watch_' + reason)
+                watch.close()
+                self._capacity_watch = None
         if self._capacity_watch is None:
             if self._capacity_cache or self._capacity_negative:
                 self._capacity_invalidate('watch_missing')
@@ -3032,7 +3043,10 @@ class StatusSampler:
         def check_batch():
             authorized()
             with self._capacity_lock:
-                self._capacity_check_watch()
+                # A foreground batch must also survive host-wide Docker
+                # overlay mount events; observed() compares the actual data
+                # mount keys and rejects a real detach/identity change.
+                self._capacity_check_watch(defer_mount_event=True)
                 if mount_generation != self._capacity_mount_epoch or self._capacity_watch is None:
                     _capacity_observe_guarded(self, lambda: self._capacity_attempt_step('parent_watch',
                         getattr(self._capacity_context, 'mount_id', None), 'failed',
@@ -3051,7 +3065,7 @@ class StatusSampler:
             nonlocal batch_changed
             with self._capacity_lock:
                 _capacity_observe_guarded(self, lambda: setattr(self._capacity_context, 'inventory', getattr(entries, 'observation', None)))
-                self._capacity_check_watch()
+                self._capacity_check_watch(defer_mount_event=True)
             active = self._capacity_reconcile(entries, complete)
             batch_changed = batch_changed or (mount_generation is not None and (
                 mount_generation != self._capacity_mount_epoch or self._capacity_watch is None))
