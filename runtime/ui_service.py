@@ -20,7 +20,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import screen_diagnostics
 import select
 import signal
 import socket
@@ -3527,6 +3526,8 @@ def allowed_origin(origin, port):
 
 def make_http_server(monitor, port=PORT, controller=None, insights=None, control_token=None, web_config=None,
                      fan_policy=None, light_policy=None, monitoring=None):
+    import screen_diagnostics
+
     class StatusHandler(http.server.BaseHTTPRequestHandler):
         def request_origin(self):
             origin = self.headers.get("Origin")
