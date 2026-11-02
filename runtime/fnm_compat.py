@@ -201,6 +201,40 @@ def _capacity_history_sideband(rows):
         return {}, None
 
 
+def _capacity_archive_sideband(rows):
+    """Owner-only past batch, independent of the current inventory or pool.
+
+    Consume the exact normal disk read, without collecting or rebinding its
+    detached archive to present disks. Copy only the closed display schema.
+    """
+    try:
+        value = getattr(rows, 'capacity_observation_archive', None)
+        if (not isinstance(value, dict) or type(value.get('schema_version')) is not int
+                or value['schema_version'] != 1 or value.get('status') != 'historical'
+                or value.get('source') != 'past_successful_observation'
+                or value.get('reason') != 'current_binding_unverified'
+                or value.get('retention') != 'memory_until_restart'):
+            return None
+        identity = value.get('observation_id')
+        if (not isinstance(identity, str) or not re.fullmatch(r'[1-9][0-9]{0,18}', identity)
+                or int(identity) > 2 ** 63 - 1
+                or any(type(value.get(key)) is not int for key in ('total', 'used', 'available'))):
+            return None
+        result = _capacity_last_observation({
+            'status': 'historical', 'source': 'last_successful_observation',
+            'reason': 'mount_continuity_unverified', 'observation_id': identity,
+            **{key: value.get(key) for key in ('total', 'used', 'available', 'percent',
+                                              'sampled_at', 'sampled_at_latest', 'coverage')}})
+        if (result is None or result['coverage']['disk_count'] > result['coverage']['filesystem_count']
+                or result['percent'] != result['used'] / result['total'] * 100):
+            return None
+        result.update(schema_version=1, source='past_successful_observation',
+                      reason='current_binding_unverified', retention='memory_until_restart')
+        return result
+    except Exception:
+        return None
+
+
 def _capacity_history_rendered_summary(summary, rows):
     """Publish the producer's batch only when its full rendered group agrees.
 
@@ -1061,6 +1095,7 @@ class FnmonitorPanel:
                  if isinstance(entry, dict)}
         history, history_summary = (_capacity_history_sideband(basic_rows)
                                     if include_identity else ({}, None))
+        archive = _capacity_archive_sideband(basic_rows) if include_identity else None
         identities = {}
         if include_identity:
             getter = getattr(self.insights, 'storage_identity_cached', None)
@@ -1173,6 +1208,7 @@ class FnmonitorPanel:
             history_summary = _capacity_history_rendered_summary(history_summary, rows)
             rows = _CapacityHistoryDisks(rows)
             rows.capacity_history_summary = history_summary
+            rows.capacity_observation_archive = archive
         return rows
 
     @_capacity_projection_stage('summary')
@@ -1675,8 +1711,9 @@ class FnmonitorPanel:
             'disk_size': total_size,
             'disk_pools': 0,
             'disks_detail': disks,
-            **({'capacity_last_observation_summary': getattr(disks, 'capacity_history_summary', None)}
-               if include_identity else {}),
+            **({'capacity_last_observation_summary': getattr(disks, 'capacity_history_summary', None),
+                'capacity_observation_archive': getattr(disks, 'capacity_observation_archive', None)}
+                if include_identity else {}),
             'idrac_slot_state': 'off',
             'net': self._net(),
             'net_aggregate': self._network_aggregate(),

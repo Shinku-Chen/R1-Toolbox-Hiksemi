@@ -276,10 +276,11 @@ class _CapacityHistoryData(dict):
 
 
 class _CapacityHistoryRows(list):
-    """Private same-projection history; normal JSON list encoding omits it."""
-    def __init__(self, rows, observations):
+    """Private same-projection history/archive; normal JSON omits both."""
+    def __init__(self, rows, observations, archive=None):
         super().__init__(rows)
         self.capacity_observations = _CapacityHistoryData(observations)
+        self.capacity_observation_archive = archive
 
 
 class _CapacityAttemptResult(dict):
@@ -2062,6 +2063,7 @@ class StatusSampler:
         self._capacity_refresh_lock = threading.Lock()
         self._capacity_cache = {}
         self._capacity_history = {}
+        self._capacity_observation_archive = None
         self._capacity_history_sequence = 0
         self._capacity_history_instance = object()
         self._capacity_negative = {}
@@ -2296,9 +2298,13 @@ class StatusSampler:
             self._capacity_note('projection')
             # Create the private sideband before binding a543's diagnostic
             # provenance: both consumers must refer to the exact returned list.
+            observations = {'disks': {}, 'summary': None}
             try:
                 observations = self._capacity_history_projection(entries, complete)
-                rows = _CapacityHistoryRows(rows, observations)
+            except Exception:
+                pass
+            try:
+                rows = _CapacityHistoryRows(rows, observations, self._capacity_observation_archive)
             except Exception:
                 pass
             def publish():
@@ -2470,6 +2476,24 @@ class StatusSampler:
         _capacity_observe_guarded(self, observed)
         return receipt
 
+    @staticmethod
+    def _capacity_archive_view(records):
+        """Detach one published batch's numbers from all present disk bindings.
+
+        The original candidate already binds and deduplicates real successful
+        measurements. Only their dated subset is retained, never identity,
+        mount paths or authority to reuse current capacity.
+        """
+        summary = StatusSampler._capacity_history_view(list(records.values()), {})
+        if summary is None:
+            return None
+        return _CapacityHistoryData({
+            'schema_version': 1, 'status': 'historical',
+            'source': 'past_successful_observation', 'reason': 'current_binding_unverified',
+            **{key: summary[key] for key in ('observation_id', 'total', 'used', 'available',
+                                             'percent', 'sampled_at', 'sampled_at_latest', 'coverage')},
+            'retention': 'memory_until_restart'})
+
     def publish_capacity_history(self, receipt, *, authorizer):
         """Finalize a successfully written owner response; never collect or retry.
 
@@ -2510,6 +2534,14 @@ class StatusSampler:
                         for mount_id, record in receipt.records.items()):
                     rejected('cache_changed', 'cache_match')
                     return False
+                # The archive has one global batch watermark. Older disjoint
+                # disk histories still follow their original per-disk ordering;
+                # they simply cannot replace a newer detached archive.
+                archive = self._capacity_observation_archive
+                if archive is None or int(archive['observation_id']) < receipt.batch:
+                    archive = self._capacity_archive_view(receipt.records)
+                    if archive is None:
+                        return False
                 updated = dict(self._capacity_history)
                 changed = False
                 for name in {record['device_name'] for record in receipt.records.values()}:
@@ -2534,16 +2566,28 @@ class StatusSampler:
                         if receipt.epoch != self._capacity_epoch or self._capacity_closed else 'timeout', 'before_publish')
                     return False
                 previous = self._capacity_history
+                previous_archive = self._capacity_observation_archive
                 self._capacity_history = updated
-                if (not (grant := allowed()) or receipt.epoch != self._capacity_epoch
-                        or self._capacity_closed or time.monotonic() >= receipt.deadline):
+                try:
+                    self._capacity_observation_archive = archive
+                    if (not (grant := allowed()) or receipt.epoch != self._capacity_epoch
+                            or self._capacity_closed or time.monotonic() >= receipt.deadline):
+                        self._capacity_history = previous if receipt.epoch == self._capacity_epoch and not self._capacity_closed else {}
+                        self._capacity_observation_archive = (previous_archive
+                            if receipt.epoch == self._capacity_epoch and not self._capacity_closed else None)
+                        rejected('authorization_denied' if not grant else 'lifecycle_changed'
+                            if receipt.epoch != self._capacity_epoch or self._capacity_closed else 'timeout', 'rollback')
+                        return False
+                    _capacity_observe_guarded(self, lambda: self.capacity_attempt_response(receipt, 'finalize', 'passed',
+                        observations={'phase': 'published', 'records_count': len(receipt.records),
+                                      'history_batch': receipt.batch}))
+                except Exception:
+                    # Still under the publication lock: an exception cannot
+                    # expose a half publication or roll back another writer.
                     self._capacity_history = previous if receipt.epoch == self._capacity_epoch and not self._capacity_closed else {}
-                    rejected('authorization_denied' if not grant else 'lifecycle_changed'
-                        if receipt.epoch != self._capacity_epoch or self._capacity_closed else 'timeout', 'rollback')
-                    return False
-                _capacity_observe_guarded(self, lambda: self.capacity_attempt_response(receipt, 'finalize', 'passed',
-                    observations={'phase': 'published', 'records_count': len(receipt.records),
-                                  'history_batch': receipt.batch}))
+                    self._capacity_observation_archive = (previous_archive
+                        if receipt.epoch == self._capacity_epoch and not self._capacity_closed else None)
+                    raise
                 return True
         except Exception:
             _capacity_observe_guarded(self, lambda: self.capacity_attempt_response(receipt, 'finalize', 'failed',
@@ -2630,6 +2674,7 @@ class StatusSampler:
             self._capacity_closed = False
             self._capacity_negative = {}
             self._capacity_history = {}
+            self._capacity_observation_archive = None
             self._capacity_history_sequence = 0
             self._capacity_mount_epoch += 1
             self._capacity_replace_cache({}, reason='start', before_epoch=before_epoch)
@@ -2646,6 +2691,7 @@ class StatusSampler:
             _capacity_observe_guarded(self, lambda: self._capacity_attempts.reset())
             self._capacity_negative = {}
             self._capacity_history = {}
+            self._capacity_observation_archive = None
             self._capacity_history_sequence = 0
             self._capacity_mount_epoch += 1
             self._capacity_replace_cache({}, reason='close', before_epoch=before_epoch)

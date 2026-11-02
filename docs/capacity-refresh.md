@@ -89,7 +89,7 @@ Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌
 
 `a543` 已保存的实机决策现场确认：成功提交后约 13.50 秒，真实 namespace-wide `mountinfo` poll 事件使八条当前容量清空；当时 namespace 相同、相关目标的可比较 key 相同，但全局表由 85 行变为 86 行。未确定是哪条外部挂载或进程，也不能用两个相同终态排除中间短暂卸载／覆盖。原安全失效继续保留；本功能不忽略事件，也不宣称已修复内核或证明物理休眠。
 
-独立 RAM 最近观测用于显示“最近实测快照”，不会恢复当前容量。历史只保存真实容量业务成功后的本批新测量；核心提交后仍是私有候选，直到真实所有者的同一授权守卫通过 JSON 前后检查、服务器响应 body 写入成功，再在容量锁内复核候选实例、业务递增序号、epoch、原缓存、绝对期限与授权后发布。服务器写入成功不证明浏览器收到；传输失败不生成新历史、不自动重放，核心已经提交的当前容量仍按原语义处理。失败、超时、撤权回滚或 stop／start 不能复活候选，迟到响应不能覆盖较新批次。
+按盘绑定的 RAM 最近观测用于显示“最近实测快照”，不会恢复当前容量。本节规则继续约束原 `capacity_last_observation` 与 `capacity_last_observation_summary`；下节独立过去测量档案不改变这些绑定与永久删除规则。历史只保存真实容量业务成功后的本批新测量；核心提交后仍是私有候选，直到真实所有者的同一授权守卫通过 JSON 前后检查、服务器响应 body 写入成功，再在容量锁内复核候选实例、业务递增序号、epoch、原缓存、绝对期限与授权后发布。服务器写入成功不证明浏览器收到；传输失败不生成新历史、不自动重放，核心已经提交的当前容量仍按原语义处理。失败、超时、撤权回滚或 stop／start 不能复活候选，迟到响应不能覆盖较新批次。
 
 候选绑定同次真实 `_capacity_device` 的完整私有 tuple，存放在不可 JSON 序列化的旁侧数据中，不扩大 worker 的原 4096 字节请求。被动投影只复用本次原库存已读取的值，不为历史重扫、poll、开 worker 或访问用户挂载。这里的库存是原 `/drives` 挂载目标库存，不是完整 `sys/block` 物理／分区枚举；必须仍有完整可验证的原生产元数据行，且同盘各分区的物理父身份、设备号、diskseq 一致。未知归属、截断、缺行、冲突、设备／分区代次变化时保守隐藏或删除历史，不能按 sdX／序列号或诊断摘要挂到新盘上。实际卸载后缺少这项证明就不展示，即使后来同名重新出现也不复活旧记录。
 
@@ -126,6 +126,45 @@ Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌
 范围始终是实际测过的文件系统子集，`complete:false` 不代表完整物理盘／池。重复设备挂载不能重复相加，多分区分别保留原贡献；同盘新批只测到部分分区时替换该盘旧组，不把旧分区数值混进新日期。单盘待机、不产生新测量时保留其仍合法的旧观测与原日期，但新批顶部汇总只统计新批实际贡献。历史永不进入当前 `total/used/usage`、`disk_size/disk_used/disk_total`、容量资格、空间预检、文件根或 Token 计划；当前未知仍是 `null`，不能用历史或 0 补成正常。所有者撤权后不披露历史；start／close 清空历史，RAM 上限 128 条测量，超限按整盘最旧组淘汰。
 
 原“卸载／重挂拒旧”规则继续约束当前容量与全部权限；新增的是明确列出的过去观测。浏览器的永久真实 HTTP 验收入口为 `node tests/check_capacity_observation.cjs`；Python 生产链、发布／回滚、传输与身份冲突回归位于 `test_capacity_history_*.py`。本地合成／便携 fixture 不证明 NAS 已恢复显示或已物理休眠，最终仍由精确 Linux CI 与部署后的有限验收判定。
+
+## 独立的过去测量档案
+
+用户已选择新增“过去测量档案”，作为与当前容量、按盘绑定的最近实测快照分开的过去观测披露。档案只说明某一批曾成功测得这些数字，不证明现在的物理盘、分区、盘位、挂载或存储池归属。库存不完整、卸载／重挂、换盘、分区或物理 parent 变化、alias 冲突和 namespace 事件后，独立档案仍可保留过去数字；原当前容量、盘位历史与同批盘位汇总的完整库存、ABA、watch、key、FD、epoch、授权及永久 prune 门均保持不变。身份后来恢复也不能借档案复活已删除的原盘位历史。
+
+仅真实 password／pair／open 所有者的现有 `GET /api/overview` 顶层增加 `capacity_observation_archive`，无已发布档案时为 `null`。不增加 per-disk archive 字段或新接口；普通快照、公开 v1、MCP、本机小屏、Bearer 和开发白名单不能取得该对象。披露沿用真实所有者首次失效锁存及 JSON 前后守卫，撤权后不披露，复权不能复活失败候选。无 monitor 或 legacy 来源保持 `null`，不从旧字段、诊断 ledger 或摘要制造档案。
+
+固定对象形状如下：
+
+```json
+{
+  "schema_version": 1,
+  "status": "historical",
+  "source": "past_successful_observation",
+  "reason": "current_binding_unverified",
+  "observation_id": "1",
+  "total": 100000,
+  "used": 25000,
+  "available": 75000,
+  "percent": 25.0,
+  "sampled_at": 1793522657.1,
+  "sampled_at_latest": 1793522658.2,
+  "coverage": {
+    "scope": "measured_filesystem_subset",
+    "filesystem_count": 2,
+    "disk_count": 1,
+    "complete": false
+  },
+  "retention": "memory_until_restart"
+}
+```
+
+`observation_id` 为原业务批次 `1..2^63-1` 的十进制字符串；`total`、`used`、`available` 是本批成功子集的字节数，`available=total-used` 只是当时未用量，不是 `f_bavail` 或当前可写空间；`percent=used/total*100`。`sampled_at`／`sampled_at_latest` 保留本批最早／最晚原 Unix 秒，GET、系统时钟变化与重绘不续日期。文件系统数、盘数均为正整数，`coverage.complete` 永远为 `false`，不声称覆盖完整物理盘或池。公开对象只含这些数字、日期与固定语义字段，不含设备身份 tuple、路径、序列号或 FD。
+
+档案只来自最近一个真实新测量成功，并最终通过原所有者 HTTP 响应发布链的单业务批次：原私有候选按可信同设备去重，只合计本批真正成功测量的文件系统，不混入旧批、物理大小或别盘／旧分区测量。部分成功的新批会用本批成功子集替换前一档案；全部失败、cached-only、空候选、超时或撤权回滚不更新，也不续日期。生成与原 `publish_capacity_history` 事务共用实例、epoch、绝对期限、原授权调用和最终提交点；JSON 序列化、响应写入或最后守卫失败均须恢复本次档案前值，不能覆盖别人较新提交的档案。迟到 A 不能覆盖较新 B，即使原盘位历史已经 prune 为空；stop／start 后旧候选也不得复活。服务器写入成功仍不证明浏览器收到，失败不重放。
+
+正常 snapshot 通过同次有界、不可变私有 sideband 携带档案，Fnm 从这一次结果读取；即使这次挂载 entries 为空或库存不完整，也不为档案额外 snapshot、扫描库存、poll、运行 SMART／statvfs 或访问用户挂载。每批仍最多 128 个原候选测量。档案只在 RAM 中保留一个最新批次，无 TTL、不持久化，start／close／重启清空。它不进入当前 `total/used/usage`、`disk_size/disk_used/disk_total` 或当前池汇总，不授容量采集、空间预检、文件根、Token 或控制资格。
+
+首页和存储页将档案放在独立区域，明确标为“过去测量档案”“当前归属未确认”“已测 N 个文件系统／M 块盘（子集）”“重启清空”，并显示原完整日期区间。当前未知仍为 `--`，不得把历史百分比放回当前容量进度或把当时未用量称为现在可用空间。生产链的定向回归位于 `tests/test_capacity_archive_core.py`、`tests/test_capacity_archive_http.py` 与 `tests/test_capacity_archive_fnm.py`，原 no-revival 回归继续保留。新档案不补回旧扫描谓词；已丢失的八项旧实机拒绝原因仍未追回，本机 fixture 不证明 NAS 长期留存或物理休眠已经通过。
 
 ## Linux 验证边界
 

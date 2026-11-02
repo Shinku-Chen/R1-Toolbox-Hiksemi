@@ -22,6 +22,10 @@
 
 存储盘位与顶部可独立显示所有者的“最近实测快照”，以原日期、历史状态和已测子集范围说明过去测量；当前挂载连续性不明时保持当前容量未知，不能把历史百分比写回当前池汇总。历史顶部只汇总同一已发布批次，待机兄弟的更旧日期不会混成新批完整池；换盘、身份未知、库存不全或冲突则不展示。该数据只来自已经完成的受控刷新，不为显示它新增 SMART、容量测量、轮询或文件访问。字段与授权／传输边界见 [容量按需刷新](capacity-refresh.md#当前容量与最近实测快照)，永久真实 HTTP 浏览器检查使用 `node tests/check_capacity_observation.cjs`。
 
+首页与存储页另设“过去测量档案”区域，披露最近一个最终成功批次的过去数字。区域明确显示“当前归属未确认”“已测 N 个文件系统／M 块盘（子集）”“重启清空”和原完整日期区间；当时未用量为 `total-used`，不是 `f_bavail` 或现在可写空间。档案不与当前盘位、物理盘或池自动关联，不进入当前池汇总；当前未知仍显示 `--`。库存不完整、换盘、分区／parent／alias／namespace 变化后可保留该档案，但原盘位“最近实测快照”和同批汇总仍按完整库存与身份门永久删除，恢复同名身份也不复活旧盘位历史。
+
+独立档案仅来自真实新测量且原所有者 JSON 前后、响应写入和最后发布守卫全部通过的一批，只含该批成功子集并按可信同设备去重；不混旧批或物理盘大小。全部失败、cached-only、空候选、回滚、迟到旧批及 JSON／写入／最后守卫失败不更新也不续日期。它仅在真实 password／pair／open 所有者的现有 `GET /api/overview` 顶层以 `capacity_observation_archive` 对象或 `null` 提供，无 per-disk archive、新接口或额外采集；公开 v1、MCP、本机小屏、Bearer、开发白名单及无 monitor／legacy 来源不扩展。对象通过正常 snapshot 同次私有 sideband 取得，最多沿用原每批 128 个候选测量，只存一个最新批次于 RAM，无 TTL、不持久化，start／close／重启清空。档案不授当前容量、空间预检、文件根、Token 或控制资格，字段合同见 [独立的过去测量档案](capacity-refresh.md#独立的过去测量档案)。本地 fixture 不证明 NAS 长期留存或物理休眠通过，也未追回旧八项实机拒绝的确切扫描谓词。
+
 实时 CPU／主板读数与曲线使用同一份 Monitoring 温度缓存。主板曲线 `temp_mb` 对应实际 `board_temperature_c`，没有明确主板测点时显示未知，不能把 CPU 封装热区或 ACPI 的读数当作主板温度。原独立测点仍可查看，展示分类不改变风扇温控来源。
 
 `overview.temp` 保留 `cpu`、`system`、`disks`，其中 `system` 与兼容别名 `mb` 都表示已证主板温度；`samples.cpu`／`samples.board` 提供真实 `sampled_at`、`sampled_monotonic`、`max_age_seconds`、`fresh` 和固定缺测 `reason`。有 Monitoring 但明确缺测时，不回退旧 basic／device 值；GET 不把请求时刻当新测量。旧嵌入没有 Monitoring 时，只接受确有原时间且三秒内的兼容缓存。

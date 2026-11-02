@@ -8184,6 +8184,102 @@ Poll.add('r1DiskDisplayAge', async () => {
 const signature = disksOf(S.o).map(d => `${d.name}:${r1DiskFresh(d)}:${d.standby}`).join('|');
 if (signature !== r1DiskAgeSignature) { r1DiskAgeSignature = signature; renderNow(); }
 }, 1000, () => !!S.o && (S.page === 'storage' || (sheetCtx && ['storage', 'disk'].includes(sheetCtx.type))));
+const R1_ARCHIVE_KEYS = new Set(['schema_version', 'status', 'source', 'reason', 'observation_id',
+'total', 'used', 'available', 'percent', 'sampled_at', 'sampled_at_latest', 'coverage', 'retention']);
+const R1_ARCHIVE_COVERAGE_KEYS = new Set(['scope', 'filesystem_count', 'disk_count', 'complete']);
+function r1ArchiveInt(v, min, max) {
+return Number.isSafeInteger(v) && v >= min && v <= max;
+}
+function r1CapacityArchive(value) {
+if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+if (Object.keys(value).some(key => !R1_ARCHIVE_KEYS.has(key))) return null;
+if (value.schema_version !== 1 || value.status !== 'historical'
+|| value.source !== 'past_successful_observation' || value.reason !== 'current_binding_unverified') return null;
+if (typeof value.observation_id !== 'string' || !/^\d{1,32}$/.test(value.observation_id)) return null;
+let id;
+try { id = BigInt(value.observation_id); } catch (_) { return null; }
+if (id < 1n || id > 9223372036854775807n) return null;
+const total = value.total, used = value.used, available = value.available, percent = value.percent;
+if (!r1ArchiveInt(total, 1, Number.MAX_SAFE_INTEGER)) return null;
+if (!r1ArchiveInt(used, 0, total)) return null;
+if (!r1ArchiveInt(available, 0, Number.MAX_SAFE_INTEGER) || available !== total - used) return null;
+if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100) return null;
+if (Math.abs(percent - used / total * 100) > 0.5) return null;
+const first = value.sampled_at, latest = value.sampled_at_latest;
+if (typeof first !== 'number' || !Number.isFinite(first) || first <= 0) return null;
+if (typeof latest !== 'number' || !Number.isFinite(latest) || latest < first) return null;
+const coverage = value.coverage;
+if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)) return null;
+if (Object.keys(coverage).some(key => !R1_ARCHIVE_COVERAGE_KEYS.has(key))) return null;
+if (coverage.scope !== 'measured_filesystem_subset' || coverage.complete !== false) return null;
+if (!r1ArchiveInt(coverage.filesystem_count, 1, 4096)) return null;
+if (!r1ArchiveInt(coverage.disk_count, 1, 1024)) return null;
+if (value.retention !== 'memory_until_restart') return null;
+return { observation_id: value.observation_id, total, used, available, percent,
+sampled_at: first, sampled_at_latest: latest,
+filesystems: coverage.filesystem_count, disks: coverage.disk_count };
+}
+function r1ArchiveDate(a) {
+const first = r1SmartStamp(a.sampled_at), last = r1SmartStamp(a.sampled_at_latest);
+return a.sampled_at_latest !== a.sampled_at ? first + ' – ' + last : first;
+}
+function r1ArchiveHTML(a) {
+return `<div class="r1-arc-head"><span class="r1-arc-title">过去测量档案</span>`
++ `<span class="r1-arc-badge">当前归属未确认</span></div>`
++ `<div class="r1-arc-value"><span class="r1-arc-percent">${F.int(a.percent)}%</span>`
++ `<span class="r1-arc-bytes">${esc(F.dsizeStr(a.used))} / ${esc(F.dsizeStr(a.total))}</span></div>`
++ `<div class="r1-arc-date">原日期区间 ${esc(r1ArchiveDate(a))}</div>`
++ `<div class="r1-arc-coverage">已测 ${a.filesystems} 个文件系统 / ${a.disks} 块盘（子集）</div>`
++ `<div class="r1-arc-note">重启清空 · 仅过去观测，不代表当前容量或可用空间</div>`;
+}
+let r1ArchiveStyle = false;
+function r1ArchiveCss() {
+if (r1ArchiveStyle || typeof document === 'undefined') return;
+r1ArchiveStyle = true;
+const style = document.createElement('style');
+style.textContent = '.r1-cap-archive{font-size:12px;line-height:1.45;color:var(--ink-3);'
++ 'white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;min-width:0}'
++ '.r1-cap-archive .r1-arc-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}'
++ '.r1-cap-archive .r1-arc-title{font-size:13px;font-weight:600;color:var(--ink-2)}'
++ '.r1-cap-archive .r1-arc-badge{font-size:12px;color:var(--ink-3);border:1px solid var(--line);'
++ 'border-radius:999px;padding:1px 8px}'
++ '.r1-cap-archive .r1-arc-value{margin-top:4px;font-size:14px;color:var(--ink-1);font-weight:600}'
++ '.r1-cap-archive .r1-arc-bytes{margin-left:6px;font-size:12px;font-weight:400;color:var(--ink-3)}'
++ '.r1-cap-archive .r1-arc-date,.r1-cap-archive .r1-arc-coverage,.r1-cap-archive .r1-arc-note{margin-top:2px}'
++ '.r1-cap-archive .r1-arc-note{font-size:12px}';
+document.head.appendChild(style);
+}
+function r1ArchiveRemove(kind) {
+document.querySelectorAll(`[data-r1-archive="${kind}"]`).forEach(node => node.remove());
+}
+function r1ArchiveSync() {
+const archive = r1CapacityArchive(S.o && S.o.capacity_observation_archive);
+r1ArchiveCss();
+if (!archive) { r1ArchiveRemove('overview'); r1ArchiveRemove('storage'); return; }
+const html = r1ArchiveHTML(archive);
+const sig = JSON.stringify(archive);
+const ensure = (kind, anchor, extraStyle) => {
+if (!anchor) { r1ArchiveRemove(kind); return; }
+let node = document.querySelector(`[data-r1-archive="${kind}"]`);
+if (!node) {
+node = document.createElement('div');
+node.className = 'card pad r1-cap-archive';
+node.dataset.r1Archive = kind;
+node.setAttribute('role', 'note');
+if (extraStyle) node.setAttribute('style', extraStyle);
+anchor.insertAdjacentElement('afterend', node);
+}
+node.dataset.r1ArchiveSig = sig;
+if (node._html !== html) { node._html = html; node.innerHTML = html; }
+};
+const ovCard = document.querySelector('#layout-overview [data-m="disk"]');
+if (ovCard) ensure('overview', ovCard, 'grid-column:1 / -1');
+else r1ArchiveRemove('overview');
+const pool = document.querySelector('#layout-storage .card.pool');
+if (pool) ensure('storage', pool, 'margin-top:0');
+else r1ArchiveRemove('storage');
+}
+if (typeof Poll !== 'undefined' && Poll.add) Poll.add('r1ArchiveWatch', async () => { r1ArchiveSync(); }, 1000);
 let uiBootReady = false, uiPending = false, uiTimer = 0;
 const uiPayload = () => ({ theme: UI.theme, accent: UI.accent, dotMatrix: UI.dotMatrix, motion: UI.motion, fontScale: UI.fontScale, range: UI.range, layoutVersion: LAYOUT_VERSION, layout: UI.layout, hidden: UI.hidden, thresholds: TH, ignored: UI.ignored || [] });
 function saveUI() {
