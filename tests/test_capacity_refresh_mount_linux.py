@@ -122,16 +122,18 @@ class CapacityRealMountTests(unittest.TestCase):
         self.assertEqual(self.sampler.capacity_snapshot(), [])
         self.assertFalse(self.sampler._capacity_cache)
 
-    def test_unrelated_namespace_event_invalidates_identical_selected_mount(self):
+    def test_unrelated_mount_event_keeps_identical_selected_mount(self):
         with self.worker():
             self.sampler.refresh_capacity(authorizer=lambda: True)
         other = self.directory / 'unrelated'
         other.mkdir()
         subprocess.run(['mount', '-t', 'tmpfs', 'tmpfs', str(other)], check=True, capture_output=True, timeout=5)
         try:
+            # Docker overlay and other unrelated host mounts must not erase a
+            # data mount whose real identity is still unchanged.
             row = self.sampler.capacity_snapshot()[0]
-            self.assertIsNone(row['total_bytes'])
-            self.assertFalse(self.sampler._capacity_cache)
+            self.assertIsNotNone(row['total_bytes'])
+            self.assertTrue(self.sampler._capacity_cache)
         finally:
             subprocess.run(['umount', str(other)], check=True, capture_output=True, timeout=5)
 
