@@ -30,7 +30,6 @@
 - 海康 R1 NAS，官方固件，x86_64。
 - 可用的 Docker／Compose 环境。
 - 一个独立数据卷 `r1_toolbox_data`（Compose 已声明）。**升级和重建必须复用它。**
-- 旧部署的 `r1-toolbox-data` 需要先复制到新卷，不能直接切换后当作空卷使用。
 - 先在不含关键数据的机器上验证；不要在生产数据盘上直接尝鲜。
 
 ### 在线部署
@@ -102,7 +101,7 @@ docker compose -f compose.yaml pull
 docker compose -f compose.yaml up -d
 ```
 
-不要执行 `docker compose down -v`。如果沿用旧卷 `r1-toolbox-data`，先按[部署文档](docs/deployment.md#数据卷)复制到 `r1_toolbox_data`；固定版本可把 `latest` 换成正式 `v*` 标签或 `sha-*` 标签。
+不要执行 `docker compose down -v`。固定版本可把 `latest` 换成正式 `v*` 标签或 `sha-*` 标签。
 
 ### 首次使用
 

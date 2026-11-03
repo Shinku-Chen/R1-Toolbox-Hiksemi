@@ -66,7 +66,7 @@ services:
     - /sys:/host/sys
     # 宿主 RAM 运行目录，存放展开的界面与运行时文件。
     - /run:/host/run
-    # 持久化设置与授权，升级必须保留原数据卷；旧 r1-toolbox-data 须先复制到 r1_toolbox_data；不要删除卷或使用 down -v。
+    # 持久化设置与授权，升级必须保留原数据卷；不要删除卷或使用 down -v。
     - r1_toolbox_data:/data
 volumes:
   r1_toolbox_data: {}

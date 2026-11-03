@@ -115,7 +115,7 @@ def _toolbox_container(detail):
             and labels.get('org.opencontainers.image.title') == 'R1 Toolbox')
 
 
-TOOLBOX_VOLUME_NAMES = frozenset(('r1_toolbox_data', 'r1-toolbox-data'))
+TOOLBOX_VOLUME_NAMES = frozenset(('r1_toolbox_data',))
 
 
 def _toolbox_volume(metadata):

@@ -67,16 +67,6 @@
 - **不要执行 `down -v`，不要删除数据卷。**
 - 删除部署后正常重启可恢复官方显示。
 
-从旧卷名迁移时，先确认旧卷实际名称（可能是项目前缀），停止旧容器后复制数据：
-
-```sh
-docker volume create r1_toolbox_data
-docker run --rm -v r1-toolbox-data:/from:ro -v r1_toolbox_data:/to alpine \
-  sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)'
-```
-
-复制完成并核对设置、Token 和历史后再更新 Compose。不要通过删除旧卷来“完成升级”。
-
 ## 升级与回退
 
 1. 拉取目标镜像标签（优先固定 `sha-*`）。
