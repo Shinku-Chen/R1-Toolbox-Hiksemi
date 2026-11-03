@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<meta name="description" content="R1 Toolbox：海康 R1 NAS 的开源增强工具箱。小屏、网页监控、SMART、风扇曲线、影视排序补丁与 API/MCP。">
+<meta name="description" content="R1 Toolbox：海康 R1 NAS 的开源增强工具箱。小屏、网页监控、SMART、风扇曲线、影视排序补丁与 API/MCP。只支持安装了海康出厂系统的 HikSemi R1 NAS。">
 <title>R1 Toolbox · 海康 R1 NAS 增强工具箱</title>
 <style>
 :root{color-scheme:dark;--bg:#0b0d0c;--panel:#141816;--panel2:#191e1b;--line:#2b332e;--text:#f1f4ec;--muted:#a8b0a5;--dim:#737d74;--lime:#c7ed89;--green:#8ed7b2;--orange:#f2a275;--shadow:0 30px 90px #0008}
@@ -31,6 +31,8 @@ h1{font-size:clamp(40px,6vw,74px);line-height:1.08;letter-spacing:-3px;margin:18
 .hero-note p{margin:0;color:var(--muted);font-size:14px;line-height:1.7}
 .design-panel h2.design-title{font-size:clamp(30px,3vw,42px);line-height:1.14;letter-spacing:-2px;margin:16px 0 14px;font-weight:600;color:var(--text)}
 .design-lead{max-width:560px;font-size:15px;line-height:1.85}
+.scope-note{max-width:620px;margin:20px 0 0;padding:10px 14px;border-left:2px solid var(--lime);background:#c7ed8908;color:var(--muted);font-size:13px;line-height:1.75}
+.scope-note strong{color:var(--text);margin-right:8px;font-weight:600}
 .design-panel .hero-notes{margin-top:20px;max-width:560px}
 .design-panel .hero-note h3{font-size:15px}
 .design-panel .hero-note p{font-size:13px}
@@ -83,6 +85,7 @@ footer .nav{height:auto;align-items:flex-start}
     <div class="eyebrow">OPEN SOURCE · DOCKER · LOCAL FIRST</div>
     <h1>把 R1 的小屏<br>和硬件控制权拿回来。</h1>
     <p class="lead">R1 Toolbox 是海康 R1 NAS 的开源增强工具箱。不刷原厂系统，用容器补上小屏、网页监控、完整 SMART、自定义风扇曲线、影视排序补丁和 API/MCP。</p>
+    <p class="scope-note"><strong>支持范围</strong>只支持安装了海康出厂系统的 HikSemi R1 NAS；其他机型或第三方系统不在当前支持范围。</p>
     <div class="actions">
       <a class="btn primary" href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19.5c-4 1.2-4-2-5.5-2.5M15 21v-3.3a2.8 2.8 0 0 0-.8-2.2c2.6-.3 5.3-1.3 5.3-5.9a4.6 4.6 0 0 0-1.3-3.2 4.3 4.3 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.3 12.3 0 0 0-6.5 0C4.9 3.9 3.8 4.2 3.8 4.2a4.3 4.3 0 0 0-.1 3.2A4.6 4.6 0 0 0 2.4 10.6c0 4.5 2.7 5.6 5.3 5.9a2.8 2.8 0 0 0-.8 2.2V21"/></svg>查看 GitHub</a>
       <a class="btn" href="prototypes/r1-small-screen.html" target="_blank">打开小屏原型</a>
@@ -142,7 +145,7 @@ footer .nav{height:auto;align-items:flex-start}
 
 <footer>
   <div class="wrap nav">
-    <span>R1 Toolbox · 非海康官方项目 · 硬件效果以实机为准</span>
+    <span>R1 Toolbox · 仅支持海康出厂系统 R1 · 非海康官方项目</span>
     <span><a href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/blob/main/README.md" target="_blank" rel="noopener noreferrer">README</a></span>
   </div>
 </footer>

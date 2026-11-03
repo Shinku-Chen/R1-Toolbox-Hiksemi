@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs(preview): 首页明确仅支持安装海康出厂系统的 HikSemi R1 NAS。
 - docs: 增加文档目录 README，作为部署、界面、硬件、API 与验收文档的统一入口。
 - docs(preview): 小屏预览区采用原型左侧的设计介绍与三条设计说明。
 - docs(preview): 静态 PC 面板嵌入预览时直接停留在当前窗口，不再显示“独立网页”引导遮罩。
