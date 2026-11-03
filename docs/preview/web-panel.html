@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>PC 网页面板预览 · R1 Toolbox</title>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f0f0ea;--card:#fbfbf7;--card2:#f5f5ef;--line:#dedfd7;--ink:#171a17;--ink2:#5f665e;--ink3:#8c9389;
+  --accent:#16845b;--lime:#9bd45f;--orange:#e89a5c;--violet:#8b7ed8;--red:#cf665d;--shadow:0 20px 55px #1d231d0b;
+  --mono:ui-monospace,"SFMono-Regular",Consolas,monospace;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;--bg:#0c0f0d;--card:#141816;--card2:#191e1b;--line:#2b332e;--ink:#f1f4ec;--ink2:#aab2a7;--ink3:#778177;
+  --accent:#8ed7b2;--lime:#c7ed89;--orange:#f2a275;--violet:#bbb3e7;--red:#f28c83;--shadow:0 24px 70px #0008;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Microsoft YaHei","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+a{color:inherit;text-decoration:none}
+.topbar{height:72px;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:4}
+.topbar-in{height:100%;max-width:1380px;margin:auto;padding:0 28px;display:flex;align-items:center;gap:20px}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;white-space:nowrap}
+.mark{width:31px;height:31px;border-radius:50%;background:var(--ink);color:var(--bg);display:grid;place-items:center;font:12px var(--mono)}
+.chip{font:11px var(--mono);color:var(--ink2);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 10px}
+.chip i{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:6px}
+.nav{display:flex;align-items:center;gap:4px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px;margin:auto}
+.nav button{border:0;background:transparent;min-height:40px;padding:0 22px;border-radius:999px;color:var(--ink2);font-size:14px;cursor:pointer}
+.nav button[aria-selected="true"]{background:var(--ink);color:var(--bg)}
+.tools{display:flex;align-items:center;gap:4px;color:var(--ink2)}
+.tools time{font:13px var(--mono);margin-right:8px;color:var(--ink2)}
+.icon{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;border:0;background:transparent;color:var(--ink2);cursor:pointer}
+.icon:hover{background:var(--card2);color:var(--ink)}
+.icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+main{max-width:1380px;margin:auto;padding:34px 28px 60px}
+.page[hidden]{display:none}
+.page-title{font-size:11px;letter-spacing:1.5px;color:var(--ink3);font-family:var(--mono);text-transform:uppercase;margin-bottom:6px}
+h1{font-size:44px;line-height:1.15;letter-spacing:-2px;margin:0 0 10px;font-weight:650}
+.dek{color:var(--ink2);font-size:14px;margin:0 0 26px}
+.hero{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:18px;align-items:stretch;margin-bottom:18px}
+.hero-main{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:30px 32px;box-shadow:var(--shadow);display:grid;grid-template-columns:116px minmax(0,1fr);gap:28px;align-items:center}
+.ring{width:108px;height:108px;border-radius:50%;background:conic-gradient(var(--accent) 0 78%,var(--line) 78% 100%);display:grid;place-items:center;position:relative}
+.ring:after{content:"";position:absolute;inset:9px;border-radius:50%;background:var(--card)}
+.ring b{position:relative;z-index:1;font:28px var(--mono);color:var(--ink);letter-spacing:-2px}.ring small{position:relative;z-index:1;display:block;text-align:center;color:var(--ink3);font-size:10px}
+.greet{color:var(--ink3);font-size:12px;margin-bottom:7px}
+.hero h2{font-size:31px;margin:0 0 8px;letter-spacing:-1px}.hero p{margin:0;color:var(--ink2);font-size:14px}
+.meta{display:flex;gap:14px;flex-wrap:wrap;color:var(--ink3);font-size:12px;margin-top:17px}
+.dot{width:6px;height:6px;display:inline-block;border-radius:50%;background:var(--accent);margin-right:5px;vertical-align:1px}
+.weather{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:26px;box-shadow:var(--shadow);display:flex;flex-direction:column;justify-content:space-between}
+.weather .big{font:42px/1 var(--mono);color:var(--accent);letter-spacing:-3px}.weather .place{color:var(--ink3);font-size:12px;margin-top:8px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:var(--shadow);min-width:0}
+.card h3{font-size:14px;margin:0;color:var(--ink2);font-weight:600}.card .value{font:38px/1.15 var(--mono);letter-spacing:-2px;margin:22px 0 8px}.card .value small{font:14px var(--mono);color:var(--ink3);letter-spacing:0}
+.bar{height:5px;border-radius:5px;background:var(--card2);overflow:hidden;margin-top:14px}.bar i{display:block;height:100%;border-radius:inherit;background:var(--accent)}
+.muted{color:var(--ink3);font-size:12px}.mono{font-family:var(--mono)}
+.section-head{display:flex;align-items:end;justify-content:space-between;gap:16px;margin:28px 0 12px}.section-head h2{font-size:20px;margin:0;letter-spacing:-.4px}.section-head span{font-size:12px;color:var(--ink3)}
+.list{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:4px 20px;box-shadow:var(--shadow)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 90px 120px 84px;gap:14px;align-items:center;padding:17px 0;border-bottom:1px solid var(--line);font-size:13px}.row:last-child{border-bottom:0}
+.row strong{font-size:14px;display:block}.row small{font-size:11px;color:var(--ink3)}
+.pill{display:inline-flex;align-items:center;gap:5px;width:max-content;padding:4px 8px;border-radius:999px;background:var(--card2);color:var(--ink2);font-size:11px}.pill.ok{color:var(--accent)}
+.temperature{font:18px var(--mono);text-align:right}.temperature.ok{color:var(--accent)}.temperature.warn{color:var(--orange)}
+.disk-row{grid-template-columns:minmax(0,1.4fr) 180px 110px 90px}.disk-row .bar{margin-top:7px}
+.app-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.app-card h3{font-size:16px;color:var(--ink);margin:0 0 3px}.app-card p{margin:0;color:var(--ink3);font-size:12px;overflow-wrap:anywhere}.app-card .app-meta{display:flex;gap:16px;margin-top:18px;font-size:12px;color:var(--ink2)}
+.thermal-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:14px}.sensor-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 0;border-bottom:1px solid var(--line)}.sensor-row:last-child{border-bottom:0}.sensor-row b{font:24px var(--mono);color:var(--accent)}
+.fan-row{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:18px}.fan-row:first-of-type{margin-top:8px}.fan-row .name{font-size:14px}.fan-row .speed{font:24px var(--mono)}.modes{display:flex;gap:5px;margin-top:14px}.modes span{border:1px solid var(--line);border-radius:7px;padding:4px 8px;font-size:11px;color:var(--ink3)}.modes span.active{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.curve{display:block;width:100%;height:130px;margin-top:15px}
+.curve path{fill:none;stroke:var(--accent);stroke-width:2.2}.curve .area{fill:var(--accent);opacity:.08;stroke:none}.curve line{stroke:var(--line);stroke-width:1}
+.settings{display:grid;grid-template-columns:220px minmax(0,1fr);gap:22px;align-items:start}.set-nav{display:grid;gap:3px}.set-nav button{text-align:left;padding:11px 12px;border:0;border-radius:9px;background:transparent;color:var(--ink2);font-size:13px;cursor:pointer}.set-nav button.active{background:var(--ink);color:var(--bg)}
+.set-card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;box-shadow:var(--shadow)}.set-card h2{font-size:22px;margin:0 0 6px}.set-card p{color:var(--ink3);font-size:13px;margin:0 0 18px}
+.field{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:center;padding:14px 0;border-top:1px solid var(--line)}.field label{font-size:13px}.field small{display:block;color:var(--ink3);font-size:11px;margin-top:3px}.select{border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:var(--card2);font-size:13px}
+.footer{max-width:1380px;margin:auto;padding:0 28px 30px;color:var(--ink3);font-size:11px}
+@media(max-width:1000px){.topbar-in{padding:0 16px;gap:12px}.nav button{padding:0 12px}.hero{grid-template-columns:1fr}.grid,.app-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.thermal-grid{grid-template-columns:1fr}.settings{grid-template-columns:1fr}.set-nav{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){.topbar{height:auto;padding:8px 0}.topbar-in{flex-wrap:wrap}.nav{order:3;width:100%;overflow:auto}.tools{margin-left:auto}.topbar .chip{display:none}.nav button{flex:1;padding:0 10px;font-size:12px}.tools time{display:none}.hero-main{grid-template-columns:1fr;padding:22px}.ring{margin:auto}.grid,.app-grid{grid-template-columns:1fr}.row,.disk-row{grid-template-columns:1fr 1fr;gap:8px}.row .muted:last-child{text-align:left}.temperature{text-align:left}.footer{padding:0 16px 20px}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand"><span class="mark">FN</span><span>R1 Toolbox</span><span class="chip"><i></i>R1-DEMO</span><span class="chip">v1.0.0</span></div>
+    <nav class="nav" id="nav" aria-label="页面">
+      <button type="button" data-page="overview" aria-selected="true">概览</button>
+      <button type="button" data-page="storage" aria-selected="false">存储</button>
+      <button type="button" data-page="network" aria-selected="false">网络</button>
+      <button type="button" data-page="apps" aria-selected="false">应用</button>
+      <button type="button" data-page="thermal" aria-selected="false">温度</button>
+      <button type="button" data-page="settings" aria-selected="false">设置</button>
+    </nav>
+    <div class="tools">
+      <time>14:43</time>
+      <button class="icon" type="button" title="切换主题" id="theme" aria-label="切换主题"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg></button>
+      <a class="icon" href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer" title="GitHub 项目" aria-label="打开 GitHub 项目"><svg viewBox="0 0 24 24"><path d="M9 19.5c-4 1.2-4-2-5.5-2.5M15 21v-3.3a2.8 2.8 0 0 0-.8-2.2c2.6-.3 5.3-1.3 5.3-5.9a4.6 4.6 0 0 0-1.3-3.2 4.3 4.3 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.3 12.3 0 0 0-6.5 0C4.9 3.9 3.8 4.2 3.8 4.2a4.3 4.3 0 0 0-.1 3.2A4.6 4.6 0 0 0 2.4 10.6c0 4.5 2.7 5.6 5.3 5.9a2.8 2.8 0 0 0-.8 2.2V21"/></svg></a>
+    </div>
+  </div>
+</header>
+
+<main>
+<section class="page" data-page="overview">
+  <div class="page-title">01 / OVERVIEW</div>
+  <h1>概览</h1>
+  <p class="dek">CPU、内存、存储、网络与温度的桌面视图。</p>
+  <div class="hero">
+    <div class="hero-main">
+      <div class="ring"><div><b>98</b><small>健康度 · 良好</small></div></div>
+      <div>
+        <div class="greet">晚上好 · 11月3日 星期二</div>
+        <h2>R1-DEMO 运行良好</h2>
+        <p>已连续运行 3 天，各项指标都在阈值以内。</p>
+        <div class="meta"><span><i class="dot"></i>1 个容器未运行</span><span>已运行 3 天 4 小时</span><span>固件 DEMO-1.0</span><span>192.168.1.50</span></div>
+      </div>
+    </div>
+    <div class="weather"><div><div class="page-title">WEATHER</div><div class="big">23°</div><div class="place">阴 · 新加坡 · 体感 37°</div></div><div class="muted">湿度 47% · 风速 12.5 km/h</div></div>
+  </div>
+  <div class="grid">
+    <article class="card"><h3>处理器</h3><div class="value">36<small>%</small></div><div class="muted">4 核 · 1.4 GHz · 负载 1.43</div><div class="bar"><i style="width:36%"></i></div></article>
+    <article class="card"><h3>内存</h3><div class="value">45<small>%</small></div><div class="muted">7.2 / 16 GB · 可用 8.8 GB</div><div class="bar"><i style="width:45%"></i></div></article>
+    <article class="card"><h3>存储</h3><div class="value">53<small>%</small></div><div class="muted">已用 10.6 TB / 总容量 20 TB</div><div class="bar"><i style="width:53%"></i></div></article>
+    <article class="card"><h3>网络</h3><div class="value">1.7<small>MB/s</small></div><div class="muted">↓ 下载 · ↑ 625 KB/s</div><div class="bar"><i style="width:68%"></i></div></article>
+    <article class="card"><h3>温度</h3><div class="value">48<small>°C</small></div><div class="muted">CPU 封装 · 硬盘最高 38°C</div><div class="bar"><i style="width:48%"></i></div></article>
+    <article class="card"><h3>容器</h3><div class="value">2<small>/3</small></div><div class="muted">2 个运行中 · 1 个已停止</div><div class="bar"><i style="width:66%"></i></div></article>
+  </div>
+</section>
+
+<section class="page" data-page="storage" hidden>
+  <div class="page-title">02 / STORAGE</div>
+  <h1>存储</h1>
+  <p class="dek">物理磁盘、容量使用率、温度与 SMART 状态。数据来自演示环境。</p>
+  <div class="card" style="margin-bottom:14px"><div class="section-head" style="margin:0 0 12px"><h2>存储池使用率</h2><span>可用空间 9.4 TB</span></div><div class="value" style="margin:0 0 8px">53<small>%</small></div><div class="bar" style="height:8px"><i style="width:53%"></i></div><div class="muted" style="margin-top:10px">已用 10.6 TB / 总容量 20 TB · 4 块磁盘</div></div>
+  <div class="section-head"><h2>物理磁盘</h2><span>4 块</span></div>
+  <div class="list">
+    <div class="row disk-row"><div><strong>NAS-DISK1</strong><small>sda · WDC WD40EFZX · 4.00 TB</small></div><div><div class="muted">已用 40%</div><div class="bar"><i style="width:40%"></i></div></div><div class="muted">1.6 TB / 4 TB</div><div class="temperature ok">38°C<div class="pill ok" style="margin-top:6px">SMART 正常</div></div></div>
+    <div class="row disk-row"><div><strong>视频资源</strong><small>sdb · WDC WD60EFPX · 6.00 TB</small></div><div><div class="muted">已用 25%</div><div class="bar"><i style="width:25%"></i></div></div><div class="muted">1.5 TB / 6 TB</div><div class="temperature ok">34°C<div class="pill ok" style="margin-top:6px">SMART 正常</div></div></div>
+    <div class="row disk-row"><div><strong>主磁盘</strong><small>sdc · WDC WD40EFZX · 4.00 TB</small></div><div><div class="muted">已用 50%</div><div class="bar"><i style="width:50%"></i></div></div><div class="muted">2.0 TB / 4 TB</div><div class="temperature ok">36°C<div class="pill ok" style="margin-top:6px">SMART 正常</div></div></div>
+    <div class="row disk-row"><div><strong>SSD</strong><small>sdd · Samsung SSD 850 · 2.00 TB</small></div><div><div class="muted">已用 20%</div><div class="bar"><i style="width:20%"></i></div></div><div class="muted">400 GB / 2 TB</div><div class="temperature ok">32°C<div class="pill ok" style="margin-top:6px">SMART 正常</div></div></div>
+  </div>
+</section>
+
+<section class="page" data-page="network" hidden>
+  <div class="page-title">03 / NETWORK</div>
+  <h1>网络</h1>
+  <p class="dek">接口、实时速率、地址和监听端口。</p>
+  <div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+    <article class="card"><h3>下载</h3><div class="value">1.7<small>MB/s</small></div><div class="muted">今日累计 128 GB</div><div class="bar"><i style="width:68%"></i></div></article>
+    <article class="card"><h3>上传</h3><div class="value">625<small>KB/s</small></div><div class="muted">今日累计 9.0 GB</div><div class="bar"><i style="width:31%"></i></div></article>
+  </div>
+  <div class="section-head"><h2>接口</h2><span>eth0 · 2500 Mb/s</span></div>
+  <div class="list">
+    <div class="row"><div><strong>eth0</strong><small>192.168.1.50 · 00:11:22:33:44:55</small></div><div class="pill ok">up</div><div class="muted">full / 2500</div><div class="muted">MTU 1500</div></div>
+    <div class="row"><div><strong>默认网关</strong><small>IPv4 · 192.168.1.1</small></div><div class="pill">metric 100</div><div class="muted">DHCP</div><div class="muted">eth0</div></div>
+  </div>
+  <div class="section-head"><h2>监听端口</h2><span>3 个</span></div>
+  <div class="list"><div class="row"><div><strong>18731</strong><small>本机小屏 API</small></div><div class="pill ok">tcp</div><div class="muted">127.0.0.1</div><div class="muted">Toolbox</div></div><div class="row"><div><strong>18732</strong><small>网页 / MCP</small></div><div class="pill ok">tcp</div><div class="muted">0.0.0.0</div><div class="muted">Toolbox</div></div><div class="row"><div><strong>5432</strong><small>demo-db</small></div><div class="pill ok">tcp</div><div class="muted">Docker</div><div class="muted">postgres</div></div></div>
+</section>
+
+<section class="page" data-page="apps" hidden>
+  <div class="page-title">04 / CONTAINERS</div>
+  <h1>容器</h1>
+  <p class="dek">2 个运行中 · 1 个未运行 · 合计 CPU 5.2% · 内存 384 MB。</p>
+  <div class="app-grid">
+    <article class="card app-card"><h3>demo-photos</h3><p>ghcr.io/example/photos:demo</p><div class="app-meta"><span>Photos</span><span class="pill ok">运行中</span></div><div class="app-meta"><span>CPU 3.7%</span><span>内存 256 MB</span></div></article>
+    <article class="card app-card"><h3>demo-db</h3><p>postgres:17</p><div class="app-meta"><span>Database</span><span class="pill ok">运行中</span></div><div class="app-meta"><span>CPU 1.5%</span><span>内存 128 MB</span></div></article>
+    <article class="card app-card"><h3>r1-toolbox</h3><p>ghcr.io/shinku-chen/r1-toolbox:latest</p><div class="app-meta"><span>Toolbox</span><span class="pill">已停止</span></div><div class="app-meta"><span>受保护</span><span>仅查看</span></div></article>
+  </div>
+  <div class="section-head"><h2>端口映射</h2><span>3 个</span></div>
+  <div class="list"><div class="row"><div><strong>demo-photos</strong><small>8888 → 80/tcp</small></div><div class="pill ok">运行中</div><div class="muted">0.0.0.0</div><div class="muted">Docker</div></div><div class="row"><div><strong>demo-db</strong><small>5432 → 5432/tcp</small></div><div class="pill ok">运行中</div><div class="muted">127.0.0.1</div><div class="muted">Docker</div></div></div>
+</section>
+
+<section class="page" data-page="thermal" hidden>
+  <div class="page-title">05 / THERMAL</div>
+  <h1>温度与风扇</h1>
+  <p class="dek">传感器、双路风扇、手动温控曲线和灯光。</p>
+  <div class="thermal-grid">
+    <article class="card"><h3>温度传感器</h3><div class="sensor-row"><span>CPU 封装</span><b>48°C</b></div><div class="sensor-row"><span>主板</span><b>28°C</b></div><div class="sensor-row"><span>硬盘最高</span><b>38°C</b></div></article>
+    <article class="card"><h3>风扇</h3><div class="fan-row"><span class="name">CPU 风扇</span><span class="speed">1250 <small>RPM</small></span></div><div class="modes"><span class="active">自动</span><span>低</span><span>中</span><span>高</span><span>手动</span></div><div class="fan-row"><span class="name">系统风扇</span><span class="speed">980 <small>RPM</small></span></div><div class="modes"><span class="active">原厂自动</span><span>低</span><span>中</span><span>高</span><span>手动</span></div></article>
+  </div>
+  <article class="card" style="margin-top:14px"><div class="section-head" style="margin:0"><h2>自定义温控曲线</h2><span>CPU · 手动</span></div><svg class="curve" viewBox="0 0 900 140" aria-label="风扇温控曲线"><line x1="0" y1="35" x2="900" y2="35"/><line x1="0" y1="70" x2="900" y2="70"/><line x1="0" y1="105" x2="900" y2="105"/><path class="area" d="M0 130 L200 120 L380 95 L560 55 L740 25 L900 10 L900 140 L0 140Z"/><path d="M0 130 L200 120 L380 95 L560 55 L740 25 L900 10"/></svg><div class="muted" style="display:flex;justify-content:space-between"><span>30°C 静音</span><span>60°C 普通</span><span>80°C 全速</span></div></article>
+  <article class="card" style="margin-top:14px"><h3>机身灯光</h3><div class="row" style="border:0;padding:14px 0 0"><div><strong>常亮</strong><small>#00FF55 · 亮度 17%</small></div><div class="pill ok">手动</div><div class="muted">已接管</div><div class="muted">原生灯效</div></div></article>
+</section>
+
+<section class="page" data-page="settings" hidden>
+  <div class="page-title">06 / SETTINGS</div>
+  <h1>设置</h1>
+  <p class="dek">改动会自动保存：服务配置保存到 NAS，外观与布局保存在面板。</p>
+  <div class="settings">
+    <nav class="set-nav"><button class="active" type="button">双路风扇</button><button type="button">机身灯光</button><button type="button">小屏与显示</button><button type="button">历史与告警</button><button type="button">天气</button><button type="button">登录口令</button><button type="button">服务与开发</button><button type="button">API 管理</button><button type="button">关于</button></nav>
+    <article class="set-card"><h2>双路风扇</h2><p>CPU 高／中／低为独立固定输出，系统高／中／低为原厂档位；手动直接编辑温控曲线。</p>
+      <div class="field"><div><label>CPU 风扇</label><small>自动、固定档或手动曲线</small></div><div class="select">手动 · 70%</div></div>
+      <div class="field"><div><label>系统风扇</label><small>沿用原厂系统档位</small></div><div class="select">原厂 · 自动</div></div>
+      <div class="field"><div><label>静音阈值</label><small>低于此温度使用静音输出</small></div><div class="select">60°C</div></div>
+      <div class="field"><div><label>普通阈值</label><small>两阈值之间使用普通输出</small></div><div class="select">75°C</div></div>
+      <div class="field"><div><label>全速阈值</label><small>高于此温度固定 100%</small></div><div class="select">80°C</div></div>
+      <button class="icon" type="button" style="width:auto;border-radius:9px;background:var(--ink);color:var(--bg);padding:0 18px;margin-top:14px">保存</button>
+    </article>
+  </div>
+</section>
+</main>
+<div class="footer">静态 HTML 预览 · 所有读数均为演示数据 · 不连接 NAS 或硬件</div>
+<script>
+(() => {
+  const pages = [...document.querySelectorAll('main > .page')];
+  const tabs = [...document.querySelectorAll('#nav button')];
+  const show = page => {
+    pages.forEach(item => { item.hidden = item.dataset.page !== page; });
+    tabs.forEach(item => item.setAttribute('aria-selected', String(item.dataset.page === page)));
+  };
+  tabs.forEach(button => button.addEventListener('click', () => show(button.dataset.page)));
+  document.getElementById('theme').addEventListener('click', () => {
+    const root = document.documentElement;
+    root.dataset.theme = root.dataset.theme === 'dark' ? '' : 'dark';
+  });
+})();
+</script>
+</body>
+</html>

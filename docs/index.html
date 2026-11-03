@@ -44,17 +44,14 @@ main{padding:20px 0 80px}
 .phone{border:1px solid #3a443c;background:#050706;border-radius:28px;padding:8px;box-shadow:var(--shadow);position:sticky;top:90px}
 .phone iframe{display:block;width:100%;height:760px;border:0;border-radius:21px;background:#080909}
 .caption{color:var(--dim);font-size:12px;margin:9px 4px 0}
-.screen-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0}
-.screen-tabs button{min-height:38px;padding:0 13px;border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--muted);font:13px inherit;cursor:pointer}
-.screen-tabs button[aria-pressed=true]{background:var(--text);color:var(--bg);border-color:var(--text)}
-.shot{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#0e100f;box-shadow:var(--shadow)}
-.shot img{display:block;width:100%;height:auto}
 .features{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .feature{padding:22px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}
 .feature .kicker{font:11px/1.4 ui-monospace,monospace;letter-spacing:1.5px;color:var(--dim)}
 .feature h3{font-size:19px;margin:10px 0 7px}.feature p{margin:0;color:var(--muted);font-size:14px;line-height:1.8}
+.pc-frame{display:block;width:100%;height:820px;border:0;border-radius:14px;background:#f0f0ea}
 footer{border-top:1px solid #ffffff0b;padding:30px 0;color:var(--dim);font-size:13px}
 footer .nav{height:auto;align-items:flex-start}
+@media(max-width:900px){.pc-frame{height:700px}}@media(max-width:620px){.pc-frame{height:640px}}
 @media(max-width:900px){.hero{grid-template-columns:1fr;padding-top:56px}.hero-side{grid-template-columns:1fr 1fr}.demo{grid-template-columns:1fr}.phone{position:static;max-width:390px;margin:auto}.features{grid-template-columns:1fr}}
 @media(max-width:620px){.wrap{padding:0 16px}.nav{height:58px}.links a:not(:last-child){display:none}.hero{padding:42px 0 30px}.hero-side{grid-template-columns:1fr}.phone iframe{height:680px}.section-head{display:block;margin-top:42px}.section-head p{margin-top:8px}.btn{min-height:50px}}
 </style>
@@ -99,7 +96,7 @@ footer .nav{height:auto;align-items:flex-start}
 <main class="wrap">
   <div class="section-head">
     <h2>先看界面</h2>
-    <p>左边是可直接操作的小屏原型，右边是真实网页面板在演示数据下的静态截图。</p>
+    <p>左边是可直接操作的小屏原型，下面是用 HTML 实现的 PC 网页面板预览。</p>
   </div>
 
   <section class="demo" aria-label="界面预览">
@@ -107,22 +104,18 @@ footer .nav{height:auto;align-items:flex-start}
       <div class="phone"><iframe src="prototypes/r1-small-screen.html" title="R1 Toolbox 小屏交互原型" loading="lazy"></iframe></div>
       <p class="caption">小屏原型 · 可点击底部导航、卡片和返回键。建议桌面浏览器查看。</p>
     </div>
-    <div class="panel" style="padding:16px">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
-        <div><h2 style="margin:0">PC 网页面板</h2><p>1440px 桌面视图 · 演示数据</p></div>
-        <a class="btn" href="preview/web/overview.png" target="_blank">查看原图</a>
-      </div>
-      <div class="screen-tabs" id="screenTabs" role="tablist" aria-label="网页预览页面">
-        <button type="button" data-src="preview/web/overview.png" aria-pressed="true">概览</button>
-        <button type="button" data-src="preview/web/storage.png" aria-pressed="false">存储</button>
-        <button type="button" data-src="preview/web/network.png" aria-pressed="false">网络</button>
-        <button type="button" data-src="preview/web/apps.png" aria-pressed="false">应用</button>
-        <button type="button" data-src="preview/web/thermal.png" aria-pressed="false">温度</button>
-        <button type="button" data-src="preview/web/settings.png" aria-pressed="false">设置</button>
-      </div>
-      <div class="shot"><img id="shot" src="preview/web/overview.png" alt="R1 Toolbox 网页面板概览"></div>
+    <div class="panel" style="padding:24px">
+      <div class="badge"><span class="dot"></span> 可交互 HTML · 无截图</div>
+      <h2 style="margin-top:16px;font-size:22px">PC 网页面板</h2>
+      <p style="margin-top:8px">下方是完整的 HTML 预览，切换概览、存储、网络、应用、温度和设置；所有读数均为演示数据，不连接 NAS。</p>
+      <a class="btn" href="preview/web-panel.html" target="_blank" style="margin-top:20px">全屏打开</a>
     </div>
   </section>
+
+  <div class="section-head"><h2>PC 网页面板</h2><p>可直接切换页面，不依赖图片或外部脚本。</p></div>
+  <div class="panel" style="padding:14px">
+    <iframe class="pc-frame" src="preview/web-panel.html" title="R1 Toolbox PC 网页面板 HTML 预览" loading="lazy"></iframe>
+  </div>
 
   <div class="section-head"><h2>不只是监控</h2><p>面向真实 R1 使用场景的扩展，不是一张静态仪表盘。</p></div>
   <section class="features" aria-label="功能">
@@ -138,16 +131,6 @@ footer .nav{height:auto;align-items:flex-start}
     <span><a href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/blob/main/README.md" target="_blank" rel="noopener noreferrer">README</a></span>
   </div>
 </footer>
-<script>
-(() => {
-  const image = document.getElementById('shot');
-  const tabs = [...document.querySelectorAll('#screenTabs button')];
-  tabs.forEach(button => button.addEventListener('click', () => {
-    tabs.forEach(item => item.setAttribute('aria-pressed', String(item === button)));
-    image.src = button.dataset.src;
-    image.alt = 'R1 Toolbox 网页面板 ' + button.textContent;
-  }));
-})();
-</script>
+
 </body>
 </html>

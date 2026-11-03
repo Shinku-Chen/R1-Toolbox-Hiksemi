@@ -2,6 +2,8 @@
 
 适用于海康 R1 NAS 的开源增强工具箱：不刷原厂系统，用 Docker 容器补上小屏、网页监控、风扇／灯光控制、完整 SMART、磁盘容量和受控 Docker 管理。
 
+> 目前适用于安装了原版海康系统的 R1 NAS；其他机型或第三方系统不在当前支持范围。
+>
 > 非海康官方项目。容器可回退，原厂 AppImage、启动脚本和厂商服务不被替换。
 
 ## 为什么用它
@@ -22,13 +24,13 @@
 - **小屏**：适配 376×960，兼容 320px；大字号、56px 以上点击目标、六标签导航。
 - **网页**：基于 [fnMonitor](https://github.com/MisiteQ/fnmonitor)（MIT）面板框架，重组为概览／存储／网络／应用／温度／设置六页。
 - 详细页面和操作说明见 [小屏与网页使用说明](docs/interface-guide.md) 与 [网页面板](docs/web-panel.md)。
-- 在线预览：[GitHub Pages](https://shinku-chen.github.io/R1-Toolbox-Hiksemi/) · 可直接操作小屏原型，查看 PC 网页面板演示截图。
+- 在线预览：[GitHub Pages](https://shinku-chen.github.io/R1-Toolbox-Hiksemi/) · 可直接操作小屏原型，查看 PC 网页面板 HTML 预览。
 
 ## 快速开始
 
 ### 要求
 
-- 海康 R1 NAS，官方固件，x86_64。
+- 海康 R1 NAS，已安装原版海康系统，x86_64。
 - 可用的 Docker／Compose 环境。
 - 一个独立数据卷 `r1_toolbox_data`（Compose 已声明）。**升级和重建必须复用它。**
 - 先在不含关键数据的机器上验证；不要在生产数据盘上直接尝鲜。
