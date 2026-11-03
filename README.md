@@ -87,7 +87,7 @@ volumes:
   r1_toolbox_data: {}
 ```
 
-升级时在 **Docker → 项目 → `r1-toolbox`** 编辑 Compose，把 `latest` 换成目标版本或继续使用 `latest`，保存后重新部署；保留原项目和 `r1_toolbox_data` 数据卷。
+升级时在 **Docker → 项目 → `r1-toolbox`** 先停止项目；打开编辑 Compose，勾选「使用最新版本镜像部署」，点击「确定」，等待容器按新镜像重新部署。保留原项目和 `r1_toolbox_data` 数据卷。
 
 不要删除数据卷，不要执行 `down -v`。固定版本可把 `latest` 换成正式 `v*` 标签或 `sha-*` 标签。
 
