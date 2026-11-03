@@ -29,7 +29,8 @@ QB_AUTH_BACKOFF_SECONDS = 300.0
 QB_LOGIN_PATH = "/api/v2/auth/login"
 # User-authorized device credentials, not upstream defaults or HTTP input.
 QB_DEFAULT_CREDENTIALS = ("admin", "Ab123456")
-_QB_SID = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+# qB 5.x emits a base64 SID containing "+", "/" and optional "=" padding.
+_QB_SID = re.compile(r"[A-Za-z0-9+/=_-]{16,128}\Z")
 QB_PATHS = ("/api/v2/app/version", "/api/v2/transfer/info",
             "/api/v2/torrents/info?filter=all&sort=hash&limit=129&offset=0")
 QB_STATES = frozenset(("error", "missingFiles", "uploading", "pausedUP", "queuedUP",
@@ -47,7 +48,7 @@ REASONS = {
     "auth_required": "下载 RPC 需要原厂授权；未读取或刷新令牌。",
     "auth_rejected": "qB 认证未通过；本轮不再登录，至少等待五分钟后才允许再次登录。",
     "auth_banned": "qB 登录被拒绝，可能触发来源封禁；至少等待五分钟后才允许再次登录。",
-    "auth_backoff": "qB 仍需要认证，新的登录尝试处于五分钟退避；已允许既有只读访问检查。",
+    "auth_backoff": "qB 仍需要认证；上次登录失败后五分钟内不重复提交凭据，期间仍会尝试既有只读访问。",
     "auth_busy": "qB 正在进行另一项只读采集或认证，请稍后读取。",
     "auth_config_invalid": "qB 内部认证配置无法确认；未发送账号口令。",
     "rpc_error": "原厂下载 RPC 返回错误；未执行登录、恢复或重试。",

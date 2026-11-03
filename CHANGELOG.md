@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- fix(qb): 接受 qB 5.x 含 base64 字符的 SID，避免有效登录被误判后进入五分钟退避；保留免登录优先、401／403 后单次登录和 SID 复用。
 - docs: 补充移除容器并重启 R1 恢复原厂状态的方法。
 - docs: 项目介绍统一改为“不改原厂系统”。
 - docs: 在 README 中直接写出 GitHub Pages 预览地址。

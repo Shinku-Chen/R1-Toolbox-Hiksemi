@@ -218,6 +218,23 @@ class QbAuthenticationTests(unittest.TestCase):
         self.assertEqual(fixture.posts(), [])
         self.assertTrue(all('cookie' not in item['headers'] and item['body'] == b'' for item in fixture.requests))
 
+    def test_base64_sid_with_plus_slash_and_padding_is_accepted(self):
+        sid = 'fixture/SID+value_1234567890abc='
+        fixture = _Fixture(self)
+        fixture.sid, fixture.accepted_sids = sid, {sid}
+        value = self.collect(fixture)
+        self.assertTrue(value['available'])
+        self.assertEqual(value['status'], 'ok')
+        self.assertEqual(len(fixture.posts()), 1)
+        self.assertTrue(all(item['headers'].get('cookie') == 'SID=' + sid
+                            for item in fixture.requests[2:]))
+        offset = len(fixture.requests)
+        self.assertTrue(self.collect(fixture)['available'])
+        self.assertEqual(len(fixture.posts()), 1)
+        self.assertTrue(all(item['headers'].get('cookie') == 'SID=' + sid
+                            for item in fixture.requests[offset:]))
+        self.assert_private(value)
+
     def test_sid_reuse_has_no_forced_expiry_or_repeat_login(self):
         fixture = _Fixture(self)
         self.assertTrue(self.collect(fixture)['available'])
