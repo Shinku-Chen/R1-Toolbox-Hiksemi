@@ -125,5 +125,5 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - commit 标题：`type(scope): 简述`，`type` ∈ `feat/fix/docs/refactor/perf/test/chore/build/ci`；祈使句、≤50 字符、结尾不加句号，默认中文，技术术语保留英文。
 - 一个 commit 只做一件事；不把无关修复、格式化或临时探针混进来。
 - 改完当轮 push；协作/公开动作（开 PR、发版）按仓库规则另行确认。
-- 发布只在正式 `v*` 标签触发，同时发布 `latest`、同版本标签和不可变 SHA；`dev` 只更新 `preview`，`main` 推送不发布镜像。
+- 发布只在正式 `v*` 标签触发，同时发布 `latest`、`preview`、同版本标签和不可变 SHA；`dev` 只更新 `preview`，`main` 推送不发布镜像。`preview` 跟随最近一次构建，正式发布时同步到该版本。
 - push 前检查 `tests/`、`scripts/build-panel.py` 产物与文档是否同步；`ui/web/` 为构建产物，先构建再提交。

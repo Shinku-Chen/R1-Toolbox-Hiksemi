@@ -90,7 +90,7 @@ Linux CI 依次检查：
 - 文件变更、容量缓存与真实挂载；
 - 镜像交付合同。
 
-发布产物包括 `deployment-manifest.json`、`SHA256SUMS`、Compose 和离线镜像包。`dev` 推送只更新 `preview`；`main` 推送只检查、不发布镜像；正式发布由 `v*` 标签触发，同时发布 `latest`、同版本标签和不可变 SHA，三者指向同一镜像。细节见 [部署与升级](deployment.md)。
+发布产物包括 `deployment-manifest.json`、`SHA256SUMS`、Compose 和离线镜像包。`dev` 推送只更新 `preview`；`main` 推送只检查、不发布镜像；正式发布由 `v*` 标签触发，同时发布 `latest`、`preview`、同版本标签和不可变 SHA，四者指向同一镜像。细节见 [部署与升级](deployment.md)。
 
 ## 变更约定
 

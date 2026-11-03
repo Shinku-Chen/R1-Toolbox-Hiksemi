@@ -6,6 +6,12 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      sync_preview_from:
+        description: 将指定已发布标签同步为 preview（留空不执行）
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -105,8 +111,8 @@ jobs:
 
   publish-image:
     needs: checks
-    # Only dev builds preview automatically. Formal latest/version publication
-    # happens on an explicit v* release tag; main pushes never publish an image.
+    # dev and v* tags refresh preview; only v* advances latest/version.
+    # main pushes and pull requests never publish an image.
     if: |
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')) &&
@@ -140,6 +146,24 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
+
+  sync-preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.sync_preview_from != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Point preview at the requested image
+        env:
+          SOURCE_TAG: ${{ inputs.sync_preview_from }}
+        run: |
+          case "$SOURCE_TAG" in
+            ''|*[!A-Za-z0-9_.-]*) echo '源标签无效' >&2; exit 1;;
+          esac
+          docker buildx imagetools create --tag ghcr.io/shinku-chen/r1-toolbox:preview "ghcr.io/shinku-chen/r1-toolbox:$SOURCE_TAG"
 
   pull-request-image:
     needs: checks

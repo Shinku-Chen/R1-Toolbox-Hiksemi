@@ -43,7 +43,7 @@
 2. 登录 [海康 Web 管理页](https://my.hiksemi.cn/web/easyconnect/index.html)，进入 **Docker → 项目 → 创建项目**，把产物中的 `composer.yml` 内容粘贴进去。
 3. 确定保存并启动容器，打开 `http://NAS_IP:18732`。
 
-镜像：`ghcr.io/shinku-chen/r1-toolbox`，平台 `linux/amd64`。`dev` 只更新 `preview`；正式版本由 `v*` 标签同时发布 `latest` 和同版本标签，两者指向同一镜像。
+镜像：`ghcr.io/shinku-chen/r1-toolbox`，平台 `linux/amd64`。`dev` 推送更新 `preview`；正式版本由 `v*` 标签同时发布 `latest`、`preview`、同版本标签和不可变 SHA，均指向同一镜像。
 
 ### 离线部署
 

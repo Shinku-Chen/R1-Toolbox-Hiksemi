@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- build(release): 正式 `v*` 标签同步更新 `preview`，并支持手动将指定标签同步为 `preview`；`latest` 仍指向最新正式版本。
 - fix(qb): 接受 qB 5.x 含 base64 字符的 SID，避免有效登录被误判后进入五分钟退避；保留免登录优先、401／403 后单次登录和 SID 复用。
 - docs: 补充移除容器并重启 R1 恢复原厂状态的方法。
 - docs: 项目介绍统一改为“不改原厂系统”。

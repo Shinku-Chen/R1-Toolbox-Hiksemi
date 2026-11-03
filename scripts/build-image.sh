@@ -134,6 +134,8 @@ if [ "${PUBLISH_IMAGE:-0}" = 1 ]; then
       fi
       docker tag "$image" "$repository:$release_tag"
       docker push "$repository:$release_tag"
+      docker tag "$image" "$repository:preview"
+      docker push "$repository:preview"
       ;;
   esac
 fi
