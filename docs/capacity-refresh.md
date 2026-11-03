@@ -4,6 +4,10 @@
 
 物理盘大小仍来自内核 size，与文件系统的 total／used／usage 不同。冷启动或没有容量快照时，后者保持 null；不会拿物理大小推算剩余空间或从上次持久化结果补值。
 
+## 显示缓存
+
+`runtime/disk_cache.py` 在 `state_dir/disk-cache.json`（0600、原子替换、有界校验）保存最近成功观测的显示字段：物理盘型号、物理大小、SMART 温度／健康可用性、休眠标记，以及按固定 `/drives/*` 挂载的容量 total／used。服务启动时加载；Web 与独立小屏的 status／insights 在 live 字段缺失时用缓存补齐，页面可立即显示。缓存不保存 SN、命令输出、Token、请求数据或用户文件；不参与容量资格、SMART 鲜度、风扇、文件空间预检或控制授权。进入存储页仍尝试一次真实 SMART／容量采集，失败不删除缓存展示；成功批次刷新缓存。Web 和小屏不显示采样时间、容量状态或“过去测量档案”。
+
 ## 所有者显式入口
 
 `POST /api/r1/storage/capacity/refresh`，严格 JSON 空对象 `{}`。请求仍须同源、`Content-Type: application/json`、`X-FNM-Request: 1` 或现有配对 CSRF 证明；首次无网页登录口令沿用所有者开放模式，启用口令后需要有效会话。
@@ -130,11 +134,11 @@ Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌
 
 范围始终是实际测过的文件系统子集，`complete:false` 不代表完整物理盘／池。重复设备挂载不能重复相加，多分区分别保留原贡献；同盘新批只测到部分分区时替换该盘旧组，不把旧分区数值混进新日期。单盘待机、不产生新测量时保留其仍合法的旧观测与原日期，但新批顶部汇总只统计新批实际贡献。历史永不进入当前 `total/used/usage`、`disk_size/disk_used/disk_total`、容量资格、空间预检、文件根或 Token 计划；当前未知仍是 `null`，不能用历史或 0 补成正常。所有者撤权后不披露历史；start／close 清空历史，RAM 上限 128 条测量，超限按整盘最旧组淘汰。
 
-原“卸载／重挂拒旧”规则继续约束当前容量与全部权限；新增的是明确列出的过去观测。浏览器的永久真实 HTTP 验收入口为 `node tests/check_capacity_observation.cjs`；Python 生产链、发布／回滚、传输与身份冲突回归位于 `test_capacity_history_*.py`。本地合成／便携 fixture 不证明 NAS 已恢复显示或已物理休眠，最终仍由精确 Linux CI 与部署后的有限验收判定。
+原“卸载／重挂拒旧”规则继续约束当前容量与全部权限；新增的是明确列出的过去观测。Python 生产链、发布／回滚、传输与身份冲突回归位于 `test_capacity_history_*.py`。本地合成／便携 fixture 不证明 NAS 已恢复显示或已物理休眠，最终仍由精确 Linux CI 与部署后的有限验收判定。
 
 ## 独立的过去测量档案
 
-用户已选择新增“过去测量档案”，作为与当前容量、按盘绑定的最近实测快照分开的过去观测披露。档案只说明某一批曾成功测得这些数字，不证明现在的物理盘、分区、盘位、挂载或存储池归属。库存不完整、卸载／重挂、换盘、分区或物理 parent 变化、alias 冲突和 namespace 事件后，独立档案仍可保留过去数字；原当前容量、盘位历史与同批盘位汇总的完整库存、ABA、watch、key、FD、epoch、授权及永久 prune 门均保持不变。身份后来恢复也不能借档案复活已删除的原盘位历史。
+后端兼容字段仍可能保留“过去测量档案”的 RAM 合同，但 Web UI 已按用户要求移除该档案及“最近实测”主卡，不再展示历史日期、覆盖范围或缓存状态；该字段只作兼容数据，不参与显示缓存、当前容量或采集授权。档案只说明某一批曾成功测得这些数字，不证明现在的物理盘、分区、盘位、挂载或存储池归属。库存不完整、卸载／重挂、换盘、分区或物理 parent 变化、alias 冲突和 namespace 事件后，独立档案仍可保留过去数字；原当前容量、盘位历史与同批盘位汇总的完整库存、ABA、watch、key、FD、epoch、授权及永久 prune 门均保持不变。身份后来恢复也不能借档案复活已删除的原盘位历史。
 
 仅真实 password／pair／open 所有者的现有 `GET /api/overview` 顶层增加 `capacity_observation_archive`，无已发布档案时为 `null`。不增加 per-disk archive 字段或新接口；普通快照、公开 v1、MCP、本机小屏、Bearer 和开发白名单不能取得该对象。披露沿用真实所有者首次失效锁存及 JSON 前后守卫，撤权后不披露，复权不能复活失败候选。无 monitor 或 legacy 来源保持 `null`，不从旧字段、诊断 ledger 或摘要制造档案。
 
@@ -169,18 +173,7 @@ Web 使用所有者 `POST /api/r1/storage/fill`；本机小屏使用独立令牌
 
 正常 snapshot 通过同次有界、不可变私有 sideband 携带档案，Fnm 从这一次结果读取；即使这次挂载 entries 为空或库存不完整，也不为档案额外 snapshot、扫描库存、poll、运行 SMART／statvfs 或访问用户挂载。每批仍最多 128 个原候选测量。档案只在 RAM 中保留一个最新批次，无 TTL、不持久化，start／close／重启清空。它不进入当前 `total/used/usage`、`disk_size/disk_used/disk_total` 或当前池汇总，不授容量采集、空间预检、文件根、Token 或控制资格。
 
-用户已选择“主卡改为最近实测”。首页和存储页在 current 有效时保留原显示；仅当 current 未知且所有者的 `capacity_observation_archive` 完整合法时，主卡以 `data-r1-primary-measured` 标记展示档案已用／总量与百分比，清楚标为“最近实测”，同时保留原完整日期区间、“已测 N 个文件系统／M 块盘（子集）”、`coverage.complete:false`、“当前归属未确认”和“重启清空”。同页去掉重复的独立档案卡；这只是主卡的历史展示，不将档案绑定到现在的池或各盘位，也不写入 `S.o`、current／API 字段或当前池汇总数据。晋升时存储主卡必须仍有可见的“当前可用空间 --”，不能隐藏原池区后漏掉当前缺测提示，绝不以 `archive.available` 的当时未用量填补。档案清空、畸形、撤权或 current 恢复时，展示按真实来源可逆切换。生产链的定向回归位于 `tests/test_capacity_archive_core.py`、`tests/test_capacity_archive_http.py` 与 `tests/test_capacity_archive_fnm.py`，原 no-revival 回归继续保留。新档案不补回旧扫描谓词；已丢失的八项旧实机拒绝原因仍未追回，本机 fixture 不证明 NAS 长期留存或物理休眠已经通过。
-
-两页使用同一有效 current 判定：`disk_size` 有限且大于 0，`disk_used` 有限且满足 `0 <= used <= size`，`disk_total` 是合法有限百分比；已用为 0 是有效 current，不应触发档案晋升。主标记 `data-r1-primary-measured` 按页取 `overview`／`storage`，解除晋升时恢复原生主卡节点与引用。主卡来源选择不改变采集、日期或安全判定：
-
-| 实际数据状态 | 主卡展示 | 当前可用空间 |
-| --- | --- | --- |
-| current 有效，archive 任意 | 原 current 数字，取消最近实测晋升 | 原 current 计算值 |
-| current 未知，合法 owner archive 存在 | 带上述历史标记、原日期与子集范围的最近实测 | `--` |
-| current 未知，archive 缺失或畸形，仍有合法旧盘位历史／同批汇总 | 保持各页面原有历史回退，不制造 archive 或新的主卡晋升 | `--` |
-| current 未知，无可用历史来源，或不具备 owner 披露权 | 原未知态 `--`，不沿用上次晋升值 | `--` |
-
-主卡晋升不增加 SMART、statvfs、缓存 GET 或后台轮询；原每个可见周期一次的前台规则不变，不增加 TTL 或持久化。当前与按盘历史的完整库存、卸载／重挂、设备、FD、watch／namespace／ABA、epoch、授权与永久 prune 门保持原样；这项显示约定不证明八项旧 `identity_changed` 的根因已修复、当前容量实时有效或硬盘物理休眠。
+Web UI 已移除“最近实测”主卡、过去测量档案和原日期／覆盖范围展示；首页与存储页只显示缓存补齐后的当前数据，不再由 archive 晋升覆盖主卡。后端 archive 字段仅保留兼容，不进入 DOM 或显示缓存。生产链的 archive 后端回归仍保留，但不作为 Web 展示合同。
 
 ## Linux 验证边界
 

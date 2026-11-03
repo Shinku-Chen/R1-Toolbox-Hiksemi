@@ -117,7 +117,7 @@ function screenModel() {
     const before = fills.length;
     await page.reload({ waitUntil: 'networkidle' });
     await page.waitForTimeout(2500);
-    check('有效缓存 0 次', fills.length === before);
+    check('概览有效缓存 0 次', fills.length === before);
 
     disks = [{ name: 'sda', total_bytes: null, used_bytes: null, usage_percent: null,
                capacity_sampled_at: null, capacity_status: 'unavailable' }];
@@ -130,7 +130,7 @@ function screenModel() {
     check('busy 后不循环', fills.length === busyBase + 1);
     mode = 'normal';
 
-    // 采样成功：POST 后被动 GET 展示新值/时间，不追加 POST
+    // 采样成功：POST 后被动 GET 展示新值，不追加 POST
     const fillBase = fills.length;
     disks = [{ name: 'sda', total_bytes: 4e12, used_bytes: 1e12, usage_percent: 25,
                capacity_sampled_at: NOW, capacity_status: 'ok' }];
@@ -152,7 +152,7 @@ function screenModel() {
     sampling = false;
     const caption = await page.textContent('#device');
     console.log('CAPTION', JSON.stringify(caption.slice(0, 240)));
-    check('被动刷新后展示新值与快照说明', caption.includes('3.8 TB') && caption.includes('容量快照'));
+    check('被动刷新后展示新值且不显示采样时间', caption.includes('3.8 TB') && !/采样|快照/.test(caption));
     check('被动刷新不追加补齐', fills.length === fillBase);
 
     // hidden 与无 token
@@ -308,11 +308,8 @@ function screenModel() {
     const poolText = await page.textContent('.inline-summary .caption');
     const [earlyText, lateText, olderText] = await page.evaluate(stamps =>
       stamps.map(stamp => new Date(stamp * 1000).toLocaleString()), [early, late, older]);
-    check('混合时刻显示最早→最新范围', poolText.includes(earlyText + ' – ' + lateText)
-      && !poolText.includes(olderText));
-    check('覆盖 3/4 且失败行计入未完成', poolText.includes('覆盖 3/4 块盘') && poolText.includes('1 块上次刷新未完成'));
-    check('容量快照完整说明与具体覆盖准确', poolText.endsWith('容量快照 · ' + earlyText + ' – ' + lateText
-      + ' · 覆盖 3/4 块盘 · 1 块上次刷新未完成'));
+    check('容量只展示聚合数据，不显示采样时间或缓存状态',
+      /TB|GB/.test(poolText) && !/容量快照|采样|覆盖\s*\d|未完成/.test(poolText));
     const aggregate = screenModel();
     aggregate.state.data.status = { disks };
     const measured = aggregate.pool();
@@ -324,7 +321,8 @@ function screenModel() {
     check('同一采样时刻重复 GET 不改变文案', (await page.textContent('.inline-summary .caption')) === firstCaption);
     await page.evaluate(() => { document.querySelector('[data-view="metrics"]')?.click(); });
     await page.waitForTimeout(600);
-    check('metrics 页也展示容量快照语义', (await page.textContent('#device')).includes('容量快照'));
+    const metricsCaption = await page.textContent('#device');
+    check('metrics 页展示容量数据且不显示采样时间', /已用/.test(metricsCaption) && !/采样|快照/.test(metricsCaption));
 
     // Inspect real closed-over feed state in a VM; each passive poll has a new timestamp.
     const curve = screenModel();
@@ -404,7 +402,7 @@ function screenModel() {
     await page.waitForTimeout(1800);
     check('metrics 同页轮询不重试', fills.length === base + 4);
 
-    // 有效 current：任何相关 view 都不需要读
+    // 有效 current：存储页仍按进入尝试一次，其他相关 view 不重复读
     disks = [{ name: 'sda', total_bytes: 4e12, used_bytes: 1e12, usage_percent: 25,
                capacity_sampled_at: NOW, capacity_status: 'ok' }];
     base = fills.length;
@@ -416,7 +414,7 @@ function screenModel() {
     await page.waitForTimeout(1400);
     await page.click('[data-view="metrics"]');
     await page.waitForTimeout(1400);
-    check('有效 current 各 view 0 次', fills.length === base);
+    check('有效 current 仅存储页进入尝试一次', fills.length === base + 1);
 
     // 在途 A→B：单并发、旧回执不能占 B 的进入机会、释放后 B 自己一次
     disks = [{ name: 'sda', total_bytes: null, used_bytes: null, usage_percent: null,

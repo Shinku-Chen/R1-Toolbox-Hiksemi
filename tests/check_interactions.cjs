@@ -248,8 +248,8 @@ assert.ok(chromeBin,'未找到 Chrome/Chromium，请通过 CHROME_BIN 指定可�
     assert.equal(await page.locator('.disk-temperature-row').count(), 4, 'every physical disk has a temperature row');
     assert.match(await page.locator('[data-disk="sda"]').textContent(), /家庭照片与备份盘.*38°/);
     assert.match(await page.locator('[data-disk="sdb"]').textContent(), /sdb.*--.*温度暂不可读/);
-    assert.match(await page.locator('[data-disk="sdc"]').textContent(), /--.*休眠中 · 暂无缓存读数/);
-    assert.match(await page.locator('[data-disk="sdd"]').textContent(), /34°.*休眠中 · 已有缓存读数/);
+    assert.match(await page.locator('[data-disk="sdc"]').textContent(), /--.*休眠中 · 暂无温度数据/);
+    assert.match(await page.locator('[data-disk="sdd"]').textContent(), /34°.*休眠中 · 温度数据/);
     assert.equal(await page.locator('[data-disk="sdc"] .bar, [data-disk="sdd"] .bar').count(), 0, 'sleeping disk caches are not graphed as current readings');
     assert.equal(apiReads.filter(endpoint => /smart|disk-temperature/.test(endpoint)).length, 0, 'opening temperature uses insights cache only');
     await shot('thermal');

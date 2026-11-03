@@ -457,9 +457,7 @@ finally:
     const detailResponse = foregroundResponse(page, fixture.owner, 'refresh');
     await page.locator('#layout-storage .bay[data-sheet="disk/sda"]').click();
     await page.waitForSelector('#sheet.on [data-ref="r1CapNote"]');
-    await page.waitForFunction(() => document.querySelector('#sheetBody [data-ref="r1SmartSnapshot"]')?.textContent.includes('采样于'));
-    const oldCapacityNote = await page.locator('[data-ref="r1CapNote"]').textContent();
-    const oldSmartNote = await page.locator('[data-ref="r1SmartSnapshot"]').textContent();
+    await page.waitForFunction(() => document.querySelector('#sheetBody [data-ref="r1SmartSnapshot"]')?.textContent === 'SMART 数据');
     await page.locator('#sheetBody').evaluate(node => { window.__refreshDrawer = node; });
     const during = await fixtureCall('entered');
     check('进入已有缓存的磁盘详情仅再发一次严格 {} refresh，在真实 SMART 在途时保留当前抽屉',
@@ -479,19 +477,16 @@ finally:
         && body.querySelector('.sheet-hero [data-ref="v"]')?.getAttribute('aria-label') === '50'
         && /43℃/.test(body.querySelector('[data-ref="smart"]')?.textContent || '');
     }, null, { timeout: 8000 });
-    await page.waitForFunction(({ oldCapacityNote, oldSmartNote }) => {
-      const capacity = document.querySelector('[data-ref="r1CapNote"]')?.textContent || '';
-      const smart = document.querySelector('[data-ref="r1SmartSnapshot"]')?.textContent || '';
-      return capacity !== oldCapacityNote && capacity.includes('采样于')
-        && smart !== oldSmartNote && smart.includes('采样于')
-        && /200 小时/.test(document.querySelector('#sheetBody [data-ref="smart"]')?.textContent || '');
-    }, { oldCapacityNote, oldSmartNote }, { timeout: 8000 });
+    await page.waitForFunction(() => /200 小时/.test(document.querySelector('#sheetBody [data-ref="smart"]')?.textContent || ''),
+      null, { timeout: 8000 });
     const filled = await api(page, '/api/overview');
-    check('响应后同一抽屉无需重开即显示新值及新容量／SMART 时间',
+    check('响应后同一抽屉无需重开即显示新值且不显示采样时间',
       filled.body.disks_detail[0].used === 2e12 && filled.body.disks_detail[0].temp === 43
       && filled.body.disks_detail[0].capacity_sampled_at === fixture.old + 2 * fixture.step
       && filled.body.disks_detail[0].smart_sampled_at === fixture.old + 2 * fixture.step
-      && await page.evaluate(() => document.querySelector('#sheetBody') === window.__refreshDrawer));
+      && await page.evaluate(() => document.querySelector('#sheetBody') === window.__refreshDrawer
+        && document.querySelector('[data-ref="r1CapNote"]')?.textContent === '容量数据'
+        && document.querySelector('[data-ref="r1SmartSnapshot"]')?.textContent === 'SMART 数据'));
     for (const pathname of ['/api/overview', '/api/smart?dev=sda', '/api/r1']) {
       assert.equal((await api(page, pathname)).status, 200);
     }
@@ -570,13 +565,11 @@ finally:
         && overview.disks_detail.find(d => d.name === 'sdc').percent === 50
         && ui.bays.find(d => d.name === 'sdb').capacity.startsWith('25%')
         && ui.bays.find(d => d.name === 'sdc').capacity.startsWith('50%'), { receipt, ui });
-      check(scenario + '：池只聚合有效容量并明确子集覆盖，文案不冒称 fnOS',
+      check(scenario + '：池只聚合有效容量且不显示覆盖／采样状态',
         overview.disk_size === (scenario === 'old' ? 14e12 : 12e12)
         && overview.disk_used === (scenario === 'old' ? 6e12 : 5e12)
         && ui.pool === (scenario === 'old' ? '43' : '42') && ui.free === (scenario === 'old' ? '8.00' : '7.00')
-        && (scenario === 'old' ? !ui.legend.includes('已覆盖 2/3') : ui.legend.includes('已覆盖 2/3'))
-        && !/fnOS|\/vol\*/.test(ui.legend)
-        && (ui.legend.match(/已覆盖/g) || []).length <= 1, ui);
+        && !/fnOS|\/vol\*|已覆盖|采样|快照/.test(ui.legend), ui);
       check(scenario + '：休眠 A 单独缺测或保留同代历史容量', a.standby === true
         && a.total === (scenario === 'old' ? 2e12 : null) && a.mounts.length === 1
         && ui.bays.find(d => d.name === 'sda').state === 'standby'
@@ -589,10 +582,9 @@ finally:
         await review.waitForFunction(value => document.querySelector('#sheet.on .sheet-hero [data-ref="v"]')?.getAttribute('aria-label') === value, expected);
         const note = await review.locator('#sheetBody [data-ref="r1CapNote"]').textContent();
         const row = overview.disks_detail.find(d => d.name === name);
-        const sampledText = row.capacity_sampled_at ? await review.evaluate(stamp => new Date(stamp * 1000).toLocaleString('zh-CN', { hour12: false }), row.capacity_sampled_at) : null;
-        check(scenario + '：磁盘详情 ' + name + ' 显示独立用量与原容量采样日期',
+        check(scenario + '：磁盘详情 ' + name + ' 显示独立用量且不显示采样时间',
           await review.locator('#sheetBody .sheet-hero [data-ref="v"]').getAttribute('aria-label') === expected
-          && (sampledText ? note.includes(sampledText) : note.includes('尚未采集容量')), { note, sampledText });
+          && note === '容量数据', { note });
         if (name === 'sda' && scenario === 'missing') check('已挂载缺测 A 的详情不再显示未挂载',
           (await review.locator('#sheetBody [data-ref="leg"]').textContent()).includes('已挂载 1 个分区'));
         await closeToStorage();
@@ -642,15 +634,16 @@ finally:
     await fixtureCall('scenario_stale');
     const activeExpiredGET = review.waitForResponse(response => response.url() === fixture.owner + '/api/overview');
     await review.clock.fastForward(15010); await activeExpiredGET;
-    await review.waitForFunction(() => document.querySelector('#layout-storage .bay[data-sheet="disk/sda"]')?.dataset.st === 'unknown');
-    check('同一 DOM 休眠→活动→过期后不保留 standby 或健康', (await dom()).bays.find(d => d.name === 'sda').temp === '--');
+    await review.waitForTimeout(200);
+    check('同一 DOM 不再渲染采样时间或缓存状态',
+      !/采样|快照|观测于/.test(await review.textContent('#layout-storage')));
     for (const scenario of ['boundary', 'future']) {
       const { ui } = await enter(scenario);
-      check(scenario + '：严格三十秒及未来日期都不显示健康绿灯或旧温度', ui.bays.every(d => d.state === 'unknown' && d.temp === '--'), ui);
+      check(scenario + '：仍展示缓存数据且不渲染采样状态', ui.bays.every(d => d.temp !== '--' && d.state !== 'unknown'), ui);
     }
     const fresh = await enter('fresh_missing');
-    check('容量全缺测显示 R1 说明，不编造未挂载或厂商路径', fresh.ui.pool === '--' && fresh.ui.free === '--'
-      && fresh.ui.legend.includes('R1') && !/fnOS|\/vol\*/.test(fresh.ui.legend)
+    check('容量全缺测显示不可用说明，不编造未挂载或厂商路径', fresh.ui.pool === '--' && fresh.ui.free === '--'
+      && fresh.ui.legend.includes('容量数据暂不可用') && !/fnOS|\/vol\*/.test(fresh.ui.legend)
       && fresh.ui.bays.every(d => d.capacity.includes('已挂载') && !d.capacity.includes('未挂载')), fresh.ui);
     const beforeAge = calls(await fixtureCall('stats'))[0].length;
     const originalDates = fresh.overview.disks_detail.map(d => d.smart_sampled_at);
@@ -663,8 +656,7 @@ finally:
     check('真实三十秒投影已 false/null，31 秒页面立即 unknown 灰灯，单位不丢',
       expired.disks_detail.every(d => d.smart_fresh === false && d.temp === null && d.health === null)
       && stale.bays.every(d => d.state === 'unknown' && d.temp === '--' && d.unit === '℃' && d.led !== 'rgb(18, 138, 78)'), stale);
-    check('过期显示真实 SMART 观测日期且不因 GET 续期', stale.observed.includes('已过期')
-      && !stale.observed.includes('巡检于 刚刚')
+    check('过期不渲染采样时间或缓存状态且不因 GET 续期', !/采样|过期|观测/.test(stale.observed)
       && JSON.stringify(expired.disks_detail.map(d => d.smart_sampled_at)) === JSON.stringify(originalDates), stale);
     await review.clock.fastForward(31000);
     check('62 秒独立健康轮询后仍不返绿，停留未增加任何采集', (await dom()).bays.every(d => d.state === 'unknown')

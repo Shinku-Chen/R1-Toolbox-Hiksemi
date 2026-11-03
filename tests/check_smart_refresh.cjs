@@ -345,26 +345,19 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
     await page.waitForTimeout(2600);
     // 容量卡由 MutationObserver 在 SMART 卡之后异步挂载，先等挂载再读文本，避免时序竞态。
     await page.waitForSelector('#sheetBody [data-ref="r1CapNote"]', { timeout: 10000 });
-    check('无容量样本盘显示尚未采集', (await page.textContent('#sheetBody [data-ref="r1CapNote"]')).includes('尚未采集容量'));
+    check('无容量样本盘仍显示容量数据标题', (await page.textContent('#sheetBody [data-ref="r1CapNote"]')) === '容量数据');
     capState.sdb = { stamp: NOW - 3600, used: 500, total: 2000, status: 'ok' };
     await waitTable(OLD);
 
     // 正式回归：同一开着的抽屉，旧时间 → 更新 /api/overview → 不重开即得到新时间。
     const capBase = capPosts.length;
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-    await page.waitForFunction(() => {
-      const note = document.querySelector('#sheetBody [data-ref="r1CapNote"]');
-      return note && note.textContent.includes('采样于');
-    }, null, { timeout: 8000 });
+    await page.waitForTimeout(400);
     const capOldNote = await page.textContent('#sheetBody [data-ref="r1CapNote"]');
     capState.sdb = { stamp: NOW + 60, used: 640, total: 2000, status: 'ok' };
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-    await page.waitForFunction(previous => {
-      const note = document.querySelector('#sheetBody [data-ref="r1CapNote"]');
-      return note && note.textContent !== previous && note.textContent.includes('采样于');
-    }, capOldNote, { timeout: 8000 });
-    check('当前抽屉不重开也能看到新采样时间',
-      (await page.textContent('#sheetBody [data-ref="r1CapNote"]')) !== capOldNote);
+    await page.waitForTimeout(400);
+    check('当前抽屉不重开也不显示采样时间', (await page.textContent('#sheetBody [data-ref="r1CapNote"]')) === capOldNote && capOldNote === '容量数据');
     check('缓存投影更新不追加容量 POST', capPosts.length === capBase);
     await closeSheet();
     await openDisk('sda');
@@ -374,9 +367,8 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
     check('默认未勾选强制', await page.isChecked('#sheetBody [data-ref="r1SmartForce"]') === false);
     check('提示后台不自动补采', (await page.textContent('#sheetBody [data-ref="r1Smart"]')).includes('后台不会自动补采'));
     const snapshotNote = await page.textContent('#sheetBody [data-ref="r1SmartSnapshot"]');
-    check('展示被动缓存采样时间并声明非实时',
-      snapshotNote.includes('SMART 快照，非实时') && snapshotNote.includes('采样于')
-      && !snapshotNote.includes('采样时间未知') && !snapshotNote.includes('观测已过期'));
+    check('展示被动 SMART 数据且不声明采样时间',
+      snapshotNote === 'SMART 数据');
     check('打开详情仍无手动 SMART POST', posts.length === 0);
 
     await page.click('#sheetBody [data-ref="r1SmartGo"]');
@@ -390,8 +382,8 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
       document.querySelector('#sheetBody [data-ref="r1Smart"]')?.dataset.device === 'sda'));
     await waitTable(NEW);
     check('当前盘属性从旧值更新为新值', (await tableText()).includes(String(NEW)));
-    check('刷新后快照时间随被动缓存更新',
-      (await page.textContent('#sheetBody [data-ref="r1SmartSnapshot"]')).includes('SMART 快照，非实时'));
+    check('刷新后仍只显示 SMART 数据，不显示采样状态',
+      (await page.textContent('#sheetBody [data-ref="r1SmartSnapshot"]')) === 'SMART 数据');
     check('缓存更新未追加 POST', posts.length === 1 && detailReads.filter(d => d === 'sda').length >= 2);
 
     // 另一块盘此前也看过旧缓存：切换过去应拿到新值（批量失效生效），且不追加 POST。
@@ -426,8 +418,7 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
     });
     await page.waitForTimeout(300);
     const capNoteInitial = await page.textContent('#sheetBody [data-ref="r1CapNote"]');
-    check('容量提示为按需快照而非实时',
-      capNoteInitial.includes('容量快照') && !capNoteInitial.includes('实时'));
+    check('容量提示不显示采样时间', capNoteInitial === '容量数据');
     await page.waitForTimeout(900);
     check('等待不触发容量 POST', capPosts.length === 0);
     await page.click('#sheetBody [data-ref="r1CapGo"]');
@@ -436,13 +427,13 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
       && capPosts[0].method === 'POST' && (capPosts[0].body === '{}' || capPosts[0].body === '')
       && /application\/json/.test(capPosts[0].headers['content-type'] || '')
       && capPosts[0].headers['x-fnm-request'] === '1');
-    check('容量回执显示完成时间', (await page.textContent('#sheetBody [data-ref="r1CapState"]')).includes('完成于'));
+    check('容量回执显示完成', (await page.textContent('#sheetBody [data-ref="r1CapState"]')).includes('完成'));
     // 让被动 /api/overview 也随之更新，验证当前抽屉无需重开即可看到新采样时间。
     capState.sda = { stamp: NOW, used: 1200, total: 4000, status: 'ok' };
     capState.sdb = { stamp: NOW, used: 600, total: 2000, status: 'ok' };
     await page.evaluate(() => { if (typeof Poll !== 'undefined' && Poll.run) Poll.run('overview'); });
     const capNoteAfter = await page.textContent('#sheetBody [data-ref="r1CapNote"]');
-    check('同步后提示不含原文或实时承诺', capNoteAfter.includes('容量快照'));
+    check('同步后不显示采样时间', capNoteAfter === '容量数据');
     check('同步不追加容量 POST', capPosts.length === 1);
     await page.waitForTimeout(600);
     check('轮询不追加容量 POST', capPosts.length === 1
@@ -493,7 +484,7 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
     const currentDevice = await page.evaluate(() =>
       document.querySelector('#sheetBody [data-ref="r1Smart"]')?.dataset.device || '');
     check('完成结果留在当前可见盘', currentDevice === 'sda'
-      && (await page.textContent('#sheetBody [data-ref="r1SmartState"]')).includes('完成于'));
+      && (await page.textContent('#sheetBody [data-ref="r1SmartState"]')).includes('完成'));
 
     // 在途关闭抽屉：完成后不得自动重新打开。
     mode = 'slow';
@@ -543,9 +534,7 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
     await page.click('#sheetBody [data-ref="r1SmartGo"]');
     await waitIdle();
     const expiredNote = await page.textContent('#sheetBody [data-ref="r1SmartSnapshot"]');
-    check('过期观测显示未知健康提示',
-      expiredNote.includes('观测已过期，当前健康未知，请手动刷新')
-      && !expiredNote.includes('采样时间未知'));
+    check('过期观测不渲染过期状态或采样时间', expiredNote === 'SMART 数据');
     mode = 'normal';
     cacheOverride = { sampledAt: 0, fresh: true };
     smartValue.sdb = OLD;
@@ -556,8 +545,8 @@ function smartDetail(raw, { sampledAt = NOW - 5, fresh = true } = {}) {
     await waitIdle();
     await page.waitForTimeout(200);
     const unknownTime = await page.textContent('#sheetBody [data-ref="r1SmartSnapshot"]');
-    check('缺采样时间显示未知且不造时间',
-      unknownTime.includes('采样时间未知') && !/采样于\s*\d{4}/.test(unknownTime));
+    check('缺采样时间不显示时间或缓存状态',
+      unknownTime === 'SMART 数据');
     cacheOverride = null;
 
     await page.setViewportSize({ width: 320, height: 760 });

@@ -345,6 +345,7 @@ class InsightsCollector:
         # The old config-root argument remains accepted for fixture callers;
         # migration databases are no longer a source of current user names.
         host_root = Path("/") if self.proc_root == Path("/proc") and self.sys_root == Path("/sys") else self.proc_root.parent
+        self.display_cache = None
         self.storage_client = storage_client or VendorStorageClient(
             root=host_root, runtime_dir=self.run_root / "r1-toolbox/storage")
         self._lock = threading.RLock()
@@ -484,6 +485,11 @@ class InsightsCollector:
         for device in state.get("device", {}).get("storage", {}).get("devices", []):
             if isinstance(device, dict) and "serial" in device:
                 device["serial"] = None
+        if self.display_cache is not None:
+            try:
+                state = self.display_cache.overlay_insights(state)
+            except Exception:
+                pass
         return state
 
     def _fast_loop(self):

@@ -2460,7 +2460,7 @@ function r1SmartCardHTML() {
       <span>强制刷新休眠硬盘</span>
       <span class="sub">可能唤醒硬盘；默认不勾选，刷新结束后自动复位。</span>
     </label>
-    <p class="sub r1-smart-snapshot" data-ref="r1SmartSnapshot">SMART 快照，非实时；健康与属性表示采样时状态 · 采样时间未知</p>
+    <p class="sub r1-smart-snapshot" data-ref="r1SmartSnapshot">SMART 数据</p>
     <p class="sub" data-ref="r1SmartState" role="status" aria-live="polite">尚未刷新。后台不再自动探测 SMART。</p>
     <div class="r1-smart-rows" data-ref="r1SmartRows" hidden></div>
   </div>`;
@@ -2468,7 +2468,7 @@ function r1SmartCardHTML() {
 function r1SmartBody(card, snapshot) {
   const skipped = snapshot.rows.filter(row => row.status === 'skipped_standby').length;
   const problems = snapshot.rows.filter(row => ['failed', 'unavailable', 'identity_changed'].includes(row.status)).length;
-  let text = (snapshot.force ? '强制刷新' : '默认跳过休眠') + ' · 完成于 ' + r1SmartStamp(snapshot.finished_at);
+  let text = snapshot.force ? '强制刷新完成' : '刷新完成';
   if (snapshot.status === 'partial') text += ' · 部分硬盘未完成';
   if (skipped) text += ' · 跳过 ' + skipped + ' 块休眠硬盘';
   if (problems) text += ' · ' + problems + ' 块异常';
@@ -2573,7 +2573,7 @@ function r1SmartPatchSleepNote() {
   const body = document.querySelector('#sheetBody');
   if (!body) return;
   for (const note of body.querySelectorAll('.note.sleep span')) {
-    const fixed = '这块硬盘已停转休眠。容量与温度为此前快照；按需采集默认跳过休眠硬盘，手动强制刷新可能唤盘。';
+    const fixed = '这块硬盘已停转休眠。容量与温度为此前数据；按需采集默认跳过休眠硬盘，手动强制刷新可能唤盘。';
     if (note.textContent !== fixed) note.textContent = fixed;
   }
 }
@@ -2582,13 +2582,9 @@ function r1SmartDetailStamp(detail) {
   const value = detail && detail.sampled_at;
   return (typeof value === 'number' && Number.isFinite(value) && value > 0) ? value : null;
 }
-/** SMART 快照说明：不依赖刷新回执，重开抽屉或刷新网页后仍显示缓存原始采样时间。 */
+/** Display-only cache values; sampling age is intentionally not shown. */
 function r1SmartSnapshotNote(detail) {
-  const stamp = r1SmartDetailStamp(detail);
-  const parts = ['SMART 快照，非实时；健康与属性表示采样时状态',
-                 stamp === null ? '采样时间未知' : '采样于 ' + r1SmartStamp(stamp)];
-  if (detail && detail.fresh === false) parts.push('观测已过期，当前健康未知，请手动刷新');
-  return parts.join(' · ');
+  return 'SMART 数据';
 }
 /** 只读已加载的被动缓存；未加载时复用同一个在途 GET，绝不触发 SMART 命令。 */
 function r1SmartUpdateSnapshot(host) {
@@ -2697,21 +2693,15 @@ function r1CapDisk() {
   return rows.find(row => row && row.name === device) || null;
 }
 function r1CapNote() {
-  const disk = r1CapDisk();
-  if (!disk) return '容量快照';
-  const stamp = r1CapIsStamp(disk.capacity_sampled_at) ? disk.capacity_sampled_at : null;
-  const status = typeof disk.capacity_status === 'string' ? disk.capacity_status : '';
-  let text = '容量快照 · ' + (stamp === null ? '尚未采集容量' : '采样于 ' + r1SmartStamp(stamp));
-  if (status === 'partial' || status === 'failed') text += ' · 上次刷新未完全完成';
-  return text;
+  return '容量数据';
 }
 function r1CapCardHTML() {
   return `<div class="card pad r1-capacity" data-ref="r1Cap">
     <div class="r1-smart-head">
-      <div><h3>刷新容量</h3><p class="sub" data-ref="r1CapNote">容量快照</p></div>
+      <div><h3>刷新容量</h3><p class="sub" data-ref="r1CapNote">容量数据</p></div>
       <button class="btn" type="button" data-ref="r1CapGo">刷新容量</button>
     </div>
-    <p class="sub" data-ref="r1CapState" role="status" aria-live="polite">后台不预采集；仅按需补齐容量快照。</p>
+    <p class="sub" data-ref="r1CapState" role="status" aria-live="polite">后台不预采集；进入页面或手动刷新时更新容量。</p>
     <div class="r1-smart-rows" data-ref="r1CapRows" hidden></div>
   </div>`;
 }
@@ -2734,9 +2724,9 @@ function r1CapSync(host) {
           const r = R1_CAP_STATE.result;
           const done = r.rows.filter(row => row.status === 'refreshed').length;
           const bad = r.rows.filter(row => row.status !== 'refreshed').length;
-          const text = '完成于 ' + r1SmartStamp(r.finished_at) + ' · 成功 ' + done + '，异常 ' + bad
+          const text = '完成 · 成功 ' + done + '，异常 ' + bad
             + (r.status === 'partial' ? ' · 部分未完成' : '');
-          const html = r.rows.map(row => `<div class="r1-smart-row" data-status="${esc(row.status)}"><strong>#${esc(String(row.mount_id))}</strong><span>${esc(r1CapStatusText(row.status))}</span><span class="sub">${esc(r1CapReasonText(row.reason) || '—')}</span><span class="sub">${esc(r1SmartStamp(row.sampled_at))}</span></div>`).join('');
+          const html = r.rows.map(row => `<div class="r1-smart-row" data-status="${esc(row.status)}"><strong>#${esc(String(row.mount_id))}</strong><span>${esc(r1CapStatusText(row.status))}</span><span class="sub">${esc(r1CapReasonText(row.reason) || '—')}</span></div>`).join('');
           return { text, html };
         })() : null;
   const signature = JSON.stringify([busy, view && view.text, view && view.html, noteText]);
@@ -3185,7 +3175,7 @@ function r1DiskCapacityMissing(d) {
 /** 当前健康与温度彼此独立；缺温度不抹掉合法 PASS，新 FAIL 不等旧巡检轮询。 */
 bayState = function (d) {
   if (d.standby === true) return { lv: 'standby', text: '休眠中', detail: '' };
-  if (!r1DiskFresh(d)) return { lv: 'unknown', text: 'SMART 未知', detail: '观测缺失或已过期' };
+  // The server overlays last persisted display values; age is internal.
   const sm = smartState(d);
   if (sm.lv === 'crit' || sm.lv === 'warn') return { lv: sm.lv, text: sm.text, detail: '' };
   if (sm.lv === '') {
@@ -3193,78 +3183,47 @@ bayState = function (d) {
       return { lv: 'warn', text: '温度接近临界值', detail: '' };
     return { lv: 'ok', text: '正常', detail: '' };
   }
-  return { lv: 'unknown', text: 'SMART 未知', detail: '' };
+  return { lv: 'unknown', text: 'SMART 暂无数据', detail: '' };
 };
 function r1DiskObservedText(disks, o) {
-  const stamps = disks.map(d => r1DiskStamp(d.smart_sampled_at)).filter(v => v !== null);
-  if (!stamps.length) return 'SMART 尚无有效观测';
-  const latest = Math.max(...stamps), fresh = disks.filter(d => r1DiskFresh(d, o)).length;
-  return `SMART 最近观测于 ${r1SmartStamp(latest)} · ${fresh ? `有效 ${fresh}/${disks.length} 块盘` : '已过期或无有效测量'}`;
+  return 'SMART 数据';
 }
 /** 只调整传给渲染器的副本，不改变前台采集授权、缓存判定或原采样日期。 */
 function r1DiskDisplay(o) {
-  return { ...o, disks_detail: disksOf(o).map(d => {
-    const fresh = r1DiskFresh(d, o), cap = r1DiskHasCapacity(d);
-    return { ...d, ...(cap ? {} : { total: null, used: null, percent: null }),
-      ...(fresh ? {} : { temp: null, health: null }) };
-  }) };
+  // The server overlays the last persisted display values.  Keep them visible;
+  // sampling age is internal and is never rendered by Web.
+  return { ...o, disks_detail: disksOf(o).map(d => ({ ...d })) };
 }
 /** 明细 GET 的异步重绘也走已有 SMART observer，避免旧详情缓存恢复过期温度/健康。 */
 function r1DiskPatchDetail() {
   if (!sheetCtx || sheetCtx.type !== 'disk' || !S.o) return;
   const disk = disksOf(S.o).find(d => d.name === r1SmartVisibleDisk());
   if (!disk) return;
-  const body = document.querySelector('#sheetBody'), fresh = r1DiskFresh(disk);
-  if (!fresh) setHTML(body.querySelector('[data-ref="pill"]'),
-    pillFor(disk.standby === true ? 'sleep' : 'none', disk.standby === true ? '休眠中' : 'SMART 未知'));
-  body.querySelectorAll('[data-ref="smart"] tr').forEach(row => {
-    if ((!fresh && row.cells[0]?.textContent === '整体评估')
-      || ((!fresh || !r1DiskNumber(disk.temp)) && row.cells[0]?.textContent === '温度')) {
-      setText(row.cells[1], '—'); setText(row.cells[2], '—');
-    }
-  });
+  const body = document.querySelector('#sheetBody');
+  if (disk.standby === true) setHTML(body.querySelector('[data-ref="pill"]'), pillFor('sleep', '休眠中'));
+  // Display cache values are shown as-is; no sampling-age status is rendered.
 }
 const r1StorageUpdate = MODS.storage.update;
 MODS.storage.update = function (o, m) {
   if (!o) return;
   r1StorageUpdate.call(this, r1DiskDisplay(o), m);
   const disks = disksOf(o), measured = disks.filter(r1DiskHasCapacity).length;
-  r1HistCss();
   disks.forEach(d => {
     const bay = m.bays[d.name];
-    const hist = r1DiskHasCapacity(d) ? null : r1DiskHistory(d);
-    if (bay && !r1DiskHasCapacity(d)) {
-      if (hist) {
-        r1ClearBayMissing(bay);
-        r1ApplyBayHistory(bay, hist, d.standby === true);
-      } else {
-        r1ApplyBayHistory(bay, null, false);
-        r1ApplyBayMissing(bay, d);
-      }
-    } else if (bay) {
-      r1ApplyBayHistory(bay, null, false);
-      r1ClearBayMissing(bay);
-    }
-    if (bay) bay.title = `${d.name} · ${bayState(d).text}（${r1DiskObservedText([d], o)}）`
-      + (hist ? ' · 当前容量未知，展示最近实测快照：' + r1HistLine(hist) : '');
+    if (!bay) return;
+    // No archive/history labels: current or last persisted display data only.
+    r1ApplyBayHistory(bay, null, false);
+    r1ClearBayMissing(bay);
+    if (!r1DiskHasCapacity(d)) r1ApplyBayMissing(bay, d);
+    bay.title = `${d.name} · ${bayState(d).text}`;
   });
-  setText(m.x.scanAgo, r1DiskObservedText(disks, o));
-  const poolHist = (+o.disk_size > 0) ? null : r1PoolHistory(o);
+  setText(m.x.scanAgo, 'SMART 数据');
   const poolCard = m.x.poolV && m.x.poolV.closest ? m.x.poolV.closest('.card') : null;
-  if (poolCard) { poolCard.classList.toggle('r1-pool-hist', !!poolHist); r1MarkHist(poolCard, 'pool', !!poolHist); }
-  if (poolHist) {
-    dnum(m.x.poolV, poolHist.percent);
-    setW(m.x.poolBar, poolHist.percent);
-    setHTML(m.x.poolLeg, `<span class="r1-hist-note">当前容量未知 · 最近实测快照</span>`
-      + `<span>${esc(r1HistBytes(poolHist.used))} / ${esc(r1HistBytes(poolHist.total))}</span>`
-      + `<span>${esc(r1HistRange(poolHist))}</span><span>${esc(r1HistCoverage(poolHist))}</span>`);
-  } else {
-    setHTML(m.x.poolLeg, o.disk_size > 0
-      ? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>`
-        + (o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : '')
-        + (measured < disks.length ? `<span>仅统计已有容量快照 · 已覆盖 ${measured}/${disks.length} 块盘</span>` : '')
-      : '<span>R1 尚无可用容量快照；已挂载分区的容量尚未采集或不可用。</span>');
-  }
+  if (poolCard) { poolCard.classList.remove('r1-pool-hist'); r1MarkHist(poolCard, 'pool', false); }
+  setHTML(m.x.poolLeg, o.disk_size > 0
+    ? `<span>已用 <b>${F.dsizeStr(o.disk_used)}</b></span><span>总容量 <b>${F.dsizeStr(o.disk_size)}</b></span>`
+      + (o.disk_pools ? `<span>${esc(o.disk_pools)} 个存储池</span>` : '')
+    : '<span>容量数据暂不可用</span>');
 };
 for (const type of ['storage', 'disk']) {
   const build = SHEETS[type].build;
@@ -3276,21 +3235,17 @@ for (const type of ['storage', 'disk']) {
       if (type === 'storage') {
         disksOf(o).forEach(d => {
           if (!r1DiskHasCapacity(d)) {
-            const hist = r1DiskHistory(d);
             const row = body.querySelector(`[data-p="${CSS.escape(d.name)}"]`);
-            setText(row, hist ? `${F.dsizeStr(d.size)} · ${r1HistLine(hist)}` : `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
-            r1MarkHist(row, 'row', !!hist);
+            r1MarkHist(row, 'row', false);
+            setText(row, `${F.dsizeStr(d.size)} · ${r1DiskCapacityMissing(d)}`);
           }
         });
       } else {
         const disk = disksOf(o).find(d => d.name === arg);
         if (disk && !r1DiskHasCapacity(disk)) {
-          const hist = r1DiskHistory(disk);
           const leg = body.querySelector('[data-ref="leg"]');
-          setText(leg, hist
-            ? r1HistNote(hist) + ` · 硬盘容量 ${F.dsizeStr(disk.size)}`
-            : `${r1DiskCapacityMissing(disk)} · 硬盘容量 ${F.dsizeStr(disk.size)}`);
-          r1MarkHist(leg, 'detail', !!hist);
+          r1MarkHist(leg, 'detail', false);
+          setText(leg, `${r1DiskCapacityMissing(disk)} · 硬盘容量 ${F.dsizeStr(disk.size)}`);
         }
         r1DiskPatchDetail();
       }
@@ -3426,6 +3381,12 @@ function r1PrimaryEnter(card, kind, a, sig) {
   if (node._html !== html) { node._html = html; node.innerHTML = html; }
 }
 function r1ArchiveSync() {
+  // Past-measurement archive was removed from Web.  Clean any nodes left by a
+  // stale layout and never promote historical values over display data.
+  r1ArchiveRemove('overview'); r1ArchiveRemove('storage');
+  r1PrimaryExit(document.querySelector('#layout-overview [data-m="disk"]'));
+  r1PrimaryExit(document.querySelector('#layout-storage .card.pool'));
+  return;
   const archive = r1CapacityArchive(S.o && S.o.capacity_observation_archive);
   r1ArchiveCss();
   const ovCard = document.querySelector('#layout-overview [data-m="disk"]');

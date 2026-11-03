@@ -3410,6 +3410,7 @@ class StatusMonitor:
         self._capacity_projection_dropped = 0
         self._capacity_projection_first_loss = None
         self._capacity_projection_last_positive = None
+        self.display_cache = None
         self.thread = threading.Thread(target=self._run, name="r1-metrics", daemon=True)
 
     def _run(self):
@@ -3467,6 +3468,11 @@ class StatusMonitor:
             raise
         self._try_capacity_projection_note(value, 'returned' if callable(project) else 'not_observed',
                                            source, operation)
+        if self.display_cache is not None:
+            try:
+                value = self.display_cache.overlay_status(value)
+            except Exception:
+                pass
         return value
 
     def _try_capacity_projection_note(self, value, result, source, operation):
@@ -3960,6 +3966,31 @@ def stop_child(child):
         child.wait(timeout=1)
 
 
+def attach_disk_display_cache(controller, insights, monitor, stopped):
+    """Load the display-only disk cache and persist refreshed snapshots.
+
+    The cache never supplies authorization or measurement proof; it only keeps
+    the last successfully observed display fields available across restarts and
+    host mount-event churn.  A missing or unwritable state directory simply
+    disables persistence.
+    """
+    state_dir = getattr(controller, 'state_dir', None)
+    if not state_dir:
+        return None
+    from disk_cache import DiskDisplayCache
+    cache = DiskDisplayCache(Path(state_dir) / 'disk-cache.json')
+    insights.display_cache = cache
+    monitor.display_cache = cache
+    def loop():
+        while not stopped.wait(5):
+            try:
+                cache.record(monitor.snapshot(), insights.snapshot())
+            except Exception:
+                pass
+    threading.Thread(target=loop, name='r1-disk-display-cache', daemon=True).start()
+    return cache
+
+
 def create_fan_policy(controller, insights):
     from fan_native import FanNativeAdapter
     from fan_policy import FanPolicyController
@@ -4018,6 +4049,7 @@ def run_service(app, port=PORT, controller=None, insights=None):
         from insights import InsightsCollector
         insights = InsightsCollector()
     stopped, monitor = threading.Event(), StatusMonitor()
+    attach_disk_display_cache(controller, insights, monitor, stopped)
     control_token = secrets.token_hex(32)
     server = server_thread = child = web = fan = light = analytics = None
     handlers = {}
@@ -4177,6 +4209,7 @@ def run_resident_service(frontend=None, port=PORT, controller=None, insights=Non
         if insights is None:
             from insights import InsightsCollector
             insights = InsightsCollector()
+        attach_disk_display_cache(controller, insights, monitor, stopped)
         controller.set_screen_managed(False)
         fan = create_fan_policy(controller, insights)
         for name, factory in (('灯光联动', lambda: create_light_policy(controller, fan)),

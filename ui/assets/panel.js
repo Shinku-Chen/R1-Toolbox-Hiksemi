@@ -323,7 +323,7 @@
   // 可见周期按真实 view 区分：overview/storage/metrics 各自独立；同页轮询不新周期。
   function fillView() {
     if (document.hidden || state.saver || state.sleeping) return null;
-    return ['overview', 'storage', 'metrics'].includes(state.view) ? state.view : null;
+    return ['overview', 'storage', 'metrics', 'thermal'].includes(state.view) ? state.view : null;
   }
   function fillRelevant() { return fillView() !== null; }
   function fillCapacityValid(disk) {
@@ -413,7 +413,9 @@
     }
     if (!state.online) return;
     if (fillState.inflight || fillState.attempted) return;
-    if (!fillMissing()) return;
+    // The storage page always tries one live batch per entry; other views only
+    // fill missing data.  Cached values stay visible while it runs.
+    if (view !== 'storage' && !fillMissing()) return;
     fillState.attempted = true;
     fillState.inflight = true;
     const epoch = fillState.epoch;
@@ -719,23 +721,6 @@
   }
 
   // ------------------------------------------------------------------ views
-  function snapshotLabel(disk) {
-    // 手动快照：只显示参与汇总行的缓存采样时间，不把缓存当实时，也不随轮询刷新。
-    if (!disk || !disk.measured) return '尚未采集容量';
-    const fmt = value => {
-      try {
-        const d = new Date(value * 1000);
-        return Number.isFinite(d.getTime()) ? d.toLocaleString() : null;
-      } catch (_) { return null; }
-    };
-    const first = disk.earliest ? fmt(disk.earliest) : null;
-    const last = disk.latest ? fmt(disk.latest) : null;
-    let text = '容量快照 · ' + (first === null ? '采样时间未知'
-      : last && last !== first ? first + ' – ' + last : first);
-    if (disk.count > 0 && disk.measured < disk.count) text += ' · 覆盖 ' + disk.measured + '/' + disk.count + ' 块盘';
-    if (disk.stale > 0) text += ' · ' + disk.stale + ' 块上次刷新未完成';
-    return text;
-  }
   function clockBlock() {
     const status = obj(state.data.status);
     const host = obj(obj(obj(state.data.insights).device).identity).name || status.hostname || 'R1-NAS';
@@ -755,7 +740,7 @@
     const badge = !state.online ? '本机服务离线' : status.available === false ? '数据不可用' : level === 'crit' ? '温度过高' : level === 'warn' ? '一项需要关注' : temp === null ? '部分指标未知' : '运行正常';
     const headline = !state.online ? '暂时无法连接 NAS' : temp === null ? '温度暂不可读' : level === 'crit' ? 'CPU 温度过高' : level === 'warn' ? 'CPU 温度稍高' : '各项指标正常';
     const copy = !state.online ? '每几秒自动重试；保留上次可用读数。' : temp === null ? 'CPU 温度传感器暂未返回读数。' : '其余已采集指标正常';
-    return `${clockBlock()}<article class="card status-card"><div class="thermal-ring"><svg viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="35" fill="none" stroke="#ffffff0d" stroke-width="5"/><circle cx="42" cy="42" r="35" fill="none" stroke="${level === 'crit' ? 'var(--red)' : level === 'warn' ? 'var(--orange)' : 'var(--green)'}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${temp === null ? 0 : Math.min(220, Math.max(0, temp / 100 * 220)).toFixed(0)} 220"/></svg><span class="ring-value ${level === 'crit' ? 'orange' : ''}">${tempText(temp)}</span></div><div><span class="badge ${level === 'warn' || level === 'crit' || !state.online ? 'warn' : ''}">${esc(badge)}</span><h2 class="status-title">${esc(headline)}</h2><p class="status-copy">${esc(copy)}</p></div></article><div class="section-label tight"><h2>AT A GLANCE / 核心指标</h2><button type="button" data-view="metrics" aria-label="查看全部核心指标">全部 ›</button></div><article class="card metric-stack"><button type="button" class="metric-row" data-view="processor" aria-label="CPU ${percentText(cpu.usage_percent)}%，查看处理器详情"><div class="metric-info"><div class="metric-name">CPU</div><div class="metric-meta">${esc(cpuModel())}${cpuCores() ? ' · ' + cpuCores() + ' 核' : ''}</div></div>${spark(state.live.cpu, 'small', false)}<span class="metric-number lime">${dotNumber(percentText(cpu.usage_percent))}<small>%</small></span></button><button type="button" class="metric-row" data-view="processor" aria-label="内存 ${percentText(mem.percent)}%，查看内存详情"><div class="metric-info"><div class="metric-name">内存</div><div class="metric-meta">${bytes(mem.used)} / ${bytes(mem.total)}</div></div>${spark(state.live.mem, 'small purple', false)}<span class="metric-number purple">${dotNumber(percentText(mem.percent))}<small>%</small></span></button></article><button type="button" class="card card-button inline-summary" data-view="storage"><div><div class="metric-name">存储空间</div><span class="caption">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) + ' · ' + esc(snapshotLabel(disk)) : '-- / -- · 尚未采集容量'}</span></div><div><span class="summary-number orange">${percentText(disk.percent)}<small>%</small></span>${bar(disk.percent, statusLevel(disk.percent) === 'warn' ? 'var(--orange)' : 'var(--green)', 'mini-bar')}</div><span class="chevron" aria-hidden="true">›</span></button><button type="button" class="card card-button flow-summary" data-view="network"><div class="flow-cell"><p class="flow-label">↓ 下载</p><p class="flow-value green">${esc(down[0])} <small>${esc(down[1])}</small></p></div><div class="flow-separator"></div><div class="flow-cell"><p class="flow-label">↑ 上传</p><p class="flow-value">${esc(up[0])} <small>${esc(up[1])}</small></p></div><span class="chevron" aria-hidden="true">›</span></button><div class="quick-links"><button type="button" data-view="trends">历史趋势</button><button type="button" data-view="thermal">温度与风扇</button></div>`;
+    return `${clockBlock()}<article class="card status-card"><div class="thermal-ring"><svg viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="35" fill="none" stroke="#ffffff0d" stroke-width="5"/><circle cx="42" cy="42" r="35" fill="none" stroke="${level === 'crit' ? 'var(--red)' : level === 'warn' ? 'var(--orange)' : 'var(--green)'}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${temp === null ? 0 : Math.min(220, Math.max(0, temp / 100 * 220)).toFixed(0)} 220"/></svg><span class="ring-value ${level === 'crit' ? 'orange' : ''}">${tempText(temp)}</span></div><div><span class="badge ${level === 'warn' || level === 'crit' || !state.online ? 'warn' : ''}">${esc(badge)}</span><h2 class="status-title">${esc(headline)}</h2><p class="status-copy">${esc(copy)}</p></div></article><div class="section-label tight"><h2>AT A GLANCE / 核心指标</h2><button type="button" data-view="metrics" aria-label="查看全部核心指标">全部 ›</button></div><article class="card metric-stack"><button type="button" class="metric-row" data-view="processor" aria-label="CPU ${percentText(cpu.usage_percent)}%，查看处理器详情"><div class="metric-info"><div class="metric-name">CPU</div><div class="metric-meta">${esc(cpuModel())}${cpuCores() ? ' · ' + cpuCores() + ' 核' : ''}</div></div>${spark(state.live.cpu, 'small', false)}<span class="metric-number lime">${dotNumber(percentText(cpu.usage_percent))}<small>%</small></span></button><button type="button" class="metric-row" data-view="processor" aria-label="内存 ${percentText(mem.percent)}%，查看内存详情"><div class="metric-info"><div class="metric-name">内存</div><div class="metric-meta">${bytes(mem.used)} / ${bytes(mem.total)}</div></div>${spark(state.live.mem, 'small purple', false)}<span class="metric-number purple">${dotNumber(percentText(mem.percent))}<small>%</small></span></button></article><button type="button" class="card card-button inline-summary" data-view="storage"><div><div class="metric-name">存储空间</div><span class="caption">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span></div><div><span class="summary-number orange">${percentText(disk.percent)}<small>%</small></span>${bar(disk.percent, statusLevel(disk.percent) === 'warn' ? 'var(--orange)' : 'var(--green)', 'mini-bar')}</div><span class="chevron" aria-hidden="true">›</span></button><button type="button" class="card card-button flow-summary" data-view="network"><div class="flow-cell"><p class="flow-label">↓ 下载</p><p class="flow-value green">${esc(down[0])} <small>${esc(down[1])}</small></p></div><div class="flow-separator"></div><div class="flow-cell"><p class="flow-label">↑ 上传</p><p class="flow-value">${esc(up[0])} <small>${esc(up[1])}</small></p></div><span class="chevron" aria-hidden="true">›</span></button><div class="quick-links"><button type="button" data-view="trends">历史趋势</button><button type="button" data-view="thermal">温度与风扇</button></div>`;
   }
 
   function metrics() {
@@ -768,12 +753,12 @@
     const cards = [
       ['CPU', percentText(obj(status.cpu).usage_percent), '%', `${cpuCores() || '--'} 核 · 负载 ${load === null ? '--' : load.toFixed(2)}`, 'cpu', 'lime', 'processor'],
       ['内存', percentText(memory().percent), '%', `${bytes(memory().used)} / ${bytes(memory().total)}`, 'mem', 'purple', 'processor'],
-      ['存储', percentText(disk.percent), '%', (disk.measured ? `已用 ${bytes(disk.used)} · ` : '容量暂不可读 · ') + snapshotLabel(disk), 'disk', 'orange', 'storage'],
+      ['存储', percentText(disk.percent), '%', (disk.measured ? `已用 ${bytes(disk.used)}` : '容量暂不可读'), 'disk', 'orange', 'storage'],
       ['下载', down[0], down[1], `${esc(net.interface || '--')}`, 'rx', 'green', 'network'],
       ['CPU 温度', tempText(temp), '', 'CPU 封装温度', 'temp', 'orange', 'thermal'],
     ];
     const stamp = status.timestamp ? new Date(status.timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '--';
-    return `<div class="detail-lead"><p class="kicker">AT A GLANCE</p><h2>${cards.length} 项核心读数</h2><p>${state.online ? '实时指标 · ' + esc(stamp) + ' · 容量为手动快照' : '等待连接本机服务'}</p></div>${cards.map(([label, value, unit, sub, chart, color, target]) => `<button type="button" class="card card-button" data-view="${target}"><div class="card-top"><h2>${esc(label)}</h2><span class="chevron" aria-hidden="true">›</span></div><div class="big-value ${color}">${dotNumber(value)}<small>${esc(unit)}</small></div><p class="caption" style="margin:12px 0">${esc(sub)}</p>${spark(state.live[chart] || [], color)}</button>`).join('')}`;
+    return `<div class="detail-lead"><p class="kicker">AT A GLANCE</p><h2>${cards.length} 项核心读数</h2><p>${state.online ? '实时指标' : '等待连接本机服务'}</p></div>${cards.map(([label, value, unit, sub, chart, color, target]) => `<button type="button" class="card card-button" data-view="${target}"><div class="card-top"><h2>${esc(label)}</h2><span class="chevron" aria-hidden="true">›</span></div><div class="big-value ${color}">${dotNumber(value)}<small>${esc(unit)}</small></div><p class="caption" style="margin:12px 0">${esc(sub)}</p>${spark(state.live[chart] || [], color)}</button>`).join('')}`;
   }
 
   function processor() {
@@ -796,7 +781,7 @@
     const smart = health.passed === false ? 'SMART 异常' : health.passed === true ? 'SMART 正常' : 'SMART 未读取';
     const usedPercent = capacity && capacity.total > 0 ? capacity.used / capacity.total * 100 : null;
     const usage = capacity ? `<div class="drive-capacity"><div class="drive-capacity-top"><span>已用 <b>${percentText(usedPercent)}%</b></span><span class="mono">${bytes(capacity.used)} / ${bytes(capacity.total)}</span></div>${bar(usedPercent, usedPercent >= 85 ? 'var(--orange)' : 'linear-gradient(90deg,#8ed7b2,#c7ed89)', 'drive-capacity-bar')}${capacity.measured > 1 ? `<p class="drive-capacity-note">已测 ${capacity.measured} 个分区／挂载</p>` : ''}</div>` : '<p class="drive-capacity muted">容量暂不可读</p>';
-    return `<article class="card"><div class="drive-row"><div class="drive-symbol" style="color:${standby ? 'var(--dim)' : temp !== null && temp >= 50 ? 'var(--orange)' : 'var(--green)'}"><svg viewBox="0 0 28 58" aria-hidden="true" fill="currentColor">${Array.from({ length: 10 }, (_, row) => `<circle cx="8" cy="${6 + row * 5}" r="1.7"/><circle cx="14" cy="${6 + row * 5}" r="1.7"/><circle cx="20" cy="${6 + row * 5}" r="1.7"/>`).join('')}</svg></div><div class="drive-content"><div class="drive-title"><h3>${esc(driveName(disk, index))}</h3><span class="drive-temperature ${standby || temp === null ? 'muted' : temp >= 50 ? 'orange' : 'green'}">${tempText(temp)}</span></div><p class="drive-meta">${esc(disk.model || '未知型号')} · ${esc(size)}</p>${usage}${standby ? `<p class="drive-standby">休眠中 · ${temp === null ? '暂无缓存读数' : '已有缓存读数'} · 不主动唤醒</p>` : `<p class="caption">${esc(smart)}${num(disk.temperature_critical_c, 0) ? ' · 临界 ' + disk.temperature_critical_c + '°C' : ''}</p>`}</div></div></article>`;
+    return `<article class="card"><div class="drive-row"><div class="drive-symbol" style="color:${standby ? 'var(--dim)' : temp !== null && temp >= 50 ? 'var(--orange)' : 'var(--green)'}"><svg viewBox="0 0 28 58" aria-hidden="true" fill="currentColor">${Array.from({ length: 10 }, (_, row) => `<circle cx="8" cy="${6 + row * 5}" r="1.7"/><circle cx="14" cy="${6 + row * 5}" r="1.7"/><circle cx="20" cy="${6 + row * 5}" r="1.7"/>`).join('')}</svg></div><div class="drive-content"><div class="drive-title"><h3>${esc(driveName(disk, index))}</h3><span class="drive-temperature ${standby || temp === null ? 'muted' : temp >= 50 ? 'orange' : 'green'}">${tempText(temp)}</span></div><p class="drive-meta">${esc(disk.model || '未知型号')} · ${esc(size)}</p>${usage}${standby ? `<p class="drive-standby">休眠中 · ${temp === null ? '暂无温度数据' : '温度数据'} · 不主动唤醒</p>` : `<p class="caption">${esc(smart)}${num(disk.temperature_critical_c, 0) ? ' · 临界 ' + disk.temperature_critical_c + '°C' : ''}</p>`}</div></div></article>`;
   }
 
   function storage() {
@@ -804,7 +789,7 @@
     const allDrives = list(obj(obj(state.data.insights).disks).items);
     const drives = allDrives.filter(row => row && row.id);
     const capacity = capacityByDevice();
-    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '快照使用率' : '尚未采集容量'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span><span>${esc(snapshotLabel(disk))}</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map((row, index) => driveCard(row, index, capacity.get(row.id))).join('')}${drives.length ? '' : '<p class="info-note">未读取到物理磁盘。</p>'}`;
+    return `<article class="card storage-total"><div class="card-top"><p class="kicker">STORAGE USAGE</p><span class="badge ${disk.percent !== null && disk.percent >= 85 ? 'warn' : ''}">${disk.percent !== null ? '使用率' : '暂无容量数据'}</span></div><div class="big-value orange">${dotNumber(percentText(disk.percent))}<small>% 已用</small></div>${bar(disk.percent, 'linear-gradient(90deg,#8ed7b2,#c7ed89,#f2a275)')}<div class="capacity-label"><span class="mono">${disk.measured ? bytes(disk.used) + ' / ' + bytes(disk.total) : '-- / --'}</span></div></article><div class="section-label"><h2>PHYSICAL DRIVES / 物理磁盘</h2><span>${drives.length} 块</span></div>${drives.map((row, index) => driveCard(row, index, capacity.get(row.id))).join('')}${drives.length ? '' : '<p class="info-note">未读取到物理磁盘。</p>'}`;
   }
 
   function network() {
@@ -835,12 +820,12 @@
   /** Render only the existing insights cache; opening this page never queries SMART. */
   function diskTemperatures(insights) {
     const drives = list(obj(insights.disks).items).filter(row => row && row.id);
-    return `<article class="card disk-temperatures"><div class="card-top"><h2>硬盘温度</h2><span class="badge neutral">后台缓存</span></div>${drives.map((disk, index) => {
+    return `<article class="card disk-temperatures"><div class="card-top"><h2>硬盘温度</h2></div>${drives.map((disk, index) => {
       const value = num(disk.temp_c, -40, 200);
       const standby = disk.standby === true;
-      const note = standby ? '休眠中 · ' + (value === null ? '暂无缓存读数' : '已有缓存读数') : value === null ? '温度暂不可读' : '后台采集读数';
+      const note = standby ? '休眠中 · ' + (value === null ? '暂无温度数据' : '温度数据') : value === null ? '温度暂不可读' : '';
       return `<div class="temperature-row disk-temperature-row" data-disk="${esc(disk.id)}"><div class="temperature-top"><span>${esc(driveName(disk, index))}</span><b class="${standby || value === null ? 'muted' : value >= 50 ? 'orange' : 'green'}">${tempText(value)}</b></div><p class="caption">${esc(note)}</p>${value !== null && !standby ? bar(Math.max(0, Math.min(100, (value - 20) / 40 * 100)), value >= 50 ? 'var(--orange)' : 'var(--green)') : ''}</div>`;
-    }).join('')}${drives.length ? '' : '<p class="caption">未读取到物理硬盘。</p>'}<p class="caption disk-temperature-note">保留休眠状态，不主动唤醒硬盘；缓存读数不代表当前温度。</p></article>`;
+    }).join('')}${drives.length ? '' : '<p class="caption">未读取到物理硬盘。</p>'}<p class="caption disk-temperature-note">保留休眠状态，不主动唤醒硬盘。</p></article>`;
   }
 
   function containerView() {

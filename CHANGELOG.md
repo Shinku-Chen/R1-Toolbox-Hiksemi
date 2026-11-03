@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- feat(storage): 增加 `disk-cache.json` 显示缓存，启动和切换页面立即展示最近一次成功观测的硬盘型号、温度、健康、容量与使用率；状态／insights 缺失时只读补齐，不参与授权、测量、风扇或空间预检。
+- feat(storage): 存储页进入时先展示缓存并尝试一次真实 SMART／容量采集；盘位卡展示每盘使用率百分比，Web 与小屏移除容量采样时间、缓存状态和“过去测量档案”／“最近实测”展示。
 - fix(storage): 测量同次 mountinfo 复读只比较受支持的 `/drives` 数据行；Docker overlay／tmpfs 等无关字节变化不再使整批 `inventory_incomplete`，选中数据行增删改仍拒绝。修复新版本实机补齐仍出现 `unavailable`／无容量提交。
 - fix(storage): 投影复核挂载事件时以实际数据挂载键判断；主机范围 Docker overlay 等无关 mountinfo 事件不再清空未变化容量，真实盘位／身份变化仍丢弃缓存。小屏物理盘卡新增已用百分比与分区汇总，未知保持未知。
 - fix(screen): 本机小屏补齐接受令牌匹配但无 `Origin` 头（Electron file／同源页面）的请求，仍拒绝 Bearer、客户端授权头和不匹配令牌；修复实机提示“授权被拒绝”而容量批次从未开始。
