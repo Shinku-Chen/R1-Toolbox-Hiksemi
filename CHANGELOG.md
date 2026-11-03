@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs: README 增加去除注释、精简后的 Compose 部署步骤与升级命令。
 - build(compose): 数据卷统一为 `r1_toolbox_data`；旧 `r1-toolbox-data` 仅保留保护并需显式复制迁移。
 - ci: `dev` 只更新 `preview`；`main` 推送不再发布镜像；正式 `v*` 标签同时发布 `latest`、版本标签和不可变 SHA。
 - docs: README 增加影视中心排序补丁、自定义温度风扇曲线和 API/MCP 入口。

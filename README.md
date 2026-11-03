@@ -47,6 +47,63 @@
 2. 在 NAS 上导入镜像。
 3. 用对应 Compose 创建项目并启动。
 
+### 精简 Compose 部署
+
+以下是从 `composer.yml` 去掉注释后的最小配置，保存为 NAS 上的 `compose.yaml`：
+
+```yaml
+services:
+  r1-toolbox:
+    image: ghcr.io/shinku-chen/r1-toolbox:latest
+    container_name: r1-toolbox
+    restart: always
+    stop_grace_period: 3m
+    privileged: true
+    pid: host
+    ipc: host
+    network_mode: host
+    environment:
+      UI_MODE: image
+      R1_WEB_AUTH_MODE: password
+    volumes:
+      - /:/host
+      - /dev:/host/dev
+      - /proc:/host/proc
+      - /sys:/host/sys
+      - /run:/host/run
+      - r1_toolbox_data:/data
+volumes:
+  r1_toolbox_data: {}
+```
+
+部署步骤：
+
+1. 在 NAS 上创建项目目录，把上面的 `compose.yaml` 放进去。
+2. 启动：
+
+   ```sh
+   docker compose -f compose.yaml up -d
+   ```
+
+3. 确认容器持续运行：
+
+   ```sh
+   docker compose -f compose.yaml ps
+   docker compose -f compose.yaml logs --tail=100
+   ```
+
+4. 浏览器打开 `http://NAS_IP:18732`。
+5. 在“设置 → 登录口令”设置口令；MCP 仍默认关闭，需要时在“设置 → API 管理”创建 Token。
+
+升级只替换镜像标签并重建容器，保留 `r1_toolbox_data`：
+
+```sh
+docker compose -f compose.yaml pull
+docker compose -f compose.yaml up -d
+```
+
+不要执行 `docker compose down -v`。如果沿用旧卷 `r1-toolbox-data`，先按[部署文档](docs/deployment.md#数据卷)复制到 `r1_toolbox_data`；固定版本可把 `latest` 换成正式 `v*` 标签或 `sha-*` 标签。
+
 ### 首次使用
 
 - 默认是登录口令模式，首次没有口令，局域网内可直接打开网页管理；建议在“设置 → 登录口令”设置口令。
