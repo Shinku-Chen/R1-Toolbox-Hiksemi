@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs: 项目介绍统一改为“不改原厂系统”。
 - docs: 在 README 中直接写出 GitHub Pages 预览地址。
 - docs: 按海康 Web 实际操作顺序补充镜像升级步骤。
 - docs: 补充海康 Web 中停止项目并勾选最新镜像的升级步骤。
