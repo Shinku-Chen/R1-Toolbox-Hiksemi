@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat(web): 顶栏与设置“关于”增加 GitHub 项目链接。
 - docs: 移除旧数据卷迁移说明，部署文档只保留当前 `r1_toolbox_data` 版本。
 - docs: README 增加去除注释、精简后的 Compose 部署步骤与升级命令。
 - build(compose): 数据卷统一为 `r1_toolbox_data`。

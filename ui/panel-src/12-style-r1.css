@@ -259,3 +259,8 @@
   .r1-smart-head .btn { width: 100%; }
   .r1-smart-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
+
+/* Header project link uses the same hit target as icon buttons. */
+a.icon-btn{text-decoration:none}
+
+@media(max-width:960px){.tools .r1-github-link{display:none}}

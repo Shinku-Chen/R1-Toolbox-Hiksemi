@@ -2237,6 +2237,7 @@ function r1About(card) {
     <p class="faint" style="margin-top:2px">面板框架与视觉来自 fnMonitor（MIT）· 本机采集、鉴权与控制代码独立实现</p>
     <p class="faint">监控读数只来自本机真实来源；没有可信来源的模块会隐藏或标注原因。</p>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap">
+      <a class="btn" href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer">${ic('github')}项目主页</a>
       <a class="btn" href="https://github.com/MisiteQ/fnmonitor" target="_blank" rel="noopener noreferrer">${ic('ext')}fnMonitor（面板框架）</a>
       <button class="btn" type="button" data-sheet="keys">${ic('key')}快捷键</button></div></div>`;
   const x = collect(card);

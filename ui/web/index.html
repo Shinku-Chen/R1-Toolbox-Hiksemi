@@ -1530,6 +1530,9 @@ dd .diag-link{margin:0;height:24px}
 @media (max-width: 520px){.r1-smart-head .btn{width:100%}
 .r1-smart-row{grid-template-columns:minmax(0,1fr);gap:2px}
 }
+a.icon-btn{text-decoration:none}
+@media(max-width:960px){.tools .r1-github-link{display:none}
+}
 </style>
 </head>
 <body>
@@ -1577,6 +1580,7 @@ dd .diag-link{margin:0;height:24px}
     <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14m0 0-5.5-5.5M12 19l5.5-5.5"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5m0 0L6.5 10.5M12 5l5.5 5.5"/></symbol>
+    <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19.5c-4 1.2-4-2-5.5-2.5M15 21v-3.3a2.8 2.8 0 0 0-.8-2.2c2.6-.3 5.3-1.3 5.3-5.9a4.6 4.6 0 0 0-1.3-3.2 4.3 4.3 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.3 12.3 0 0 0-6.5 0C4.9 3.9 3.8 4.2 3.8 4.2a4.3 4.3 0 0 0-.1 3.2A4.6 4.6 0 0 0 2.4 10.6c0 4.5 2.7 5.6 5.3 5.9a2.8 2.8 0 0 0-.8 2.2V21"/></symbol>
     <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></symbol>
     <symbol id="i-trend" viewBox="0 0 24 24"><path d="M3.5 19.5h17M5 15l4.5-5 4 3.5L20 6"/></symbol>
     <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></symbol>
@@ -1619,6 +1623,7 @@ dd .diag-link{margin:0;height:24px}
     <div class="tools">
       <span class="clock-mini tnum" id="clockMini">--:--</span>
       <button class="icon-btn" type="button" id="btnSearch" title="搜索  /" aria-label="搜索"><svg class="i"><use href="#i-search"/></svg></button>
+      <a class="icon-btn r1-github-link" href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer" title="GitHub 项目" aria-label="打开 GitHub 项目"><svg class="i"><use href="#i-github"/></svg></a>
       <button class="icon-btn hide-m" type="button" id="btnRefresh" title="刷新全部数据" aria-label="刷新全部数据"><svg class="i"><use href="#i-refresh"/></svg></button>
       <button class="icon-btn hide-m" type="button" id="btnEdit" title="编辑布局  E" aria-label="编辑布局" aria-pressed="false"><svg class="i"><use href="#i-layout"/></svg></button>
       <button class="icon-btn" type="button" id="btnTheme" title="切换浅色 / 深色  T" aria-label="切换浅色 / 深色"><svg class="i"><use href="#i-moon"/></svg></button>
@@ -7191,6 +7196,7 @@ card.innerHTML = `<div class="about"><div class="brand-mark">${ic('logo')}</div>
 <p class="faint" style="margin-top:2px">面板框架与视觉来自 fnMonitor（MIT）· 本机采集、鉴权与控制代码独立实现</p>
 <p class="faint">监控读数只来自本机真实来源；没有可信来源的模块会隐藏或标注原因。</p>
 <div style="display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap">
+<a class="btn" href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer">${ic('github')}项目主页</a>
 <a class="btn" href="https://github.com/MisiteQ/fnmonitor" target="_blank" rel="noopener noreferrer">${ic('ext')}fnMonitor（面板框架）</a>
 <button class="btn" type="button" data-sheet="keys">${ic('key')}快捷键</button></div></div>`;
 const x = collect(card);

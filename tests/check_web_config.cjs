@@ -454,6 +454,9 @@ finally:
     check('天气位置已展示', /Fixture City/.test(await page.locator('[data-ref="wxCity"]').textContent()));
     const navLabels = await page.locator('#pageSeg button').allTextContents();
     check('网页六标签', JSON.stringify(navLabels) === JSON.stringify(['概览', '存储', '网络', '应用', '温度', '设置']), navLabels.join(','));
+    const githubTop = page.locator('header.topbar a[aria-label="打开 GitHub 项目"]');
+    check('顶栏 GitHub 项目链接', await githubTop.getAttribute('href') === 'https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi'
+      && await githubTop.getAttribute('target') === '_blank' && await githubTop.getAttribute('rel') === 'noopener noreferrer');
     check('总览模块已渲染', await page.locator('#layout-overview section[data-mod="metrics"]').count() === 1);
     check('不显示 CPU 功耗卡', await page.locator('#layout-overview [data-m="pwr"]').count() === 0);
     check('不显示显卡内容', !/显卡|GPU/.test(await page.locator('#layout-overview section[data-mod="compute"]').textContent()));
@@ -721,6 +724,8 @@ finally:
     for (const id of ['r1-fan', 'r1-light', 'r1-screen', 'r1-monitor', 'look', 'weather', 'r1-auth', 'r1-conn', 'about']) {
       check('设置分组 ' + id, await page.locator('#set-' + id).count() === 1);
     }
+    const aboutGithub = page.locator('#set-about a[href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi"]');
+    check('关于页 GitHub 项目链接', await aboutGithub.count() === 1 && /项目主页/.test(await aboutGithub.textContent()));
     const lightCard = page.locator('#set-r1-light');
     const lightOptions = await lightCard.locator('.r1-editor select').first().locator('option').allTextContents();
     check('灯光只保留四种原生模式', JSON.stringify(lightOptions) === JSON.stringify(['关闭', '常亮', '彩虹', '呼吸']), lightOptions.join(','));
