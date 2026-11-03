@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs(preview): 首页采用小屏原型的左侧设计介绍与三条设计说明。
 - docs(preview): 静态 PC 面板嵌入预览时直接停留在当前窗口，不再显示“独立网页”引导遮罩。
 - docs(preview): 调整 GitHub Pages 信息层级，将功能亮点放在预览前，移除重复的 PC 面板入口。
 - docs(preview): PC 预览改为纯 HTML 交互页面，移除截图；README 明确当前仅支持安装原版海康系统的 R1 NAS。
