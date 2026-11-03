@@ -10,7 +10,7 @@
 services:
   r1-toolbox:
     # R1_TOOLBOX_IMAGE 是此 image 行使用的外部 Compose 变量，不是容器 environment。
-    # 默认 preview（开发预览）；可改用 latest（主分支）或 sha-提交哈希（固定版本）。
+    # 默认 latest（主分支）；开发者模板默认 preview（开发预览）；可改用 sha-提交哈希（固定版本）。
     image: ${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}
     # 默认容器名 r1-toolbox；若修改，请同步设置下方 TASK_CONTAINER。
     container_name: r1-toolbox

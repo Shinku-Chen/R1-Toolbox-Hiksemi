@@ -74,6 +74,10 @@ class ComposeExampleTests(unittest.TestCase):
         environment = normalized['services']['r1-toolbox']['environment']
         for name, value in DEVELOPER_ENV.items():
             self.assertEqual(environment.pop(name), value)
+        self.assertEqual(demo['services']['r1-toolbox']['image'],
+                         '${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:latest}')
+        # The developer template intentionally defaults to preview.
+        normalized['services']['r1-toolbox']['image'] = demo['services']['r1-toolbox']['image']
         self.assertEqual(normalized, demo)
         self.assertEqual(developer['volumes'], {'r1-toolbox-data': {}})
         service = developer['services']['r1-toolbox']
@@ -100,6 +104,8 @@ class ComposeExampleTests(unittest.TestCase):
                 environment = self.read(name)['services']['r1-toolbox']['environment']
                 self.assertEqual(environment, {'UI_MODE': 'image', 'R1_WEB_AUTH_MODE': 'password'})
                 self.assertFalse(set(DEVELOPER_ENV) & set(environment))
+                self.assertEqual(self.read(name)['services']['r1-toolbox']['image'],
+                                 '${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:latest}')
 
     def test_developer_whitelist_is_required_without_personal_ip_or_open_fallback(self):
         contents = (self.repo / 'composer.dev.yml').read_text(encoding='utf-8')

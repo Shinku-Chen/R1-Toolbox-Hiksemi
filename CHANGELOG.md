@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- build(compose): 通用 `composer.yml` 默认镜像标签改为 `latest`；开发者模板继续使用 `preview`。
 - docs: 重写 README 为产品定位、快速开始、安全边界和文档索引；将运行时、部署和开发细节归档到 `docs/architecture.md`、`docs/deployment.md`、`docs/development.md`。
 - feat(storage): 增加 `disk-cache.json` 显示缓存，启动和切换页面立即展示最近一次成功观测的硬盘型号、温度、健康、容量与使用率；状态／insights 缺失时只读补齐，不参与授权、测量、风扇或空间预检。
 - feat(storage): 存储页进入时先展示缓存并尝试一次真实 SMART／容量采集；盘位卡展示每盘使用率百分比，Web 与小屏移除容量采样时间、缓存状态和“过去测量档案”／“最近实测”展示。

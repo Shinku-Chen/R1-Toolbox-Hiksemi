@@ -17,7 +17,7 @@ runner = (root / "runner.sh.in").read_text(encoding="utf-8").replace(
 project = {
     "services": {
         "r1-toolbox": {
-            "image": "${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}",
+            "image": "${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:latest}",
             "container_name": "r1-toolbox",
             "restart": "always",
             "stop_grace_period": "3m",
@@ -115,7 +115,7 @@ def render_project(configuration):
     body = yaml.safe_dump(configuration, allow_unicode=True, sort_keys=False, width=100)
     body = insert_comments(body, "    image: ", (
         "    # R1_TOOLBOX_IMAGE 是此 image 行使用的外部 Compose 变量，不是容器 environment。\n"
-        "    # 默认 preview（开发预览）；可改用 latest（主分支）或 sha-提交哈希（固定版本）。\n"
+        "    # 默认 latest（主分支）；开发者模板默认 preview（开发预览）；可改用 sha-提交哈希（固定版本）。\n"
     ))
     body = insert_comments(body, "    container_name: ", (
         "    # 默认容器名 r1-toolbox；若修改，请同步设置下方 TASK_CONTAINER。\n"
@@ -163,6 +163,7 @@ for path in (root / "compose.yaml", root.parents[1] / "composer.yml"):
 # A complete single-file variant keeps project/service/volume selection aligned
 # with the demo. It does not introduce an override or a second named project.
 developer = copy.deepcopy(project)
+developer["services"]["r1-toolbox"]["image"] = "${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}"
 developer["services"]["r1-toolbox"]["environment"].update({
     "R1_DEV_NO_PAIRING": "1",
     "R1_DEV_ALLOW_IPS": "${R1_DEV_ALLOW_IPS:?请设置开发者白名单IP或CIDR}",
