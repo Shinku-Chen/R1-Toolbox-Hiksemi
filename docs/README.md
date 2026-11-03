@@ -3,7 +3,7 @@
 R1 Toolbox 是海康 HikSemi R1 NAS 的开源增强工具箱。本文档面向**安装了原版海康系统**的 R1；其他机型或第三方系统不在当前支持范围。
 
 - 项目主页与快速开始：[README](../README.md)
-- 在线预览：[GitHub Pages](https://shinku-chen.github.io/R1-Toolbox-Hiksemi/)
+- 在线预览（演示数据）：[https://shinku-chen.github.io/R1-Toolbox-Hiksemi/](https://shinku-chen.github.io/R1-Toolbox-Hiksemi/)
 - 问题与发布：[Issues](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/issues) · [Releases](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/releases)
 
 ## 先读这些
