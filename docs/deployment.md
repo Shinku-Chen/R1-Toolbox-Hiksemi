@@ -25,7 +25,7 @@
 
 ## 在线部署
 
-1. 从 [Actions](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/actions) 下载成功构建的产物。
+1. 从正式 `v*` 标签对应的 [Actions](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/actions) 运行或 Release 下载成功构建的产物；`main` 推送本身不再发布镜像。
 2. 在 NAS Docker 管理页用产物中的 `composer.yml` 创建或更新项目。
 3. 启动容器。
 4. 打开 `http://NAS_IP:18732`。
