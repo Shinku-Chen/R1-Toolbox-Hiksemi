@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs(preview): PC 预览强制留在当前窗口并更新缓存版本，避免旧版独立网页引导。
 - docs(preview): 首页 PC 面板不再出现独立网页引导，并增加在新窗口打开的入口。
 - docs(preview): 首页明确仅支持安装海康出厂系统的 HikSemi R1 NAS。
 - docs: 增加文档目录 README，作为部署、界面、硬件、API 与验收文档的统一入口。
