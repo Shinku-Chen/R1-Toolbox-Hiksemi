@@ -35,11 +35,11 @@ project = {
                 "/proc:/host/proc",
                 "/sys:/host/sys",
                 "/run:/host/run",
-                "r1-toolbox-data:/data",
+                "r1_toolbox_data:/data",
             ],
         }
     },
-    "volumes": {"r1-toolbox-data": {}},
+    "volumes": {"r1_toolbox_data": {}},
 }
 
 # Only these public deployment settings are editable in the examples. Optional
@@ -132,7 +132,7 @@ def render_project(configuration):
         ("    - /proc:/host/proc\n", "宿主进程信息，用于运行状态与进程身份校验。"),
         ("    - /sys:/host/sys\n", "宿主硬件与内核状态，供监控和硬件身份校验。"),
         ("    - /run:/host/run\n", "宿主 RAM 运行目录，存放展开的界面与运行时文件。"),
-        ("    - r1-toolbox-data:/data\n", "持久化设置与授权，升级必须保留原数据卷；不要删除卷或使用 down -v。"),
+        ("    - r1_toolbox_data:/data\n", "持久化设置与授权，升级必须保留原数据卷；旧 r1-toolbox-data 须先复制到 r1_toolbox_data；不要删除卷或使用 down -v。"),
     ):
         body = insert_comments(body, anchor, "    # " + comment + "\n")
     start, environment_anchor, rest = body.partition("    environment:\n")

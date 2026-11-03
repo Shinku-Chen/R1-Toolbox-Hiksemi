@@ -125,6 +125,6 @@ END;
 
 | 验证范围 | 结果与证据来源 |
 | --- | --- |
-| Linux CI | [run 41166333387](https://github.com/Shinku-Chen/R1-Toolbox/actions/runs/41166333387) 通过。全量 2320 项，2254 项通过、66 项其他功能跳过；媒体排序 156 项全部执行通过，其中 49 项真实 Linux 专属检查无跳过。 |
+| Linux CI | [run 41166333387](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/actions/runs/41166333387) 通过。全量 2320 项，2254 项通过、66 项其他功能跳过；媒体排序 156 项全部执行通过，其中 49 项真实 Linux 专属检查无跳过。 |
 | NAS 显式检测 | 用户部署上述精确版本后，北京时间 12:06:20 的所有者 probe 返回 `ready`，19 个进程及数据库固定阶段全部通过。原厂 exe 仍为 `0777`，固定摘要与真实句柄校验通过；唯一数据库为 `/drives/BSLZZWTUM2R/scraper/scraper.db`，原始规则识别为 `enabled`／`rule_version:1`，`metadata_count:355`。本轮只检测，未应用、撤销、重装或重新 seed；`can_apply:false` 表示已经启用。 |
 | 真实新集触发 | 用户于同日明确确认“真实新一集触发效果已验证”。该项依据用户实机验收反馈，不以合成 SQLite 测试代替，也不扩展为对全部媒体库或所有客户端的验证结论。 |

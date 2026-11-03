@@ -179,7 +179,7 @@ class DockerDeploymentRegistry(projects.DockerProjectRegistry):
         for row in spec['volumes']:
             if (not isinstance(row, dict) or set(row) != {'name', 'target', 'readonly'}
                     or not isinstance(row['name'], str) or not _RESOURCE_NAME.fullmatch(row['name'])
-                    or row['name'] == 'r1-toolbox-data' or type(row['readonly']) is not bool):
+                    or row['name'] in {'r1_toolbox_data', 'r1-toolbox-data'} or type(row['readonly']) is not bool):
                 _deny()
             _target(row['target'])
             if row['target'] in targets or row['name'] in names:

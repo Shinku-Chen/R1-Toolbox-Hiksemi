@@ -242,7 +242,7 @@ def settings_directory(container, required=False):
         return source
     except (ValueError, OSError, RuntimeError, TypeError):
         if required:
-            raise ValueError('未找到可写的持久化设置卷；请使用包含 r1-toolbox-data:/data 的新版 Compose，未停止原小屏') from None
+            raise ValueError('未找到可写的持久化设置卷；请使用包含 r1_toolbox_data:/data 的新版 Compose，未停止原小屏') from None
         print('未找到可用的设置数据卷，设置仅在本次开机保留。')
         return fallback
 

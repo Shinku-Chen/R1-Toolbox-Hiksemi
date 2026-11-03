@@ -4,7 +4,7 @@
 
 ## 一．定义与授权回归
 
-使用新镜像的原项目和原 `r1-toolbox-data` 卷。容器启动、Web 可用、服务开关和旧密钥保持原值；无需为了查看定义开启 MCP。
+使用新镜像的原项目和原 `r1_toolbox_data` 卷。容器启动、Web 可用、服务开关和旧密钥保持原值；无需为了查看定义开启 MCP。
 
 1. 所有者在 Web 登录后打开“API 管理 → 文件与 Docker 接口定义”，读取 `/api/access/contracts`。确认 `schema_version:1`、`status:definitions_only`、四项 `implemented:true` 与十六项待接入，输入／输出和资源条件齐全。定义本身的 `execution_allowed:false` 不代表已接入工具不能在另外的机器通道获授权调用。
 2. 最低角色分布为只读十项、读写八项、管理员两项；管理员更新执行仍要求项目授权、绑定计划、幂等键和确认。

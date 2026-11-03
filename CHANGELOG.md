@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- build(compose): 数据卷统一为 `r1_toolbox_data`；旧 `r1-toolbox-data` 仅保留保护并需显式复制迁移。
+- ci: `dev` 只更新 `preview`；`main` 推送不再发布镜像；正式 `v*` 标签同时发布 `latest`、版本标签和不可变 SHA。
+- docs: README 增加影视中心排序补丁、自定义温度风扇曲线和 API/MCP 入口。
 - build(compose): 通用 `composer.yml` 默认镜像标签改为 `latest`；开发者模板继续使用 `preview`。
 - docs: 重写 README 为产品定位、快速开始、安全边界和文档索引；将运行时、部署和开发细节归档到 `docs/architecture.md`、`docs/deployment.md`、`docs/development.md`。
 - feat(storage): 增加 `disk-cache.json` 显示缓存，启动和切换页面立即展示最近一次成功观测的硬盘型号、温度、健康、容量与使用率；状态／insights 缺失时只读补齐，不参与授权、测量、风扇或空间预检。

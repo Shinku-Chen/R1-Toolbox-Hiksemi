@@ -20,7 +20,9 @@ channel=preview
 if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
   channel=pull-request
 elif [ "${GITHUB_REF:-}" = refs/heads/main ]; then
-  channel=latest
+  # Formal releases are explicit v* tags; a main push must not advance latest.
+  echo 'main 分支推送不发布镜像；请创建 v* 标签发布正式版本。' >&2
+  exit 1
 else
   case "${GITHUB_REF:-}" in
     refs/tags/v*) channel=latest ;;

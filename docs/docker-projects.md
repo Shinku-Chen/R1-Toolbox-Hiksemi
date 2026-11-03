@@ -81,4 +81,4 @@ registry.get_resource_usage(principal, project_id, authorizer=integration._is_cu
 
 有效开发窗口和真实来源白名单下，固定 `/api/dev/diagnostics` 可显式选择 `docker_project_readiness`、`file_access_readiness` 或 `file_backend_context`；不需要机器 Token，也不能借此登记项目或管理密钥。前两项分别检查可信项目候选、注册表及文件访问就绪状态；最后一项补充固定管理员逻辑身份、Unix 映射候选与 Users 目录句柄元数据，不列目录、不读用户内容，仍可能唤盘。默认四项被动检查不扩展，过期后丢弃结果。
 
-自动化使用隔离 Unix／HTTP fixture，证明协议和权限边界，不代表新增能力已在 NAS 实机通过。部署复用原项目及 `r1-toolbox-data`，先按[只读验收清单](file-docker-readonly-acceptance.md)核对。没有用户指定的样本文件和非 Toolbox 项目时，不为验收创建业务服务或读取私人文件；启停与更新须另有明确对象和授权，不能用只读验收替代。
+自动化使用隔离 Unix／HTTP fixture，证明协议和权限边界，不代表新增能力已在 NAS 实机通过。部署复用原项目及 `r1_toolbox_data`，先按[只读验收清单](file-docker-readonly-acceptance.md)核对。没有用户指定的样本文件和非 Toolbox 项目时，不为验收创建业务服务或读取私人文件；启停与更新须另有明确对象和授权，不能用只读验收替代。

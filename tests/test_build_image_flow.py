@@ -200,6 +200,15 @@ class BuildImageFlowTests(unittest.TestCase):
         self.assertEqual(self.docker_calls("tag"), [])
         self.assertFalse(any(call[0] == "package" for call in self.calls))
 
+    def test_version_tag_publishes_latest_and_same_version(self):
+        self.assert_success(self.run_flow(ref="refs/tags/v1.2.3"))
+        pushes = self.docker_calls("push")
+        self.assertEqual(pushes[0], ["docker", "push", REFERENCE])
+        self.assertEqual(pushes[1], ["docker", "push", "ghcr.io/shinku-chen/r1-toolbox:latest"])
+        self.assertEqual(pushes[2], ["docker", "push", "ghcr.io/shinku-chen/r1-toolbox:v1.2.3"])
+        package = next(call for call in self.calls if call[0] == "package")
+        self.assertEqual(package[package.index("--channel") + 1], "latest")
+
     def test_new_commit_builds_checks_then_publishes_preview(self):
         self.assert_success(self.run_flow())
         self.assertEqual(len(self.docker_calls("build")), 1)
@@ -220,19 +229,11 @@ class BuildImageFlowTests(unittest.TestCase):
         self.assertLess(ui_index, push_index)
         self.assertEqual(self.state["registry_checks"], 2)
 
-    def test_main_promotes_existing_sha_without_rebuilding_or_replacing_it(self):
+    def test_main_push_never_publishes_an_image(self):
         original = dict(self.image, Id=OTHER_ID)
-        self.assert_success(self.run_flow(remote=original, ref="refs/heads/main"))
-        self.assertEqual(self.docker_calls("build"), [])
-        self.assertEqual(self.docker_calls("push"), [
-            ["docker", "push", "ghcr.io/shinku-chen/r1-toolbox:latest"],
-        ])
-        self.assertEqual(self.state["remote"]["Id"], OTHER_ID)
-        package = next(call for call in self.calls if call[0] == "package")
-        self.assertEqual(package[package.index("--image-id") + 1], OTHER_ID)
-        self.assertEqual(package[package.index("--channel") + 1], "latest")
-        self.assertEqual(len(self.docker_calls("run")), 2)
-        self.assertTrue(any(call[0] == "sudo" for call in self.calls))
+        result = self.run_flow(remote=original, ref="refs/heads/main")
+        self.assert_not_published(result)
+        self.assertIn("请创建 v* 标签", result.stderr)
 
     def test_existing_sha_requires_correct_architecture_entrypoint_version_and_revision(self):
         for field in ("architecture", "os", "entrypoint", "command", "version",

@@ -115,11 +115,14 @@ def _toolbox_container(detail):
             and labels.get('org.opencontainers.image.title') == 'R1 Toolbox')
 
 
+TOOLBOX_VOLUME_NAMES = frozenset(('r1_toolbox_data', 'r1-toolbox-data'))
+
+
 def _toolbox_volume(metadata):
     """Compose's logical volume label survives project-prefixed real names."""
     labels = metadata.get('Labels') if isinstance(metadata, dict) else None
-    return (isinstance(metadata, dict) and metadata.get('Name') == 'r1-toolbox-data'
-            or isinstance(labels, dict) and labels.get('com.docker.compose.volume') == 'r1-toolbox-data')
+    return (isinstance(metadata, dict) and metadata.get('Name') in TOOLBOX_VOLUME_NAMES
+            or isinstance(labels, dict) and labels.get('com.docker.compose.volume') in TOOLBOX_VOLUME_NAMES)
 
 
 def _toolbox_data_volumes(backend, context):
@@ -127,7 +130,7 @@ def _toolbox_data_volumes(backend, context):
     rows = backend.request('GET', '/containers/json?all=1&limit=129', context)
     if not isinstance(rows, list) or len(rows) > projects.MAX_CONTAINERS:
         raise OperationError('limit_exceeded')
-    names = {'r1-toolbox-data'}
+    names = set(TOOLBOX_VOLUME_NAMES)
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get('Id'), str) or not _CID.fullmatch(row['Id']):
             raise OperationError('native_unavailable')
@@ -362,7 +365,7 @@ class DockerProjectOperations:
         labels = config.get('Labels') or {}
         return (image in ('r1-toolbox', 'r1-boot-once')
                 or isinstance(labels, dict) and labels.get('org.opencontainers.image.title') == 'R1 Toolbox'
-                or any(isinstance(row, dict) and row.get('Name') == 'r1-toolbox-data'
+                or any(isinstance(row, dict) and row.get('Name') in TOOLBOX_VOLUME_NAMES
                        for row in detail.get('Mounts') or []))
 
     def _protected_resources(self, detail, context):
@@ -693,7 +696,7 @@ class DockerProjectOperations:
             # A bind source is resolved anew by dockerd during create. Existing
             # inspect strings cannot prove the same inode/mount is still bound.
             if (not isinstance(mount, dict) or mount.get('Type') not in ('volume', 'tmpfs')
-                    or mount.get('Name') == 'r1-toolbox-data'):
+                    or mount.get('Name') in TOOLBOX_VOLUME_NAMES):
                 raise OperationError('write_backend_unverified')
         bindings = host.get('Binds') or []
         if not isinstance(bindings, list) or len(bindings) > 128:

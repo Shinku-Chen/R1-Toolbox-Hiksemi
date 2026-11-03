@@ -79,7 +79,7 @@ class ComposeExampleTests(unittest.TestCase):
         # The developer template intentionally defaults to preview.
         normalized['services']['r1-toolbox']['image'] = demo['services']['r1-toolbox']['image']
         self.assertEqual(normalized, demo)
-        self.assertEqual(developer['volumes'], {'r1-toolbox-data': {}})
+        self.assertEqual(developer['volumes'], {'r1_toolbox_data': {}})
         service = developer['services']['r1-toolbox']
         self.assertEqual(service['container_name'], 'r1-toolbox')
         self.assertEqual(service['stop_grace_period'], '3m')
@@ -90,7 +90,7 @@ class ComposeExampleTests(unittest.TestCase):
         self.assertEqual(service['image'], '${R1_TOOLBOX_IMAGE:-ghcr.io/shinku-chen/r1-toolbox:preview}')
         self.assertEqual(service['volumes'], [
             '/:/host', '/dev:/host/dev', '/proc:/host/proc', '/sys:/host/sys',
-            '/run:/host/run', 'r1-toolbox-data:/data',
+            '/run:/host/run', 'r1_toolbox_data:/data',
         ])
         self.assertNotIn('name', developer, '模板不能静默切换现有项目名')
         self.assertNotIn('include', developer)
@@ -204,7 +204,7 @@ class ComposeExampleTests(unittest.TestCase):
             '    image:', '    container_name:', '    restart:', '    stop_grace_period:',
             '    privileged:', '    pid:', '    ipc:', '    network_mode:',
             '    - /:/host', '    - /dev:/host/dev', '    - /proc:/host/proc',
-            '    - /sys:/host/sys', '    - /run:/host/run', '    - r1-toolbox-data:/data',
+            '    - /sys:/host/sys', '    - /run:/host/run', '    - r1_toolbox_data:/data',
         )
         for name in OUTPUTS:
             with self.subTest(path=name):

@@ -24,7 +24,7 @@ environment:
 
 当前固件没有 IT87 hwmon/PWM，但原厂路径不能仅据此否定。同一固件有不同的 rootfs/initrd hikio，前者缺调速、后者实现；两者都缺旧 RPM 查询。用户已读取实际加载模块 GNU note，确认与 initrd 支持版完全一致，原厂 Unix GET 也已返回 b'5'/auto，可在条件满足时开放系统风扇策略；物理效果仍需观察。未知/旧版模块仅只读，文件或 socket 存在不会自动解锁。对照值与识别步骤见 [官方接口审查](../../docs/histor-interfaces.md)。不加载/替换内核模块，不使用 /dev/port。
 
-Compose 中的 `r1-toolbox-data:/data` 是独立命名卷，保存面板、亮度、风扇／灯光规则、历史与统计，以及 `web/service-settings.json` 服务偏好和 `web/api-access.json` Token 摘要。风扇规则的待用配置与最后成功应用配置分别保存。网页和小屏读取同一服务状态，不依赖浏览器存储。宿主核心通过 Docker `.Mounts.Source` 解析卷位置，但其前台生命周期与容器一致。不要把 `/data` 改为官方小屏目录；缺少可写卷时拒绝启动。
+Compose 中的 `r1_toolbox_data:/data` 是独立命名卷，保存面板、亮度、风扇／灯光规则、历史与统计，以及 `web/service-settings.json` 服务偏好和 `web/api-access.json` Token 摘要。旧卷 `r1-toolbox-data` 的实际名称可能带 Compose 项目前缀，升级前须先复制到新卷。风扇规则的待用配置与最后成功应用配置分别保存。网页和小屏读取同一服务状态，不依赖浏览器存储。宿主核心通过 Docker `.Mounts.Source` 解析卷位置，但其前台生命周期与容器一致。不要把 `/data` 改为官方小屏目录；缺少可写卷时拒绝启动。
 
 更新镜像、Docker/NAS 重启、删除并重新创建容器不会删除命名卷。请更新原项目并复用原卷；卷的实际名字通常带 Docker 项目前缀。删除项目时保留该卷，并不要执行清理卷或删除卷的操作，就能留住设置。若以不同项目名重建，需要显式复用旧卷，不能把新建的空卷误认为旧配置丢失。
 

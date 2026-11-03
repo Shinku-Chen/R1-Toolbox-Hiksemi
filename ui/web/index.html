@@ -6924,7 +6924,7 @@ if (closed) return;
 if (!catalog || catalog.ok !== true || !Array.isArray(catalog.volumes) || !Array.isArray(catalog.networks)) throw new Error(deploymentError(catalog));
 if (!registered || registered.ok !== true || !Array.isArray(registered.deployments)) throw new Error(deploymentError(registered));
 const validName = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value);
-deploymentCandidates = { volumes: catalog.volumes.filter(row => row && validName(row.name) && row.name !== 'r1-toolbox-data').slice(0, 128),
+deploymentCandidates = { volumes: catalog.volumes.filter(row => row && validName(row.name) && !['r1_toolbox_data', 'r1-toolbox-data'].includes(row.name)).slice(0, 128),
 networks: catalog.networks.filter(row => row && validName(row.name) && !['host', 'container'].includes(row.name)).slice(0, 128) };
 const selected = x.deploymentNetwork.value; x.deploymentNetwork.replaceChildren();
 const empty = document.createElement('option'); empty.value = ''; empty.textContent = '选择已有网络'; x.deploymentNetwork.append(empty);
@@ -7177,7 +7177,7 @@ const b = mount(`<button class="btn" type="button">输入配对码解锁</button
 b.onclick = () => R1.openPair('修改设备设置需要授权');
 rows.append(r1Field('解锁设置', b, '登录口令开启后可直接登录，无需配对码。'));
 }
-rows.append(r1Field('数据卷', mount(`<span class="mono">r1-toolbox-data</span>`),
+rows.append(r1Field('数据卷', mount(`<span class="mono">r1_toolbox_data</span>`),
 '升级或重建 Compose 时必须复用原数据卷，否则配对会话与服务设置会丢失。'));
 rows.append(r1Field('版本', mount(`<span class="mono">${esc(st.version || '--')}</span>`), '镜像按提交标签发布；更新请复用原项目与数据卷。'));
 x.rows.replaceChildren(rows);

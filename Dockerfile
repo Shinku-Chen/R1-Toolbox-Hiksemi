@@ -19,7 +19,7 @@ ENV TOOLBOX_VERSION=${TOOLBOX_VERSION}
 
 LABEL org.opencontainers.image.title="R1 Toolbox" \
       org.opencontainers.image.description="Resident Web, MCP and screen control for Hiksemi R1 NAS" \
-      org.opencontainers.image.source="https://github.com/Shinku-Chen/R1-Toolbox" \
+      org.opencontainers.image.source="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" \
       org.opencontainers.image.version="${TOOLBOX_VERSION}"
 
 WORKDIR /opt/r1-toolbox

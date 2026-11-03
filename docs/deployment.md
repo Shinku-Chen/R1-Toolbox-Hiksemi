@@ -8,23 +8,24 @@
 
 | 标签 | 来源 | 用途 |
 | --- | --- | --- |
-| `latest` | `main` 已验证提交 | 稳定部署 |
-| `preview` | `dev` | 预览与新功能验证 |
-| `sha-<完整提交>` | 每次构建 | 固定版本、回滚和问题复现 |
+| `latest` | 正式 `v*` 标签 | 稳定部署；与同版本标签指向同一镜像 |
+| `v*` | 正式 `v*` 标签 | 固定版本；与 `latest` 指向同一镜像 |
+| `preview` | `dev` 推送 | 开发预览；不代表正式版本 |
+| `sha-<完整提交>` | 实际构建的提交 | 固定版本、回滚和问题复现 |
 
-同一提交从 `dev` 推进到 `main` 时，发布流程复用已有 SHA 镜像，重新校验并更新 `latest`，不覆盖不可变的 SHA 标签。具体构建和检查步骤见 [开发与测试](development.md)。
+`main` 推送只运行检查，不发布镜像。正式发布必须创建 `v*` 标签；工作流发布不可变 SHA、同版本标签和 `latest`，三者指向同一镜像。`dev` 推送只更新 `preview`。不为每次提交自动发布正式镜像。具体构建和检查步骤见 [开发与测试](development.md)。
 
 ## 前置条件
 
 - 海康 R1 NAS，官方固件，x86_64。
 - 可用的 Docker／Compose 环境。
-- 可写的独立数据卷 `r1-toolbox-data`。
+- 可写的独立数据卷 `r1_toolbox_data`。
 - 局域网内可访问 NAS 的电脑或手机。
 - 建议先在非关键数据环境验证；不要在生产数据盘上直接尝鲜。
 
 ## 在线部署
 
-1. 从 [Actions](https://github.com/Shinku-Chen/R1-Toolbox/actions) 下载成功构建的产物。
+1. 从 [Actions](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/actions) 下载成功构建的产物。
 2. 在 NAS Docker 管理页用产物中的 `composer.yml` 创建或更新项目。
 3. 启动容器。
 4. 打开 `http://NAS_IP:18732`。
@@ -61,10 +62,20 @@
 
 ## 数据卷
 
-- 面板、风扇、灯光、统计、服务开关、开发窗口、Token 摘要和显示缓存保存在 `r1-toolbox-data`。
+- 面板、风扇、灯光、统计、服务开关、开发窗口、Token 摘要和显示缓存保存在 `r1_toolbox_data`。
 - 升级、重建和回滚必须复用原 Docker 项目与原数据卷。
 - **不要执行 `down -v`，不要删除数据卷。**
 - 删除部署后正常重启可恢复官方显示。
+
+从旧卷名迁移时，先确认旧卷实际名称（可能是项目前缀），停止旧容器后复制数据：
+
+```sh
+docker volume create r1_toolbox_data
+docker run --rm -v r1-toolbox-data:/from:ro -v r1_toolbox_data:/to alpine \
+  sh -c 'cd /from && tar cf - . | (cd /to && tar xf -)'
+```
+
+复制完成并核对设置、Token 和历史后再更新 Compose。不要通过删除旧卷来“完成升级”。
 
 ## 升级与回退
 
@@ -95,7 +106,7 @@
 | 小屏没有接管 | “服务与开发”的实际 `active/busy/last_error`，不要只看开关 |
 | 硬盘数据为 `--` | 是否有合法缓存、是否休眠、是否刚进入页面正在补齐 |
 | 风扇手动不可用 | 预检是否通过；自动／原厂模式不需要独立接管 |
-| 更新后配置丢失 | 是否复用了原项目与原 `r1-toolbox-data` 卷 |
+| 更新后配置丢失 | 是否复用了原项目与原 `r1_toolbox_data` 卷 |
 | MCP 连接被拒 | MCP 是否开启、Token 角色／功能域／来源是否匹配 |
 
 ## 安全边界

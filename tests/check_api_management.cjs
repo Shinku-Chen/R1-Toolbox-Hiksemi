@@ -159,7 +159,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
           deploymentReads += 1;
           if (failDeploymentRead) return reply(503, { error: { message: 'fixture：部署资源读取失败' } });
           return reply(200, url.pathname.endsWith('/catalog') ? { ok: true,
-            volumes: [{ name: 'fixture-data' }, { name: 'r1-toolbox-data' }],
+            volumes: [{ name: 'fixture-data' }, { name: 'r1_toolbox_data' }],
             networks: [{ name: 'fixture-net' }, { name: 'none' }, { name: 'host' }] } : state.docker_deployment_catalog);
         }
         const body = request.postDataJSON(); calls.push({ path: url.pathname, body, headers: request.headers() });
@@ -896,7 +896,7 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     await manager.locator('[data-ref="addDeploymentVolume"]').click();
     await manager.locator('[data-volume-name]').selectOption('fixture-data');
     await manager.locator('[data-volume-target]').fill('/data');
-    check('卷默认只读且不提供Toolbox保护卷', await manager.locator('[data-volume-readonly]').isChecked() && await manager.locator('[data-volume-name] option[value="r1-toolbox-data"]').count() === 0);
+    check('卷默认只读且不提供Toolbox保护卷', await manager.locator('[data-volume-readonly]').isChecked() && await manager.locator('[data-volume-name] option[value="r1_toolbox_data"]').count() === 0);
     await manager.locator('[data-ref="addDeploymentPort"]').click();
     await manager.locator('[data-port-published]').fill('18080');
     await manager.locator('[data-port-target]').fill('8080');

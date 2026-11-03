@@ -105,7 +105,12 @@ jobs:
 
   publish-image:
     needs: checks
-    if: github.event_name != 'pull_request' && github.repository == 'Shinku-Chen/R1-Toolbox'
+    # Only dev builds preview automatically. Formal latest/version publication
+    # happens on an explicit v* release tag; main pushes never publish an image.
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')) &&
+      github.repository_owner == 'Shinku-Chen'
     runs-on: ubuntu-latest
     concurrency:
       group: r1-image-${{ github.sha }}

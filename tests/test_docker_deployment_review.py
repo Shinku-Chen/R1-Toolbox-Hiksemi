@@ -38,11 +38,11 @@ class DeploymentHealthReviewTests(unittest.TestCase):
                              for method, path, _body in self.engine.requests))
 
     def test_real_compose_named_toolbox_data_volume_cannot_be_delegated(self):
-        name = 'r1project_r1-toolbox-data'
+        name = 'r1project_r1_toolbox_data'
         volume = copy.deepcopy(self.engine.volumes['test-data'])
         volume.update(Name=name, Mountpoint='/var/lib/docker/volumes/' + name + '/_data',
                       Labels={'com.docker.compose.project': 'r1project',
-                              'com.docker.compose.volume': 'r1-toolbox-data'})
+                              'com.docker.compose.volume': 'r1_toolbox_data'})
         self.engine.volumes[name] = volume
         catalog = self.registry.catalog()
         self.assertTrue(catalog['ok'], catalog)

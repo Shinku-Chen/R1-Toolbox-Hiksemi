@@ -286,7 +286,7 @@ class ControlHTTPTests(unittest.TestCase):
         self.assertFalse(self.engine.containers[CID]['State']['Running'])
 
     def test_protected_volume_and_binding_change_are_not_operated(self):
-        self.engine.containers[CID]['Mounts'] = [{'Type': 'volume', 'Name': 'r1-toolbox-data', 'RW': True}]
+        self.engine.containers[CID]['Mounts'] = [{'Type': 'volume', 'Name': 'r1_toolbox_data', 'RW': True}]
         value = self.control()
         self.assertIn(value.get('error', value.get('task', {}).get('error'))['code'],
                       ('permission_denied', 'project_binding_changed'))

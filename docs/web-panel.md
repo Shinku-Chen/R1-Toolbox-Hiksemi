@@ -220,6 +220,6 @@ python tools/demo/run.py --host 0.0.0.0
 
 ## 部署与升级
 
-面板文件随镜像交付，展开到宿主 RAM 目录；配置写入 `r1-toolbox-data` 数据卷。
+面板文件随镜像交付，展开到宿主 RAM 目录；配置写入 `r1_toolbox_data` 数据卷。
 升级或重建 Compose 时必须复用原项目与数据卷，不要删除卷或使用 `down -v`。
 删除部署后正常重启可恢复官方显示。

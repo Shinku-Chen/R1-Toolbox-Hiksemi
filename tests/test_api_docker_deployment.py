@@ -281,7 +281,7 @@ class DeploymentTests(unittest.TestCase):
             body = spec()
             body['ports'][0]['host_ip'] = value
             self.assertFalse(self.registry.register({'label': 'test', 'spec': body})['ok'])
-        for value in ('r1-toolbox-data', '/host/path'):
+        for value in ('r1_toolbox_data', '/host/path'):
             body = spec()
             body['volumes'][0]['name'] = value
             self.assertFalse(self.registry.register({'label': 'test', 'spec': body})['ok'])
@@ -566,7 +566,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(self.registry.register({'label': 'test', 'spec': body})['ok'])
 
     def test_similar_volume_name_is_not_mistaken_for_toolbox_state(self):
-        name = 'user_r1-toolbox-data'
+        name = 'user_r1_toolbox_data'
         volume = copy.deepcopy(self.engine.volumes['test-data'])
         volume.update(Name=name, Mountpoint='/var/lib/docker/volumes/' + name + '/_data',
                       Labels={'com.docker.compose.volume': 'independent-media-data'})

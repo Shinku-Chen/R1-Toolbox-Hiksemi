@@ -10,7 +10,7 @@
 | `runtime/ui_service.py --resident` | 宿主命名空间 | 本机 API `127.0.0.1:18731`、Web 入口 `0.0.0.0:18732`、指标采集、容量／SMART、硬件控制 |
 | 小屏管理 | 宿主 systemd 临时服务 | 只读绑定内置前端，启动原厂 Electron `AppRun`；关闭时恢复官方窗口 |
 | Web 面板 | 浏览器 | fnMonitor 框架与 R1 扩展；网页配置、Token、设置与详情 |
-| 数据卷 `r1-toolbox-data` | Docker 卷 | 面板设置、风扇／灯光、统计、服务开关、开发窗口、Token 摘要和显示缓存 |
+| 数据卷 `r1_toolbox_data` | Docker 卷 | 面板设置、风扇／灯光、统计、服务开关、开发窗口、Token 摘要和显示缓存 |
 
 Web 是常驻核心；小屏和 MCP 是独立可选服务。图形环境、Electron 或小屏故障不得阻止 Web 启动。
 
