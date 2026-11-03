@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs: 按海康 Web 实际操作顺序补充镜像升级步骤。
 - docs: 补充海康 Web 中停止项目并勾选最新镜像的升级步骤。
 - docs: 按海康 Web 管理页的实际流程更新 Compose 部署步骤。
 - docs(preview): PC 预览强制留在当前窗口并更新缓存版本，避免旧版独立网页引导。
