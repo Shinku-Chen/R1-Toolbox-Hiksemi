@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs: 按海康 Web 管理页的实际流程更新 Compose 部署步骤。
 - docs(preview): PC 预览强制留在当前窗口并更新缓存版本，避免旧版独立网页引导。
 - docs(preview): 首页 PC 面板不再出现独立网页引导，并增加在新窗口打开的入口。
 - docs(preview): 首页明确仅支持安装海康出厂系统的 HikSemi R1 NAS。

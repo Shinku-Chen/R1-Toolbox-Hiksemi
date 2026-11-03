@@ -26,8 +26,8 @@
 ## 在线部署
 
 1. 从正式 `v*` 标签对应的 [Actions](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/actions) 运行或 Release 下载成功构建的产物；`main` 推送本身不再发布镜像。
-2. 在 NAS Docker 管理页用产物中的 `composer.yml` 创建或更新项目。
-3. 启动容器。
+2. 登录[海康 Web 管理页](https://my.hiksemi.cn/web/easyconnect/index.html)，进入 **Docker → 项目 → 创建项目**，把产物中的 `composer.yml` 内容粘贴进去。
+3. 确定保存并启动容器。
 4. 打开 `http://NAS_IP:18732`。
 
 容器应持续运行。`UI_MODE: image` 使用镜像内置小屏界面，不需要上传前端目录；`UI_MODE: diagnostic` 不接管小屏，只运行网页核心服务。
@@ -36,7 +36,7 @@
 
 1. 下载同一产物的 `r1-toolbox-linux-amd64.tar` 和 `composer.yml`。
 2. 在 NAS 上导入 `r1-toolbox-linux-amd64.tar`。
-3. 用 `composer.yml` 创建项目并启动。
+3. 登录海康 Web 管理页，在 **Docker → 项目 → 创建项目** 中粘贴 `composer.yml` 内容并保存。
 
 发布包的 Compose 固定对应源码提交的镜像，不需要 `.env`，也不强制联网重新拉取。
 

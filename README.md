@@ -38,20 +38,29 @@
 ### 在线部署
 
 1. 从正式 `v*` 标签对应的 [Actions](https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi/actions) 运行或 Release 下载成功构建的产物；`main` 推送本身不再发布镜像。
-2. 在 NAS Docker 管理页用产物中的 `composer.yml` 创建或更新项目。
-3. 启动容器，打开 `http://NAS_IP:18732`。
+2. 登录 [海康 Web 管理页](https://my.hiksemi.cn/web/easyconnect/index.html)，进入 **Docker → 项目 → 创建项目**，把产物中的 `composer.yml` 内容粘贴进去。
+3. 确定保存并启动容器，打开 `http://NAS_IP:18732`。
 
 镜像：`ghcr.io/shinku-chen/r1-toolbox`，平台 `linux/amd64`。`dev` 只更新 `preview`；正式版本由 `v*` 标签同时发布 `latest` 和同版本标签，两者指向同一镜像。
 
 ### 离线部署
 
 1. 下载同一产物的 `r1-toolbox-linux-amd64.tar` 和 `composer.yml`。
-2. 在 NAS 上导入镜像。
-3. 用对应 Compose 创建项目并启动。
+2. 在 NAS 上导入 `r1-toolbox-linux-amd64.tar`。
+3. 登录海康 Web 管理页，在 **Docker → 项目 → 创建项目** 中粘贴 Compose 内容并保存。
 
 ### 精简 Compose 部署
 
-以下是从 `composer.yml` 去掉注释后的最小配置，保存为 NAS 上的 `compose.yaml`：
+不用 SSH。登录海康 Web 管理页，在 Docker 项目里粘贴 Compose 即可：
+
+1. 打开 [海康 Web 管理页](https://my.hiksemi.cn/web/easyconnect/index.html)，登录并连接 R1。
+2. 进入 **Docker → 项目 → 创建项目**。
+3. 项目名称填 `r1-toolbox`，把下面的 Compose 内容完整粘贴到编辑框。
+4. 点击「确定／保存」，等待容器启动。
+5. 浏览器打开 `http://NAS_IP:18732`。
+6. 在“设置 → 登录口令”设置口令；MCP 仍默认关闭，需要时在“设置 → API 管理”创建 Token。
+
+以下是从 `composer.yml` 去掉注释后的最小配置，直接粘贴到创建项目的 Compose 编辑框：
 
 ```yaml
 services:
@@ -78,33 +87,9 @@ volumes:
   r1_toolbox_data: {}
 ```
 
-部署步骤：
+升级时在 **Docker → 项目 → `r1-toolbox`** 编辑 Compose，把 `latest` 换成目标版本或继续使用 `latest`，保存后重新部署；保留原项目和 `r1_toolbox_data` 数据卷。
 
-1. 在 NAS 上创建项目目录，把上面的 `compose.yaml` 放进去。
-2. 启动：
-
-   ```sh
-   docker compose -f compose.yaml up -d
-   ```
-
-3. 确认容器持续运行：
-
-   ```sh
-   docker compose -f compose.yaml ps
-   docker compose -f compose.yaml logs --tail=100
-   ```
-
-4. 浏览器打开 `http://NAS_IP:18732`。
-5. 在“设置 → 登录口令”设置口令；MCP 仍默认关闭，需要时在“设置 → API 管理”创建 Token。
-
-升级只替换镜像标签并重建容器，保留 `r1_toolbox_data`：
-
-```sh
-docker compose -f compose.yaml pull
-docker compose -f compose.yaml up -d
-```
-
-不要执行 `docker compose down -v`。固定版本可把 `latest` 换成正式 `v*` 标签或 `sha-*` 标签。
+不要删除数据卷，不要执行 `down -v`。固定版本可把 `latest` 换成正式 `v*` 标签或 `sha-*` 标签。
 
 ### 首次使用
 
