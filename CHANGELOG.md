@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs: 增加文档目录 README，作为部署、界面、硬件、API 与验收文档的统一入口。
 - docs(preview): 小屏预览区采用原型左侧的设计介绍与三条设计说明。
 - docs(preview): 静态 PC 面板嵌入预览时直接停留在当前窗口，不再显示“独立网页”引导遮罩。
 - docs(preview): 调整 GitHub Pages 信息层级，将功能亮点放在预览前，移除重复的 PC 面板入口。
