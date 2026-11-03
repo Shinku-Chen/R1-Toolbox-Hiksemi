@@ -22,6 +22,7 @@
 - **小屏**：适配 376×960，兼容 320px；大字号、56px 以上点击目标、六标签导航。
 - **网页**：基于 [fnMonitor](https://github.com/MisiteQ/fnmonitor)（MIT）面板框架，重组为概览／存储／网络／应用／温度／设置六页。
 - 详细页面和操作说明见 [小屏与网页使用说明](docs/interface-guide.md) 与 [网页面板](docs/web-panel.md)。
+- 在线预览：[GitHub Pages](https://shinku-chen.github.io/R1-Toolbox-Hiksemi/) · 可直接操作小屏原型，查看 PC 网页面板演示截图。
 
 ## 快速开始
 
