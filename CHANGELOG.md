@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs(preview): 调整 GitHub Pages 信息层级，将功能亮点放在预览前，移除重复的 PC 面板入口。
 - docs(preview): PC 预览改为纯 HTML 交互页面，移除截图；README 明确当前仅支持安装原版海康系统的 R1 NAS。
 - docs(preview): 增加 GitHub Pages 静态预览，包含可交互小屏原型与 PC 网页面板六页截图。
 - feat(web): 顶栏与设置“关于”增加 GitHub 项目链接。

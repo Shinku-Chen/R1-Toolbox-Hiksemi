@@ -94,35 +94,35 @@ footer .nav{height:auto;align-items:flex-start}
 </div>
 
 <main class="wrap">
-  <div class="section-head">
-    <h2>先看界面</h2>
-    <p>左边是可直接操作的小屏原型，下面是用 HTML 实现的 PC 网页面板预览。</p>
-  </div>
-
-  <section class="demo" aria-label="界面预览">
-    <div>
-      <div class="phone"><iframe src="prototypes/r1-small-screen.html" title="R1 Toolbox 小屏交互原型" loading="lazy"></iframe></div>
-      <p class="caption">小屏原型 · 可点击底部导航、卡片和返回键。建议桌面浏览器查看。</p>
-    </div>
-    <div class="panel" style="padding:24px">
-      <div class="badge"><span class="dot"></span> 可交互 HTML · 无截图</div>
-      <h2 style="margin-top:16px;font-size:22px">PC 网页面板</h2>
-      <p style="margin-top:8px">下方是完整的 HTML 预览，切换概览、存储、网络、应用、温度和设置；所有读数均为演示数据，不连接 NAS。</p>
-      <a class="btn" href="preview/web-panel-live.html" target="_blank" style="margin-top:20px">全屏打开</a>
-    </div>
-  </section>
-
-  <div class="section-head"><h2>PC 网页面板</h2><p>可直接切换页面，不依赖图片或外部脚本。</p></div>
-  <div class="panel" style="padding:14px">
-    <iframe class="pc-frame" src="preview/web-panel-live.html" title="R1 Toolbox PC 网页面板 HTML 预览" loading="lazy"></iframe>
-  </div>
-
   <div class="section-head"><h2>不只是监控</h2><p>面向真实 R1 使用场景的扩展，不是一张静态仪表盘。</p></div>
   <section class="features" aria-label="功能">
     <article class="feature"><div class="kicker">01 / MEDIA</div><h3>影视中心排序补丁</h3><p>为原厂影视库增加追更排序；显式检测、确认和备份后应用，可撤销。</p></article>
     <article class="feature"><div class="kicker">02 / THERMAL</div><h3>自定义温度风扇曲线</h3><p>CPU／系统风扇独立配置，多选温度来源，保留原厂自动与故障回退。</p></article>
     <article class="feature"><div class="kicker">03 / AUTOMATION</div><h3>API / MCP</h3><p>默认关闭；独立 Token 按角色、功能域、文件和来源授权，旧键不自动扩权。</p></article>
   </section>
+
+  <div class="section-head">
+    <h2>先看界面</h2>
+    <p>左边是可直接操作的小屏原型，下面是用真实面板代码构建的 PC 网页预览。</p>
+  </div>
+
+  <section class="demo" aria-label="小屏界面预览">
+    <div>
+      <div class="phone"><iframe src="prototypes/r1-small-screen.html" title="R1 Toolbox 小屏交互原型" loading="lazy"></iframe></div>
+      <p class="caption">小屏原型 · 可点击底部导航、卡片和返回键。建议桌面浏览器查看。</p>
+    </div>
+    <div class="panel" style="padding:24px">
+      <div class="badge"><span class="dot"></span> 可交互 HTML · 无截图</div>
+      <h2 style="margin-top:16px;font-size:22px">小屏交互原型</h2>
+      <p style="margin-top:8px">适配 376×960，兼容 320px；点击底部六标签切换页面，卡片可进入详情，电源操作保留确认和倒计时。</p>
+      <a class="btn" href="prototypes/r1-small-screen.html" target="_blank" style="margin-top:20px">全屏打开小屏</a>
+    </div>
+  </section>
+
+  <div class="section-head"><h2>PC 网页面板</h2><p>真实面板 HTML 构建 · 可切换六个页面 · 演示数据。</p></div>
+  <div class="panel" style="padding:14px">
+    <iframe class="pc-frame" src="preview/web-panel-live.html" title="R1 Toolbox PC 网页面板 HTML 预览" loading="lazy"></iframe>
+  </div>
 </main>
 
 <footer>
