@@ -29,6 +29,11 @@ h1{font-size:clamp(40px,6vw,74px);line-height:1.08;letter-spacing:-3px;margin:18
 .hero-note>span{font:12px/1.6 var(--mono);color:var(--lime);padding-top:2px}
 .hero-note h3{font-size:16px;margin:0 0 3px;font-weight:600}
 .hero-note p{margin:0;color:var(--muted);font-size:14px;line-height:1.7}
+.design-panel h2.design-title{font-size:clamp(30px,3vw,42px);line-height:1.14;letter-spacing:-2px;margin:16px 0 14px;font-weight:600;color:var(--text)}
+.design-lead{max-width:560px;font-size:15px;line-height:1.85}
+.design-panel .hero-notes{margin-top:20px;max-width:560px}
+.design-panel .hero-note h3{font-size:15px}
+.design-panel .hero-note p{font-size:13px}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:30px}
 .btn{display:inline-flex;align-items:center;gap:9px;min-height:48px;padding:0 18px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text);font-size:15px;font-weight:600;text-decoration:none}
 .btn:hover{text-decoration:none;border-color:#53604f;background:var(--panel2)}
@@ -75,14 +80,9 @@ footer .nav{height:auto;align-items:flex-start}
 
 <div class="wrap hero">
   <div>
-    <div class="eyebrow">HIKSEMI R1 · SMALL SCREEN CONCEPT</div>
-    <h1>小屏幕，<br>一眼知全局。</h1>
-    <p class="lead">R1 Toolbox 是海康 R1 NAS 的开源增强工具箱。把 NAS 的每一次呼吸，变成看得懂的数字。深色卡片、点阵读数和克制的状态色，让常驻小屏安静而清晰。</p>
-    <div class="hero-notes">
-      <div class="hero-note"><span>01</span><div><h3>为 376 × 960 而设计</h3><p>单列信息流，留出指尖空间。六个底部入口，温度与调节各自独立，始终知道自己在哪里。</p></div></div>
-      <div class="hero-note"><span>02</span><div><h3>先看状态，再看数字</h3><p>温度与异常优先出现；点阵保留仪表感，解释和操作使用清晰的中文。</p></div></div>
-      <div class="hero-note"><span>03</span><div><h3>轻操作，完整信息</h3><p>亮度、风扇档位和灯光触手可及；完整曲线和联动仍交给网页设置。</p></div></div>
-    </div>
+    <div class="eyebrow">OPEN SOURCE · DOCKER · LOCAL FIRST</div>
+    <h1>把 R1 的小屏<br>和硬件控制权拿回来。</h1>
+    <p class="lead">R1 Toolbox 是海康 R1 NAS 的开源增强工具箱。不刷原厂系统，用容器补上小屏、网页监控、完整 SMART、自定义风扇曲线、影视排序补丁和 API/MCP。</p>
     <div class="actions">
       <a class="btn primary" href="https://github.com/Shinku-Chen/R1-Toolbox-Hiksemi" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19.5c-4 1.2-4-2-5.5-2.5M15 21v-3.3a2.8 2.8 0 0 0-.8-2.2c2.6-.3 5.3-1.3 5.3-5.9a4.6 4.6 0 0 0-1.3-3.2 4.3 4.3 0 0 0-.1-3.2s-1.1-.3-3.6 1.3a12.3 12.3 0 0 0-6.5 0C4.9 3.9 3.8 4.2 3.8 4.2a4.3 4.3 0 0 0-.1 3.2A4.6 4.6 0 0 0 2.4 10.6c0 4.5 2.7 5.6 5.3 5.9a2.8 2.8 0 0 0-.8 2.2V21"/></svg>查看 GitHub</a>
       <a class="btn" href="prototypes/r1-small-screen.html" target="_blank">打开小屏原型</a>
@@ -121,11 +121,16 @@ footer .nav{height:auto;align-items:flex-start}
       <div class="phone"><iframe src="prototypes/r1-small-screen.html" title="R1 Toolbox 小屏交互原型" loading="lazy"></iframe></div>
       <p class="caption">小屏原型 · 可点击底部导航、卡片和返回键。建议桌面浏览器查看。</p>
     </div>
-    <div class="panel" style="padding:24px">
-      <div class="badge"><span class="dot"></span> 可交互 HTML · 无截图</div>
-      <h2 style="margin-top:16px;font-size:22px">小屏交互原型</h2>
-      <p style="margin-top:8px">适配 376×960，兼容 320px；点击底部六标签切换页面，卡片可进入详情，电源操作保留确认和倒计时。</p>
-      <a class="btn" href="prototypes/r1-small-screen.html" target="_blank" style="margin-top:20px">全屏打开小屏</a>
+    <div class="panel design-panel" style="padding:28px">
+      <p class="eyebrow">HIKSEMI R1 · SMALL SCREEN CONCEPT</p>
+      <h2 class="design-title">小屏幕，<br>一眼知全局。</h2>
+      <p class="lead design-lead">把 NAS 的每一次呼吸，变成看得懂的数字。深色卡片、点阵读数和克制的状态色，让常驻小屏安静而清晰。</p>
+      <div class="hero-notes">
+        <div class="hero-note"><span>01</span><div><h3>为 376 × 960 而设计</h3><p>单列信息流，留出指尖空间。六个底部入口，温度与调节各自独立，始终知道自己在哪里。</p></div></div>
+        <div class="hero-note"><span>02</span><div><h3>先看状态，再看数字</h3><p>温度与异常优先出现；点阵保留仪表感，解释和操作使用清晰的中文。</p></div></div>
+        <div class="hero-note"><span>03</span><div><h3>轻操作，完整信息</h3><p>亮度、风扇档位和灯光触手可及；完整曲线和联动仍交给网页设置。</p></div></div>
+      </div>
+      <a class="btn" href="prototypes/r1-small-screen.html" target="_blank" style="margin-top:22px">全屏打开小屏</a>
     </div>
   </section>
 
