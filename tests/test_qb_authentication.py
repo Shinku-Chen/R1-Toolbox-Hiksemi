@@ -372,6 +372,28 @@ class QbAuthenticationTests(unittest.TestCase):
         self.assert_failure(self.collect(fixture), 'invalid_response', 'auth_rejected')
         self.assertEqual(len(fixture.requests), 2)
 
+    def test_prelogin_proc_partial_does_not_start_auth_backoff(self):
+        fixture = _Fixture(self)
+        def owner(**_):
+            return {'available': False, 'status': 'proc_partial'} if fixture.requests else dict(OWNER)
+        value = self.collect(fixture, owner=owner)
+        self.assert_failure(value, 'proc_partial')
+        self.assertEqual(fixture.posts(), [])
+        value = self.collect(fixture)
+        self.assertTrue(value['available'])
+        self.assertEqual(len(fixture.posts()), 1)
+
+    def test_post_login_proc_partial_does_not_start_auth_backoff(self):
+        fixture = _Fixture(self)
+        def owner(**_):
+            return {'available': False, 'status': 'proc_partial'} if fixture.posts() else dict(OWNER)
+        value = self.collect(fixture, owner=owner)
+        self.assert_failure(value, 'proc_partial')
+        self.assertEqual(len(fixture.posts()), 1)
+        value = self.collect(fixture)
+        self.assertTrue(value['available'])
+        self.assertEqual(len(fixture.posts()), 2)
+
     def test_identity_change_after_rejection_stops_before_credentials_are_sent(self):
         fixture = _Fixture(self)
         def owner(**_):
@@ -389,7 +411,6 @@ class QbAuthenticationTests(unittest.TestCase):
         self.assert_failure(value, 'identity_changed')
         self.assertEqual(len(fixture.posts()), 1)
         self.assertEqual(len(fixture.requests), 2)
-        self.now[0] += download.QB_AUTH_BACKOFF_SECONDS + 1
         self.assertTrue(self.collect(fixture)['available'])
         self.assertNotIn('cookie', fixture.requests[2]['headers'])
         self.assertEqual(len(fixture.posts()), 2)

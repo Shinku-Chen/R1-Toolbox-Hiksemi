@@ -48,7 +48,7 @@ REASONS = {
     "auth_required": "下载 RPC 需要原厂授权；未读取或刷新令牌。",
     "auth_rejected": "qB 认证未通过；本轮不再登录，至少等待五分钟后才允许再次登录。",
     "auth_banned": "qB 登录被拒绝，可能触发来源封禁；至少等待五分钟后才允许再次登录。",
-    "auth_backoff": "qB 仍需要认证；上次登录失败后五分钟内不重复提交凭据，期间仍会尝试既有只读访问。",
+    "auth_backoff": "qB 仍需要认证；上次登录失败或结果未确认，五分钟内不重复提交凭据，期间仍会尝试既有只读访问。",
     "auth_busy": "qB 正在进行另一项只读采集或认证，请稍后读取。",
     "auth_config_invalid": "qB 内部认证配置无法确认；未发送账号口令。",
     "rpc_error": "原厂下载 RPC 返回错误；未执行登录、恢复或重试。",
@@ -493,7 +493,7 @@ def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, 
     if not state._lock.acquire(blocking=False):
         return {"available": False, "status": "auth_busy", "reason": REASONS['auth_busy'],
                 "source": QB_SOURCE, "data": None}
-    login_attempted, authenticated, completed = False, False, False
+    login_sent, login_rejected, authenticated, completed = [False], False, False, False
     status = 'transport_error'
     try:
         credentials, credential_key = _qb_credentials(credentials)
@@ -511,6 +511,12 @@ def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, 
                 state._forget()
                 raise _Failure('identity_changed')
 
+        def before_login_send():
+            # A process/proc failure here happens before any credential byte is
+            # sent; it must not start the credential backoff window.
+            verify()
+            login_sent[0] = True
+
         try:
             data = _qb_snapshot(identity, state._sid, verify, deadline, clock, socket_factory)
         except _Failure as error:
@@ -522,10 +528,12 @@ def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, 
             if clock() < state._retry_at:
                 raise _Failure('auth_backoff')
             _remaining(deadline, clock)
-            login_attempted = True
             try:
-                sid = _qb_login(credentials, deadline, clock, socket_factory, host=identity[3], before_send=verify)
-            except (_Failure, OSError):
+                sid = _qb_login(credentials, deadline, clock, socket_factory, host=identity[3],
+                                before_send=before_login_send)
+            except (_Failure, OSError) as error:
+                if isinstance(error, _Failure) and error.status in ('auth_rejected', 'auth_banned'):
+                    login_rejected = True
                 verify()
                 raise
             verify()
@@ -551,9 +559,11 @@ def collect_qbittorrent(root="/", *, ownership_check=None, socket_factory=None, 
     except OSError:
         status = "transport_error"
     finally:
-        if login_attempted and not completed and (not authenticated or status in (
-                'auth_rejected', 'identity_changed', 'proc_unavailable', 'proc_partial',
-                'not_listening', 'owner_unverified', 'ambiguous')):
+        if not completed and (
+                status in ('auth_rejected', 'auth_banned') or login_rejected
+                or (login_sent[0] and not authenticated and status not in (
+                    'proc_unavailable', 'proc_partial', 'not_listening',
+                    'owner_unverified', 'ambiguous', 'identity_changed'))):
             state._backoff(clock())
         state._lock.release()
     return {"available": False, "status": status, "reason": REASONS[status], "source": QB_SOURCE, "data": None}
