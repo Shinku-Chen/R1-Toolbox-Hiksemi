@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- docs: 补充移除容器并重启 R1 恢复原厂状态的方法。
 - docs: 项目介绍统一改为“不改原厂系统”。
 - docs: 在 README 中直接写出 GitHub Pages 预览地址。
 - docs: 按海康 Web 实际操作顺序补充镜像升级步骤。
