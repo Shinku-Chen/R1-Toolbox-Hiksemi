@@ -3975,10 +3975,14 @@ def attach_disk_display_cache(controller, insights, monitor, stopped):
     disables persistence.
     """
     state_dir = getattr(controller, 'state_dir', None)
-    if not state_dir:
+    if not isinstance(state_dir, (str, os.PathLike)):
+        return None
+    try:
+        cache_path = Path(state_dir) / 'disk-cache.json'
+    except (TypeError, ValueError):
         return None
     from disk_cache import DiskDisplayCache
-    cache = DiskDisplayCache(Path(state_dir) / 'disk-cache.json')
+    cache = DiskDisplayCache(cache_path)
     insights.display_cache = cache
     monitor.display_cache = cache
     def loop():
