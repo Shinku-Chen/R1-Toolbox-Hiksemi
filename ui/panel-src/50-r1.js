@@ -3430,6 +3430,69 @@ function r1ArchiveSync() {
 }
 if (typeof Poll !== 'undefined' && Poll.add) Poll.add('r1ArchiveWatch', async () => { r1ArchiveSync(); }, 1000);
 
+/* ---------------------------------------------------------------------
+   R1 GPU — N100 i915 PMU 使用率（0 是实测空闲，warming/不可用为 --）
+   --------------------------------------------------------------------- */
+const GPU_ENGINE_LABEL = { rcs0: '渲染', bcs0: '复制', vcs0: '视频', vecs0: '视频增强' };
+const GPU_SOURCE_LABEL = {
+  pmu: 'i915 PMU · 引擎占用',
+  rc6: 'RC6 估算 · PMU 不可用',
+  sysfs: 'DRM sysfs',
+};
+defineModule({
+  id: 'gpu', page: 'overview', kicker: 'GRAPHICS', title: '显卡', dek: '核显使用率、引擎与频率',
+  build(body) {
+    body.innerHTML = `<div class="card pad gpu-card">
+      <div class="gpu-top">
+        <div class="gpu-usage">
+          <div class="label">使用率</div>
+          <div class="big-stat dnum"><span class="dm" data-ref="util"></span><span class="unit">%</span></div>
+          <div class="sub" data-ref="source"></div>
+        </div>
+        <div class="gpu-device">
+          <div class="label">设备</div>
+          <b data-ref="model">--</b>
+          <div class="sub mono" data-ref="pci"></div>
+        </div>
+        <div class="gpu-freq">
+          <div class="label">频率</div>
+          <b data-ref="freq">--</b>
+          <div class="sub" data-ref="mem"></div>
+        </div>
+      </div>
+      <div class="bar" style="margin-top:18px"><i data-ref="bar"></i></div>
+      <div class="gpu-engines" data-ref="engines"></div>
+    </div>`;
+  },
+  update(o, m) {
+    if (!o) { m.dirty = true; return; }
+    // 初始快照可能还没有 gpu 字段，先保留占位，等下一次真实快照再判断；
+    // 明确为空（[] 或 available:false）才显示无显卡提示。
+    if (!Object.prototype.hasOwnProperty.call(o, 'gpu')) { m.dirty = true; return; }
+    const raw = o.gpu;
+    const g = Array.isArray(raw) ? raw[0] : (raw && Array.isArray(raw.devices) ? raw.devices[0] : null);
+    if (!g) {
+      m.r.body.innerHTML = emptyHTML('未检测到可监控的显卡', '需要 N100 i915 PMU 或 DRM GPU 数据。', 'gpu');
+      return;
+    }
+    const x = collect(m.r.body), util = g.util;
+    dnum(x.util, util, F.d1);
+    inkTo(x.util, ok(util) ? 'var(--m-io)' : '');
+    setW(x.bar, ok(util) ? util : 0);
+    x.bar.style.background = ok(util) ? 'var(--m-io)' : '';
+    setText(x.source, GPU_SOURCE_LABEL[g.util_source] || (g.util_source ? String(g.util_source) : '暂无可信读数'));
+    setText(x.model, g.model || g.name || 'GPU');
+    setText(x.pci, [g.pci, g.driver].filter(Boolean).join(' · '));
+    setText(x.freq, ok(g.freq_mhz) && g.freq_mhz > 0 ? F.int(g.freq_mhz) + ' MHz' : '--');
+    setText(x.mem, g.shared_memory ? '共享系统内存' : (g.mem_total ? `${F.bytesStr(g.mem_used)} / ${F.bytesStr(g.mem_total)}` : '显存未提供'));
+    const engines = g.engines && typeof g.engines === 'object' ? Object.entries(g.engines) : [];
+    setHTML(x.engines, engines.length ? engines.map(([id, value]) =>
+      `<span class="gpu-engine"><span>${esc(GPU_ENGINE_LABEL[id] || id)}</span><b>${ok(value) ? F.d1(value) + '%' : '--'}</b></span>`).join('')
+      : '<span class="faint">引擎明细暂不可用</span>');
+    setText(m.r.dek, g.temp == null ? '核显没有独立温度读数；使用率和频率来自 i915。' : `GPU 温度 ${F.int(g.temp)}℃；使用率和频率来自 i915。`);
+  },
+});
+
 /* 320/窄屏 hero/clock intrinsic sizing：只约束 R1 小屏布局，不改上游渲染。 */
 (function r1NarrowHeroCss() {
   if (typeof document === 'undefined') return;

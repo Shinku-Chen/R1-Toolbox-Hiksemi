@@ -264,3 +264,23 @@
 a.icon-btn{text-decoration:none}
 
 @media(max-width:960px){.tools .r1-github-link{display:none}}
+
+/* 概览：N100 核显使用率 */
+.gpu-card .gpu-top { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(220px, 1.4fr) minmax(110px, .7fr); gap: 24px; align-items: end; }
+.gpu-card .gpu-device b { display: block; font-size: 21px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.gpu-card .gpu-device .sub { margin-top: 4px; overflow-wrap: anywhere; }
+.gpu-card .gpu-freq { text-align: right; }
+.gpu-card .gpu-freq b { display: block; font: 22px var(--font-mono); font-variant-numeric: tabular-nums; }
+.gpu-card .gpu-freq .sub { margin-top: 4px; }
+.gpu-card .gpu-engines { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.gpu-engine { display: inline-flex; align-items: baseline; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--card-sunk); font-size: 13px; color: var(--muted); }
+.gpu-engine b { color: var(--ink-1); font: 13px var(--font-mono); font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) {
+  .gpu-card .gpu-top { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+  .gpu-card .gpu-device { grid-column: 1 / -1; grid-row: 2; }
+  .gpu-card .gpu-freq { text-align: left; }
+}
+@media (max-width: 420px) {
+  .gpu-card .gpu-top { grid-template-columns: minmax(0, 1fr); }
+  .gpu-card .gpu-device { grid-column: auto; grid-row: auto; }
+}

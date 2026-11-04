@@ -203,7 +203,7 @@ class Insights:
                   'containers':{'available':True,'items':[{'id':'a'*64,'name':'fixture-db','image':'fixture:local','state':'running','protected':False,'cpu_percent':3.2,'memory_bytes':134217728,'memory_limit_bytes':1073741824,'ports':'0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp'},{'id':'b'*64,'name':'r1-toolbox','image':'fixture:local','state':'exited','protected':True}]},
                   'vms':{'available':False,'reason':'fixture: no VM','items':[]},'ports':[{'protocol':'tcp','address':'127.0.0.1','port':18731}],
                   'processes':[{'pid':101,'name':'fixture-monitor','cpu_percent':1.2,'memory_bytes':40000000}],
-                  'gpu':{'available':False,'reason':'fixture: no GPU','devices':[]},
+                  'gpu':{'available':True,'devices':[{'name':'card0','vendor':'0x8086','device':'0x46d1','util':12.5,'util_source':'pmu','engines':{'rcs0':12.5,'bcs0':2.0},'freq_mhz':700,'shared_memory':True}]},
                   'history':[{'cpu_usage_percent':v,'memory_usage_percent':37.5} for v in [18,22,28,21,24.5]]}
     def snapshot(self):return copy.deepcopy(self.data)
     def storage_identity_cached(self):
@@ -459,7 +459,10 @@ finally:
       && await githubTop.getAttribute('target') === '_blank' && await githubTop.getAttribute('rel') === 'noopener noreferrer');
     check('总览模块已渲染', await page.locator('#layout-overview section[data-mod="metrics"]').count() === 1);
     check('不显示 CPU 功耗卡', await page.locator('#layout-overview [data-m="pwr"]').count() === 0);
-    check('不显示显卡内容', !/显卡|GPU/.test(await page.locator('#layout-overview section[data-mod="compute"]').textContent()));
+    await page.locator('#layout-overview section[data-mod="gpu"]').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => /12\.5/.test(document.querySelector('#layout-overview section[data-mod="gpu"] [data-ref="util"]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
+    check('概览显示 GPU 使用率卡', await page.locator('#layout-overview section[data-mod="gpu"]').count() === 1
+      && /12\.5%/.test(await page.locator('#layout-overview section[data-mod="gpu"]').textContent()));
     check('指标卡有真实读数', (await page.locator('[data-m="cpu"] .m-val .dm').first().getAttribute('aria-label')) !== '--');
     check('R1 双路风扇模块在温度页', await page.locator('#layout-thermal section[data-mod="r1cool"]').count() === 1);
     check('概览页不再夹带风扇/灯光磁贴', await page.locator('#layout-overview section[data-mod="r1cool"], #layout-overview section[data-mod="r1light"]').count() === 0);
