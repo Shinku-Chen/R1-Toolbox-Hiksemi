@@ -284,3 +284,6 @@ a.icon-btn{text-decoration:none}
   .gpu-card .gpu-top { grid-template-columns: minmax(0, 1fr); }
   .gpu-card .gpu-device { grid-column: auto; grid-row: auto; }
 }
+
+/* 温度页：没有可信风扇转速时不再保留空风扇卡；无电压时单列展示温度。 */
+.g-thermal.single { grid-template-columns: 1fr; }

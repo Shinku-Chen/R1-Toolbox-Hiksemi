@@ -44,7 +44,6 @@ const vendorModel = d => { const v = String(d.vendor || '').trim(), mo = String(
 const fPct = v => [F.int(v), '%'];
 const fDeg = v => [F.int(v), '℃'];
 const fW = v => [F.d1(v), 'W'];
-const fRpm = v => [F.int(v), 'RPM'];
 const fMBs = v => [F.d1(v), 'MB/s'];
 const fLoad = v => [F.d2(v), ''];
 const shortBytes = v => { const p = F.bytes(v); return p[0] + (p[1] ? p[1].charAt(0).replace('B', '') : ''); };

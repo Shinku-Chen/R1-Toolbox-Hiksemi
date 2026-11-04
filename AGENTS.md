@@ -67,7 +67,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 - 会话状态 `owner_authorized` 仅按真实 `panel_authorized(headers, peer)` 的 password／pair／open 结果提供布尔 UI 提示；保留 authorized／dev_mode 原语义及判断顺序，不能以开发窗口开启排除正常所有者，也不能以提示取代 POST 的实时 owner／Bearer／CSRF／代次检查。旧服务兼容仅 logged_in:true 或 password＋auth_required:false＋authorized:true，缺明确证明的旧 pair 只读缓存。
 - 默认 `password` 模式首次无口令，网页监控与管理直接可用；设置并开启口令后需登录会话。显式 `pair` 模式兼容原五位一次性配对流程。两种模式均保留同源／JSON／CSRF、操作确认和 5 秒可取消电源操作；小屏控制令牌不得发给网页。
 - 部署/升级必须复用原 Docker 项目与 `r1_toolbox_data` 数据卷；不删除卷、不使用 `down -v`。删除部署后正常重启可恢复官方显示。
-- 未知读数保持 `null` / `--`，不用 0 或猜测填补；不可用的能力隐藏或标注原因，不生成占位卡片。
+- 未知读数保持 `null` / `--`，不用 0 或猜测填补；不可用的能力隐藏或标注原因，不生成占位卡片。当前 R1 没有可信风扇 RPM，网页概览与温度页不展示风扇转速趋势／卡片；控制请求百分比不得冒充实测转速。
 - 风扇接管排障优先使用受限的 `/api/dev/fan` 诊断接口，一次采集完整预检、进程现场和监督端真实判定时间线；不要反复追加少量错误字段、打包并要求用户部署试探。被截断的错误文本不足以判定根因，先对照结构化现场再修复。
 - “服务与开发”通过所有者授权的 `/api/services/*` 管理独立小屏／MCP 开关和开发窗口，不能由 Bearer Token 或开发者白名单管理自己。小屏返回保存意图与实际 `active/busy/last_error`，不得按勾选成功宣称完成切换。Web 是常驻核心，端口不可用必须报告启动失败，不用空循环伪装健康容器。停止容器执行官方窗口、风扇等恢复，失败保留真实原因。
 - 开发者白名单直接检测统一使用 `/api/dev/diagnostics`：只在显式开发模式、实际连接来源命中非空局域网 IP／CIDR 白名单和有效窗口内免登录读取固定项目，保持同源／JSON／CSRF。Web 保存绝对到期时间，重启不续期；过期、配置损坏或无白名单都关闭授权。只读授权不得扩展到控制、风扇重试或任意命令，采集复用各来源的并发锁，逐项报告失败。接口边界见 `docs/dev-diagnostics.md`。

@@ -285,13 +285,13 @@ const SHEETS = {
     },
   },
   temp: {
-    icon: 'temp', title: () => '温度与散热', sub: o => { const s = o.sensors || {}; return `${(s.temps || []).length + diskThermo(o).length + (cpuTemp(o) != null ? 1 : 0)} 个温度测点 · ${(s.fans || []).length} 个风扇`; },
+    icon: 'temp', title: () => '温度与散热', sub: o => { const s = o.sensors || {}; return `${(s.temps || []).length + diskThermo(o).length + (cpuTemp(o) != null ? 1 : 0)} 个温度测点`; },
     build(b, arg, ctx) {
       b.innerHTML = `<div class="sheet-hero"><div><div class="eyebrow">CPU</div><div class="dnum"><span class="dm" data-ref="v"></span><span class="unit">℃</span></div></div><div style="text-align:right"><div class="eyebrow">阈值</div><b class="tnum" data-ref="thr"></b></div></div>
         <div class="stat-cells temp-cells"><div class="stat-cell"><div class="eyebrow">CPU</div><b class="tnum" data-ref="c1"></b></div><div class="stat-cell"><div class="eyebrow">主板</div><b class="tnum" data-ref="c2"></b></div><div class="stat-cell"><div class="eyebrow">全部测点最高</div><b class="tnum" data-ref="c4"></b></div></div>
         <div class="card pad" data-ref="th"></div>`;
-      sheetCharts(ctx, b, [Object.assign({}, TREND_DEFS[3], { peak: true }), TREND_DEFS[4]]);
-      b.insertAdjacentHTML('beforeend', `${sec('风扇')}<div data-ref="fans"></div>${sec('电压')}<div data-ref="volts"></div>${sec('全部传感器')}<div data-ref="all"></div>`);
+      sheetCharts(ctx, b, [Object.assign({}, TREND_DEFS[3], { peak: true })]);
+      b.insertAdjacentHTML('beforeend', `${sec('电压')}<div data-ref="volts"></div>${sec('全部传感器')}<div data-ref="all"></div>`);
       const x = collect(b);
       return o => {
         const ct = cpuTemp(o); dnum(x.v, ct); inkTo(x.v, ct != null ? rampInk(ct, 'temp') : '');
@@ -302,7 +302,6 @@ const SHEETS = {
         const list = thermoList(o, true).concat(diskThermo(o)), sig = list.map(t => t.k).join();
         if (x._sig !== sig) { x._sig = sig; x.th.innerHTML = list.length ? thermoRows(list) + scaleHTML : emptyHTML('未读取到任何温度传感器', 'fnOS 默认未安装 lm-sensors，已直读 thermal zone 与 hwmon；虚拟机或容器内通常无法访问硬件传感器。'); }
         updateThermo(x.th, list);
-        setHTML(x.fans, (s.fans || []).length ? kvHTML(s.fans.map(f => [esc(fanName(f)), `${F.int(f.rpm)} RPM`]).concat(s.fans_source ? [['数据来源', `<span class="mono">${esc(s.fans_source)}</span>`]] : [])) : `<div class="card pad">${emptyHTML('未检测到可读取的风扇传感器', esc(NO_FAN))}</div>`);
         setHTML(x.volts, (s.volts || []).length ? kvHTML(s.volts.map(v => [esc(v.name), `${F.d2(v.value)} V`])) : `<div class="card pad">${emptyHTML('未读取到电压数据')}</div>`);
         const TN = { cpu: 'CPU', pch: '芯片组', board: '主板', acpi: 'ACPI', disk: '硬盘', gpu: 'GPU' };
         setHTML(x.all, temps.length ? kvHTML(temps.map(t => [`${esc(t.name)} <span class="pill">${esc(TN[t.type] || t.type)}</span>`, `${tv(t.value)}${ok(t.max) ? `<div class="sub">上限 ${F.d1(t.max)} ℃</div>` : ''}`])) : `<div class="card pad">${emptyHTML(s.available ? 'sensors 未返回温度' : '未安装 lm-sensors（sensors 命令不可用）', '已使用 thermal zone / hwmon 直读作为替代')}</div>`);

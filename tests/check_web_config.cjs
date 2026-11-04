@@ -463,6 +463,7 @@ finally:
     await page.waitForFunction(() => /12\.5/.test(document.querySelector('#layout-overview section[data-mod="gpu"] [data-ref="util"]')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
     check('概览显示 GPU 使用率卡', await page.locator('#layout-overview section[data-mod="gpu"]').count() === 1
       && /12\.5%/.test(await page.locator('#layout-overview section[data-mod="gpu"]').textContent()));
+    check('概览不再显示风扇转速趋势', !/风扇转速/.test(await page.locator('#layout-overview section[data-mod="trends"]').textContent()));
     check('指标卡有真实读数', (await page.locator('[data-m="cpu"] .m-val .dm').first().getAttribute('aria-label')) !== '--');
     check('R1 双路风扇模块在温度页', await page.locator('#layout-thermal section[data-mod="r1cool"]').count() === 1);
     check('概览页不再夹带风扇/灯光磁贴', await page.locator('#layout-overview section[data-mod="r1cool"], #layout-overview section[data-mod="r1light"]').count() === 0);
@@ -472,11 +473,13 @@ finally:
     await page.waitForSelector('#layout-thermal section[data-mod="r1cool"] [data-ch="cpu"]', { timeout: 10000 });
     check('温度页不显示能耗模块', await page.locator('#layout-thermal section[data-mod="energy"]').count() === 0);
     check('双路风扇名称', /CPU 风扇/.test(await page.locator('#layout-thermal section[data-mod="r1cool"]').textContent()));
+    check('温度页不再显示风扇转速卡片', !/风扇转速/.test(await page.locator('#layout-thermal section[data-mod="thermal"]').textContent())
+      && await page.locator('#layout-thermal section[data-mod="thermal"] .fan').count() === 0);
     check('系统状态显示实际原厂低档', /原厂 · 低档/.test(await page.locator('#layout-thermal [data-ch="system"]').textContent()));
     await page.locator('#pageSeg button[data-page="overview"]').click();
     await page.locator('section[data-mod="trends"]').scrollIntoViewIfNeeded();
     await page.waitForTimeout(800);
-    check('趋势模块已渲染', await page.locator('section[data-mod="trends"] .chart-card').count() >= 5);
+    check('趋势模块已渲染', await page.locator('section[data-mod="trends"] .chart-card').count() === 4);
     await shot('overview');
 
     /* 2. 数据映射 */

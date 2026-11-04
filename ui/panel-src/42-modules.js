@@ -2,7 +2,7 @@
    03 TRENDS — 历史（/api/history）+ 实时拼接，同步十字线，阈值线
    --------------------------------------------------------------------- */
 const SERIES_SRC = { 'net.rx': ['net', 'rx'], 'net.tx': ['net', 'tx'], 'diskio.r': ['diskio', 'r'], 'diskio.w': ['diskio', 'w'], 'net_bytes.rx': ['net_bytes', 'rx'], 'net_bytes.tx': ['net_bytes', 'tx'] };
-const LIVE_OF = { cpu: 'cpu', mem: 'mem', 'net.rx': 'rx', 'net.tx': 'tx', 'diskio.r': 'dr', 'diskio.w': 'dw', temp: 'temp', temp_mb: 'tempMb', power: 'power', fan_avg: 'fan', disk_total: 'disk', load1: 'load' };
+const LIVE_OF = { cpu: 'cpu', mem: 'mem', 'net.rx': 'rx', 'net.tx': 'tx', 'diskio.r': 'dr', 'diskio.w': 'dw', temp: 'temp', temp_mb: 'tempMb', power: 'power', disk_total: 'disk', load1: 'load' };
 const histIv = () => (S.cfg && S.cfg.history_interval) || 60;
 async function fetchSeries(keys, range) {
   const bases = [...new Set(keys.map(k => (SERIES_SRC[k] || [k])[0]))], res = {};
@@ -18,7 +18,6 @@ function seriesOf(res, key, range) {
 const emptyFor = key => () => {
   const o = S.o || {};
   if (key === 'temp' && cpuTemp(o) == null && mbTemp(o) == null) return '未检测到 CPU / 主板温度传感器';
-  if (key === 'fan_avg' && !((o.sensors || {}).fans || []).length) return '未检测到可读取的风扇转速传感器（已适配 hwmon / IPMI / ThinkPad / EC，多为固件未开放）';
   if (key === 'power' && !pwrOk(o)) return '功耗不可用';
   return `暂无数据 · 后台每 ${histIv()} 秒记录一条历史，稍后自动出现`;
 };
@@ -27,7 +26,6 @@ const TREND_DEFS = [
   { id: 'net', title: '网络', sheet: 'net', yMin: 0, yTick: shortBytes, series: [{ m: 'net.rx', label: '下行', color: M.io, fmt: F.rate }, { m: 'net.tx', label: '上行', color: M.io2, fmt: F.rate }] },
   { id: 'io', title: '磁盘读写', sheet: 'storage', yMin: 0, yTick: v => v + 'M', series: [{ m: 'diskio.r', label: '读取', color: M.io, fmt: fMBs }, { m: 'diskio.w', label: '写入', color: M.io2, fmt: fMBs }] },
   { id: 'temp', title: '温度', sheet: 'temp', yTick: v => v + '°', thresholds: () => [{ v: TH.tempWarn, lv: 'warn' }, { v: TH.tempCrit, lv: 'crit' }], series: [{ m: 'temp', label: 'CPU', color: M.temp, fmt: fDeg }, { m: 'temp_mb', label: '主板', color: M.temp2, fmt: fDeg }] },
-  { id: 'fan', title: '风扇转速', sheet: 'temp', yMin: 0, yTick: v => String(v), series: [{ m: 'fan_avg', label: '平均转速', color: M.fan, fmt: fRpm }] },
 ];
 const chartOpt = (d, extra) => Object.assign({ series: d.series, yMin: d.yMin, yMax: d.yMax, yTick: d.yTick, peak: d.peak, thresholds: d.thresholds, empty: emptyFor(d.series[0].m) }, extra);
 defineModule({
@@ -201,10 +199,8 @@ function updateThermo(root, list) {
   });
 }
 const scaleHTML = `<div class="thermo-scale"><span></span><div>${[20, 40, 60, 80, 100].map(v => `<span style="left:${tPos(v)}%">${v}°</span>`).join('')}</div><span></span></div>`;
-const fanName = f => String(f.name || '风扇');
-const NO_FAN = '已适配标准 hwmon、IPMI/BMC、ThinkPad ACPI 与 0xA20 硬件监控邮箱（只读）；仍无数值通常表示该机型固件未向系统开放风扇数据。带 BMC 的主机可安装 ipmitool 后自动识别。';
 defineModule({
-  id: 'thermal', page: 'thermal', dc: 'temp', kicker: 'THERMAL', title: '温度与散热', dek: '温度测点、风扇与电压',
+  id: 'thermal', page: 'thermal', dc: 'temp', kicker: 'THERMAL', title: '温度与散热', dek: '温度测点与可选电压',
   actions: () => detailBtn('temp'),
   build(body, m) {
     body.innerHTML = `<div class="grid g-thermal">
@@ -215,33 +211,31 @@ defineModule({
         <div data-ref="td"></div>
         ${scaleHTML}
       </div>
-      <div class="card pad">
-        <div class="label">风扇</div>
-        <div data-ref="fans" style="margin-top:6px"></div>
-        <div data-ref="vw"><div class="label" style="margin:18px 0 12px">电压</div><div class="volts" data-ref="volts"></div></div>
+      <div class="card pad" data-ref="voltcard" hidden>
+        <div class="label">电压</div>
+        <div class="volts" data-ref="volts"></div>
       </div>
     </div>`;
     m.x = collect(body);
   },
   update(o, m) {
     if (!o) return;
-    const x = m.x, tl = thermoList(o), td = diskThermo(o), sen = o.sensors || {}, fans = sen.fans || [], volts = sen.volts || [];
+    const x = m.x, tl = thermoList(o), td = diskThermo(o), sen = o.sensors || {}, volts = sen.volts || [];
     const s1 = tl.map(t => t.k).join(), s2 = td.map(t => t.k).join();
     if (m.s1 !== s1) { m.s1 = s1; x.tl.innerHTML = tl.length ? thermoRows(tl) : emptyHTML('未读取到 CPU / 主板温度', 'fnOS 默认未安装 lm-sensors，已直读 thermal zone 与 hwmon；虚拟机或容器内通常无法访问硬件传感器。'); }
     if (m.s2 !== s2) { m.s2 = s2; x.td.innerHTML = td.length ? thermoRows(td) : emptyHTML('没有可用的硬盘温度', disksOf(o).length ? '硬盘未提供温度（需要 drivetemp 或 smartctl）' : '未检测到物理硬盘'); }
     updateThermo(x.tl, tl); updateThermo(x.td, td);
-    const fsig = fans.map(fanName).join();
-    if (m.fsig !== fsig) { m.fsig = fsig; x.fans.innerHTML = fans.length ? fans.map((f, i) => `<div class="fan"><span class="fan-ico"><svg class="i" data-ref="fi${i}"><use href="#i-fan"/></svg></span><div style="flex:1;min-width:0"><div class="sub">${esc(fanName(f))}</div><div class="num"><span data-ref="fv${i}">--</span><span class="unit" style="font-size:12px">RPM</span></div></div></div>`).join('') : emptyHTML('未检测到可读取的风扇传感器', esc(NO_FAN), 'fan'); Object.assign(x, collect(x.fans)); }
-    fans.forEach((f, i) => { num(x['fv' + i], f.rpm); if (x['fi' + i]) { x['fi' + i].style.setProperty('--spin', (2400 / Math.max(300, +f.rpm || 300)).toFixed(2) + 's'); x['fi' + i].style.animationPlayState = +f.rpm > 0 ? '' : 'paused'; } });
-    x.vw.hidden = !volts.length;
+    // R1 未提供可信风扇转速；温度页只保留温度与可选电压，不再占位风扇卡片。
+    const voltGrid = x.voltcard && x.voltcard.parentElement;
+    x.voltcard.hidden = !volts.length;
+    if (voltGrid) voltGrid.classList.toggle('single', !volts.length);
     const vsig = volts.map(v => v.name).join();
     if (m.vsig !== vsig) { m.vsig = vsig; x.volts.innerHTML = volts.slice(0, 8).map((v, i) => `<div class="volt"><div class="eyebrow">${esc(v.name)}</div><div class="num"><span data-ref="vv${i}">--</span><span class="unit" style="font-size:12px">V</span></div></div>`).join(''); Object.assign(x, collect(x.volts)); }
     volts.slice(0, 8).forEach((v, i) => num(x['vv' + i], v.value, z => (+z).toFixed(2)));
     const ct = cpuTemp(o), lt = LV.temp(ct), hot = td.filter(t => !t.sleep).sort((a, b) => b.v - a.v)[0];
-    const fanAvg = fans.filter(f => +f.rpm > 0); const fa = fanAvg.length ? fanAvg.reduce((a, f) => a + +f.rpm, 0) / fanAvg.length : null;
     setHTML(m.r.dek, lt ? `<span class="warn">CPU ${F.int(ct)}℃，温度${lt === 'crit' ? '过高' : '偏高'}</span>，建议检查风道与灰尘。`
       : !tl.length && !td.length ? '未读取到任何温度传感器。'
-        : [ct != null ? `CPU <b>${F.int(ct)}℃</b>` : '', hot ? `硬盘最高 ${F.int(hot.v)}℃（${esc(hot.label)}）` : '', fa != null ? `风扇平均 ${F.int(fa)} RPM` : ''].filter(Boolean).join('，') + '。');
+        : [ct != null ? `CPU <b>${F.int(ct)}℃</b>` : '', hot ? `硬盘最高 ${F.int(hot.v)}℃（${esc(hot.label)}）` : ''].filter(Boolean).join('，') + '。');
   },
 });
 

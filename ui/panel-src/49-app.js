@@ -93,7 +93,6 @@ function feed(o) {
   P('power', pwrOk(o) ? o.power.total : null); P('disk', +o.disk_size > 0 ? o.disk_total : null); P('load', o.cpu && o.cpu.load && o.cpu.load[0]);
   const ni = nets(o); if (ni.length) { P('rx', sumRx(o)); P('tx', sumTx(o)); }
   const io = o.diskio || []; if (io.length) { P('dr', io.reduce((a, z) => a + (+z.read_rate || 0), 0) / 1048576); P('dw', io.reduce((a, z) => a + (+z.write_rate || 0), 0) / 1048576); }
-  const rpm = ((o.sensors || {}).fans || []).map(f => +f.rpm).filter(v => v > 0); if (rpm.length) P('fan', rpm.reduce((a, b) => a + b, 0) / rpm.length);
   io.forEach(z => { const b = S.diskBuf[z.name] || (S.diskBuf[z.name] = { r: [], w: [] }); push(b.r, +z.read_rate || 0); push(b.w, +z.write_rate || 0); });
   S.cpuHigh = LV.cpu(o.cpu && o.cpu.percent) ? S.cpuHigh + 1 : 0;
   return true;
@@ -245,7 +244,7 @@ setInterval(() => Poll.tick(), 1000);
 const seen = { thermal: false, energy: false, containers: false };
 function noteSeen(o) {
   if (!o) return;
-  if (cpuTemp(o) != null || mbTemp(o) != null || diskTemps(o).length || ((o.sensors || {}).fans || []).length) seen.thermal = true;
+  if (cpuTemp(o) != null || mbTemp(o) != null || diskTemps(o).length) seen.thermal = true;
   if (pwrOk(o)) seen.energy = true;
   if (dockerOk(S.docker || o.docker)) seen.containers = true;
 }
