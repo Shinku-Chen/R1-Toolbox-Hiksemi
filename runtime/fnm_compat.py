@@ -1527,12 +1527,23 @@ class FnmonitorPanel:
             used = _number(item.get('vram_used_bytes'), 0)
             total = _number(item.get('vram_total_bytes'), 0)
             name = _text(item.get('name'), 80) or 'GPU'
+            util = _number(item.get('util'), 0, 100)
+            if util is None:
+                util = _number(item.get('busy_percent'), 0, 100)
+            engines = item.get('engines')
+            engines = ({
+                str(key)[:32]: _number(value, 0, 100)
+                for key, value in engines.items()
+                if _text(key, 32) and _number(value, 0, 100) is not None
+            } if isinstance(engines, dict) else None)
             rows.append({
                 'name': name, 'vendor': vendor, 'type': 'intel' if vendor == '8086' else 'drv',
-                'util': _number(item.get('busy_percent'), 0, 100),
-                'util_source': 'sysfs' if _number(item.get('busy_percent'), 0, 100) is not None else None,
+                'util': util,
+                'util_source': _text(item.get('util_source'), 20) or ('sysfs' if util is not None else None),
+                'engines': engines,
                 'temp': _number(item.get('temp_c'), -40, 200),
                 'freq_mhz': _number(item.get('freq_mhz'), 0, 100000),
+                'freq_req_mhz': _number(item.get('freq_req_mhz'), 0, 100000),
                 'mem_total': total, 'mem_used': used,
                 'mem_pct': used / total * 100 if used is not None and total else None,
                 'shared_memory': bool(total in (None, 0)),

@@ -466,6 +466,26 @@ class MappingTests(unittest.TestCase):
         self.assertIsNone(self.panel._gpu()[0]['model'])
         self.assertIsNone(self.panel._gpu()[0]['pci'])
 
+    def test_gpu_pmu_usage_and_engines_are_projected_without_fake_values(self):
+        cached = Insights().snapshot()
+        cached['gpu'] = {'devices': [{
+            'name': 'card0', 'vendor': '0x8086', 'device': '0x46d1',
+            'busy_percent': 0, 'util_source': 'pmu',
+            'engines': {'rcs0': 12.5, 'bcs0': 0.0}, 'freq_mhz': 700,
+        }]}
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        gpu = self.panel._gpu()[0]
+        self.assertEqual(gpu['util'], 0)
+        self.assertEqual(gpu['util_source'], 'pmu')
+        self.assertEqual(gpu['engines'], {'rcs0': 12.5, 'bcs0': 0.0})
+        self.assertEqual(gpu['freq_mhz'], 700)
+        cached['gpu']['devices'][0]['util_source'] = None
+        cached['gpu']['devices'][0]['busy_percent'] = None
+        self.panel.insights.snapshot = lambda: copy.deepcopy(cached)
+        gpu = self.panel._gpu()[0]
+        self.assertIsNone(gpu['util'])
+        self.assertIsNone(gpu['util_source'])
+
     def test_disk_volume_comes_from_drives_mount(self):
         proc = Path(tempfile.mkdtemp(prefix='r1-panel-proc-'))
         (proc / 'self').mkdir()

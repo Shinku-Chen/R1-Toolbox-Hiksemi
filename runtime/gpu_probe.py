@@ -155,7 +155,7 @@ def _candidates(sys_root):
     return result
 
 
-def _open_perf(pmu_type, config, cpu):
+def _open_perf(pmu_type, config, cpu, *, disabled=True):
     machine = platform.machine().lower()
     nr = _PERF_EVENT_OPEN_NR.get(machine)
     if nr is None:
@@ -164,8 +164,8 @@ def _open_perf(pmu_type, config, cpu):
     attr.type = int(pmu_type)
     attr.size = ctypes.sizeof(_PerfEventAttr)
     attr.config = int(config)
-    # disabled, exclude_hv; no sampling, no write, no inherit.
-    attr.flags = (1 << 0) | (1 << 6)
+    # exclude_hv; the persistent sampler starts enabled, the probe starts disabled.
+    attr.flags = (1 << 6) | ((1 << 0) if disabled else 0)
     attr.wakeup_events_or_watermark = 1
     lib = _libc()
     lib.syscall.restype = ctypes.c_long

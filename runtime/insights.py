@@ -31,6 +31,7 @@ import uuid
 
 from device_info import collect_device_info
 from disk_names import VendorStorageClient, read_disk_names
+from gpu_usage import IntelGpuSampler
 
 try:
     import fcntl
@@ -384,6 +385,8 @@ class InsightsCollector:
         # Owner Web identity is a separate projection, never a public snapshot.
         # Each record is tied to the same sampled lifetime and fixed vendor list.
         self._disk_verified_serials = {}
+        self._gpu_sampler = None
+        self._gpu_sampler_lock = threading.Lock()
         self._state = {
             "schema_version": 1, "timestamp": None, "system": {}, "interfaces": [],
             "disks": _capability(), "containers": _capability(), "vms": _capability(),
@@ -906,12 +909,28 @@ class InsightsCollector:
             if not re.fullmatch(r"card\d+", card.name) or not (card / "device").is_dir():
                 continue
             path = card / "device"
-            devices.append({"name": card.name,
-                            "vendor": (_text(path / "vendor", 128) or "").strip() or None,
-                            "device": (_text(path / "device", 128) or "").strip() or None,
-                            "busy_percent": _finite(_integer(path / "gpu_busy_percent"), maximum=100),
-                            "vram_total_bytes": _integer(path / "mem_info_vram_total"),
-                            "vram_used_bytes": _integer(path / "mem_info_vram_used")})
+            vendor = (_text(path / "vendor", 128) or "").strip() or None
+            pci = os.path.basename(os.path.realpath(path)) or None
+            busy = _finite(_integer(path / "gpu_busy_percent"), maximum=100)
+            item = {"name": card.name, "vendor": vendor,
+                    "device": (_text(path / "device", 128) or "").strip() or None,
+                    "busy_percent": busy,
+                    "util_source": "sysfs" if busy is not None else None,
+                    "engines": None, "freq_mhz": None,
+                    "vram_total_bytes": _integer(path / "mem_info_vram_total"),
+                    "vram_used_bytes": _integer(path / "mem_info_vram_used")}
+            if vendor and vendor.lower().replace("0x", "") == "8086":
+                with self._gpu_sampler_lock:
+                    if self._gpu_sampler is None:
+                        self._gpu_sampler = IntelGpuSampler(self.sys_root)
+                    sample = self._gpu_sampler.sample(pci)
+                if sample is not None:
+                    if sample.get("util") is not None:
+                        item["busy_percent"] = sample["util"]
+                    item["util_source"] = sample.get("util_source")
+                    item["engines"] = sample.get("engines")
+                    item["freq_mhz"] = sample.get("freq_mhz")
+            devices.append(item)
         return {"available": bool(devices), "reason": None if devices else "未发现支持的 GPU sysfs 设备", "devices": devices}
 
     def _collect_slow(self):
