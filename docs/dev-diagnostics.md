@@ -57,9 +57,10 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 {"action":"snapshot","checks":["file_backend_context"]}
 {"action":"snapshot","checks":["file_protocol"]}
 {"action":"snapshot","checks":["capacity_cache"]}
+{"action":"snapshot","checks":["gpu_probe"]}
 ```
 
-不指定 `checks` 时仍只采 `device/storage/business/fan` 原四项。目录共十一项，额外七项须在 `checks` 明确选择；媒体 `probe_business` 和独立原厂 `probe/packages` 不属于目录。列表非空、已知且不重复，按请求顺序返回；不接受其他字段、查询参数、命令、路径、端口、凭据、用户或任务 ID。没有公开 GET／CORS，也不建立网页登录会话；固定业务认证边界见[业务状态](business-diagnostics.md)。
+不指定 `checks` 时仍只采 `device/storage/business/fan` 原四项。目录共十二项，额外八项须在 `checks` 明确选择；媒体 `probe_business` 和独立原厂 `probe/packages` 不属于目录。列表非空、已知且不重复，按请求顺序返回；不接受其他字段、查询参数、命令、路径、端口、凭据、用户或任务 ID。没有公开 GET／CORS，也不建立网页登录会话；固定业务认证边界见[业务状态](business-diagnostics.md)。
 
 ## 检测项目
 
@@ -120,6 +121,20 @@ curl -sS 'http://192.168.31.5:18732/api/dev/diagnostics' \
 | `docker_project_readiness` | 显式通过固定本机 Docker Unix GET 发现可信候选，并读取 Toolbox 注册表元数据；不读取 Compose 正文、不登记项目、不部署或启停，未知绑定保持未核验 |
 | `disk_activity` | 显式读取 `/proc/diskstats`、进程 `stat/io`、sysfs 生命周期和已有监控历史状态；两次调用形成增量，不读命令行、环境、FD 目标、用户文件或块设备，不执行 SMART、原厂存储 RPC、休眠或任务控制。见[磁盘休眠排查](disk-sleep-diagnostics.md) |
 | `capacity_cache` | 显式只读已有容量决策 ledger 和独立尝试记录；包含最近成功提交、首次真实失效、逐盘首拒绝与最终处置、原库存组件摘要和独立心跳，不运行库存／poll／容量投影或任何磁盘采集。见本页固定 schema。 |
+| `gpu_probe` | 仅显式尝试打开固定 `i915*` PMU 事件并读取短样本，报告事件名、config、单位、打开／读取结果及 RC6 回退；不写 GPU、不调整频率／电源，不读取磁盘或用户文件。 |
+
+### GPU PMU 探测
+
+`gpu_probe` 结果位于 `snapshot.checks.gpu_probe.data.gpu_probe`。固定 schema 1 只包含：
+
+- `pmu.candidates[]`：固定 `i915*` 事件源、`type`、`cpumask`，最多四个候选
+- `pmu.candidates[].events[]`：最多 64 个事件名、config、unit、是否打开、errno 名称、是否读取，以及 `*-busy` 的短样本百分比
+- `pmu.opened_events` / `pmu.readable_events`：本次实际成功数和可读计数
+- `perf_event_paranoid`
+- `rc6.available` / `source` / `delta_ms` / `utilization_percent`：只读 RC6 回退
+- `reason`：`i915_pmu_not_found`、`no_event_opened`、`events_opened_but_not_readable` 等固定原因
+
+不返回 perf 文件描述符、任意路径、错误原文、GPU 温度或伪造显存。`perf_event_open` 失败按 errno 名称返回，0 个事件打开时保持不可用，不用零表示使用率。该检查只读内核计数器，不写 GPU、不调整频率或电源，也不会读取磁盘、SMART 或用户文件。
 
 Docker 候选、文件上下文和协议检查会访问元数据，部分原厂查询可能初始化状态并唤盘，只能显式选择，不加入默认采集或轮询。文件边界仍为 `/drives/*/Users/admin/`；元数据或映射候选不代替完整原厂 ACL 和最终句柄。五项文件只读执行器另有逐次运行门槛，八项写合同仍未接入。Docker 证据见[固定项目读取](docker-projects.md)。检测结束时开发窗口失效，丢弃整次结果并返回 `403`，不续期。
 

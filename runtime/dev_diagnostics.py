@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 CHECKS = ('device', 'storage', 'business', 'fan')
 # Identity serials require an explicit selection; the default snapshot remains
 # the original four checks even as the discovery catalog grows.
-ALLOWED_CHECKS = CHECKS + ('storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context', 'file_protocol', 'capacity_cache')
+ALLOWED_CHECKS = CHECKS + ('storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context', 'file_protocol', 'capacity_cache', 'gpu_probe')
 _CHECK_DETAILS = {
     'device': ('设备信息', '只读现有监控中的设备身份缓存。'),
     'storage': ('存储信息', '固定名称查询与现有身份缓存，不运行 SMART 或唤醒磁盘。'),
@@ -23,6 +23,7 @@ _CHECK_DETAILS = {
     'file_backend_context': ('文件后端上下文', '显式核对固定管理员身份摘要与 Users/admin 句柄元数据；不读取目录内容，但路径元数据访问可能唤盘。'),
     'file_protocol': ('原厂文件协议与句柄现场', '显式核对固定 Users ACL 前置及 admin 的原厂元数据与真实挂载拓扑；不枚举 Users 或 public，可能初始化原厂资源或唤盘，不读取文件内容。'),
     'capacity_cache': ('容量缓存决策现场', '仅显式投影已记录的内存决策、首次失效与心跳证据；不重新扫描挂载、不轮询事件、不测容量或 SMART。'),
+    'gpu_probe': ('GPU PMU 探测', '仅显式尝试打开固定 i915 PMU 事件并读取短样本；不写 GPU、不调整频率或电源，不可用保持未知。'),
 }
 _INVALID_REQUEST = '诊断操作或参数无效。'
 _INVALID_CHECKS = '诊断项目必须是非空且不重复的固定项目列表。'

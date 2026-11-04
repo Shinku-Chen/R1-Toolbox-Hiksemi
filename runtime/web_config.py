@@ -41,6 +41,7 @@ from network_access import peer_matches
 from mcp_service import validate_http_metadata
 from dev_diagnostics import catalog as diagnostic_catalog, parse_request as parse_diagnostic_request, collect as collect_diagnostics
 import screen_diagnostics
+import gpu_probe
 
 SETTINGS = frozenset(('theme', 'font_scale', 'page_interval', 'sleep_timeout', 'saver_timeout',
                       'saver_brightness', 'saver_content', 'saver_items', 'brightness',
@@ -1707,6 +1708,7 @@ class WebConfigServer:
                 'file_protocol': lambda: self._file_protocol_snapshot(ip),
                 'disk_activity': self._disk_activity_snapshot,
                 'capacity_cache': self._capacity_cache_snapshot,
+                'gpu_probe': self._gpu_probe_snapshot,
                 'docker_project_readiness': lambda: (200, {'ok': True,
                     'discovery': self.integration.docker_projects.catalog(),
                     'registry': self.integration.docker_projects.metadata()}),
@@ -1726,6 +1728,16 @@ class WebConfigServer:
                          'snapshot': snapshot}, None
         finally:
             self.diagnostic_lock.release()
+
+    def _gpu_probe_snapshot(self):
+        """Open fixed i915 PMU events for one explicit, read-only probe."""
+        try:
+            value = gpu_probe.probe()
+        except Exception:
+            return 503, {'ok': False, 'error': 'GPU PMU 探测暂不可确认'}
+        if not isinstance(value, dict):
+            return 503, {'ok': False, 'error': 'GPU PMU 探测暂不可确认'}
+        return 200, {'ok': True, 'gpu_probe': value}
 
     def _capacity_cache_snapshot(self):
         """Read the bounded decision ledger, without replaying any disk checks."""

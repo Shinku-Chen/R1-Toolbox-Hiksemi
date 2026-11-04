@@ -135,7 +135,7 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         self.assertEqual(value['catalog']['schema_version'], 1)
         self.assertIs(value['catalog']['read_only'], True)
         self.assertEqual({row['id'] for row in value['catalog']['checks']},
-                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context', 'file_protocol', 'capacity_cache'})
+                         CHECKS | {'storage_identity', 'file_access_readiness', 'docker_project_readiness', 'disk_activity', 'file_backend_context', 'file_protocol', 'capacity_cache', 'gpu_probe'})
         self.assertNotIn('set-cookie', headers)
         self.assert_no_sources()
 
@@ -190,6 +190,21 @@ class DeveloperDiagnosticsHTTPTests(unittest.TestCase):
         status, _, value = self.request({'action': 'snapshot', 'checks': ['disk_activity']})
         self.assertEqual(status, 403)
         self.assertNotIn('should-not-leave', json.dumps(value))
+
+    def test_gpu_probe_is_explicit_and_has_no_hardware_control(self):
+        result = {'schema_version': 1, 'read_only': True, 'reason': 'fixture',
+                  'pmu': {'available': False, 'candidates': []},
+                  'rc6': {'available': False, 'reason': 'not_sampled'}}
+        with mock.patch.object(web_config.gpu_probe, 'probe', return_value=result) as probe:
+            status, _, value = self.request({'action': 'snapshot', 'checks': ['gpu_probe']})
+        self.assertEqual(status, 200)
+        self.assertEqual(value['snapshot']['checks']['gpu_probe']['data']['gpu_probe'], result)
+        probe.assert_called_once_with()
+        self.insights.snapshot.assert_not_called()
+        self.insights.storage_name_diagnostics.assert_not_called()
+        self.business.assert_not_called()
+        self.fan.snapshot.assert_not_called()
+        self.assert_no_controls()
 
     def test_file_readiness_is_explicit_metadata_and_shares_the_storage_lock(self):
         provider = self._patch(self.server.integration, 'file_readiness', return_value={
