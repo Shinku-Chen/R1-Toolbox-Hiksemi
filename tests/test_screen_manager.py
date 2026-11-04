@@ -282,6 +282,12 @@ class ProvisionTests(unittest.TestCase):
                                              mountinfo=self.mountinfo, wait_seconds=0)
         command.assert_not_called()
 
+    def test_missing_screen_mountpoint_fails_without_waiting(self):
+        missing = Path(self.temp.name) / 'missing-screen'
+        with self.assertRaisesRegex(ValueError, '/screen 分区尚未挂载'):
+            MODULE.provision_screen_runtime(root=missing, runtime=missing / 'squashfs-root',
+                                             mountinfo=self.mountinfo, wait_seconds=20)
+
     def test_missing_screen_mount_is_not_written(self):
         (self.runtime).parent.mkdir(exist_ok=True)
         empty = Path(self.temp.name) / 'empty-mountinfo'

@@ -98,6 +98,10 @@ def provision_screen_runtime(*, root=None, runtime=None, mountinfo=None,
     runtime = pathlib.Path(runtime or app)
     if runtime_complete(runtime):
         return
+    if not root.is_dir():
+        # CI and non-screen hosts have no /screen mountpoint at all; only a
+        # present mountpoint can become the factory partition shortly after.
+        raise ValueError('原厂 /screen 分区尚未挂载；Web 服务继续运行')
     deadline = time.monotonic() + max(0.0, wait_seconds)
     while True:
         source = screen_mount_source(root, mountinfo)
