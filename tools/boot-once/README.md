@@ -11,7 +11,7 @@
 
 离线部署先在镜像页面导入同包的 `r1-toolbox-linux-amd64.tar`。Compose 与离线包的镜像标签必须一致。
 
-小屏接管仍需已有可运行的 `/screen/squashfs-root/AppRun`，不自动解包官方 AppImage；这个条件不再阻止 Web 核心启动。新版环境变量示例：
+小屏接管需要可运行的 `/screen/squashfs-root/AppRun`；`/screen` 分区已挂载而该派生目录缺失时，Toolbox 会从固定命名的原厂 root-owned AppImage 自动解包，不修改原 AppImage。解包失败只影响小屏，Web 核心继续运行。环境变量示例：
 
 ```yaml
 environment:
@@ -54,7 +54,7 @@ Compose 中的 `r1_toolbox_data:/data` 是独立命名卷，保存面板、亮�
 
 构建时将 `ui/` 和原创 Python 监控/控制服务打包进镜像。容器启动后通过宿主 `docker cp` 读取内置包，先确认 `/run` 及其运行目录确实位于 tmpfs，再验证 SHA256、文件清单、路径、类型与大小限制。在随机暂存目录中校验完成后，原子发布到 `/run/r1-toolbox/ui-<内容摘要>`；复用缓存也重新校验。
 
-容器前台经 `nsenter` 在宿主命名空间运行 `ui_service.py --resident`，不脱离容器后台保活。小屏独立临时服务将缓存的 `frontend` 用 `BindReadOnlyPaths` 只读挂载到 `/screen/squashfs-root/resources/app/dist`；挂载仅影响窗口服务视图，宿主原目录保持原样。Web／监控核心和 `AppRun` 生命周期分离，关闭或崩溃的小屏不会结束 Web。设置写入数据卷，不写只读前端。
+容器前台经 `nsenter` 在宿主命名空间运行 `ui_service.py --resident`，不脱离容器后台保活。小屏独立临时服务将缓存的 `frontend` 用 `BindReadOnlyPaths` 只读挂载到 `/screen/squashfs-root/resources/app/dist`；缺失的派生目录只从 `/screen` 已挂载分区内的原厂 AppImage 生成，原厂 AppImage 和启动脚本保持原样。挂载仅影响窗口服务视图。Web／监控核心和 `AppRun` 生命周期分离，关闭或崩溃的小屏不会结束 Web。设置写入数据卷，不写只读前端。
 
 仅复制、展开到 `/run` 运行目录，不覆盖原版 AppImage、解包版前端或 `/screen/screen-app-startup.sh`。不绑定 Docker 内部镜像层路径，也不要求新版 Compose 的 image volume 语法。
 

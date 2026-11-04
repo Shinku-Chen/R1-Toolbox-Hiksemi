@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -21,11 +22,122 @@ app = pathlib.Path('/screen/squashfs-root')
 target = app / 'resources/app/dist'
 base_env = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/histor/bin:/histor/sbin'}
 Process = collections.namedtuple('Process', 'pid exe start is_main ppid process_type')
+APPIMAGE_GLOB = 'HistorSub-Linux-*.AppImage'
+SCREEN_MOUNT_WAIT_SECONDS = 20.0
 
 
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+def _mount_text(value):
+    return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), value)
+
+def screen_mount_source(mountpoint=None, mountinfo=None):
+    """Return the device backing /screen; None means the path is not a mount."""
+    mountpoint = str(mountpoint or app.parent)
+    path = pathlib.Path(mountinfo or '/proc/self/mountinfo')
+    try:
+        rows = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return None
+    for row in rows:
+        before, separator, after = row.partition(' - ')
+        fields = before.split()
+        if not separator or len(fields) < 5:
+            continue
+        if _mount_text(fields[4]) == mountpoint:
+            backing = after.split()
+            return backing[1] if len(backing) > 1 else ''
+    return None
+
+def runtime_complete(runtime=None):
+    """Check the extracted AppImage layout Toolbox needs, without executing it."""
+    runtime = pathlib.Path(runtime or app)
+    dist = runtime / 'resources/app/dist'
+    try:
+        return (runtime.is_dir() and not runtime.is_symlink()
+                and dist.is_dir() and (dist / 'index.html').is_file()
+                and (runtime / 'hiksemi-sub').is_file()
+                and (runtime / 'AppRun').is_file()
+                and os.access(runtime / 'AppRun', os.X_OK))
+    except OSError:
+        return False
+
+def official_appimage(root=None):
+    """Pick the newest root-owned official AppImage; never follow a link."""
+    root = pathlib.Path(root or app.parent)
+    candidates = []
+    try:
+        paths = list(root.glob(APPIMAGE_GLOB))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or path.is_symlink()
+                or (os.name == 'posix' and os.geteuid() == 0 and info.st_uid != 0)
+                or not os.access(path, os.X_OK)):
+            continue
+        candidates.append((info.st_mtime, path))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+def provision_screen_runtime(*, root=None, runtime=None, mountinfo=None,
+                             wait_seconds=SCREEN_MOUNT_WAIT_SECONDS, cancelled=None):
+    """Restore the derived AppImage runtime only when /screen is a real mount.
+
+    The official startup script runs the AppImage directly and never creates
+    squashfs-root. Toolbox needs that extracted layout for AppRun and the
+    read-only frontend bind, so a missing layout is rebuilt from the official
+    root-owned AppImage. Existing or incomplete directories are never
+    overwritten; the original AppImage and startup script stay untouched.
+    """
+    root = pathlib.Path(root or app.parent)
+    runtime = pathlib.Path(runtime or app)
+    if runtime_complete(runtime):
+        return
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        source = screen_mount_source(root, mountinfo)
+        if source and source.startswith('/dev/'):
+            break
+        if time.monotonic() >= deadline:
+            raise ValueError('原厂 /screen 分区尚未挂载；Web 服务继续运行')
+        if cancelled is not None:
+            if cancelled.wait(min(0.5, max(0.0, deadline - time.monotonic()))):
+                raise ValueError('小屏切换已取消')
+        else:
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+    if runtime_complete(runtime):
+        return
+    if runtime.exists():
+        raise ValueError('原厂小屏解包目录不完整；未自动覆盖，请检查 /screen/squashfs-root')
+    appimage = official_appimage(root)
+    if appimage is None:
+        raise ValueError('原厂小屏 AppImage 未找到；Web 服务继续运行')
+    stage = pathlib.Path(tempfile.mkdtemp(prefix='.r1-toolbox-screen-', dir=str(root)))
+    try:
+        try:
+            result = subprocess.run([str(appimage), '--appimage-extract'], cwd=stage,
+                                    env=base_env, capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError('原厂小屏 AppImage 解包失败：' + type(error).__name__) from None
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or '').strip().splitlines()
+            suffix = ('：' + detail[-1][:160]) if detail else ''
+            raise ValueError('原厂小屏 AppImage 解包失败（退出码 %s）%s' % (result.returncode, suffix))
+        extracted = stage / 'squashfs-root'
+        if not runtime_complete(extracted):
+            raise ValueError('原厂小屏 AppImage 解包结果不完整')
+        if cancelled is not None and cancelled.is_set():
+            raise ValueError('小屏切换已取消')
+        if runtime.exists():
+            raise ValueError('原厂小屏解包目录已变化；未自动覆盖，请重试')
+        os.replace(str(extracted), str(runtime))
+    finally:
+        shutil.rmtree(str(stage), ignore_errors=True)
 
 def run(*args, env=None):
     try:
@@ -348,6 +460,17 @@ class ScreenBackend:
         self.owned = False
         self.gui_attempted = False
         self.original_family = []
+        self._provision_lock = threading.Lock()
+
+    def _provision(self, cancelled):
+        if runtime_complete():
+            return
+        if not self._provision_lock.acquire(blocking=False):
+            raise ValueError('原厂小屏解包正在进行，请稍后重试')
+        try:
+            provision_screen_runtime(cancelled=cancelled)
+        finally:
+            self._provision_lock.release()
 
     def availability(self):
         if not self.frontend or not self.frontend.is_dir() or not (self.frontend / 'index.html').is_file():
@@ -364,6 +487,9 @@ class ScreenBackend:
             # claim a fresh, verified official process family.
             self.release()
         available, reason = self.availability()
+        if not available and not runtime_complete():
+            self._provision(cancelled)
+            available, reason = self.availability()
         require(available, reason)
         frontend = resolve_source(str(self.frontend))
         current = processes()

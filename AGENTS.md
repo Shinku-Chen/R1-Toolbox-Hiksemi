@@ -98,6 +98,7 @@ docker build --platform linux/amd64 -t r1-toolbox:local .
 
 - 镜像 RAM 缓存严格拒绝清单之外的文件和目录；所有执行或导入缓存运行时的 Python 入口必须带 `-B`，包括启动脚本在 `exec --resident` 前的导入，避免字节码缓存污染导致重启失败。
 - 小屏是触摸优先：最小点击目标 56px、正文 22px、导航 18px、单列布局、底部六标签导航；不引入 hover 依赖、PC 双栏或需要精确指针的交互。风扇/灯光策略、登录口令等复杂设置只放在网页。
+- 小屏派生目录缺失时，仅在 `/screen` 已挂载且存在固定命名、root-owned 的原厂 AppImage 时，允许从该 AppImage 自动解包到派生 `squashfs-root`；不覆盖已有派生目录、不修改或删除原厂 AppImage／启动脚本，解包失败只影响小屏且 Web 继续。
 - 小屏实际展示与 `docs/prototypes/r1-small-screen.html` 必须保持一致。图标、样式通过 `scripts/build-prototype.py` 从实际小屏同步，原型专有 CSS 只用于外部画板；可见交互改动同步更新离线演示及检查，不能只改正式界面。CI 用 `--check` 拒绝未同步的图标与样式。
 - 网页面板优先复用 fnMonitor 的 `defineModule`、设置分组、抽屉与控件；R1 专有内容放 `50-r1.js` / `12-style-r1.css`，保持上游模块结构、布局及控件。现有窄兼容仅包括 `33-state.js` 的可选网络汇总与空值内存辅助函数、`41-modules.js` 的缺测网络状态判定，以及 `42-modules.js`／`45-sheets.js` 的内存与交换区缺测保护，避免重复汇总、未知假空闲或假零值；其余不改上游渲染逻辑。R1 缺少构成来源时明确 `breakdown_available:false`，不从 MemAvailable 倒算 MemFree 或估算应用内存。构建时只做品牌与功耗文案替换。
 - 对不自解释的函数、接口、结构字段、请求参数和关键返回值补简洁注释，说明职责、语义和使用边界；不要写变量赋值式废话。

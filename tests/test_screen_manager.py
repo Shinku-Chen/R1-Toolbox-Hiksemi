@@ -2,6 +2,7 @@
 import ast
 import importlib.util
 from pathlib import Path
+import tempfile
 import threading
 import time
 import types
@@ -253,6 +254,71 @@ class ScreenBoundaryTests(unittest.TestCase):
                 mock.patch.object(MODULE, 'processes', return_value=[]), \
                 self.assertRaisesRegex(ValueError, '未确认停止'):
             MODULE.migrate_legacy_runtime()
+
+
+class ProvisionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name) / 'screen'
+        self.root.mkdir()
+        self.runtime = self.root / 'squashfs-root'
+        self.mountinfo = Path(self.temp.name) / 'mountinfo'
+        self.mountinfo.write_text(
+            '1 1 0:1 / {} rw - ext4 /dev/mmcblk0p7 rw\n'.format(self.root), encoding='utf-8')
+
+    def appimage(self):
+        path = self.root / 'HistorSub-Linux-1.1.15.AppImage'
+        path.write_bytes(b'fixture AppImage')
+        path.chmod(0o755)
+        return path
+
+    def test_complete_runtime_is_used_without_extraction(self):
+        (self.runtime / 'resources/app/dist').mkdir(parents=True)
+        (self.runtime / 'resources/app/dist/index.html').write_text('fixture')
+        (self.runtime / 'hiksemi-sub').write_text('fixture')
+        (self.runtime / 'AppRun').write_text('fixture')
+        (self.runtime / 'AppRun').chmod(0o755)
+        with mock.patch.object(MODULE.subprocess, 'run') as command:
+            MODULE.provision_screen_runtime(root=self.root, runtime=self.runtime,
+                                             mountinfo=self.mountinfo, wait_seconds=0)
+        command.assert_not_called()
+
+    def test_missing_screen_mount_is_not_written(self):
+        (self.runtime).parent.mkdir(exist_ok=True)
+        empty = Path(self.temp.name) / 'empty-mountinfo'
+        empty.write_text('', encoding='utf-8')
+        with mock.patch.object(MODULE.subprocess, 'run') as command,                 self.assertRaisesRegex(ValueError, '/screen 分区尚未挂载'):
+            MODULE.provision_screen_runtime(root=self.root, runtime=self.runtime,
+                                             mountinfo=empty, wait_seconds=0)
+        command.assert_not_called()
+
+    def test_missing_runtime_is_extracted_from_official_appimage(self):
+        self.appimage()
+        def run(args, **kwargs):
+            self.assertEqual(args[1], '--appimage-extract')
+            extracted = Path(kwargs['cwd']) / 'squashfs-root'
+            (extracted / 'resources/app/dist').mkdir(parents=True)
+            (extracted / 'resources/app/dist/index.html').write_text('fixture')
+            (extracted / 'hiksemi-sub').write_text('fixture')
+            (extracted / 'AppRun').write_text('fixture')
+            (extracted / 'AppRun').chmod(0o755)
+            return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        with mock.patch.object(MODULE.subprocess, 'run', side_effect=run):
+            MODULE.provision_screen_runtime(root=self.root, runtime=self.runtime,
+                                             mountinfo=self.mountinfo, wait_seconds=0)
+        self.assertTrue(MODULE.runtime_complete(self.runtime))
+        self.assertEqual(self.runtime.parent, self.root)
+        self.assertFalse(any(p.name.startswith('.r1-toolbox-screen-') for p in self.root.iterdir()))
+
+    def test_incomplete_existing_runtime_is_never_overwritten(self):
+        self.runtime.mkdir()
+        self.appimage()
+        with mock.patch.object(MODULE.subprocess, 'run') as command,                 self.assertRaisesRegex(ValueError, '解包目录不完整'):
+            MODULE.provision_screen_runtime(root=self.root, runtime=self.runtime,
+                                             mountinfo=self.mountinfo, wait_seconds=0)
+        command.assert_not_called()
+
 
 
 if __name__ == '__main__':
