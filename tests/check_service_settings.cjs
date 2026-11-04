@@ -120,8 +120,9 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     check('保存关闭意图后不会误报已恢复官方', !(await manager.locator('[data-ref="screenEnabled"]').isChecked())
       && (await manager.locator('[data-ref="screenState"]').innerText()).includes('当前实际显示 Toolbox')
       && await manager.locator('[data-ref="screenEnabled"]').isDisabled());
-    await manager.locator('[data-ref="screenState"]').filter({ hasText: '实际状态：官方界面' }).waitFor();
-    check('短期轮询核对真实状态再显示恢复完成', serviceReads >= 2 && !(await manager.locator('[data-ref="screenEnabled"]').isDisabled()));
+    await manager.locator('[data-ref="screenState"]').filter({ hasText: '实际状态：Toolbox 小屏未接管' }).waitFor();
+    check('短期轮询核对真实状态后要求重启恢复官方界面', serviceReads >= 2 && !(await manager.locator('[data-ref="screenEnabled"]').isDisabled())
+      && (await manager.locator('[data-ref="screenState"]').innerText()).includes('重启 R1'));
     const stableReads = serviceReads;
     await page.waitForTimeout(2200);
     check('稳定后停止服务状态轮询且不读取密钥', serviceReads === stableReads && accessReads === 0);
@@ -129,8 +130,8 @@ const pythonFixture = fixtureMatch[1].replaceAll("asset_dir=repo / 'ui/web'", 'a
     failScreen = true;
     await manager.locator('[data-ref="screenEnabled"]').click();
     await manager.locator('[data-ref="error"]').filter({ hasText: '屏幕切换请求失败' }).waitFor();
-    check('请求失败保留实际官方状态和关闭开关', !(await manager.locator('[data-ref="screenEnabled"]').isChecked())
-      && (await manager.locator('[data-ref="screenState"]').innerText()).includes('官方界面'));
+    check('请求失败保留实际未接管状态和关闭开关', !(await manager.locator('[data-ref="screenEnabled"]').isChecked())
+      && (await manager.locator('[data-ref="screenState"]').innerText()).includes('未接管'));
     failScreen = false; screenError = true;
     await manager.locator('[data-ref="screenEnabled"]').click();
     await manager.locator('[data-ref="screenState"]').filter({ hasText: '切换未完成' }).waitFor();

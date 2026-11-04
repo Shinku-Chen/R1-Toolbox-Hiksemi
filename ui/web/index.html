@@ -6018,7 +6018,7 @@ throw new Error('来源须为不重复的 IPv4／IPv6 地址、CIDR 或 IPv4 点
 return rules;
 }
 function r1ServiceSettings(card) {
-card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">常驻服务与开发模式</div><p class="hint">容器持续提供网页监控与管理。小屏默认开启，可关闭并恢复官方界面；MCP 默认关闭。首次使用无需网页口令，可在登录口令中设置。</p></div><button class="btn" type="button" data-ref="open">管理服务</button></div>`;
+card.innerHTML = `<div class="r1-api-intro"><div><div class="lbl">常驻服务与开发模式</div><p class="hint">容器持续提供网页监控与管理。小屏默认开启；关闭后官方界面需重启 R1 恢复；MCP 默认关闭。首次使用无需网页口令，可在登录口令中设置。</p></div><button class="btn" type="button" data-ref="open">管理服务</button></div>`;
 card._r = collect(card); card._r.open.onclick = r1OpenServiceManager;
 }
 function r1MediaSortSettings(card) {
@@ -6139,7 +6139,7 @@ const el = mount(`<div class="fullmask r1-api-mask" id="r1ServiceManager" role="
 <p>网页服务随容器常驻。小屏与 MCP 可分别开关，关闭 MCP 不会删除访问密钥。</p>
 <p class="sub" data-ref="loading" role="status">正在读取服务状态…</p><p class="st-crit" data-ref="error" role="alert" hidden></p><button class="btn" type="button" data-ref="retry" hidden>重新读取服务状态</button>
 <div class="r1-services" data-ref="content" hidden>
-<section class="r1-service-item"><h3>小屏界面</h3><label class="check"><input type="checkbox" data-ref="screenEnabled">启用 Toolbox 小屏</label><p class="sub" data-ref="screenState" role="status"></p><p class="sub">关闭后恢复官方显示，网页和其他 Toolbox 服务继续运行。</p></section>
+<section class="r1-service-item"><h3>小屏界面</h3><label class="check"><input type="checkbox" data-ref="screenEnabled">启用 Toolbox 小屏</label><p class="sub" data-ref="screenState" role="status"></p><p class="sub">关闭后停止 Toolbox 小屏，官方显示需重启 R1 恢复；网页和其他 Toolbox 服务继续运行。</p></section>
 <section class="r1-service-item"><h3>局域网 AI 服务</h3><label class="check"><input type="checkbox" data-ref="mcpEnabled">启用 MCP 与 REST API</label><p class="sub" data-ref="mcpState" role="status"></p><button class="btn" type="button" data-ref="api">管理访问密钥</button></section>
 <section class="r1-service-item"><h3>开发模式</h3><p class="sub">仅对白名单来源开放固定诊断接口，不提供任意命令或原厂动作代理。到期后自动停止授权。</p>
 <form class="r1-api-create" data-ref="developerForm"><label class="check"><input type="checkbox" data-ref="developerEnabled">启用开发模式</label>
@@ -6169,9 +6169,9 @@ x.content.hidden = false; x.loading.hidden = true; x.retry.hidden = true;
 x.screenEnabled.checked = screen.enabled === true; x.mcpEnabled.checked = state.mcp.enabled === true;
 setText(x.screenState, screen.last_error ? '切换未完成：' + String(screen.last_error)
 : screen.available !== true ? '小屏切换不可用。'
-: screen.busy === true ? `正在切换；当前实际显示${screen.active === true ? ' Toolbox' : screen.active === false ? '官方界面' : '尚未确认'}。${polls >= 30 ? '自动核对已结束，请点击刷新实际状态。' : ''}`
+: screen.busy === true ? `正在切换；当前实际显示${screen.active === true ? ' Toolbox' : screen.active === false ? '未接管' : '尚未确认'}。${polls >= 30 ? '自动核对已结束，请点击刷新实际状态。' : ''}`
 : screen.active === true ? '实际状态：Toolbox 小屏已接管。'
-: screen.active === false ? '实际状态：官方界面；Toolbox 小屏未接管。' : '实际显示状态尚未确认，请刷新核对。');
+: screen.active === false ? '实际状态：Toolbox 小屏未接管；若官方窗口未显示，请重启 R1。' : '实际显示状态尚未确认，请刷新核对。');
 setText(x.mcpState, state.mcp.enabled === true ? '已开启，仍需要独立 Token 与对应权限。' : '已关闭，已有密钥保留。');
 r1SyncMcpService(state.mcp.enabled);
 setText(x.developerState, developer.active === true

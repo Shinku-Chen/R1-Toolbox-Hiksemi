@@ -4273,7 +4273,7 @@ def run_resident_service(frontend=None, port=PORT, controller=None, insights=Non
         if web is not None:
             cleanup.append(('停止 Web', web.stop))
         if manager is not None:
-            cleanup.append(('恢复官方小屏', manager.stop))
+            cleanup.append(('停止小屏', manager.stop))
         if light is not None:
             cleanup.append(('恢复灯光', light.stop))
         if analytics is not None:

@@ -521,27 +521,20 @@ class ScreenBackend:
         return self.owned and run('systemctl', 'is-active', self.unit).stdout.strip() == 'active'
 
     def release(self):
+        """Stop the private window; do not start the factory window.
+
+        Recovery is deliberately left to a full NAS reboot. This avoids a
+        second launch of the official AppRun (and its unpacked runtime) when
+        the user exits, disables the screen, or stops the container.
+        """
         if not self.owned:
             return
         if self.gui_attempted:
             result = run('systemctl', 'stop', self.unit)
             active = run('systemctl', 'is-active', self.unit).stdout.strip() == 'active'
             require(not active and (result.returncode == 0 or not processes()),
-                    'Toolbox 小屏服务尚未确认停止，未启动另一套官方窗口')
+                    'Toolbox 小屏服务尚未确认停止；请重启 R1 恢复官方窗口')
             self.gui_attempted = False
-        current = processes()
-        if current:
-            try:
-                graphics_environment(current)
-            except (ValueError, OSError):
-                # Finish only captured members after a partial original stop.
-                # New/unknown processes are never signalled by this recovery.
-                stop_verified_family(self.original_family)
-            else:
-                self.owned = False
-                return
-        require(self.environment is not None, '缺少已核验的官方图形环境，无法恢复窗口')
-        start(self.unit + '-official', self.environment)
         self.owned = False
 
 
@@ -618,7 +611,7 @@ class ScreenManager:
                             self._release()
                             with self.condition:
                                 self.active = False
-                                self.last_error = 'Toolbox 小屏已退出，已尝试恢复官方窗口；Web 服务继续运行'
+                                self.last_error = 'Toolbox 小屏已退出；重启 R1 恢复官方窗口'
                     except Exception as error:
                         with self.condition:
                             self.active = False

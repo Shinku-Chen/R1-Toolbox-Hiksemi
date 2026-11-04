@@ -117,13 +117,13 @@ class ScreenManagerTests(unittest.TestCase):
         self.assertTrue(self.settled()['active'])
         self.assertEqual(self.backend.events.count('takeover'), 2)
 
-    def test_unexpected_gui_exit_restores_official_without_retrying_gui(self):
+    def test_unexpected_gui_exit_reports_reboot_required_without_retrying_gui(self):
         self.manager.set_enabled(True)
         self.assertTrue(self.settled()['active'])
         self.backend.alive = False
         value = self.settled(lambda state: not state['active'] and state['last_error'])
         self.assertTrue(value['enabled'])
-        self.assertIn('Web 服务继续运行', value['last_error'])
+        self.assertIn('重启 R1', value['last_error'])
         self.assertEqual(self.backend.events.count('takeover'), 1)
         self.assertIn('release', self.backend.events)
 
@@ -173,7 +173,7 @@ class ScreenManagerTests(unittest.TestCase):
 
 
 class ScreenBoundaryTests(unittest.TestCase):
-    def test_partial_original_stop_keeps_recovery_responsibility_and_restores_official(self):
+    def test_partial_original_stop_stops_private_work_without_restoring_official(self):
         backend = MODULE.ScreenBackend('/fixture/frontend', 'private-test-token')
         original = [MODULE.Process(123, str(MODULE.app / 'hiksemi-sub'), '42', True, 1, None)]
         with mock.patch.object(backend, 'availability', return_value=(True, None)), \
@@ -186,21 +186,19 @@ class ScreenBoundaryTests(unittest.TestCase):
                 mock.patch.object(MODULE, 'start') as launch, \
                 self.assertRaisesRegex(ValueError, '部分停止'):
             backend.takeover(threading.Event())
-        launch.assert_called_once_with(backend.unit + '-official', {'DISPLAY': ':0'})
+        launch.assert_not_called()
         self.assertFalse(backend.owned)
         self.assertIn(mock.call('systemctl', 'reset-failed', backend.unit + '-check'), command.call_args_list)
 
-    def test_failed_official_restore_retains_responsibility_for_explicit_retry(self):
+    def test_release_only_stops_private_unit_and_never_launches_official(self):
         backend = MODULE.ScreenBackend('/fixture/frontend', 'private-test-token')
-        backend.owned, backend.environment = True, {'DISPLAY': ':0'}
-        with mock.patch.object(MODULE, 'processes', return_value=[]), \
-                mock.patch.object(MODULE, 'start', side_effect=[RuntimeError('窗口恢复失败'), None]) as launch:
-            with self.assertRaisesRegex(RuntimeError, '窗口恢复失败'):
-                backend.release()
-            self.assertTrue(backend.owned)
+        backend.owned, backend.gui_attempted = True, True
+        with mock.patch.object(MODULE, 'run', return_value=types.SimpleNamespace(returncode=0, stdout='inactive')) as command, \
+                mock.patch.object(MODULE, 'start') as launch:
             backend.release()
-        self.assertEqual(launch.call_count, 2)
         self.assertFalse(backend.owned)
+        launch.assert_not_called()
+        self.assertEqual(command.call_args_list[0], mock.call('systemctl', 'stop', backend.unit))
 
     def test_failed_gui_unit_is_reset_before_the_same_private_name_is_launched(self):
         with mock.patch.object(MODULE, 'run', return_value=types.SimpleNamespace(returncode=1)) as command, \
