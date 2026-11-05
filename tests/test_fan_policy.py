@@ -45,12 +45,14 @@ def legacy_config():
 class Adapter:
     def __init__(self):
         self.available = True
+        self.reason = None
         self.calls = []
         self.failure = False
         self.channels = set()
 
     def capabilities(self):
-        return {"available": self.available, "channels": ["cpu", "system"], "rpm_available": False}
+        return {"available": self.available, "reason": self.reason,
+                "channels": ["cpu", "system"], "rpm_available": False}
 
     def snapshot(self):
         return {"phase": "active" if self.channels else "idle", "active_channels": sorted(self.channels)}
@@ -416,12 +418,47 @@ class ControllerTests(unittest.TestCase):
 
     def test_unknown_hardware_can_save_but_cannot_apply(self):
         self.adapter.available = False
+        self.adapter.reason = "已加载的风扇驱动身份已经改变或未验证"
+        self.controller.preflight_wait = 0
         self.controller._refresh_capability()
         result = self.apply()
         self.assertTrue(result["settings_saved"])
         self.assertFalse(result["ok"])
+        self.assertIn("已加载的风扇驱动身份", result["error"])
         self.assertEqual(self.adapter.calls, [])
         self.assertEqual(json.loads((self.directory / "fan-policy.json").read_text())["config"], config())
+
+    def test_preflight_error_includes_capability_reason(self):
+        self.adapter.available = False
+        self.adapter.reason = "原厂系统风扇同步接口不可用"
+        self.controller.preflight_wait = 0
+        self.controller._refresh_capability()
+        with mock.patch.object(self.controller, "_save"):
+            result = self.controller.action("fan.policy.update", {
+                "config": config(), "apply": True, "confirmed": True})
+        self.assertFalse(result["ok"])
+        self.assertIn("原厂系统风扇同步接口不可用", result["error"])
+
+    def test_first_unavailable_preflight_retries_before_apply(self):
+        self.adapter.available = False
+        self.controller._refresh_capability()
+        self.controller.preflight_wait = 0.5
+        original = self.adapter.capabilities
+        calls = []
+
+        def capabilities():
+            calls.append(True)
+            state = original()
+            if len(calls) >= 2:
+                self.adapter.available = True
+            return state
+
+        self.adapter.capabilities = capabilities
+        with mock.patch.object(self.controller, "_save"):
+            result = self.apply()
+        self.assertTrue(result["ok"], result)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertIn(("start", {"cpu", "system"}), self.adapter.calls)
 
     def test_snapshot_and_async_ack_do_not_wait_for_native_start_lock(self):
         entered, finish = threading.Event(), threading.Event()

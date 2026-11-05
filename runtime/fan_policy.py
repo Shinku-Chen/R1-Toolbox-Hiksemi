@@ -21,6 +21,8 @@ VENDOR_MODES = ("auto", "low", "medium", "high")
 MIN_OUTPUT_PERCENT = 10
 # Requested output scale only; the driver does not supply measured RPM.
 MIN_TARGET_RAW = 26  # round(255 * 10 / 100), never a zero/stop command.
+PREFLIGHT_WAIT_SECONDS = 10.0
+PREFLIGHT_RETRY_INTERVAL = 0.25
 QUICK_PERCENT = {"low": 50, "medium": 75, "high": 100}
 FIELDS = {"mode", "sources", "low_temp", "high_temp",
           "quiet_percent", "normal_percent", "manual_percent"}
@@ -199,12 +201,14 @@ class _DiskTemperatureDemand:
 
 class FanPolicyController:
     def __init__(self, state_dir, sources, adapter, *, histor=None, clock=None, interval=1,
-                 smart_collector=None):
+                 smart_collector=None, preflight_wait=PREFLIGHT_WAIT_SECONDS):
         self.state_dir, self.sources, self.adapter = Path(state_dir), sources, adapter
         self.smart_collector = smart_collector
         self._smart_policy_epoch = 0
         self.histor = histor
         self.clock, self.interval = clock or time.monotonic, interval
+        self.preflight_wait = max(0.0, float(preflight_wait))
+        self._preflight_waited = False
         self.lock = threading.RLock()
         self.control_lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -277,6 +281,33 @@ class FanPolicyController:
             capability = {"available": False, "reason": "原厂风扇适配暂不可用", "rpm_available": False}
         with self.lock:
             self.capability = copy.deepcopy(capability)
+
+    def _wait_for_capability(self):
+        """Give the host one bounded chance to finish boot-time preflight.
+
+        temp_control, /dev/hikio, the vendor config and the emhistor socket are
+        runtime objects; a container can start before they appear. The first
+        explicit apply waits briefly, then keeps the original save-but-not-
+        applied behavior if the hardware is genuinely unsupported.
+        """
+        with self.lock:
+            if self._preflight_waited or self.capability.get("available") is True:
+                return
+            self._preflight_waited = True
+        deadline = time.monotonic() + self.preflight_wait
+        while True:
+            try:
+                capability = self.adapter.capabilities()
+            except Exception:
+                capability = {"available": False, "reason": "原厂风扇适配暂不可用", "rpm_available": False}
+            with self.lock:
+                self.capability = copy.deepcopy(capability)
+                if capability.get("available") is True:
+                    return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(PREFLIGHT_RETRY_INTERVAL, remaining))
 
     def snapshot(self):
         # Histor.snapshot reads its worker's cache only. Never use the vendor
@@ -573,8 +604,29 @@ class FanPolicyController:
         # Target construction and worker scheduling share the same lock as a
         # completed apply. A single-channel action cannot capture an old CPU
         # rule while a preceding worker commits its newly active configuration.
+        if self._needs_preflight_wait(name, payload):
+            self._wait_for_capability()
         with self.lock:
             return self._action_locked(name, payload)
+
+    @staticmethod
+    def _needs_preflight_wait(name, payload):
+        """Detect custom-output actions without mutating or validating state."""
+        if not isinstance(payload, dict):
+            return False
+        if name == "fan.policy.update":
+            if payload.get("apply") is not True or payload.get("confirmed") is not True:
+                return False
+            config = payload.get("config")
+            channels = config.get("channels") if isinstance(config, dict) else None
+            return isinstance(channels, dict) and any(
+                isinstance(item, dict) and item.get("mode") != "vendor" for item in channels.values())
+        if name == "fan.policy.quick":
+            if payload.get("channel") == "cpu":
+                return payload.get("mode") != "auto"
+            if payload.get("channel") == "system":
+                return payload.get("mode") == "manual"
+        return False
 
     def _action_locked(self, name, payload):
         saved = False
@@ -659,8 +711,14 @@ class FanPolicyController:
                         _require(self.snapshot()["recovery_confirmed"],
                                  "原厂恢复尚未确认；请先恢复原厂管理，再更改原厂档位")
                     capability = self.capability
+                    reason = capability.get("reason") if isinstance(capability, dict) else None
+                    reason = reason.strip()[:160] if isinstance(reason, str) else ''
+                    message = "当前设备尚不满足独立调速条件"
+                    if reason:
+                        message += "：" + reason
+                    message += "；配置已保存，未接管"
                     _require(not any(item["mode"] != "vendor" for item in apply_target["channels"].values())
-                             or capability.get("available") is True, "当前设备尚不满足独立调速条件；配置已保存，未接管")
+                             or capability.get("available") is True, message)
                     self.busy = True
                     self._smart_policy_epoch += 1
                     self.worker = threading.Thread(target=self._apply_worker,
